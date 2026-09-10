@@ -1,0 +1,425 @@
+from __future__ import annotations
+
+import json
+import asyncio
+import hashlib
+import re
+import logging
+from datetime import datetime
+from typing import Any, AsyncIterator
+
+from .ai import (
+    AIRequestError,
+    context_window_for,
+    concurrency_for,
+    output_limit_for,
+    polish_and_translate,
+    retry_transient_ai,
+    summarize_note_abstract,
+    summarize_transcript,
+    summary_instructions,
+)
+from .context_budget import chunk_text_blocks, estimate_tokens
+from .note_content import transcript_blocks
+from .storage import RecordingRecord, format_clock, local_now
+
+
+logger = logging.getLogger(__name__)
+
+
+def _needs_translation(config: dict[str, Any]) -> bool:
+    return str(config.get("translation", "off")) != "off"
+
+
+def segment_ai_complete(segment: dict[str, Any], config: dict[str, Any]) -> bool:
+    if config.get("ai_correction") and not str(segment.get("corrected") or "").strip():
+        return False
+    if _needs_translation(config) and not str(segment.get("translation") or "").strip():
+        return False
+    return True
+
+
+async def correct_batch_segment(
+    record: RecordingRecord,
+    segment: dict[str, Any],
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    """Correct one ASR block immediately and persist it before the next block."""
+    ai_config = json.loads(json.dumps(config))
+    ai_config["_batch_segment_mode"] = True
+    previous = [
+        str(item.get("corrected") or item.get("raw") or "")
+        for item in record.segments
+        if int(item.get("id", 0)) < int(segment.get("id", 0))
+    ]
+    ai_options = ai_config.get("ai") if isinstance(ai_config.get("ai"), dict) else {}
+    try:
+        history_chars = max(0, int(ai_options.get("history_chars", 2000)))
+    except (TypeError, ValueError):
+        history_chars = 2000
+    joined_history = "\n".join(previous)
+    ai_config["_transcript_context"] = joined_history[-history_chars:] if history_chars else ""
+    try:
+        enrichment = await retry_transient_ai(
+            lambda: polish_and_translate(
+                str(segment.get("raw") or ""),
+                str(segment.get("language") or ""),
+                ai_config,
+            )
+        )
+        segment.update(enrichment)
+        segment.pop("ai_error", None)
+    except Exception as exc:
+        segment["ai_error"] = str(exc)
+    segment["ai_pending"] = False
+    record.upsert_segment(segment)
+    return segment
+
+
+def _source_blocks(record: RecordingRecord) -> list[str]:
+    return [
+        f"[{format_clock(float(item.get('start', 0)))}–{format_clock(float(item.get('end', 0)))}]\n"
+        f"{item.get('corrected') or item.get('raw') or ''}"
+        for item in record.segments
+        if str(item.get("corrected") or item.get("raw") or "").strip()
+    ]
+
+
+async def global_rewrite_events(
+    record: RecordingRecord,
+    config: dict[str, Any],
+) -> AsyncIterator[dict[str, Any]]:
+    """Run a context-safe global pass and persist each recoverable part."""
+    context_window = context_window_for(config, "global")
+    chunks = chunk_text_blocks(_source_blocks(record), context_window, max_source_tokens=3500)
+    detected_language = next(
+        (
+            str(item.get("language") or "")
+            for item in record.segments
+            if str(item.get("language") or "").strip()
+        ),
+        "",
+    )
+    global_config = json.loads(json.dumps(config))
+    global_config["_global_mode"] = True
+    fingerprint = hashlib.sha256(
+        json.dumps([chunks, detected_language, global_config], ensure_ascii=False, sort_keys=True).encode()
+    ).hexdigest()
+    previous = record.metadata.get("ai_global_rewrite") or {}
+    previous_parts = previous.get("parts") if previous.get("fingerprint") == fingerprint else []
+    saved_by_index = {
+        int(part["id"]) - 1: dict(part)
+        for part in previous_parts or []
+        if isinstance(part, dict)
+        and isinstance(part.get("id"), int)
+        and not part.get("ai_error")
+        and 1 <= int(part["id"]) <= len(chunks)
+    }
+    parts = [saved_by_index.get(index) for index in range(len(chunks))]
+    global_result: dict[str, Any] = {
+        "fingerprint": fingerprint,
+        "context_window": context_window,
+        "parts": [part for part in parts if part is not None],
+        "text": "",
+        "translation": "",
+        "complete": False,
+    }
+    record.metadata["ai_global_rewrite"] = global_result
+    record.save_all()
+
+    semaphore = asyncio.Semaphore(concurrency_for(config, "global"))
+    async def process(index, chunk):
+        if parts[index] is not None:
+            return index, parts[index], True
+        async with semaphore:
+            ai_config = json.loads(json.dumps(global_config))
+            ai_config["_transcript_context"] = chunks[index - 1][-2000:] if index else ""
+            part = {"id": index + 1, "raw": chunk,
+                    "segment_ids": [int(segment["id"]) for segment in record.segments
+                                    if (f"[{format_clock(float(segment.get('start', 0)))}–{format_clock(float(segment.get('end', 0)))}]\n"
+                                        f"{segment.get('corrected') or segment.get('raw') or ''}") in chunk]}
+            try:
+                part.update(await polish_and_translate(chunk, detected_language, ai_config))
+            except Exception as exc:
+                part["ai_error"] = str(exc)
+            parts[index] = part
+            return index, part, False
+    tasks = [asyncio.create_task(process(index, chunk)) for index, chunk in enumerate(chunks)]
+    def persist_global_parts() -> None:
+        global_result["parts"] = [part for part in parts if part is not None]
+        global_result["text"] = "\n\n".join(
+            str(part.get("corrected") or part["raw"]) for part in global_result["parts"]
+        )
+        global_result["translation"] = "\n\n".join(
+            str(part["translation"])
+            for part in global_result["parts"]
+            if part.get("translation")
+        )
+        record.save_all()
+
+    try:
+        for completed, task in enumerate(asyncio.as_completed(tasks), 1):
+            index, part, reused = await task
+            persist_global_parts()
+            yield {"type": "ai_global_part", "part": part, "index": index + 1,
+                   "completed": completed, "count": len(chunks), "reused": reused}
+    finally:
+        # A cancellation can arrive after a worker finished but before the
+        # as_completed iterator receives it. Collect those successful results
+        # before stopping the remaining workers so the next retry only fills
+        # genuinely missing parts.
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        for task in tasks:
+            if task.cancelled():
+                continue
+            try:
+                index, part, _ = task.result()
+            except (Exception, asyncio.CancelledError):
+                continue
+            parts[index] = part
+        persist_global_parts()
+
+    # Each bounded part already receives a global editing pass. A second pass
+    # over the same result adds latency and can shorten or damage good output.
+    global_result["single_final_pass"] = len(chunks) <= 1
+    global_result["context_split"] = len(chunks) > 1
+    global_result["complete"] = all(not part.get("ai_error") for part in global_result["parts"])
+    record.metadata["ai_global_rewrite"] = global_result
+    record.save_all()
+    yield {"type": "ai_global_complete", "global_rewrite": global_result}
+
+
+def note_summary_chunks(blocks: list[str], config: dict[str, Any]) -> list[str]:
+    """Prefer one complete input, reserving instructions, JSON and output space."""
+    full_text = "\n\n".join(blocks).strip()
+    if not full_text:
+        return []
+    window = context_window_for(config, "summary")
+    output_reserve = output_limit_for(config, "summary", 32_768)
+    # Detailed notes are normally shorter than their source.  Allow a single
+    # coherent request when the source is up to ~1.5x the reserved output, while
+    # still splitting very large lectures before they can be truncated.
+    source_output_budget = max(512, int((output_reserve - 512) * 1.5))
+
+    def request_size(text: str, *, full: bool) -> int:
+        options = {**config, "_full_note": full, "_detailed_chunk": not full}
+        payload = json.dumps({"previous_cumulative_summary": None, "new_transcript": text}, ensure_ascii=False)
+        return estimate_tokens(summary_instructions(options)) + estimate_tokens(payload) + output_reserve + 320
+
+    # Match the actual request serialization rather than counting only raw text.
+    # Full-context input remains preferred, but do not choose it when a
+    # faithful detailed response is predictably larger than the provider's
+    # output cap. That previously produced a permanent finish_reason=length.
+    try:
+        forced_chunk_budget = int(config.get("_summary_force_chunk_tokens") or 0)
+    except (TypeError, ValueError):
+        forced_chunk_budget = 0
+    if forced_chunk_budget > 0:
+        source_output_budget = min(source_output_budget, max(512, forced_chunk_budget))
+    if not forced_chunk_budget and estimate_tokens(full_text) <= source_output_budget and request_size(full_text, full=True) <= window:
+        return [full_text]
+    overhead = request_size("", full=False) + 64
+    if overhead + 128 >= window:
+        raise ValueError("总结提示词占用过多上下文，请缩短提示词或提高长上下文窗口")
+    budget = min(window - overhead, source_output_budget)
+    while True:
+        chunks = chunk_text_blocks(blocks, window, max_source_tokens=budget,
+                                   fixed_overhead=overhead, use_full_window=True)
+        if all(request_size(chunk, full=False) <= window for chunk in chunks):
+            return chunks
+        if budget <= 128:
+            raise ValueError("总结内容在 JSON 编码后超过上下文窗口，请调整窗口设置")
+        budget = max(128, budget // 2)
+
+
+async def build_note_summary(
+    record: RecordingRecord,
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    """Generate the user-requested post-recording Markdown summary.
+
+    This is stored separately from live summaries so only this editable result can
+    ever participate in IdeaShell synchronization.
+    """
+    blocks = [f"[{format_clock(block['start'])}–{format_clock(block['end'])}]\n{block['text']}"
+              for block in transcript_blocks(record)]
+    window = context_window_for(config, "summary")
+    chunks = note_summary_chunks(blocks, config)
+    if not chunks:
+        raise ValueError("录音还没有可用于生成总结的转写内容")
+    chunk_config = json.loads(json.dumps(config))
+    chunk_config["_detailed_chunk"] = len(chunks) > 1
+    chunk_config["_full_note"] = len(chunks) == 1
+    # Low verbosity is appropriate for the library abstract, not lecture notes.
+    provider = chunk_config.setdefault("ai", {}).setdefault("summary_provider", {})
+    extra = provider.get("extra_params")
+    if isinstance(extra, str):
+        extra = json.loads(extra)
+    extra = dict(extra or {})
+    extra["text"] = {**(extra.get("text") if isinstance(extra.get("text"), dict) else {}), "verbosity": "high"}
+    provider["extra_params"] = extra
+    fingerprint = hashlib.sha256(json.dumps([chunks, chunk_config], ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+    draft = record.metadata.get("ai_note_summary_draft") or {}
+    if draft.get("fingerprint") != fingerprint:
+        draft = {"fingerprint": fingerprint, "parts": []}
+    draft.update(total_parts=len(chunks), phase="全文笔记" if len(chunks) == 1 else "分块详细笔记")
+    record.metadata["ai_note_summary_draft"] = draft
+    record.save_metadata()
+    saved_parts = draft["parts"]
+    if isinstance(saved_parts, list):
+        saved_parts = {str(index): text for index, text in enumerate(saved_parts)}
+        draft["parts"] = saved_parts
+    semaphore = asyncio.Semaphore(concurrency_for(config, "summary"))
+    async def summarize_part(index, chunk):
+        if str(index) in saved_parts:
+            return
+        async with semaphore:
+            result = await summarize_transcript(chunk, "", chunk_config, provider_mode="summary")
+            saved_parts[str(index)] = str(result["summary"])
+            record.save_metadata()
+    tasks = [asyncio.create_task(summarize_part(index, chunk)) for index, chunk in enumerate(chunks)]
+    generation_error: BaseException | None = None
+    try:
+        await asyncio.gather(*tasks)
+    except BaseException as exc:
+        generation_error = exc
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+    if generation_error is not None:
+        error_kind = str(getattr(generation_error, "kind", ""))
+        if isinstance(generation_error, AIRequestError) and error_kind in {
+            "output_truncated", "output_incomplete", "input_too_long",
+        }:
+            # Some compatible providers enforce a smaller real input/output
+            # ceiling than their advertised context. Recursively halve the
+            # source budget; completed parts remain durable between attempts.
+            try:
+                previous_budget = int(config.get("_summary_force_chunk_tokens") or 0)
+                retry_depth = int(config.get("_summary_chunk_retry_depth") or 0)
+            except (TypeError, ValueError):
+                previous_budget, retry_depth = 0, 0
+            if retry_depth >= 5:
+                raise generation_error
+            current_largest = max(estimate_tokens(chunk) for chunk in chunks)
+            next_budget = (
+                max(400, min(3_000, current_largest // 3))
+                if previous_budget <= 0
+                else max(400, previous_budget // 2)
+            )
+            if previous_budget and previous_budget <= 400:
+                raise generation_error
+            retry_config = json.loads(json.dumps(config))
+            retry_config["_summary_force_chunk_tokens"] = next_budget
+            retry_config["_summary_chunk_retry_depth"] = retry_depth + 1
+            record.metadata.pop("ai_note_summary_draft", None)
+            record.save_metadata()
+            return await build_note_summary(record, retry_config)
+        raise generation_error
+    knowledge, formulas, details = [], [], []
+    for index, chunk in enumerate(chunks):
+        markdown = saved_parts[str(index)]
+        label = f"片段 {index + 1}"
+        times = re.findall(r"\[([0-9:]+)–([0-9:]+)\]", chunk)
+        if times:
+            label = f"{times[0][0]}–{times[-1][1]}"
+        sections = re.split(r"^##\s+(知识点速览|公式速览|按时间展开)\s*$", markdown, flags=re.M)
+        parsed = dict(zip(sections[1::2], sections[2::2]))
+        if len(parsed) == 3:
+            knowledge.append(f"### {label}\n\n{parsed['知识点速览'].strip()}")
+            formulas.append(f"### {label}\n\n{parsed['公式速览'].strip()}")
+            details.append(f"### {label}\n\n{parsed['按时间展开'].strip()}")
+        else:
+            # Preserve an unexpected response verbatim; make the missing index
+            # visible instead of silently dropping any lecture content.
+            knowledge.append(f"- {label}：模型未按速览格式输出，详见该时间段正文。")
+            formulas.append(f"- {label}：请参阅正文中的公式。")
+            details.append(f"### {label}\n\n{markdown}")
+    rolling_summary = ("## 知识点速览\n\n" + "\n\n".join(knowledge)
+                       + "\n\n## 公式速览\n\n" + "\n\n".join(formulas)
+                       + "\n\n## 按课堂时间展开\n\n" + "\n\n".join(details))
+    if len(chunks) == 1:
+        rolling_summary = saved_parts["0"]
+    key_points: list[str] = []
+    started_at = str(record.metadata.get("started_at") or "")
+    try:
+        started = datetime.fromisoformat(started_at)
+        date_text = started.strftime("%Y-%m-%d")
+        time_text = started.strftime("%H:%M")
+    except (TypeError, ValueError):
+        date_text = started_at[:10]
+        time_text = started_at[11:16]
+    course = str(record.metadata.get("category") or "未分类")
+    title = str(record.metadata.get("title") or "课堂录音")
+    metadata_block = (
+        f"# {title}\n\n"
+        f"- 课程：{course}\n"
+        f"- 日期：{date_text or '未知'}\n"
+        f"- 时间：{time_text or '未知'}\n\n"
+    )
+    rolling_summary = metadata_block + rolling_summary.lstrip()
+    now = local_now()
+    previous = record.metadata.get("ai_note_summary")
+    item = {
+        "summary": rolling_summary,
+        "abstract": "",
+        "key_points": key_points,
+        "parts": len(chunks),
+        "context_window": window,
+        "input_mode": "full" if len(chunks) == 1 else "chunked",
+        "created_at": previous.get("created_at", now) if isinstance(previous, dict) else now,
+        "updated_at": now,
+        "source": "post_recording",
+    }
+    draft["phase"] = "录音库短摘要"
+    # Persist the detailed Markdown before the independent short-abstract call.
+    # A failed abstract must never discard a usable full summary.
+    record.metadata["ai_note_summary"] = item
+    sync = record.metadata.get("ideashell_sync")
+    if isinstance(sync, dict) and sync.get("note_id"):
+        sync["status"] = "local_changes"
+    record.save_all()
+    try:
+        item["abstract"] = await summarize_note_abstract(rolling_summary, config)
+        item.pop("abstract_error", None)
+    except Exception as exc:
+        item["abstract_error"] = str(exc)
+        logger.error(
+            "AI note abstract failed recording=%s; detailed summary was preserved: %s",
+            record.id,
+            exc,
+        )
+    item["updated_at"] = local_now()
+    record.metadata.pop("ai_note_summary_draft", None)
+    record.metadata["ai_note_summary"] = item
+    record.save_all()
+    return item
+
+
+async def regenerate_note_abstract(
+    record: RecordingRecord,
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    """Regenerate only the 100-character library abstract for a saved summary."""
+    previous = record.metadata.get("ai_note_summary")
+    if not isinstance(previous, dict) or not str(previous.get("summary") or "").strip():
+        raise ValueError("请先生成详细 AI 总结，再重新生成录音库短摘要")
+    item = dict(previous)
+    try:
+        item["abstract"] = await summarize_note_abstract(str(item["summary"]), config)
+        item.pop("abstract_error", None)
+    except Exception as exc:
+        item["abstract_error"] = str(exc)
+        logger.error("AI note abstract retry failed recording=%s: %s", record.id, exc)
+        item["updated_at"] = local_now()
+        record.metadata["ai_note_summary"] = item
+        record.save_all()
+        raise RuntimeError(f"录音库短摘要生成失败：{exc}") from exc
+    item["updated_at"] = local_now()
+    record.metadata["ai_note_summary"] = item
+    record.save_all()
+    return item
