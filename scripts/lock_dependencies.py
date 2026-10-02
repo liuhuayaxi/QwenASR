@@ -1,0 +1,34 @@
+"""Capture the installed, consistent runtime dependency closure for this Mac."""
+from importlib.metadata import distribution
+from pathlib import Path
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def capture():
+    queue = [Requirement(line) for line in (ROOT / 'requirements.in').read_text().splitlines() if line.strip() and not line.startswith('#')]
+    locked, visited = {}, set()
+    while queue:
+        req = queue.pop()
+        name = canonicalize_name(req.name)
+        dist = distribution(name)
+        if req.specifier and not req.specifier.contains(dist.version, prereleases=True):
+            raise RuntimeError(f'{name} {dist.version} does not satisfy {req.specifier}')
+        locked[name] = dist.version
+        visit = (name, tuple(sorted(req.extras)))
+        if visit in visited:
+            continue
+        visited.add(visit)
+        for raw in dist.requires or []:
+            dep = Requirement(raw)
+            if dep.marker is None or any(dep.marker.evaluate({'extra': extra}) for extra in {'', *req.extras}):
+                queue.append(dep)
+    return locked
+
+
+if __name__ == '__main__':
+    locked = capture()
+    (ROOT / 'requirements.lock').write_text('# Locked from the tested CPython 3.12 / macOS arm64 runtime.\n# Refresh intentionally with scripts/lock_dependencies.py, then run regression tests.\n' + ''.join(f'{name}=={version}\n' for name, version in sorted(locked.items())))
+    print(f'Locked {len(locked)} runtime packages; dependency constraints checked.')

@@ -3,18 +3,37 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#f4f0e8" />
+    <meta name="theme-color" content="#f5f7f5" />
     <title>Qwen3-ASR · 本地语音工作台</title>
     <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
-    <link rel="stylesheet" href="/static/styles.css?v=20260910-2" />
+    <script src="/static/js/theme.js?v=20261002-theme-2"></script>
+    <link rel="stylesheet" href="/static/styles.css?v=20261002-theme-2" />
+    <link rel="stylesheet" href="/static/ui.css?v=20261002-theme-2" />
     <link rel="stylesheet" href="/static/vendor/katex/katex.min.css" />
   <script src="/static/vendor/katex/katex.min.js" defer></script>
 </head>
-  <body>
+  <body class="workbench-page">
+    <header class="app-header">
+      <div class="app-header-inner">
+        <a class="app-brand" href="/" aria-label="QwenASR 本地学习工作台">
+          <span class="app-brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span><b>QwenASR</b><small>本地学习工作台</small></span>
+        </a>
+        <nav class="app-nav" aria-label="主导航">
+          <a href="/" id="workbenchNav" aria-current="page">录音工作台</a>
+          <a href="/library" id="libraryTab">录音库</a>
+          <a href="/course/" id="courseSyncLink" target="_blank" rel="noopener">课程回放</a>
+          <a href="/course-files">课程资料库</a>
+          <a href="/tasks">任务中心</a>
+        </nav>
+        <div class="app-header-tools"><button class="theme-toggle" type="button" data-theme-toggle aria-pressed="false" aria-label="切换深色模式" title="切换深色模式"><span data-theme-icon aria-hidden="true">☾</span><span data-theme-label>深色</span></button><span class="app-local">本地工作空间</span></div>
+      </div>
+    </header>
     <main class="shell">
       <section class="workspace">
         <div class="control-panel">
-          <div id="modelBadge" class="status-badge loading">
+          <div class="control-heading"><h1>实时录音</h1><span>录音与转写</span></div>
+          <div role="status" aria-live="polite" id="modelBadge" class="status-badge loading">
             <span class="status-dot"></span>
             <span id="modelStatus">正在启动服务</span>
           </div>
@@ -51,7 +70,6 @@
           </button>
 
           <div class="record-actions">
-            <a id="courseSyncLink" class="secondary-button" href="http://127.0.0.1:8766/" target="_blank" rel="noopener">课程回放转写</a>
             <button id="uploadButton" class="secondary-button" type="button" disabled>
               <span>↑</span> 上传录音一键转写
             </button>
@@ -72,6 +90,7 @@
             </div>
           </div>
 
+          <h2 class="section-label">识别与 AI</h2>
           <div class="quick-options">
             <label>
               <span>识别语言</span>
@@ -102,22 +121,33 @@
             </label>
           </div>
 
+          <h2 class="section-label">工具与设置</h2>
           <button id="openSettingsDialog" class="main-settings-button" type="button">
-            <span class="main-settings-icon" aria-hidden="true">⚙</span>
+            <span class="main-settings-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3" fill="var(--green-soft)"/><circle cx="15" cy="17" r="3" fill="var(--green-soft)"/></svg></span>
             <span><b>全部设置</b><small>资料库、AI 模型、提示词与录音参数</small></span>
             <i aria-hidden="true">›</i>
           </button>
+
+          <a id="courseFilesLink" class="main-settings-button" href="/course-files">
+            <span class="main-settings-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h6l2 3h8v12H4z"/><path d="M8 12h8M8 16h5"/></svg></span>
+            <span><b>课程资料库</b><small>课程文件、PDF 转换与闪念贝壳附件同步</small></span>
+            <i aria-hidden="true">›</i>
+          </a>
+
+          <a class="main-settings-button pdf-ai-button" href="/tasks?new=pdf" target="_blank" rel="noopener">
+            <span class="main-settings-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3h8l4 4v14H6zM14 3v5h4M9 12h6M9 16h4"/></svg></span>
+            <span><b>生成 AI 友好 PDF</b><small>提取正文、表格与公式，方便 AI 阅读</small></span>
+            <i aria-hidden="true">›</i>
+          </a>
         </div>
 
         <section class="transcript-panel">
           <div class="panel-heading">
             <div>
-              <h2 id="panelTitle">当前笔记</h2>
-              <div class="view-tabs">
-                <button id="transcriptTab" class="view-tab active" type="button">当前笔记</button>
-                <button id="summaryTab" class="view-tab" type="button">实时总结</button>
-                <button id="aiTasksTab" class="view-tab" type="button">AI 任务 <span id="aiTasksBadge" class="task-count hidden">0</span></button>
-                <button id="libraryTab" class="view-tab" type="button">录音库</button>
+              <h2 id="panelTitle" class="visually-hidden">当前笔记</h2>
+              <div class="view-tabs" role="group" aria-label="内容视图">
+                <button id="transcriptTab" aria-controls="transcriptView" aria-pressed="true" class="view-tab active" type="button">当前笔记</button>
+                <button id="summaryTab" aria-controls="summaryView" aria-pressed="false" class="view-tab" type="button">实时总结</button>
               </div>
             </div>
             <div class="panel-actions">
@@ -140,7 +170,9 @@
           </div>
 
           <div id="libraryView" class="library-view hidden">
+            <div class="page-heading"><div><span class="eyebrow">RECORDINGS</span><h1>录音库</h1><p>搜索课堂原文、回听讲解、整理与核对学习笔记。</p></div><button id="librarySettings" class="ui-button">设置</button></div>
             <div class="library-toolbar">
+              <input id="librarySearch" class="ui-field" type="search" maxlength="200" placeholder="搜索标题、逐字稿和笔记…" aria-label="全文搜索录音" />
               <label>分类
                 <select id="libraryCategory"><option value="">全部分类</option></select>
               </label>
@@ -164,7 +196,9 @@
                 <span class="calendar-legend" aria-label="录音数量从少到多">少 <i data-level="0"></i><i data-level="1"></i><i data-level="2"></i><i data-level="3"></i><i data-level="4"></i> 多</span>
               </div>
             </section>
+            <div id="librarySearchResults" hidden><p id="librarySearchStatus" role="status"></p><div id="libraryMatches"></div><button id="moreLibraryMatches" class="ui-button" hidden>更多匹配</button></div>
             <div id="libraryList" class="library-list"></div>
+            <div id="libraryPagination"><button id="libraryPrevious" class="ui-button">上一页</button><span id="libraryPageStatus"></span><button id="libraryNext" class="ui-button">下一页</button></div>
           </div>
 
           <div id="summaryView" class="summary-view hidden">
@@ -176,24 +210,17 @@
             <div id="summaryList" class="summary-list"></div>
           </div>
 
-          <div id="aiTasksView" class="ai-tasks-view hidden">
-            <div class="ai-tasks-heading">
-              <div><b>AI 任务中心</b><small>失败任务会保留进度，可继续、重试或取消</small></div>
-              <div class="ai-tasks-toolbar">
-                <button id="continueAllAiTasks" class="ghost-button primary" type="button" disabled>全部继续</button>
-                <button id="pauseAllAiTasks" class="ghost-button" type="button" disabled>全部暂停</button>
-                <button id="retryAllAiTasks" class="ghost-button" type="button" disabled>全部重试</button>
-                <button id="refreshAiTasks" class="ghost-button" type="button">刷新</button>
-              </div>
-            </div>
-            <div id="aiTasksList" class="ai-tasks-list"></div>
-          </div>
+
         </section>
       </section>
       <span id="footerDevice" class="visually-hidden">Qwen3-ASR-1.7B · MLX BF16</span>
     </main>
 
-    <dialog id="settingsDialog" class="settings settings-dialog">
+    <dialog id="noteVersionsDialog" class="ui-dialog note-versions-dialog" aria-label="笔记版本历史">
+      <div class="page-heading"><div><h2>笔记版本历史</h2><p>− 为历史版本内容，+ 为当前版本内容。恢复前的笔记也会保留。</p></div><button id="closeNoteVersions" class="ui-button">关闭</button></div>
+      <div id="noteVersionList"></div><pre id="noteVersionDiff"></pre><button id="restoreNoteVersion" class="ui-button primary" disabled>恢复所选版本</button>
+    </dialog>
+    <dialog aria-label="全部设置" id="settingsDialog" class="settings settings-dialog">
       <div class="settings-dialog-header">
         <div><b>全部设置</b><small>资料库、模型、提示词与录音参数</small></div>
         <button id="closeSettingsDialog" class="ghost-button" type="button">完成</button>
@@ -491,7 +518,7 @@
       </div>
     </dialog>
 
-    <dialog id="regenerateSummaryDialog" class="summary-prompt-dialog">
+    <dialog id="regenerateSummaryDialog" class="ui-dialog summary-prompt-dialog" aria-label="重新生成 AI 总结">
       <div class="settings-dialog-header">
         <div><b>重新生成 AI 总结</b><small id="regenerateSummaryTitle">使用完整转写生成复习笔记</small></div>
         <button id="closeRegenerateSummary" class="ghost-button" type="button">取消</button>
@@ -500,7 +527,7 @@
         <p class="summary-prompt-source">本次使用“全部设置 → AI 总结”中的详细 AI 总结提示词。</p>
         <label>
           <span>本次附加提示词 <small>追加在系统提示词后，只影响这次重新生成</small></span>
-          <textarea id="summaryCustomPrompt" rows="5" placeholder="例如：重点整理第三章公式，并补充容易混淆的概念对比。"></textarea>
+          <textarea class="ui-field" id="summaryCustomPrompt" rows="5" placeholder="例如：重点整理第三章公式，并补充容易混淆的概念对比。"></textarea>
         </label>
         <div class="summary-prompt-actions">
           <button id="confirmRegenerateSummary" class="mini-button primary-mini-button" type="button">重新生成总结</button>
@@ -508,7 +535,7 @@
       </div>
     </dialog>
 
-    <dialog id="noteDialog" class="note-dialog">
+    <dialog aria-label="课堂笔记" id="noteDialog" class="note-dialog">
       <div class="note-dialog-header">
         <div>
           <b id="noteDialogTitle">查看笔记</b>
@@ -522,7 +549,8 @@
             <div><b>录音原文</b><small>保留真实时间范围，便于回溯课堂</small></div><select id="noteTranscriptMode" class="field-select"><option value="refined">精修原文</option><option value="raw">原始识别</option></select>
           </div>
           <div id="unrefinedActions" class="unrefined-actions hidden"><span id="unrefinedStatus"></span><button id="retryUnrefined" class="mini-button primary-mini-button" type="button">重新精修全部</button></div>
-          <div id="noteTranscript" class="note-transcript"></div>
+          <div class="note-playback"><audio id="noteAudio" controls preload="none"></audio><small id="notePlaybackHint"></small></div>
+            <div id="noteTranscript" class="note-transcript"></div>
         </section>
         <section class="note-summary-pane">
           <div class="note-pane-heading">
@@ -534,13 +562,15 @@
               <button id="openSummarySettings" class="mini-button" type="button">总结设置</button>
               <button id="generateNoteSummary" class="mini-button primary-mini-button" type="button">AI 生成总结</button>
               <button id="regenerateNoteAbstract" class="mini-button" type="button" disabled>重新生成短摘要</button>
-              <button id="saveNoteSummary" class="mini-button" type="button" disabled>保存修改</button>
+              <span id="noteSaveStatus" class="note-save-status" role="status">修改会自动保存</span><button id="saveNoteSummary" class="mini-button" type="button" hidden disabled>重试保存</button>
             </div>
           </div>
           <div class="reader-toolbar">
+            <button id="openNoteVersions" class="mini-button" type="button">版本历史</button>
+            <button id="locateNoteSource" class="mini-button" type="button">查找原文</button>
             <button id="toggleNoteFocus" class="mini-button" type="button">展开阅读</button>
             <button id="toggleNoteToc" class="mini-button" type="button" aria-expanded="false">目录</button>
-            <span>点击段落编辑 · ⌘/Ctrl+Enter 完成 · Esc 撤销该段</span>
+            <span>编辑后自动保存 · ⌘/Ctrl+Enter 完成 · Esc 撤销该段</span>
             <button id="toggleNoteSource" class="mini-button" type="button">Markdown 源码</button>
           </div>
           <div id="markdownToolbar" class="markdown-toolbar hidden" aria-label="Markdown 编辑工具">
@@ -559,14 +589,14 @@
       </div>
     </dialog>
 
-    <dialog id="pushDialog" class="push-dialog">
+    <dialog aria-label="推送到 IdeaShell" id="pushDialog" class="push-dialog">
       <div class="settings-dialog-header"><div><b>推送到 IdeaShell</b><small id="pushTarget"></small></div><button id="closePushDialog" class="ghost-button" type="button">取消</button></div>
       <div class="push-options"><label for="pushContentMode">选择推送内容</label><select id="pushContentMode" class="field-select"><option value="combined">总结＋精修原文（默认）</option><option value="summary">仅 AI 总结</option><option value="transcript">仅精修原文（含时间戳）</option></select><p id="pushPreviewStatus" role="status"></p></div>
       <div id="pushPreview" class="push-preview markdown-body"></div>
       <div class="push-footer"><span>下方按钮会推送当前预览的内容</span><button id="confirmPush" class="mini-button primary-mini-button" type="button" disabled>推送此内容</button></div>
     </dialog>
 
-    <dialog id="batchDialog" class="batch-dialog">
+    <dialog aria-label="批量转写" id="batchDialog" class="batch-dialog">
       <div class="batch-header">
         <div><b>批量录音转写</b><small id="batchFileStatus">准备中</small></div>
         <button id="closeBatchDialog" class="ghost-button" type="button">关闭窗口</button>
@@ -582,7 +612,7 @@
     </dialog>
 
     <div id="toast" class="toast" role="status"></div>
-    <script src="/static/app.js?v=20260910-2" type="module"></script>
+    <script src="/static/app.js?v=20260923-upgrade-1" type="module"></script>
     <script src="/static/js/course-sync-link.js?v=20260910"></script>
   </body>
 </html>

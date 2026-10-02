@@ -1,3 +1,4 @@
+from tests import isolation  # Must precede application imports.
 import json
 import tempfile
 import unittest

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 
 from .batch_ai import correct_batch_segment
@@ -17,7 +18,9 @@ class SegmentCorrectionPipeline:
     def __init__(self, record: Any, config: dict[str, Any]) -> None:
         self.record, self.config = record, config
         self.concurrency = concurrency_for(config, "correction")
-        self.jobs: asyncio.Queue = asyncio.Queue(maxsize=self.concurrency * 2)
+        # Queue contains references to already persisted text, never PCM audio.
+        # 512 segments covers a two-hour class even with 15-second ASR blocks.
+        self.jobs: asyncio.Queue = asyncio.Queue(maxsize=512)
         self.events: asyncio.Queue = asyncio.Queue()
         self.task = asyncio.create_task(self._workers())
 
@@ -36,7 +39,13 @@ class SegmentCorrectionPipeline:
             try:
                 if segment is None:
                     return
+                timing = segment.setdefault("metrics", {})
+                started = time.time()
+                timing["ai_queue_seconds"] = round(max(0, started - timing.get("ai_queued_at", started)), 3)
                 updated = await correct_batch_segment(self.record, segment, self.config)
+                updated.setdefault("metrics", {}).update(ai_seconds=round(time.time() - started, 3))
+                if self.record is not None:
+                    self.record.upsert_segment(updated)
                 if updated.get("ai_error"):
                     self.events.put_nowait({"type": "ai_error", "id": updated["id"],
                                            "message": updated["ai_error"], "scope": "segment"})
@@ -49,6 +58,11 @@ class SegmentCorrectionPipeline:
     async def submit(self, segment: dict[str, Any]) -> None:
         # Propagate an unexpected consumer failure rather than waiting forever
         # on a full queue with nobody left to drain it.
+        if segment is not None:
+            segment.setdefault("metrics", {})["ai_queued_at"] = time.time()
+            segment["ai_pending"] = True
+            if self.record is not None:
+                self.record.upsert_segment(segment)
         pending = asyncio.create_task(self.jobs.put(segment))
         try:
             done, _ = await asyncio.wait({pending, self.task}, return_when=asyncio.FIRST_COMPLETED)

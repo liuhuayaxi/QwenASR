@@ -6,3 +6,15 @@ __pycache__/
 server.log
 course-sync.log
 models/*/.cache/
+
+# Personal data and generated artifacts
+models/
+recordings/
+output/
+app-settings.json
+.env.*
+!.env.example
+.playwright-cli/
+*.log
+
+tmp/

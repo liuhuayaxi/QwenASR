@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests import isolation  # Must precede application imports.
+
 import tempfile
 import time
 import unittest

@@ -18,30 +18,30 @@ function canonicalMathExpression(value) {
     .replace(/(\d+(?:\.\d+)?)\s*(?:度|°)/g, "$1^{\\circ}");
   return text.replace(/\s+/g, " ").trim();
 }
-export function normalizeMarkdownMath(markdown) {
-  const normalized = String(markdown || "").replace(/(^|[^`])`([^`\n]+)`(?!`)/gm, (whole, prefix, raw) => {
-    const value = raw.trim();
-    const hasOperator = /[=≈≠≤≥±×÷√∑∫]|(?:^|\s)[+\-*/](?:\s|$)/.test(value);
-    const hasOperand = /\d|[A-Za-zα-ωΑ-Ωθλμσπω]|\\(?:frac|sqrt|sin|cos|tan)/.test(value);
-    const hasFormulaShape = /(?:\d+(?:\.\d+)?°|[_^][A-Za-z0-9{}]+|\b(?:sin|cos|tan|arcsin|sqrt)\s*\()/i.test(value);
-    return hasOperand && (hasOperator || hasFormulaShape)
-      ? `${prefix}$${canonicalMathExpression(value)}$` : whole;
-  });
-  return normalized.replace(/\*\*([^*\n]+?)\*\*/g, (whole, raw) => {
-    const value = raw.trim();
-    if (value.includes("$")) return whole;
-    const hasOperator = /[=≈≠≤≥<>±×÷√∑∫]/.test(value);
-    const hasOperand = /\d|[A-Za-zα-ωΑ-Ω]/.test(value);
-    const proseChars = (value.match(/[\u4e00-\u9fff]/g) || []).length;
-    return hasOperator && hasOperand && proseChars <= 3
-      ? `$${canonicalMathExpression(value)}$` : whole;
-  });
+function isObviousMath(value) {
+  // Keep identifiers, assignments and ordinary code intact. Ambiguous ASCII
+  // expressions need explicit $ delimiters; an underscore alone is not math.
+  if (!/[≈≠≤≥±×÷√∑∫°]|\\(?:frac|sqrt|sin|cos|tan|arcsin)\b/.test(value)) return false;
+  const operands = value.replace(/\\(?:frac|sqrt|sin|cos|tan|arcsin|theta|lambda|pi|Delta|approx|le|ge|times|div|circ)\b/g, "")
+    .replace(/\b(?:arcsin|sin|cos|tan|sqrt)\b/g, "");
+  return /[\dA-Za-zΑ-Ωα-ω]/.test(value)
+    && !/[A-Za-z]{3,}|[A-Za-z0-9]_[A-Za-z]{2,}/.test(operands)
+    && !/[^\s\dA-Za-zΑ-Ωα-ω₀-₉²³≈≠≤≥±×÷√∑∫°度_{}()\[\].,+\-*/=^<>]/.test(operands);
 }
 function mathHtml(text, displayMode) {
   try { return window.katex.renderToString(text, { displayMode, throwOnError: false, trust: false, strict: "ignore", maxExpand: 500 }); }
   catch { return `<code>${escape(text)}</code>`; }
 }
 marked.use({ gfm: true, breaks: false, extensions: [
+  // Render legacy AI formula formatting without changing token.raw. Fenced
+  // and indented code never enter these inline renderers.
+  { name: "codespan", renderer(token) {
+    return /^`[^`]/.test(token.raw) && !token.raw.includes("\n") && isObviousMath(token.text)
+      ? mathHtml(canonicalMathExpression(token.text), false) : false;
+  } },
+  { name: "strong", renderer(token) {
+    return isObviousMath(token.text) ? mathHtml(canonicalMathExpression(token.text), false) : false;
+  } },
   { name: "blockMath", level: "block", start: (src) => src.indexOf("$$"),
     tokenizer(src) {
       const match = /^(?: {0,3}\$\$([\s\S]+?)\$\$| {0,3}\\\[([\s\S]+?)\\\])(?:[ \t]*\n|$)/.exec(src);
@@ -55,7 +55,7 @@ marked.use({ gfm: true, breaks: false, extensions: [
 ] });
 
 export function renderMarkdown(markdown) {
-  return DOMPurify.sanitize(marked.parse(normalizeMarkdownMath(markdown)), {
+  return DOMPurify.sanitize(marked.parse(String(markdown || "")), {
     FORBID_TAGS: ["style", "iframe", "form", "input"], FORBID_ATTR: ["autofocus"],
   });
 }
@@ -114,7 +114,7 @@ export function createMarkdownReader({ container, source, toc, onChange }) {
   }
   function render() {
     active = null;
-    const markdown = normalizeMarkdownMath(source.value.replace(/\r\n?/g, "\n"));
+    const markdown = source.value.replace(/\r\n?/g, "\n");
     tokens = marked.lexer(markdown);
     // Lexer raws preserve source, including structural whitespace and links.
     const fragment = document.createDocumentFragment();

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests import isolation  # Must precede application imports.
+
 import asyncio
 import os
 import unittest
@@ -223,9 +225,9 @@ class AISecretStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / ".qwenasr" / "ai-provider-secrets.json"
             store = AISecretStore(path)
-            status = store.update({"sentence": "secret-a", "review": "secret-b"})
+            status = store.update({"sentence": "secret-a", "review": "secret-b"}, {"sentence": "https://a.invalid/v1", "review": "https://b.invalid/v1"})
             self.assertTrue(status["sentence"])
-            self.assertEqual(store.get("review"), "secret-b")
+            self.assertEqual(store.get("review", "https://b.invalid/v1"), "secret-b")
             self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
             store.clear()
             self.assertFalse(path.exists())

@@ -244,8 +244,11 @@ async def build_note_summary(
     This is stored separately from live summaries so only this editable result can
     ever participate in IdeaShell synchronization.
     """
-    blocks = [f"[{format_clock(block['start'])}–{format_clock(block['end'])}]\n{block['text']}"
-              for block in transcript_blocks(record)]
+    source_blocks = transcript_blocks(record)
+    source_map = {str(index): {"start": block['start'], "end": block['end'], "segment_ids": block.get('segment_ids', [])}
+                  for index, block in enumerate(source_blocks, 1)}
+    blocks = [f"[来源 S{index}] [{format_clock(block['start'])}–{format_clock(block['end'])}]\n{block['text']}"
+              for index, block in enumerate(source_blocks, 1)]
     window = context_window_for(config, "summary")
     chunks = note_summary_chunks(blocks, config)
     if not chunks:
@@ -362,6 +365,8 @@ async def build_note_summary(
         f"- 时间：{time_text or '未知'}\n\n"
     )
     rolling_summary = metadata_block + rolling_summary.lstrip()
+    rolling_summary = re.sub(r'\[([^\]]+)\]\(#source-(\d+)\)',
+                             lambda match: match.group(0) if match.group(2) in source_map else match.group(1) + '（来源待核对）', rolling_summary)
     now = local_now()
     previous = record.metadata.get("ai_note_summary")
     item = {
@@ -374,6 +379,7 @@ async def build_note_summary(
         "created_at": previous.get("created_at", now) if isinstance(previous, dict) else now,
         "updated_at": now,
         "source": "post_recording",
+        "source_map": source_map,
     }
     draft["phase"] = "录音库短摘要"
     # Persist the detailed Markdown before the independent short-abstract call.

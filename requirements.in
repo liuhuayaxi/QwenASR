@@ -1,0 +1,16 @@
+mlx-audio>=0.5.1,<1
+fastapi>=0.115,<1
+uvicorn[standard]>=0.34,<1
+watchfiles>=1,<2
+httpx>=0.28,<1
+python-dotenv>=1,<2
+numpy>=2,<3
+soundfile>=0.13,<1
+huggingface_hub>=1.0,<2
+av>=14,<20
+python-multipart>=0.0.20,<1
+mcp>=2,<3
+cryptography>=50,<51
+pymupdf>=1.26,<2
+fonttools>=4.55,<5
+pillow>=11,<13

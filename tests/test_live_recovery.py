@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests import isolation  # Must precede application imports.
+
 import asyncio
 import json
 import tempfile
@@ -131,6 +133,8 @@ class DurableJobTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_websocket_reconnect_reuses_session_with_unfinished_work(self):
         class Socket:
+            headers = {"origin": "http://127.0.0.1:8765"}
+            url = "ws://127.0.0.1:8765/ws/transcribe"
             def __init__(self):
                 self.queue = asyncio.Queue()
                 self.events = {}

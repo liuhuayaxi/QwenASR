@@ -7,13 +7,15 @@ import os
 import re
 import time
 import weakref
+from contextlib import asynccontextmanager
 from difflib import SequenceMatcher
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
-from .ai_secrets import ai_secret_store
+from .ai_secrets import ai_secret_store, endpoint_identity
+from .ai_limits import account_gate
 from .context_budget import (
     DEFAULT_CONTEXT_WINDOW,
     estimate_tokens,
@@ -33,6 +35,7 @@ from .terminology import ai_terminology_context
 
 logger = logging.getLogger(__name__)
 _api_semaphores: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+_api_clients: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 TRANSIENT_AI_KINDS = {"rate_limit", "provider_busy"}
 
 
@@ -43,6 +46,33 @@ class AIRequestError(RuntimeError):
         super().__init__(message)
         self.kind = kind
         self.retriable = retriable
+
+
+@asynccontextmanager
+async def shared_ai_client(read_timeout: float):
+    """Reuse keep-alive connections for AI calls made by the same event loop."""
+    loop = asyncio.get_running_loop()
+    clients = _api_clients.setdefault(loop, {})
+    client = clients.get(read_timeout)
+    if client is None or client.is_closed:
+        client = httpx.AsyncClient(
+            timeout=httpx.Timeout(read_timeout, connect=15),
+            limits=httpx.Limits(
+                max_connections=20,
+                max_keepalive_connections=10,
+                keepalive_expiry=45,
+            ),
+        )
+        clients[read_timeout] = client
+    yield client
+
+
+async def close_ai_clients() -> None:
+    """Close pooled transports when the local service shuts down."""
+    clients = [client for group in list(_api_clients.values()) for client in group.values()]
+    _api_clients.clear()
+    if clients:
+        await asyncio.gather(*(client.aclose() for client in clients), return_exceptions=True)
 
 
 async def retry_transient_ai(
@@ -280,7 +310,16 @@ def parse_json_object(text: str) -> dict[str, Any]:
     return value
 
 
-_SINGLE_BACKTICK_RE = re.compile(r"(?<!`)`(?!`)([^`\n]+?)(?<!`)`(?!`)")
+_MATH_MARKDOWN_TOKEN_RE = re.compile(
+    # Protect code blocks, including common list/blockquote containers.
+    r"(?P<fence>^[ \t>]*(?:(?:[-+*]|\d+[.)])[ \t]+)?(?P<marker>`{3,}|~{3,})[^\n]*(?:\n|$))"
+    r"|(?P<indent>^(?: {0,3}>[ \t]?)*(?: {4,}|\t)[^\n]*(?:\n|$))"
+    r"|(?P<html><!--[\s\S]*?(?:-->|$)|<(?:pre|code|script|style|textarea)\b[^>]*>[\s\S]*?(?:</(?:pre|code|script|style|textarea)\s*>|$)|<[^>\n]+>)"
+    r"|(?P<math>\$\$[\s\S]*?\$\$|\$(?:\\.|[^$\n])+\$|\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\])"
+    r"|(?P<escape>\\.)|(?P<ticks>`+)"
+    r"|(?P<bold>\*\*(?P<bold_text>[^*\n]+?)\*\*)",
+    re.M | re.I,
+)
 
 
 def _canonical_math_expression(value: str) -> str:
@@ -304,41 +343,63 @@ def _canonical_math_expression(value: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def _is_obvious_math(value: str) -> bool:
+    # Keep this conservative rule aligned with markdown-reader.js. ASCII
+    # assignments and identifiers such as max_tokens need no conversion.
+    if not re.search(r"[≈≠≤≥±×÷√∑∫°]|\\(?:frac|sqrt|sin|cos|tan|arcsin)\b", value):
+        return False
+    operands = re.sub(
+        r"\\(?:frac|sqrt|sin|cos|tan|arcsin|theta|lambda|pi|Delta|approx|le|ge|times|div|circ)\b", "", value,
+    )
+    operands = re.sub(r"\b(?:arcsin|sin|cos|tan|sqrt)\b", "", operands)
+    return bool(re.search(r"[\dA-Za-zΑ-Ωα-ω]", value)) and not re.search(
+        r"[A-Za-z]{3,}|[A-Za-z0-9]_[A-Za-z]{2,}|[^\s\dA-Za-zΑ-Ωα-ω₀-₉²³≈≠≤≥±×÷√∑∫°度_{}()\[\].,+\-*/=^<>]",
+        operands,
+    )
+
+
 def normalize_markdown_math(markdown: str) -> str:
-    """Turn obvious formula code spans into KaTeX-compatible math delimiters.
+    """Repair clear AI formulas while preserving code blocks and code examples.
 
-    Models sometimes ignore an otherwise explicit Markdown instruction and use
-    single backticks for equations. Keep genuine code spans untouched and only
-    convert spans containing a strong mathematical signal.
+    Consume protected spans before looking for inline formulas. A whole-text
+    substitution would also rewrite backticks and bold text inside code.
     """
-    def replace(match: re.Match[str]) -> str:
-        value = match.group(1).strip()
-        has_operator = bool(re.search(r"[=≈≠≤≥±×÷√∑∫]|(?:^|\s)[+\-*/](?:\s|$)", value))
-        has_operand = bool(re.search(r"\d|[A-Za-zα-ωΑ-Ωθλμσπω]|\\(?:frac|sqrt|sin|cos|tan)", value))
-        has_formula_shape = bool(
-            re.search(r"(?:\d+(?:\.\d+)?°|[_^][A-Za-z0-9{}]+|\b(?:sin|cos|tan|arcsin|sqrt)\s*\()", value, re.I)
-        )
-        if not has_operand or not (has_operator or has_formula_shape):
-            return match.group(0)
-        return f"${_canonical_math_expression(value)}$"
-
-    normalized = _SINGLE_BACKTICK_RE.sub(replace, str(markdown or ""))
-
-    def replace_bold(match: re.Match[str]) -> str:
-        value = match.group(1).strip()
-        if "$" in value:
-            return match.group(0)
-        has_operator = bool(re.search(r"[=≈≠≤≥<>±×÷√∑∫]", value))
-        has_operand = bool(re.search(r"\d|[A-Za-zα-ωΑ-Ω]", value))
-        prose_chars = len(re.findall(r"[\u4e00-\u9fff]", value))
-        if not has_operator or not has_operand or prose_chars > 3:
-            return match.group(0)
-        return f"${_canonical_math_expression(value)}$"
-
-    return re.sub(r"\*\*([^*\n]+?)\*\*", replace_bold, normalized)
+    source = str(markdown or "")
+    pieces: list[str] = []
+    cursor = 0
+    while match := _MATH_MARKDOWN_TOKEN_RE.search(source, cursor):
+        pieces.append(source[cursor:match.start()])
+        end = match.end()
+        value = ""
+        if marker := match.group("marker"):
+            closing = re.compile(r"^[ \t>]*" + re.escape(marker[0]) + "{" + str(len(marker)) + r",}[ \t]*(?:\n|$)", re.M)
+            closing_match = closing.search(source, end)
+            end = closing_match.end() if closing_match else len(source)
+        elif ticks := match.group("ticks"):
+            # Markdown code spans can contain shorter backtick runs and newlines.
+            closing_match = re.compile(r"(?<!`)" + re.escape(ticks) + r"(?!`)").search(source, end)
+            if closing_match:
+                raw = source[end:closing_match.start()]
+                if len(ticks) == 1 and "\n" not in raw:
+                    value = raw.strip()
+                end = closing_match.end()
+            else:
+                end = len(source)
+        elif match.group("bold"):
+            value = match.group("bold_text").strip()
+        pieces.append(f"${_canonical_math_expression(value)}$" if _is_obvious_math(value) else source[match.start():end])
+        cursor = end
+    pieces.append(source[cursor:])
+    return "".join(pieces)
 
 
 def provider_for_mode(ai: dict[str, Any], mode: str | bool = "sentence") -> dict[str, Any]:
+    def inherited_key(provider, base_url):
+        if provider.get('api_key'):
+            return provider['api_key']
+        original = ai.get('base_url') or os.getenv('AI_BASE_URL') or os.getenv('OPENAI_BASE_URL') or 'https://api.openai.com/v1'
+        return ai.get('api_key') if endpoint_identity(base_url or original) == endpoint_identity(original) else None
+
     normalized_mode = "review" if mode is True else "sentence" if mode is False else str(mode)
     if normalized_mode in {"global", "correction"}:
         key = f"{normalized_mode}_provider"
@@ -351,7 +412,7 @@ def provider_for_mode(ai: dict[str, Any], mode: str | bool = "sentence") -> dict
         return {**provider,
                 "base_url": provider.get("base_url") or os.getenv(prefix + "_BASE_URL"),
                 "model": provider.get("model") or os.getenv(prefix + "_MODEL"),
-                "api_key": provider.get("api_key") or os.getenv(prefix + "_API_KEY")}
+                "api_key": provider.get("api_key")}
     if normalized_mode == "review":
         nested = ai.get("review_provider")
         provider = dict(nested) if isinstance(nested, dict) else {}
@@ -359,7 +420,7 @@ def provider_for_mode(ai: dict[str, Any], mode: str | bool = "sentence") -> dict
             **ai,
             **provider,
             "base_url": provider.get("base_url") or os.getenv("AI_REVIEW_BASE_URL") or ai.get("base_url"),
-            "api_key": provider.get("api_key") or os.getenv("AI_REVIEW_API_KEY") or ai.get("api_key"),
+            "api_key": inherited_key(provider, provider.get("base_url") or os.getenv("AI_REVIEW_BASE_URL") or ai.get("base_url")),
             "model": provider.get("model") or os.getenv("AI_REVIEW_MODEL") or ai.get("review_model") or ai.get("model"),
             "context_window": provider.get("context_window") or ai.get("context_window"),
             "api_mode": provider.get("api_mode") or ai.get("api_mode"),
@@ -372,7 +433,7 @@ def provider_for_mode(ai: dict[str, Any], mode: str | bool = "sentence") -> dict
             **ai,
             **provider,
             "base_url": provider.get("base_url") or os.getenv("AI_SUMMARY_BASE_URL") or ai.get("base_url"),
-            "api_key": provider.get("api_key") or os.getenv("AI_SUMMARY_API_KEY") or ai.get("api_key"),
+            "api_key": inherited_key(provider, provider.get("base_url") or os.getenv("AI_SUMMARY_BASE_URL") or ai.get("base_url")),
             "model": provider.get("model") or os.getenv("AI_SUMMARY_MODEL") or ai.get("summary_model") or ai.get("model"),
             "context_window": provider.get("context_window") or ai.get("context_window"),
             "api_mode": provider.get("api_mode") or ai.get("api_mode"),
@@ -430,6 +491,20 @@ def _extra_params(ai: dict[str, Any]) -> dict[str, Any]:
     return value
 
 
+def provider_credentials(config, mode):
+    provider = provider_for_mode(config.get("ai", {}), mode)
+    base = str(provider.get("base_url") or os.getenv("AI_BASE_URL") or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1")
+    identity = endpoint_identity(base)
+    key = str(provider.get("api_key") or "")
+    if not key:
+        key = ai_secret_store.get(mode, base)
+    for prefix in (f"AI_{mode.upper()}", "AI", "OPENAI"):
+        env_base = os.getenv(prefix + "_BASE_URL") or os.getenv("AI_BASE_URL") or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1"
+        if not key and endpoint_identity(env_base) == identity:
+            key = os.getenv(prefix + "_API_KEY") or ""
+    return base, key
+
+
 async def request_ai_text(
     *,
     instructions: str,
@@ -444,7 +519,8 @@ async def request_ai_text(
     semaphores = _api_semaphores.setdefault(loop, {})
     key = (mode, str(provider.get("base_url") or ""), str(provider.get("model") or ""), concurrency)
     semaphore = semaphores.setdefault(key, asyncio.Semaphore(concurrency))
-    async with semaphore:
+    base_url, credential = provider_credentials(config, mode)
+    async with semaphore, account_gate(base_url, credential):
         return await _request_ai_text_unlimited(instructions=instructions, payload=payload,
             config=config, mode=mode, max_output_tokens=max_output_tokens)
 
@@ -456,19 +532,7 @@ async def _request_ai_text_unlimited(
     """Call Responses/Chat and return the model's complete text output."""
     ai = config.get("ai") if isinstance(config.get("ai"), dict) else {}
     provider = provider_for_mode(ai, mode)
-    api_key = str(
-        provider.get("api_key")
-        or os.getenv("AI_API_KEY")
-        or os.getenv("OPENAI_API_KEY")
-        or ai_secret_store.get(mode)
-        or ""
-    )
-    base_url = str(
-        provider.get("base_url")
-        or os.getenv("AI_BASE_URL")
-        or os.getenv("OPENAI_BASE_URL")
-        or "https://api.openai.com/v1"
-    )
+    base_url, api_key = provider_credentials(config, mode)
     model = select_model(ai, mode)
     context_window = context_window_for(config, mode)
     provider_kind = _provider_kind(mode)
@@ -535,7 +599,7 @@ async def _request_ai_text_unlimited(
         raise ValueError("接口格式必须是 auto、responses 或 chat_completions")
 
     read_timeout = 600 if mode == "summary" else 180 if mode == "global" else 90
-    async with httpx.AsyncClient(timeout=httpx.Timeout(read_timeout, connect=15)) as client:
+    async with shared_ai_client(read_timeout) as client:
         async def post_request(
             request_url: str, body: dict[str, Any], api_name: str
         ) -> httpx.Response:
@@ -1079,6 +1143,8 @@ def summary_instructions(config: dict[str, Any], *, live: bool = False) -> str:
         "行内公式使用 $...$，独立推导使用 $$...$$。绝对不要用反引号 `...` 包裹公式。"
         "使用 \\sin、\\arcsin、\\sqrt{}、\\frac{}、下标 _{}、上标 ^{}、\\approx 和 ^\\circ 等标准写法。"
     )
+    if not live:
+        instructions += "\n原文中的 [来源 S编号] 是可核对的转写片段。每个知识点、公式和例题后附 Markdown 链接，例如 [原文 S3](#source-3)。只引用输入中实际提供且支持该结论的编号，不能编造来源；原文不足时明确写待核对。"
     if course_prompt:
         instructions += f"\n课程校对背景：{course_prompt}"
     glossary = ai_terminology_context(

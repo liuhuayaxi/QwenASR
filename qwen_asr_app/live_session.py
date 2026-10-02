@@ -208,6 +208,8 @@ class TranscriptionSession:
                 asr_terminology_context(
                     str(self.config.get("context", "")), self.config.get("terminology")
                 ),
+                priority=2,
+                is_current=lambda: segment_id == self.segment_id and self.speaking,
                 asr_params=asr_params_with_terminology(
                     self.config.get("asr_params"), self.config.get("terminology")
                 ),
@@ -283,12 +285,14 @@ class TranscriptionSession:
         segment_end: float,
     ) -> None:
         try:
+            metrics = {}
             raw, language, seconds = await self.model_manager.transcribe(
                 audio,
                 config.get("language"),
                 asr_terminology_context(
                     str(config.get("context", "")), config.get("terminology")
                 ),
+                priority=0, metrics=metrics,
                 asr_params=asr_params_with_terminology(
                     config.get("asr_params"), config.get("terminology")
                 ),
@@ -305,6 +309,7 @@ class TranscriptionSession:
                 "raw": raw,
                 "language": language,
                 "latency": seconds,
+                "metrics": metrics,
                 "duration": round(len(audio) / SAMPLE_RATE, 1),
                 "start": round(segment_start, 2),
                 "end": round(segment_end, 2),
@@ -460,8 +465,6 @@ class TranscriptionSession:
                 recording.metadata["ai_reviews"] = reviews
                 recording.metadata["last_ai_review_at"] = window_end
                 recording.save_all()
-                if recording.metadata.get("status") == "completed":
-                    recording.make_bundle()
                 if review.get("ai_error"):
                     await self.send({"type": "ai_review", "review": review})
                 else:
@@ -554,8 +557,6 @@ class TranscriptionSession:
                 recording.metadata["ai_summaries"] = summaries
                 recording.metadata["last_ai_summary_at"] = window_end
                 recording.save_all()
-                if recording.metadata.get("status") == "completed":
-                    recording.make_bundle()
                 await self.send({"type": "ai_summary", "summary": summary_item})
                 if summary_item.get("ai_error"):
                     # A cumulative chain must resume from its earliest failure.

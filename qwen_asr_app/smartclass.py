@@ -10,6 +10,7 @@ import time
 from datetime import datetime
 from fractions import Fraction
 from pathlib import Path
+from .paths import PRIVATE_ROOT
 from urllib.parse import parse_qs, urljoin, urlsplit, urlunsplit
 
 import httpx
@@ -19,7 +20,7 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 PORTAL = "https://njupt.smartclass.cn"
 CAS = "https://i.njupt.edu.cn"
 SERVICE = PORTAL + "/SystemSpace/Redirect.aspx"
-STATE_DIR = Path.home() / ".qwenasr" / "smartclass"
+STATE_DIR = PRIVATE_ROOT / "smartclass"
 CHECK_KEY = "1629428467008"
 # Public transport cipher shipped by SmartClass's hber.js; not an account secret.
 SMARTCLASS_KEY = b"80bdbdbaf7494add99198960d715d41b"

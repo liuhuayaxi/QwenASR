@@ -6,6 +6,8 @@ import os
 import time
 from contextlib import AsyncExitStack
 from pathlib import Path
+from .paths import PRIVATE_ROOT
+from .durable import atomic_json
 from typing import Any
 from urllib.parse import urlparse
 
@@ -27,7 +29,7 @@ class FileTokenStorage:
 
     def __init__(self, server_url: str) -> None:
         host = urlparse(server_url).hostname or "ideashell"
-        self.path = Path.home() / ".qwenasr" / f"{host}-oauth.json"
+        self.path = PRIVATE_ROOT / f"{host}-oauth.json"
 
     def _read(self) -> dict[str, Any]:
         try:
@@ -37,15 +39,38 @@ class FileTokenStorage:
             return {}
 
     def _write(self, payload: dict[str, Any]) -> None:
+        if payload.get("tokens") and "tokens_saved_at" not in payload:
+            try:
+                payload["tokens_saved_at"] = self.path.stat().st_mtime
+            except FileNotFoundError:
+                payload["tokens_saved_at"] = time.time()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         try:
             os.chmod(self.path.parent, 0o700)
         except OSError:
             pass
-        temp = self.path.with_suffix(".json.tmp")
-        temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.chmod(temp, 0o600)
-        temp.replace(self.path)
+        # atomic_json creates its temporary file with mode 0600 before writing.
+        atomic_json(self.path, payload)
+
+    def get_discovery(self) -> dict[str, Any]:
+        value = self._read().get("discovery")
+        return value if isinstance(value, dict) else {}
+
+    def set_discovery(self, value: dict[str, Any]) -> None:
+        payload = self._read()
+        payload["discovery"] = value
+        self._write(payload)
+
+    def callback_url(self) -> str:
+        payload = self._read()
+        callbacks = (payload.get("client_info") or {}).get("redirect_uris") or []
+        return str(payload.get("callback_url") or (callbacks[0] if callbacks else ""))
+
+    def save_callback_url(self, value: str) -> None:
+        payload = self._read()
+        if payload.get("callback_url") != value:
+            payload["callback_url"] = value
+            self._write(payload)
 
     def _token_remaining(self, payload: dict[str, Any]) -> float | None:
         raw = payload.get("tokens")
@@ -101,7 +126,8 @@ class FileTokenStorage:
         self._write(payload)
 
     def has_saved_tokens(self) -> bool:
-        return isinstance(self._read().get("tokens"), dict)
+        tokens = self._read().get("tokens")
+        return isinstance(tokens, dict) and bool(tokens.get("access_token") or tokens.get("refresh_token"))
 
     def tokens_valid_for(self, minimum_seconds: float = 30.0) -> bool:
         payload = self._read()
@@ -119,13 +145,18 @@ class IdeaShellConnection:
         self.authorization_url = ""
         self.error = ""
         self.connected = False
-        self._callback_url = ""
+        self._callback_url = self.storage.callback_url() or f"http://127.0.0.1:{os.getenv('QWEN_ASR_PORT', '8765')}/api/ideashell/oauth/callback"
+        self._interactive_auth = False
         self._redirect_ready = asyncio.Event()
         self._callback_queue: asyncio.Queue[dict[str, str | None]] = asyncio.Queue(maxsize=1)
         self._connect_task: asyncio.Task[Any] | None = None
         self._call_lock = asyncio.Lock()
 
     async def _redirect_handler(self, auth_url: str) -> None:
+        self.connected = False
+        if not self._interactive_auth:
+            self.error = "闪念贝壳授权已失效，请点击连接后重新授权"
+            raise RuntimeError(self.error)
         self.authorization_url = str(auth_url)
         self._redirect_ready.set()
 
@@ -147,11 +178,11 @@ class IdeaShellConnection:
         await self._callback_queue.put({"code": code, "state": state, "iss": iss})
 
     def _build_auth(self) -> Any:
-        from mcp.client.auth import OAuthClientProvider
+        from .ideashell_auth import PersistentOAuthProvider
         from mcp.shared.auth import OAuthClientMetadata
         from pydantic import AnyUrl
 
-        return OAuthClientProvider(
+        return PersistentOAuthProvider(
             server_url=self.server_url,
             client_metadata=OAuthClientMetadata(
                 client_name="QwenASR IdeaShell Sync",
@@ -192,29 +223,42 @@ class IdeaShellConnection:
         await resources[1].aclose()
 
     async def _probe(self) -> None:
+        async with self._call_lock:
+            self._interactive_auth = True
+            try:
+                await self._probe_locked()
+            finally:
+                self._interactive_auth = False
+
+    async def _probe_locked(self) -> None:
         resources: tuple[Any, AsyncExitStack] | None = None
         try:
             resources = await self._client_session()
             session = resources[0]
-            tools = await session.list_tools()
-            names = {str(tool.name) for tool in tools.tools}
+            names = set(await self._tool_schemas(session))
             required = {"note_create", "note_update", "note_detail"}
             missing = sorted(required - names)
             if missing:
                 raise RuntimeError(f"IdeaShell MCP 缺少工具：{', '.join(missing)}")
             self.connected = True
+            self.authorization_url = ""
             self.error = ""
         except Exception as exc:
             self.connected = False
-            self.error = str(exc)
+            self.authorization_url = ""
+            self.error = str(exc) or "暂时无法连接闪念贝壳，本机凭证已保留"
         finally:
             if resources is not None:
                 await self._close_session(resources)
 
-    async def start_connect(self, callback_url: str) -> dict[str, Any]:
-        self._callback_url = str(callback_url or "").strip()
-        if not self._callback_url.startswith("http://127.0.0.1:") and not self._callback_url.startswith("http://localhost:"):
+    async def start_connect(self, callback_url: str, *, wait_seconds: float = 8) -> dict[str, Any]:
+        callback_url = str(callback_url or self._callback_url).strip()
+        parsed = urlparse(callback_url)
+        if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost"} or parsed.path != "/api/ideashell/oauth/callback":
             raise ValueError("IdeaShell OAuth 回调必须使用本机地址")
+        if self._connect_task is None or self._connect_task.done():
+            self._callback_url = callback_url
+            self.storage.save_callback_url(callback_url)
 
         # A successful probe is enough for subsequent push/pull calls.  Do not
         # restart OAuth on every button click: doing so clears the connected
@@ -227,10 +271,14 @@ class IdeaShellConnection:
             self.error = ""
             self.connected = False
             self._redirect_ready = asyncio.Event()
+            while not self._callback_queue.empty():
+                self._callback_queue.get_nowait()
             self._connect_task = asyncio.create_task(self._probe())
+        if wait_seconds <= 0:
+            return self.status()
         try:
             await asyncio.wait_for(
-                asyncio.shield(self._wait_for_connection_event()), timeout=8
+                asyncio.shield(self._wait_for_connection_event()), timeout=wait_seconds
             )
         except asyncio.TimeoutError:
             pass
@@ -265,6 +313,7 @@ class IdeaShellConnection:
             "authorization_url": self.authorization_url if status == "authorization_required" else "",
             "error": self.error,
             "server_url": self.server_url,
+            "has_saved_credentials": self.storage.has_saved_tokens(),
         }
 
     def deactivate(self) -> None:
@@ -273,9 +322,33 @@ class IdeaShellConnection:
         self.connected = False
         self.authorization_url = ""
 
+    async def list_tools(self) -> dict[str, Any]:
+        """Read current attachment schemas instead of assuming a document field."""
+        await self.ensure_connected()
+        async with self._call_lock:
+            resources = await self._client_session()
+            try:
+                return await self._tool_schemas(resources[0])
+            finally:
+                await self._close_session(resources)
+
+    @staticmethod
+    async def _tool_schemas(session) -> dict[str, Any]:
+        from mcp.types import PaginatedRequestParams
+        result, cursors = {}, set()
+        cursor = None
+        while True:
+            page = await session.list_tools(params=PaginatedRequestParams(cursor=cursor)) if cursor else await session.list_tools()
+            result.update({tool.name: tool.input_schema for tool in page.tools})
+            cursor = page.next_cursor
+            if not cursor:
+                return result
+            if cursor in cursors:
+                raise RuntimeError("闪念贝壳工具列表返回了重复分页，请稍后重试")
+            cursors.add(cursor)
+
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        if not self.connected:
-            raise RuntimeError("请先连接并授权 IdeaShell")
+        await self.ensure_connected()
         async with self._call_lock:
             resources: tuple[Any, AsyncExitStack] | None = None
             try:
@@ -287,6 +360,23 @@ class IdeaShellConnection:
             finally:
                 if resources is not None:
                     await self._close_session(resources)
+
+    async def ensure_connected(self) -> None:
+        if self.connected:
+            return
+        if not self.storage.has_saved_tokens():
+            raise RuntimeError("请先连接并授权 IdeaShell")
+        status = await self.start_connect(self._callback_url)
+        if status["status"] == "connecting":
+            try:
+                await asyncio.wait_for(asyncio.shield(self._wait_for_connection_event()), timeout=30)
+            except asyncio.TimeoutError:
+                pass
+            status = self.status()
+        if not status["connected"]:
+            if status["authorization_url"]:
+                raise RuntimeError("闪念贝壳授权已失效，请打开授权页面完成登录")
+            raise RuntimeError(status["error"] or "正在恢复闪念贝壳连接，请稍后重试")
 
 
 def _tool_text(result: Any) -> str:

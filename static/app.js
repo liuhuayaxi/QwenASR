@@ -1,8 +1,11 @@
-import { createMarkdownReader, renderMarkdown } from "./js/markdown-reader.js?v=20260910-2";
+import { createBatchView } from "./js/batch-view.js?v=20260923";
+import { createLibraryTools } from "./js/library-tools.js?v=20260923";
+import { createMarkdownReader, renderMarkdown } from "./js/markdown-reader.js?v=20260923-upgrade-1";
+import { createNoteAutosave } from "./js/note-autosave.js?v=20260923-upgrade-1";
 import { DEFAULT_NOTE_SUMMARY_PROMPT } from "./js/default-prompts.js";
 import { resample } from "./js/audio.js";
-import { createSummaryView } from "./js/summary-view.js";
-import { createTranscriptView } from "./js/transcript-view.js?v=20260910-2";
+import { createSummaryView } from "./js/summary-view.js?v=20260923-upgrade-1";
+import { createTranscriptView } from "./js/transcript-view.js?v=20260923-upgrade-1";
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -45,10 +48,8 @@ const els = {
   partialInterval: $("#partialInterval"), partialIntervalValue: $("#partialIntervalValue"),
   storageRoot: $("#storageRoot"), chooseStorageRoot: $("#chooseStorageRoot"), saveStorageRoot: $("#saveStorageRoot"), storageRootHint: $("#storageRootHint"), hardwareMode: $("#hardwareMode"),
   panelTitle: $("#panelTitle"), transcriptTab: $("#transcriptTab"),
-  summaryTab: $("#summaryTab"), aiTasksTab: $("#aiTasksTab"), aiTasksBadge: $("#aiTasksBadge"), libraryTab: $("#libraryTab"),
+  summaryTab: $("#summaryTab"), libraryTab: $("#libraryTab"),
   transcriptView: $("#transcriptView"), summaryView: $("#summaryView"), libraryView: $("#libraryView"),
-  aiTasksView: $("#aiTasksView"), aiTasksList: $("#aiTasksList"), refreshAiTasks: $("#refreshAiTasks"),
-  continueAllAiTasks: $("#continueAllAiTasks"), pauseAllAiTasks: $("#pauseAllAiTasks"), retryAllAiTasks: $("#retryAllAiTasks"),
   summaryEmpty: $("#summaryEmpty"), summaryStatus: $("#summaryStatus"), summaryList: $("#summaryList"),
   libraryCategory: $("#libraryCategory"), refreshLibrary: $("#refreshLibrary"), libraryList: $("#libraryList"),
   calendarPrevious: $("#calendarPrevious"), calendarNext: $("#calendarNext"),
@@ -78,7 +79,7 @@ const els = {
 const API_STORAGE_KEY = "qwen-asr-api-settings-v1";
 const CONTEXT_MIGRATION_KEY = "qwen-asr-context-model-aware-v2";
 const DEFAULT_CONTEXT_TOKENS = 131072;
-const REQUIRED_FEATURE_VERSION = "ai-task-center-v11";
+const REQUIRED_FEATURE_VERSION = "library-upgrade-v14";
 const PENDING_END_KEY = "qwen-asr-pending-end-v1";
 const IDEASHELL_STORAGE_KEY = "qwen-asr-ideashell-settings-v1";
 const IDEASHELL_SERVERS = {
@@ -112,11 +113,16 @@ const state = {
   activeSession: null, shownSession: null, ws: null, stream: null, audioContext: null,
   source: null, processor: null, analyser: null, animation: null, segments: new Map(),
   reviewCards: new Map(), library: [], categories: ["未分类"], categoryProfiles: {}, activeView: "transcript",
-  libraryMonth: null, selectedLibraryDate: null, backendCompatible: true, storageRoot: "",
+  libraryMonth: null, selectedLibraryDate: null, libraryPage: 0, backendCompatible: true, storageRoot: "",
   noteSession: null, regenerateRecord: null, summaryGenerating: new Set(),
   aiTasks: [], aiTasksLoading: false,
   endPolling: new Set(),
 };
+
+
+document.getElementById("courseFilesLink")?.addEventListener("click", (event) => {
+  event.currentTarget.href = `/course-files?category=${encodeURIComponent(els.recordCategory.value === "__new__" ? "未分类" : els.recordCategory.value)}`;
+});
 
 let summaryView = null;
 const {
@@ -133,6 +139,33 @@ const noteReader = createMarkdownReader({
   container: $("#noteSummaryReader"), source: els.noteSummaryEditor, toc: $("#noteToc"),
   onChange: () => els.noteSummaryEditor.dispatchEvent(new Event("input")),
 });
+const noteAutosave = createNoteAutosave({
+  onStatus: (id, phase, message, doc) => {
+    if (state.noteSession?.id !== id) return;
+    $("#noteSaveStatus").textContent = message;
+    $("#noteSaveStatus").dataset.status = phase;
+    els.saveNoteSummary.hidden = phase !== "error";
+    els.saveNoteSummary.disabled = phase !== "error";
+    els.saveNoteSummary.textContent = doc.conflictBase !== undefined ? "保存当前版本" : "重试保存";
+  },
+  onSaved: (id, payload, doc) => {
+    const index = state.library.findIndex(item => item.id === id);
+    if (index >= 0) state.library[index] = {...state.library[index], ...payload.session};
+    if (state.noteSession?.id !== id) return;
+    state.noteSession = {...state.noteSession, ...payload.session, ai_note_summary: payload.summary};
+    els.noteSummaryEditor.dataset.savedValue = doc.savedInput;
+    els.downloadNoteSummary.href = state.noteSession.downloads?.ai_summary || "#";
+    els.downloadNoteSummary.classList.remove("disabled-download");
+    els.noteSummaryHint.textContent = `修改已保存到本机${state.noteSession.ideashell_sync?.note_id ? " · 有尚未推送的修改" : ""}`;
+  },
+});
+
+const {uploadRecordings, transcribeUploadedFile} = createBatchView({els, state, formatDuration, escapeHtml, summaryView, showSession, updateButtons, toast, sessionConfig, selectedRecordCategory, loadLibrary});
+
+const libraryTools = createLibraryTools({getSession: () => state.noteSession, openRecord: openLibraryRecord,
+  saveNote: () => saveNoteSummary({quiet:true}), finishEditing: () => noteReader.finish(),
+  renderNote: session => {state.noteSession=session; renderNoteDialog(session); loadLibrary();},
+  toast, escapeHtml, formatDuration});
 
 function toast(message, duration = 2600) {
   els.toast.textContent = message;
@@ -408,7 +441,7 @@ function persistAiSecrets() {
   fetch("/api/ai/secrets", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ keys }),
+    body: JSON.stringify({ keys, base_urls: Object.fromEntries(["sentence", "review", "summary", "correction", "global"].map(mode => [mode, rawProvider(mode).base_url])) }),
     keepalive: true,
   }).catch(() => { /* Browser storage still retains a local fallback. */ });
 }
@@ -620,24 +653,26 @@ function switchView(view) {
   state.activeView = view;
   const library = view === "library";
   const summary = view === "summary";
-  const tasks = view === "tasks";
-  const transcript = !library && !summary && !tasks;
+  const transcript = !library && !summary;
   els.transcriptView.classList.toggle("hidden", !transcript);
   els.summaryView.classList.toggle("hidden", !summary);
   els.libraryView.classList.toggle("hidden", !library);
-  els.aiTasksView.classList.toggle("hidden", !tasks);
   els.transcriptTab.classList.toggle("active", transcript);
   els.summaryTab.classList.toggle("active", summary);
   els.libraryTab.classList.toggle("active", library);
-  els.aiTasksTab.classList.toggle("active", tasks);
-  els.panelTitle.textContent = library ? "录音库" : summary ? "实时总结" : tasks ? "AI 任务中心" : "当前笔记";
+  for (const [tab, active] of [[els.transcriptTab, transcript], [els.summaryTab, summary], [els.libraryTab, library]]) {
+    tab.setAttribute("aria-pressed", String(active));
+  }
+  els.panelTitle.textContent = library ? "录音库" : summary ? "实时总结" : "当前笔记";
   els.copyButton.classList.toggle("hidden", !transcript);
   els.clearButton.classList.toggle("hidden", !transcript);
+  document.body.classList.toggle("library-page", library);
+  if (library) els.libraryTab.setAttribute("aria-current", "page"); else els.libraryTab.removeAttribute("aria-current");
+  if (!library) $("#workbenchNav").setAttribute("aria-current", "page"); else $("#workbenchNav").removeAttribute("aria-current");
+  document.title = library ? "录音库 · QwenASR" : "录音工作台 · QwenASR";
+  const target = library ? "/library" : "/";
+  if (location.pathname !== target) history.pushState(null, "", target);
   if (library) renderLibrary();
-  if (tasks) {
-    renderAiTasks();
-    loadAiTasks();
-  }
 }
 
 function recordingStatus(record) {
@@ -646,61 +681,6 @@ function recordingStatus(record) {
   if (record.status === "interrupted") return "可继续";
   if (record.status === "failed") return "未完成";
   return "已完成";
-}
-
-function friendlyTaskError(task) {
-  if (!task.error) return task.status === "pending" ? "等待手动处理" : "";
-  if (task.error_kind === "network_dns") return "模型服务域名当时无法解析。网络恢复后可继续，已完成内容会保留。";
-  if (task.error_kind === "output_truncated") return "模型输出达到长度上限。程序会缩小处理块；旧任务可继续或重试。";
-  if (task.error_kind === "input_too_long") return "请求片段超过服务商实际窗口。程序会自动拆成更小的连续段落。";
-  if (task.error_kind === "rate_limit") return task.status === "waiting_retry" ? "模型服务临时限流，程序正在等待并会自动重试。" : "模型服务曾触发临时限流。";
-  if (task.error_kind === "provider_busy") return task.status === "waiting_retry" ? "模型服务暂时繁忙，程序正在等待并会自动重试。" : "模型服务暂时繁忙。";
-  if (task.error_kind === "provider_quota") return "服务商账户余额或总额度已耗尽，自动等待无法恢复；请充值或更换模型后重试。";
-  if (task.error_kind === "invalid_json") return "模型返回的 JSON 结构损坏。继续后会自动重生成，并在必要时缩小处理块。";
-  if (task.error_kind === "invalid_segment_mapping") return "模型返回的段落编号不可靠。继续后会自动拆成更小的连续段重试。";
-  return task.error;
-}
-
-function taskActionLabel(action) {
-  return { continue: "继续", pause: "暂停", retry: "重试", cancel: "取消" }[action] || action;
-}
-
-function renderAiTasks() {
-  const tasks = state.aiTasks || [];
-  els.aiTasksList.innerHTML = "";
-  if (!tasks.length) {
-    els.aiTasksList.innerHTML = '<div class="library-empty">当前没有进行中或需要处理的 AI 任务</div>';
-    els.continueAllAiTasks.disabled = true;
-    els.pauseAllAiTasks.disabled = true;
-    els.retryAllAiTasks.disabled = true;
-    return;
-  }
-  for (const task of tasks) {
-    const card = document.createElement("article");
-    card.className = `ai-task-card ${escapeHtml(task.status)}`;
-    const progress = task.total ? `${task.completed || 0}/${task.total}` : "";
-    const range = task.range_end ? ` · ${formatDuration(task.range_start)}–${formatDuration(task.range_end)}` : "";
-    const attempts = task.attempts > 1 ? ` · 历史尝试 ${task.attempts} 次（已去重）` : "";
-    const statusName = { running: "进行中", queued: "排队中", waiting_retry: "等待自动重试", paused: "已暂停", failed: "失败", interrupted: "已中断", pending: "待处理" }[task.status] || task.status;
-    const retryWait = task.status === "waiting_retry" && task.retry_in_seconds
-      ? ` · 约 ${task.retry_in_seconds} 秒后自动重试（第 ${task.auto_retry_count || 1} 次等待）` : "";
-    card.innerHTML = `<div class="ai-task-main"><div class="ai-task-title"><b>${escapeHtml(task.label)}</b><span class="ai-task-status">${escapeHtml(statusName)}</span></div>
-      <p>${escapeHtml(task.recording_title)} · ${escapeHtml(task.category)}${range}</p>
-      ${progress || task.phase ? `<small>${escapeHtml(task.phase || "处理进度")}${progress ? ` · ${escapeHtml(progress)}` : ""}${attempts}${escapeHtml(retryWait)}</small>` : attempts || retryWait ? `<small>${escapeHtml([attempts.slice(3), retryWait.slice(3)].filter(Boolean).join(" · "))}</small>` : ""}
-      ${friendlyTaskError(task) ? `<div class="ai-task-error">${escapeHtml(friendlyTaskError(task))}</div>` : ""}</div>
-      <div class="ai-task-actions"><button type="button" data-action="open">查看笔记</button>${(task.actions || []).map((action) => `<button type="button" data-action="${escapeHtml(action)}" class="${action === "cancel" ? "danger" : "primary"}">${taskActionLabel(action)}</button>`).join("")}</div>`;
-    card.querySelector('[data-action="open"]').addEventListener("click", () => openLibraryRecord(task.recording_id));
-    for (const button of card.querySelectorAll("[data-action]:not([data-action='open'])")) {
-      button.addEventListener("click", () => runAiTaskAction(task, button.dataset.action, button));
-    }
-    els.aiTasksList.appendChild(card);
-  }
-  const canContinue = tasks.some((task) => (task.actions || []).includes("continue"));
-  const canPause = tasks.some((task) => (task.actions || []).includes("pause"));
-  const canRetry = tasks.some((task) => (task.actions || []).includes("retry"));
-  els.continueAllAiTasks.disabled = !canContinue;
-  els.pauseAllAiTasks.disabled = !canPause;
-  els.retryAllAiTasks.disabled = !canRetry;
 }
 
 async function refreshOpenNoteTranscript() {
@@ -728,13 +708,9 @@ async function loadAiTasks() {
     const nextTasks = payload.tasks || [];
     const tasksChanged = JSON.stringify(nextTasks) !== JSON.stringify(state.aiTasks || []);
     state.aiTasks = nextTasks;
-    const count = Number(payload.active_count) || (payload.tasks || []).length;
-    els.aiTasksBadge.textContent = String(count);
-    els.aiTasksBadge.classList.toggle("hidden", count === 0);
-    if (state.activeView === "tasks" && tasksChanged) renderAiTasks();
     if (state.noteSession && tasksChanged) refreshOpenNoteTranscript();
   } catch (error) {
-    if (state.activeView === "tasks") els.aiTasksList.innerHTML = `<div class="library-empty">${escapeHtml(error.message)}</div>`;
+    // Keep the last task status while the backend reconnects.
   } finally {
     state.aiTasksLoading = false;
   }
@@ -864,50 +840,6 @@ async function runAiTaskAction(task, action, button = null) {
   }
 }
 
-async function runBulkAiTaskAction(action) {
-  if (!requireCurrentBackend()) return;
-  const targets = (state.aiTasks || []).filter((task) => (task.actions || []).includes(action));
-  if (!targets.length) {
-    toast(action === "pause" ? "当前没有可暂停的任务" : "当前没有可批量处理的任务", 3600);
-    return;
-  }
-  let items;
-  try {
-    items = targets.map((task) => {
-      const item = { recording_id: task.recording_id, type: task.type };
-      if (action !== "pause") {
-        item.config = configForAiTask(task);
-        if (task.type === "summary") {
-          const record = state.library.find((entry) => entry.id === task.recording_id) || {};
-          item.summary_payload = automaticSummaryPayload(record);
-        }
-      }
-      return item;
-    });
-  } catch (error) {
-    toast(error.message, 5200);
-    return;
-  }
-  const buttons = [els.continueAllAiTasks, els.pauseAllAiTasks, els.retryAllAiTasks];
-  buttons.forEach((button) => { button.disabled = true; });
-  try {
-    const response = await fetch("/api/ai-tasks/bulk-action", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action, items }),
-    });
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.detail || "批量操作失败");
-    const actionName = { continue: "继续", pause: "暂停", retry: "重试" }[action];
-    toast(`已批量${actionName} ${payload.accepted}/${payload.requested} 个任务${payload.failed ? `，${payload.failed} 个未提交` : ""}`, 5200);
-    await loadAiTasks();
-  } catch (error) {
-    toast(error.message, 5600);
-  } finally {
-    buttons.forEach((button) => { button.disabled = false; });
-    renderAiTasks();
-  }
-}
-
 function localDateKey(value) {
   const date = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(date.getTime())) return "";
@@ -1012,13 +944,20 @@ function renderLibrary() {
     : categoryRecords;
   els.libraryList.innerHTML = "";
   if (!records.length) {
+    $("#libraryPageStatus").textContent = "0 条录音";
+    $("#libraryPrevious").disabled = $("#libraryNext").disabled = true;
     const scope = state.selectedLibraryDate
       ? `${formatCalendarDate(state.selectedLibraryDate)}没有录音`
       : "这个分类还没有录音";
     els.libraryList.innerHTML = `<div class="library-empty">${escapeHtml(scope)}</div>`;
     return;
   }
-  for (const record of records) {
+  const pages = Math.max(1, Math.ceil(records.length / 20));
+  state.libraryPage = Math.max(0, Math.min(state.libraryPage, pages - 1));
+  $("#libraryPageStatus").textContent = `${records.length} 条录音 · 第 ${state.libraryPage + 1}/${pages} 页`;
+  $("#libraryPrevious").disabled = !state.libraryPage;
+  $("#libraryNext").disabled = state.libraryPage >= pages - 1;
+  for (const record of records.slice(state.libraryPage * 20, (state.libraryPage + 1) * 20)) {
     const card = document.createElement("article");
     card.className = "library-card";
     card.dataset.id = record.id;
@@ -1054,7 +993,7 @@ function renderLibrary() {
         <button class="library-delete" type="button" ${canEdit ? "" : "disabled"}>删除</button>
       </div>
       ${canDownload ? `<div class="library-downloads">
-        <a href="${record.downloads.bundle}">整套 ZIP</a>
+        <a href="${record.downloads.bundle}" title="按需生成，下载响应结束后从本机临时目录删除">临时整套 ZIP</a>
         <a href="${record.downloads.audio}">AAC</a>
         <a href="${record.downloads.raw_transcript || record.downloads.transcript}">原始转写 TXT</a>
         <a href="${record.downloads.corrected_transcript || record.downloads.transcript}">AI 修正 TXT</a>
@@ -1159,7 +1098,7 @@ async function generateLibrarySummary(record, card = null, promptOverrides = {})
   state.summaryGenerating.add(record.id);
   let polling = false;
   const poll = async () => {
-    if (polling) return;
+    if (polling || document.hidden) return;
     polling = true;
     try { await refreshSummaryStatus(record.id); } finally { polling = false; }
   };
@@ -1267,16 +1206,19 @@ async function generateLibraryTitle(record, card) {
     const response = await fetch(`/api/recordings/${encodeURIComponent(record.id)}/generate-title`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ config, title_prompt: prompt }),
+      body: JSON.stringify({ config, title_prompt: prompt, apply: true }),
     });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.detail || "AI 标题生成失败");
     const input = card.querySelector(".library-title-input");
     input.value = payload.title;
-    input.focus();
-    input.select();
-    card.classList.add("title-suggested");
-    toast("AI 标题已填入，确认后点击“保存名称与分类”", 4800);
+    if (payload.session && state.noteSession?.id === record.id) {
+      state.noteSession = {...state.noteSession, ...payload.session};
+      els.noteDialogTitle.textContent = payload.session.title;
+    }
+    if (payload.session && state.activeSession?.id === record.id) state.activeSession = payload.session;
+    await loadLibrary();
+    toast(`名称已修改为“${payload.title}”`, 4200);
   } catch (error) {
     toast(error.message, 6200);
   } finally {
@@ -1315,6 +1257,7 @@ async function loadLibrary() {
 }
 
 async function openLibraryRecord(sessionId) {
+  if (state.noteSession && state.noteSession.id !== sessionId && !await saveNoteSummary({quiet: true})) return;
   try {
     const response = await fetch(`/api/recordings/${encodeURIComponent(sessionId)}`, { cache: "no-store" });
     const payload = await response.json();
@@ -1332,6 +1275,7 @@ function renderNoteDialog(session) {
   const when = session.started_at ? new Date(session.started_at).toLocaleString() : "";
   els.noteDialogTitle.textContent = session.title || "未命名录音";
   els.noteDialogMeta.textContent = `${session.category || "未分类"} · ${when} · ${formatDuration(session.duration)}`;
+  libraryTools.attach(session);
   renderNoteTranscript(session);
   renderNoteSummary(session);
   refreshSummaryStatus(session.id);
@@ -1357,8 +1301,8 @@ function renderNoteTranscript(session) {
     (session.segments || []).filter((segment) => segment.ai_error).map((segment) => String(segment.id)),
   );
   els.noteTranscript.innerHTML = blocks.length ? blocks.map((block) => `
-    <article class="note-transcript-segment">
-      <span>${formatDuration(block.start)}<br>${formatDuration(block.end)}${refined && !block.refined ? "<br>未精修" : ""}</span>
+    <article class="note-transcript-segment" data-start="${Number(block.start) || 0}" data-end="${Number(block.end) || 0}">
+      <button class="transcript-time" type="button" data-seek="${Number(block.start) || 0}" title="定位并播放这段录音">${formatDuration(block.start)}<br>${formatDuration(block.end)}${refined && !block.refined ? "<br>未精修" : ""}</button>
       <div class="markdown-body">${renderMarkdown(block.text || "")}${refined && !block.refined && block.segment_ids?.length === 1 && failedIds.has(String(block.segment_ids[0]))
         ? `<button class="segment-retry-button note-segment-retry" type="button" data-segment-id="${escapeHtml(block.segment_ids[0])}">重试该段</button>` : ""}</div>
     </article>`).join("") : '<div class="note-empty">尚无转写内容</div>';
@@ -1370,10 +1314,17 @@ function renderNoteTranscript(session) {
 function renderNoteSummary(session) {
   const summary = session.ai_note_summary || {};
   const markdown = summary.summary || "";
-  els.noteSummaryEditor.value = markdown;
-  els.noteSummaryEditor.dataset.savedValue = markdown;
-  noteReader.render();
-  els.saveNoteSummary.disabled = true;
+  const doc = noteAutosave.open(session.id, markdown, {preserve: els.noteSummaryEditor.dataset.noteId === session.id && noteReader.hasActive()});
+  const preserveEditor = els.noteSummaryEditor.dataset.noteId === session.id
+    && (noteReader.hasActive() || doc.pending || noteAutosave.isDirty(session.id));
+  if (!preserveEditor) {
+    els.noteSummaryEditor.value = doc.text;
+    els.noteSummaryEditor.dataset.savedValue = doc.savedInput;
+    els.noteSummaryEditor.dataset.noteId = session.id;
+    noteReader.render();
+  }
+  els.saveNoteSummary.hidden = doc.phase !== "error";
+  els.saveNoteSummary.disabled = doc.phase !== "error";
   els.pushNoteSummary.disabled = false;
   els.pullNoteSummary.disabled = !session.ideashell_sync?.note_id || session.ideashell_sync?.content_mode === "transcript";
   const summaryBusy = ["queued", "running"].includes(session.summary_job?.status);
@@ -1399,43 +1350,32 @@ function renderNoteSummary(session) {
   }
 }
 
-async function saveNoteSummary({ quiet = false } = {}) {
+async function saveNoteSummary({ quiet = false, replaceConflict = false } = {}) {
   const session = state.noteSession;
-  if (!session) return false;
+  if (!session) return true;
   noteReader.finish();
-  const markdown = els.noteSummaryEditor.value.trim();
-  if (!markdown) {
-    toast("AI 总结不能为空", 4200);
-    return false;
-  }
-  els.saveNoteSummary.disabled = true;
-  try {
-    const response = await fetch(`/api/recordings/${encodeURIComponent(session.id)}/summary`, {
-      method: "PUT", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ summary: markdown }),
-    });
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.detail || "总结保存失败");
-    if (state.noteSession?.id === session.id) {
-      state.noteSession = { ...state.noteSession, ...payload.session, ai_note_summary: payload.summary };
-      renderNoteSummary(state.noteSession);
-    }
-    await loadLibrary();
-    if (!quiet) toast("AI 总结修改已保存");
-    return true;
-  } catch (error) {
-    els.saveNoteSummary.disabled = false;
-    toast(error.message, 5200);
-    return false;
-  }
+  const saved = await noteAutosave.flush(session.id, {replaceConflict});
+  if (!saved && !quiet) toast("自动保存未完成，请查看笔记上方的保存状态", 4200);
+  return saved;
+}
+
+async function closeNoteDialog() {
+  const id = state.noteSession?.id;
+  const saved = await saveNoteSummary({quiet: true});
+  if (state.noteSession?.id !== id) return;
+  if (!saved && !noteAutosave.get(id)?.localSafe) { toast("保存失败，请保留页面以免丢失修改", 4200); return; }
+  if (!saved) toast("暂未写入笔记文件，草稿已保留，下次打开会恢复", 4800);
+  els.noteDialog.close();
+  state.noteSession = null;
+  if (state.activeView === "library") renderLibrary();
 }
 
 function setIdeashellStatus(status, message = "") {
   const labels = {
     connected: "已连接，授权已保存在本机",
-    saved: "已保存授权，点击连接后验证",
+    saved: "授权已保存在本机，将自动恢复连接",
     connecting: "正在连接…",
-    authorization_required: "请在授权窗口完成登录",
+    authorization_required: "授权已失效或尚未授权，请打开授权页面",
     disconnected: "尚未连接",
     error: message || "连接失败",
   };
@@ -1443,32 +1383,46 @@ function setIdeashellStatus(status, message = "") {
   els.ideashellStatus.dataset.status = status;
 }
 
-async function waitForIdeashellConnection(authWindow, serverUrl) {
-  const deadline = Date.now() + 5 * 60 * 1000;
-  while (Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 900));
-    const response = await fetch(`/api/ideashell/status?server_url=${encodeURIComponent(serverUrl)}`, { cache: "no-store" });
-    const status = await response.json();
-    if (!response.ok) throw new Error(status.detail || "无法读取 IdeaShell 连接状态");
-    setIdeashellStatus(status.status, status.error);
-    if (status.connected) {
-      authWindow?.close();
-      return true;
-    }
-    if (status.status === "error") throw new Error(status.error || "IdeaShell 授权失败");
+function ideashellAuthDialog(status) {
+  let dialog = document.getElementById("ideashellAuthDialog");
+  if (!dialog) {
+    dialog = document.createElement("dialog");
+    dialog.id = "ideashellAuthDialog";
+    dialog.className = "pdf-ai-dialog";
+    dialog.innerHTML = `<div class="pdf-ai-body"><h3>连接闪念贝壳</h3><p>本地凭证尚未授权或已经失效。请打开授权页面完成登录，授权后会自动继续。</p><p><a id="ideashellAuthorizationLink" class="secondary-button" target="_blank" rel="noopener">打开授权页面</a></p><button type="button" class="secondary-button">取消</button></div>`;
+    dialog.querySelector("button").addEventListener("click", () => dialog.close());
+    document.body.append(dialog);
   }
-  throw new Error("IdeaShell 授权等待超时，请重新连接");
+  dialog.querySelector("a").href = status.authorization_url;
+  if (!dialog.open) dialog.showModal();
+  return dialog;
+}
+
+async function waitForIdeashellConnection(serverUrl, initialStatus) {
+  const deadline = Date.now() + 5 * 60 * 1000;
+  let status = initialStatus;
+  let dialog = null;
+  try {
+    while (Date.now() < deadline) {
+      setIdeashellStatus(status.status, status.error);
+      if (status.connected) return true;
+      if (status.status === "error") throw new Error(status.error || "IdeaShell 连接失败，本地凭证已保留");
+      if (dialog && !dialog.open) throw new Error("已取消等待授权");
+      if (status.authorization_url) dialog = ideashellAuthDialog(status);
+      await new Promise((resolve) => setTimeout(resolve, 900));
+      const response = await fetch(`/api/ideashell/status?server_url=${encodeURIComponent(serverUrl)}`, { cache: "no-store" });
+      status = await response.json();
+      if (!response.ok) throw new Error(status.detail || "无法读取 IdeaShell 连接状态");
+    }
+    throw new Error("IdeaShell 连接等待超时，本地凭证已保留，请稍后重试");
+  } finally { dialog?.close(); }
 }
 
 async function ensureIdeashellConnected(serverUrl = currentIdeashellServer()) {
   if (!requireCurrentBackend()) throw new Error("后台服务需要重启后才能连接 IdeaShell");
   setIdeashellStatus("connecting");
-  const authWindow = window.open("about:blank", "qwenasr-ideashell-auth", "width=720,height=760");
-  if (authWindow) {
-    authWindow.document.title = "正在连接 IdeaShell";
-    authWindow.document.body.textContent = "正在准备 IdeaShell 授权…";
-  }
   try {
+    // The backend reuses the saved grant and refreshes it without opening a window.
     const response = await fetch("/api/ideashell/connect", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -1478,20 +1432,8 @@ async function ensureIdeashellConnected(serverUrl = currentIdeashellServer()) {
     });
     const status = await response.json();
     if (!response.ok) throw new Error(status.detail || "无法连接 IdeaShell");
-    setIdeashellStatus(status.status, status.error);
-    if (status.connected) {
-      authWindow?.close();
-      return true;
-    }
-    if (status.authorization_url) {
-      if (!authWindow) throw new Error("浏览器阻止了授权窗口，请允许弹出窗口后重试");
-      authWindow.location.href = status.authorization_url;
-      return await waitForIdeashellConnection(authWindow, serverUrl);
-    }
-    if (status.status === "error") throw new Error(status.error || "IdeaShell 连接失败");
-    return await waitForIdeashellConnection(authWindow, serverUrl);
+    return await waitForIdeashellConnection(serverUrl, status);
   } catch (error) {
-    authWindow?.close();
     setIdeashellStatus("error", error.message);
     throw error;
   }
@@ -1602,6 +1544,7 @@ async function loadIdeashellStatus() {
     const response = await fetch(`/api/ideashell/status?server_url=${encodeURIComponent(currentIdeashellServer())}`, { cache: "no-store" });
     const payload = await response.json();
     setIdeashellStatus(response.ok ? payload.status : "error", payload.error || payload.detail);
+    if (response.ok && payload.status === "connecting") setTimeout(loadIdeashellStatus, 1500);
   } catch (error) {
     setIdeashellStatus("error", error.message);
   }
@@ -1673,7 +1616,7 @@ async function deleteLibraryRecord(record) {
 
 async function resumeLibraryRecord(record) {
   if (record.course_stream) {
-    window.open('http://127.0.0.1:8766/', '_blank', 'noopener');
+    window.open('/course/', '_blank', 'noopener');
     return;
   }
   if (state.uploading || state.activeSession) return;
@@ -1762,6 +1705,7 @@ async function chooseStorageRoot() {
   } catch (error) { toast(error.message, 5200); }
   finally { els.chooseStorageRoot.disabled = false; }
 }
+
 
 async function loadSession() {
   try {
@@ -2088,163 +2032,6 @@ function handleMessage(message) {
   }
 }
 
-function setBatchProgress(fileIndex, fileCount, progress, stage, filename) {
-  const overall = Math.min(100, ((fileIndex + Number(progress || 0) / 100) / fileCount) * 100);
-  els.batchProgressBar.style.width = `${Math.max(parseFloat(els.batchProgressBar.style.width) || 0, overall)}%`;
-  els.batchFileStatus.textContent = `${fileIndex + 1}/${fileCount} · ${filename}`;
-  els.batchStage.textContent = `${stage || "处理中"} · 总进度 ${Math.round(overall)}%`;
-}
-
-function addBatchBlock(container, segment, text, label) {
-  const block = document.createElement("p");
-  block.dataset.id = String(segment?.id || "");
-  const timing = segment && Number.isFinite(Number(segment.start))
-    ? `${formatDuration(segment.start)}–${formatDuration(segment.end)}` : "";
-  block.innerHTML = `<small>${escapeHtml(label)}${timing ? ` · ${timing}` : ""}</small>${escapeHtml(text || "")}`;
-  container.appendChild(block);
-  container.scrollTop = container.scrollHeight;
-}
-
-async function transcribeUploadedFile(file, config, fileIndex, fileCount, resumeRecord = null) {
-  const displayName = resumeRecord?.title || file?.name || "录音";
-  let response;
-  if (resumeRecord) {
-    setBatchProgress(fileIndex, fileCount, resumeRecord.batch_progress?.percent || 1, "正在恢复任务", displayName);
-    response = await fetch(`/api/recordings/${encodeURIComponent(resumeRecord.id)}/resume`, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(config),
-    });
-  } else {
-    const form = new FormData();
-    form.append("file", file, file.name);
-    form.append("config_json", JSON.stringify(config));
-    setBatchProgress(fileIndex, fileCount, 1, "正在上传录音", displayName);
-    response = await fetch("/api/transcribe-file", { method: "POST", body: form });
-  }
-  if (!response.ok || !response.body) {
-    let message = "上传转写失败";
-    try { message = (await response.json()).detail || message; } catch (_) {}
-    throw new Error(message);
-  }
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let completedSession = null;
-  while (true) {
-    const { value, done } = await reader.read();
-    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
-    const lines = buffer.split("\n");
-    buffer = lines.pop() || "";
-    if (done && buffer.trim()) { lines.push(buffer); buffer = ""; }
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      const event = JSON.parse(line);
-      setBatchProgress(fileIndex, fileCount, event.progress, event.stage, displayName);
-      if (event.type === "raw") {
-        addBatchBlock(els.batchRaw, event.segment, event.segment.raw, `原始段 ${event.segment.id}`);
-      } else if (event.type === "retry") {
-        addBatchBlock(
-          els.batchRaw,
-          { start: event.start, end: event.end },
-          event.stage,
-          "自动修复"
-        );
-      } else if (event.type === "ai_group") {
-        els.batchAi.classList.remove("muted-output");
-        if (els.batchAi.dataset.placeholder === "true") els.batchAi.innerHTML = "";
-        els.batchAi.dataset.placeholder = "false";
-        const group = event.group || {};
-        const text = [group.corrected || group.raw, group.translation && `译文：${group.translation}`].filter(Boolean).join("\n\n");
-        addBatchBlock(els.batchAi, group, text, `AI 长段 ${group.id || ""}`);
-      } else if (event.type === "ai_segment") {
-        els.batchAi.classList.remove("muted-output");
-        if (els.batchAi.dataset.placeholder === "true") els.batchAi.innerHTML = "";
-        els.batchAi.dataset.placeholder = "false";
-        const segment = event.segment || {};
-        const text = [segment.corrected || segment.raw, segment.translation && `译文：${segment.translation}`]
-          .filter(Boolean).join("\n\n");
-        addBatchBlock(els.batchAi, segment, text, `逐段修正 ${segment.id || ""}`);
-      } else if (event.type === "ai_global_part") {
-        const part = event.part || {};
-        const text = [part.corrected || part.raw, part.translation && `译文：${part.translation}`]
-          .filter(Boolean).join("\n\n");
-        addBatchBlock(els.batchAi, part, text, `全局改写 ${event.index}/${event.count}`);
-      } else if (event.type === "ai_global_complete") {
-        const result = event.global_rewrite || {};
-        addBatchBlock(
-          els.batchAi,
-          {},
-          result.context_split
-            ? "内容超过 Context Window，已按安全分块完成全局整理，未丢弃正文。"
-            : "全部内容已完成最终全局统一改写。",
-          "全局改写完成"
-        );
-      } else if (event.type === "summary") {
-        summaryView.renderResult(event.summary || {});
-        addBatchBlock(els.batchAi, {}, event.summary?.summary || "", "课堂总结");
-      } else if (event.type === "summary_error") {
-        summaryView.renderError(event.message || "未知错误");
-        addBatchBlock(els.batchAi, {}, `AI 总结未完成：${event.message}`, "课堂总结");
-      } else if (event.type === "ai_error") {
-        const label = event.scope === "segment" ? `逐段修正 ${event.id}` : `AI 处理 ${event.id}`;
-        addBatchBlock(els.batchAi, { id: event.id }, `AI 处理未完成：${event.message}`, label);
-      } else if (event.type === "complete") {
-        completedSession = event.session;
-        $("#batchTiming").textContent = `本次处理耗时 ${formatDuration(completedSession.processing_seconds)} · 本地识别累计 ${formatDuration(completedSession.asr_seconds)}${completedSession.ai_warnings ? ` · ${completedSession.ai_warnings} 项 AI 处理未完成` : ""}`;
-      } else if (event.type === "error") {
-        throw new Error(event.message || "录音转写失败");
-      }
-    }
-    if (done) break;
-  }
-  if (!completedSession) throw new Error("服务没有返回完整的录音结果");
-  return completedSession;
-}
-
-async function uploadRecordings(fileList) {
-  const files = Array.from(fileList || []);
-  if (!files.length || state.uploading || state.activeSession) return;
-  state.uploading = true;
-  els.batchRaw.innerHTML = "";
-  els.batchAi.textContent = els.aiCorrection.checked || els.translation.value !== "off"
-    ? "本地转写与 AI 精修同时进行；最后按时间分块统一整理…"
-    : "本次只做转写；完成后可在录音库按需生成 AI 总结";
-  els.batchAi.dataset.placeholder = "true";
-  els.batchAi.classList.add("muted-output");
-  els.batchQueue.textContent = `队列：${files.map((file) => file.name).join(" · ")}`;
-  els.batchProgressBar.style.width = "0%";
-  if (!els.batchDialog.open) els.batchDialog.showModal();
-  els.listeningLabel.textContent = "正在批量处理上传录音";
-  updateButtons();
-  let lastSession = null;
-  try {
-    for (let index = 0; index < files.length; index++) {
-      const file = files[index];
-      const config = sessionConfig(false);
-      delete config.type;
-      config.title = files.length === 1 && els.recordName.value.trim()
-        ? els.recordName.value.trim() : file.name.replace(/\.[^.]+$/, "") || `录音 ${index + 1}`;
-      config.category = selectedRecordCategory(true);
-      config.summary_enabled = false;
-      lastSession = await transcribeUploadedFile(file, config, index, files.length);
-    }
-    if (lastSession) showSession(lastSession, true);
-    els.listeningLabel.textContent = `${files.length} 个上传录音已转写并保存`;
-    els.batchStage.textContent = `全部完成 · 共 ${files.length} 个文件`;
-    els.recordName.value = "";
-    await loadLibrary();
-    toast("批量转写完成；AAC、转写和 ZIP 均已保存", 4800);
-  } catch (error) {
-    els.listeningLabel.textContent = "批量转写未完成";
-    els.batchStage.textContent = `处理未完成：${error.message}`;
-    toast(error.message, 6200);
-  } finally {
-    state.uploading = false;
-    await loadLibrary();
-    els.fileInput.value = "";
-    updateButtons();
-  }
-}
-
 function drawMeter() {
   if (!state.capturing || !state.analyser) return;
   const canvas = els.meter;
@@ -2292,14 +2079,14 @@ els.copyButton.addEventListener("click", copyAll);
 els.clearButton.addEventListener("click", clearAll);
 els.transcriptTab.addEventListener("click", () => switchView("transcript"));
 els.summaryTab.addEventListener("click", () => switchView("summary"));
-els.aiTasksTab.addEventListener("click", () => switchView("tasks"));
-els.libraryTab.addEventListener("click", () => switchView("library"));
+els.libraryTab.addEventListener("click", event => { event.preventDefault(); switchView("library"); });
+$("#workbenchNav").addEventListener("click", event => {event.preventDefault(); switchView("transcript");});
+window.addEventListener("popstate", () => switchView(location.pathname === "/library" ? "library" : "transcript"));
+$("#librarySettings").addEventListener("click", () => openAdvancedSettings());
+$("#libraryPrevious").addEventListener("click", () => {state.libraryPage--; renderLibrary();});
+$("#libraryNext").addEventListener("click", () => {state.libraryPage++; renderLibrary();});
 els.libraryCategory.addEventListener("change", renderLibrary);
 els.refreshLibrary.addEventListener("click", loadLibrary);
-els.refreshAiTasks.addEventListener("click", loadAiTasks);
-els.continueAllAiTasks.addEventListener("click", () => runBulkAiTaskAction("continue"));
-els.pauseAllAiTasks.addEventListener("click", () => runBulkAiTaskAction("pause"));
-els.retryAllAiTasks.addEventListener("click", () => runBulkAiTaskAction("retry"));
 els.calendarPrevious.addEventListener("click", () => {
   const anchor = state.libraryMonth || new Date();
   state.libraryMonth = new Date(anchor.getFullYear(), anchor.getMonth() - 1, 1);
@@ -2351,18 +2138,8 @@ els.confirmRegenerateSummary.addEventListener("click", async () => {
     state.regenerateRecord = null;
   }
 });
-els.closeNoteDialog.addEventListener("click", () => {
-  noteReader.finish();
-  if (!els.saveNoteSummary.disabled && !window.confirm("AI 总结还有未保存的修改，确定关闭吗？")) return;
-  els.noteDialog.close();
-  state.noteSession = null;
-});
-els.noteDialog.addEventListener("cancel", (event) => {
-  if (!els.saveNoteSummary.disabled) {
-    event.preventDefault();
-    toast("AI 总结还有未保存的修改，请先保存或使用“关闭”确认", 4200);
-  }
-});
+els.closeNoteDialog.addEventListener("click", closeNoteDialog);
+els.noteDialog.addEventListener("cancel", event => { event.preventDefault(); closeNoteDialog(); });
 els.noteDialog.addEventListener("close", () => { state.noteSession = null; });
 els.retryUnrefined.addEventListener("click", async () => {
   const record = state.noteSession;
@@ -2374,34 +2151,33 @@ els.retryUnrefined.addEventListener("click", async () => {
     type: "refinement",
   };
   if (await runAiTaskAction(task, "retry", els.retryUnrefined)) {
-    els.unrefinedStatus.textContent = "已提交精修任务，可在 AI 任务中心查看进度";
+    els.unrefinedStatus.textContent = "已提交精修任务，可在顶部“任务中心”查看进度";
     setTimeout(loadAiTasks, 700);
   }
 });
 els.noteSummaryEditor.addEventListener("input", () => {
-  const dirty = els.noteSummaryEditor.value !== (els.noteSummaryEditor.dataset.savedValue || "");
-  els.saveNoteSummary.disabled = !dirty || !els.noteSummaryEditor.value.trim();
+  if (state.noteSession) noteAutosave.change(state.noteSession.id, els.noteSummaryEditor.value);
   els.pushNoteSummary.disabled = false;
-  els.noteSummaryHint.textContent = dirty ? "有未保存的 Markdown 修改" : els.noteSummaryHint.textContent;
 });
-els.generateNoteSummary.addEventListener("click", () => {
-  noteReader.finish();
-  if (!els.saveNoteSummary.disabled) { toast("请先保存修改后再生成总结", 4200); return; }
-  if (state.noteSession) generateLibrarySummary(state.noteSession);
-});
-els.regenerateNoteAbstract.addEventListener("click", () => {
-  if (state.noteSession) generateLibraryAbstract(state.noteSession);
-});
-els.saveNoteSummary.addEventListener("click", () => saveNoteSummary());
-els.pushNoteSummary.addEventListener("click", async () => {
-  if (!state.noteSession) return;
-  if (!els.saveNoteSummary.disabled) {
-    toast("请先保存当前 Markdown 修改，再手动推送到 IdeaShell", 4200);
-    return;
+els.noteDialog.addEventListener("focusout", event => {
+  if (event.target.matches(".markdown-block-input,#noteSummaryEditor")) {
+    const id = state.noteSession?.id;
+    setTimeout(() => { if (state.noteSession?.id === id) noteAutosave.flush(id); }, 0);
   }
-  await pushSummaryToIdeashell(state.noteSession, els.pushNoteSummary);
 });
-els.pullNoteSummary.addEventListener("click", pullNoteSummaryFromIdeashell);
+els.generateNoteSummary.addEventListener("click", async () => {
+  if (await saveNoteSummary() && state.noteSession) generateLibrarySummary(state.noteSession);
+});
+els.regenerateNoteAbstract.addEventListener("click", async () => {
+  if (await saveNoteSummary() && state.noteSession) generateLibraryAbstract(state.noteSession);
+});
+els.saveNoteSummary.addEventListener("click", () => saveNoteSummary({replaceConflict: true}));
+els.pushNoteSummary.addEventListener("click", async () => {
+  if (await saveNoteSummary() && state.noteSession) await pushSummaryToIdeashell(state.noteSession, els.pushNoteSummary);
+});
+els.pullNoteSummary.addEventListener("click", async () => {
+  if (await saveNoteSummary()) await pullNoteSummaryFromIdeashell();
+});
 document.querySelectorAll(".markdown-toolbar button").forEach((button) => {
   button.addEventListener("click", () => insertMarkdown(button));
 });
@@ -2505,7 +2281,7 @@ els.vadThreshold.addEventListener("input", () => {
   input.addEventListener("change", () => sendLiveConfigUpdate("实时分段设置已更新"));
 });
 document.addEventListener("keydown", (event) => {
-  if (event.code !== "Space" || document.querySelector("dialog[open]") || ["INPUT", "TEXTAREA", "SELECT", "BUTTON", "A"].includes(document.activeElement.tagName)) return;
+  if (state.activeView === "library" || event.code !== "Space" || document.querySelector("dialog[open]") || ["INPUT", "TEXTAREA", "SELECT", "BUTTON", "A"].includes(document.activeElement.tagName)) return;
   event.preventDefault();
   if (!els.recordButton.disabled) els.recordButton.click();
 });
@@ -2514,10 +2290,17 @@ window.addEventListener("beforeunload", () => { saveApiSettings(); stopAudioNode
 
 async function init() {
   drawIdleMeter();
+  if (location.pathname === "/library") switchView("library");
   await Promise.all([loadConfig(), loadSession(), loadLibrary(), loadIdeashellStatus(), loadAiTasks()]);
   if (state.activeSession) applySessionCourseSettings(state.activeSession);
   else applyCategoryProfile(selectedRecordCategory() || "未分类");
   pollHealth();
+  const query = new URLSearchParams(location.search);
+  if (query.get("recording")) await openLibraryRecord(query.get("recording"));
+  if (query.get("settings") === "ai") {
+    els.settingsDialog.showModal();
+    selectAiSettings("summary");
+  }
 }
 
 init();
@@ -2605,10 +2388,18 @@ $("#pushContentMode").addEventListener("change", refreshPushPreview);
 $("#closePushDialog").addEventListener("click", () => $("#pushDialog").close());
 $("#pushDialog").addEventListener("close", () => { previewRequest++; pushRecord = null; pushPreviewData = null; });
 $("#confirmPush").addEventListener("click", confirmPush);
-window.addEventListener("beforeunload", (event) => {
-  if (els.noteSummaryEditor.value !== (els.noteSummaryEditor.dataset.savedValue || "") && state.noteSession) {
-    event.preventDefault(); event.returnValue = "";
+window.addEventListener("beforeunload", event => {
+  const id = state.noteSession?.id;
+  if (id && noteAutosave.isDirty(id)) {
+    noteAutosave.flush(id, {keepalive: true});
+    if (!noteAutosave.get(id)?.localSafe) { event.preventDefault(); event.returnValue = ""; }
   }
+});
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden && state.noteSession) noteAutosave.flush(state.noteSession.id, {keepalive: true});
+});
+window.addEventListener("online", () => {
+  if (state.noteSession) noteAutosave.flush(state.noteSession.id);
 });
 
 function selectAiSettings(mode) {
@@ -2675,9 +2466,36 @@ $("#cancelSummaryJob").addEventListener("click", async () => {
   if (response.ok) { toast("已请求取消；完成的分块会保留", 4200); setTimeout(() => refreshSummaryStatus(id), 500); }
 });
 setInterval(() => {
-  if (state.noteSession && !state.summaryGenerating.has(state.noteSession.id)) refreshSummaryStatus(state.noteSession.id);
+  if (!document.hidden && state.noteSession && !state.summaryGenerating.has(state.noteSession.id)) refreshSummaryStatus(state.noteSession.id);
 }, 3000);
-setInterval(loadAiTasks, 5000);
+setInterval(() => {
+  if (!document.hidden) loadAiTasks();
+}, 5000);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) {
+    loadAiTasks();
+    if (state.noteSession) refreshSummaryStatus(state.noteSession.id);
+  }
+});
 
 document.querySelectorAll('[id$="Concurrency"]').forEach((input) => input.addEventListener("input", scheduleApiSave));
 document.querySelectorAll('[id$="MaxOutput"]').forEach((input) => input.addEventListener("input", scheduleApiSave));
+
+// Keep course names and recording paths in step with Finder changes.
+const sharedLibraryEvents = new EventSource('/api/library/events');
+let sharedLibraryRefresh;
+sharedLibraryEvents.onmessage = () => {
+  clearTimeout(sharedLibraryRefresh);
+  sharedLibraryRefresh = setTimeout(() => {
+    if (document.visibilityState === 'visible' && state.activeView === 'library') loadLibrary();
+  }, 200);
+};
+
+for (const mode of ["sentence", "review", "summary", "correction", "global"]) {
+  const base = mode === "sentence" ? els.aiBaseUrl : $(`#${mode}BaseUrl`);
+  const key = mode === "sentence" ? els.aiApiKey : $(`#${mode}ApiKey`);
+  base.addEventListener("input", () => {
+    key.value = "";
+    toast("接口地址已改变，请为这个服务填写 Key；原服务凭证仍保存在本机", 5000);
+  }, true);
+}

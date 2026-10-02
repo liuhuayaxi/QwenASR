@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import copy
 import os
 import re
 import shutil
 import struct
+import tempfile
 import time
 import uuid
 import zipfile
@@ -14,6 +16,9 @@ from typing import Any
 
 import numpy as np
 
+from .paths import data_path
+from .durable import atomic_json
+from .library_layout import RECORDINGS, shared, recording_path, manifest_time
 from .audio import convert_audio_to_aac
 from .note_content import transcript_markdown, transcript_blocks
 from .settings import (
@@ -27,11 +32,11 @@ from .settings import (
 from .terminology import normalize_terminology
 
 ROOT = Path(__file__).resolve().parent.parent
-LEGACY_RECORDINGS_DIR = Path(os.getenv("QWEN_ASR_LEGACY_RECORDINGS_DIR", ROOT / "recordings"))
+LEGACY_RECORDINGS_DIR = Path(os.getenv("QWEN_ASR_LEGACY_RECORDINGS_DIR", data_path("recordings", ROOT / "recordings")))
 LEGACY_RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
-SETTINGS_PATH = Path(os.getenv("QWEN_ASR_SETTINGS_PATH", ROOT / "app-settings.json"))
-DEFAULT_STORAGE_ROOT = Path(os.getenv("QWEN_ASR_STORAGE_ROOT", Path.home() / "Documents" / "QwenASR资料库"))
-TRASH_ROOT = Path.home() / ".Trash" / "QwenASR-课堂录音"
+SETTINGS_PATH = Path(os.getenv("QWEN_ASR_SETTINGS_PATH", data_path("app-settings.json", ROOT / "app-settings.json")))
+DEFAULT_STORAGE_ROOT = Path(os.getenv("QWEN_ASR_STORAGE_ROOT", data_path("library", Path.home() / "Documents" / "QwenASR资料库")))
+TRASH_ROOT = data_path("trash", Path.home() / ".Trash" / "QwenASR-课堂录音")
 
 
 def local_now() -> str:
@@ -70,6 +75,7 @@ class AppSettings:
         self.categories: list[str] = ["未分类"]
         self.known_roots: list[str] = []
         self.category_profiles: dict[str, dict[str, Any]] = {}
+        self.library_layout = "legacy"
         self.terminology_seed_version = 0
         self.load()
 
@@ -78,6 +84,7 @@ class AppSettings:
             payload = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             payload = {}
+        self.library_layout = str(payload.get("library_layout") or "legacy")
         try:
             self.terminology_seed_version = int(payload.get("terminology_seed_version") or 0)
         except (TypeError, ValueError):
@@ -172,6 +179,12 @@ class AppSettings:
             changed = True
         if changed:
             self.save()
+        if shared(self):
+            directory = self.storage_root / category
+            (directory / RECORDINGS).mkdir(parents=True, exist_ok=True)
+            marker = directory / ".qwenasr-course.json"
+            if not marker.exists():
+                atomic_json(marker, {"category": category, **self.category_profiles[category]})
         return category
 
     def save_category_profile(self, name: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -228,6 +241,31 @@ class AppSettings:
                 "migrated_files": 0,
                 "skipped": [],
             }
+        if shared(self):
+            if root.is_relative_to(source) or source.is_relative_to(root):
+                raise ValueError('同步文件夹不能迁移到自身的上级或子目录')
+            planned = [(source / name, root / name) for name in self.categories if (source / name).is_dir()]
+            if any(target.exists() for _, target in planned):
+                raise ValueError('目标文件夹已有同名课程，请选择空文件夹')
+            root.mkdir(parents=True, exist_ok=True)
+            moved = []
+            previous_roots = list(self.known_roots)
+            try:
+                for old, target in planned:
+                    shutil.move(str(old), str(target))
+                    moved.append((old, target))
+                self.storage_root = root
+                self.add_known_root(root)
+                self.save()
+            except BaseException:
+                for old, target in reversed(moved):
+                    shutil.move(str(target), str(old))
+                self.storage_root, self.known_roots = source, previous_roots
+                self.save()
+                raise
+            return {'source_root': str(source), 'storage_root': str(root),
+                    'migrated_records': sum(1 for _, target in moved for _ in target.glob(f'{RECORDINGS}/*/session.json')),
+                    'migrated_files': sum(1 for _, target in moved for path in target.rglob('*') if path.is_file()), 'skipped': []}
         if root.is_relative_to(source):
             relative_root = root.relative_to(source)
             if relative_root.parts and relative_root.parts[0] in set(self.categories):
@@ -278,6 +316,7 @@ class AppSettings:
                     target = destination / child.name
                     if not (
                         child.name == ".qwenasr-course.json"
+                        or (child.name == "课程资料" and child.is_dir() and (child / ".qwenasr-materials.json").is_file())
                         or (child.is_dir() and (child / "session.json").exists())
                     ):
                         continue
@@ -317,8 +356,11 @@ class AppSettings:
         return {
             "source_root": str(source),
             "storage_root": str(root),
-            "migrated_records": len(record_moves),
-            "migrated_files": len(file_moves),
+            "migrated_records": sum((target / "session.json").is_file() for _, target in record_moves),
+            "migrated_files": len(file_moves) + sum(
+                sum(path.is_file() for path in target.rglob("*"))
+                for _, target in record_moves if (target / ".qwenasr-materials.json").is_file()
+            ),
             "skipped": skipped,
         }
 
@@ -327,6 +369,7 @@ class AppSettings:
             "storage_root": str(self.storage_root),
             "categories": self.categories,
             "known_roots": self.known_roots,
+            "library_layout": self.library_layout,
             "category_profiles": self.category_profiles,
             "terminology_seed_version": self.terminology_seed_version,
         }
@@ -339,6 +382,7 @@ class AppSettings:
             "storage_root": str(self.storage_root),
             "categories": self.categories,
             "category_profiles": self.category_profiles,
+            "library_layout": self.library_layout,
         }
 
 
@@ -363,9 +407,10 @@ class RecordingRecord:
         self.metadata = metadata
         self.segments: list[dict[str, Any]] = list(metadata.pop("segments", []))
         self._last_meta_write = 0.0
+        self._persisted_note = copy.deepcopy(metadata.get("ai_note_summary"))
 
     @classmethod
-    def create_live(cls, title: str, category: str, storage_root: Path) -> "RecordingRecord":
+    def create_live(cls, title: str, category: str, storage_root: Path, recorded_at: str | None = None) -> "RecordingRecord":
         started = datetime.now().astimezone()
         session_id = f"{started:%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}"
         clean_title = str(title or "").strip()
@@ -373,6 +418,9 @@ class RecordingRecord:
             raise ValueError("开始录音前，请先填写录音名称")
         clean_category = safe_component(category, "未分类")
         directory = storage_root / clean_category / f"{safe_component(clean_title, '课堂录音')}__{session_id}"
+        if shared(app_settings):
+            directory = recording_path(storage_root, clean_category, {"id": session_id,
+                "started_at": started.isoformat(), "recorded_at": recorded_at})
         directory.mkdir(parents=True, exist_ok=False)
         metadata: dict[str, Any] = {
             "id": session_id,
@@ -381,6 +429,7 @@ class RecordingRecord:
             "kind": "microphone",
             "status": "active",
             "started_at": started.isoformat(timespec="seconds"),
+            "recorded_at": recorded_at or started.isoformat(timespec="seconds"),
             "updated_at": started.isoformat(timespec="seconds"),
             "ended_at": None,
             "sample_rate": SAMPLE_RATE,
@@ -403,13 +452,21 @@ class RecordingRecord:
         title: str,
         category: str,
         storage_root: Path,
+        session_id: str | None = None,
     ) -> "RecordingRecord":
         started = datetime.now().astimezone()
-        session_id = f"upload-{started:%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}"
+        session_id = session_id or f"upload-{started:%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}"
         clean_title = str(title or "").strip() or Path(original_filename).stem or "上传录音"
         clean_category = safe_component(category, "未分类")
         directory = storage_root / clean_category / f"{safe_component(clean_title, '上传录音')}__{session_id}"
-        directory.mkdir(parents=True, exist_ok=False)
+        if shared(app_settings):
+            directory = recording_path(storage_root, clean_category, {"id": session_id, "started_at": started.isoformat()})
+        if (directory / "session.json").exists():
+            existing = cls.load(directory)
+            if existing.id != session_id:
+                raise ValueError("上传归档目录冲突")
+            return existing
+        directory.mkdir(parents=True, exist_ok=True)
         audio_filename = "recording.aac"
         convert_audio_to_aac(source, directory / audio_filename)
         metadata: dict[str, Any] = {
@@ -434,6 +491,10 @@ class RecordingRecord:
     @classmethod
     def load(cls, directory: Path) -> "RecordingRecord":
         payload = json.loads((directory / "session.json").read_text(encoding="utf-8"))
+        if not payload.get('recorded_at'):
+            recorded_at = manifest_time(directory)
+            if recorded_at:
+                payload['recorded_at'] = recorded_at
         segments = []
         transcript_json = directory / "transcript.json"
         if transcript_json.exists():
@@ -557,14 +618,40 @@ class RecordingRecord:
         self.save_all()
 
     def save_metadata(self) -> None:
-        temp_path = self.meta_path.with_suffix(".json.tmp")
-        temp_path.write_text(json.dumps(self.metadata, ensure_ascii=False, indent=2), encoding="utf-8")
-        temp_path.replace(self.meta_path)
+        self.refresh_location()
+        from .note_history import capture
+        capture(self, self._persisted_note)
+        atomic_json(self.meta_path, self.metadata)
+        self._persisted_note = copy.deepcopy(self.metadata.get("ai_note_summary"))
+
+    def refresh_location(self) -> None:
+        if not shared(app_settings):
+            return
+        if not self.directory.exists():
+            location = None
+            for candidate in app_settings.storage_root.glob(f'*/{RECORDINGS}/*/session.json'):
+                try:
+                    if json.loads(candidate.read_text()).get('id') == self.id:
+                        location = candidate.parent
+                        break
+                except (OSError, ValueError):
+                    continue
+            if location is None:
+                raise FileNotFoundError('录音目录已从文件夹移除，停止写入以免重新创建已删除的文件')
+            old = self.directory
+            for key in ('meta_path', 'audio_path', 'working_audio_path', 'transcript_path',
+                        'raw_transcript_path', 'corrected_transcript_path', 'transcript_json_path',
+                        'notes_path', 'ai_summary_path', 'bundle_path'):
+                setattr(self, key, location / getattr(self, key).relative_to(old))
+            self.directory = location
+        try:
+            category = self.directory.relative_to(app_settings.storage_root).parts[0]
+        except ValueError:
+            return
+        self.metadata['category'] = category
 
     def save_transcripts(self) -> None:
-        json_temp = self.transcript_json_path.with_suffix(".json.tmp")
-        json_temp.write_text(json.dumps(self.segments, ensure_ascii=False, indent=2), encoding="utf-8")
-        json_temp.replace(self.transcript_json_path)
+        atomic_json(self.transcript_json_path, self.segments)
 
         blocks: list[str] = []
         for segment in self.segments:
@@ -813,7 +900,6 @@ class RecordingRecord:
         self.metadata["ended_at"] = local_now()
         self.metadata["updated_at"] = self.metadata["ended_at"]
         self.save_all()
-        self.make_bundle()
         if self.working_audio_path != self.audio_path:
             self.working_audio_path.unlink(missing_ok=True)
 
@@ -831,27 +917,47 @@ class RecordingRecord:
         return self.audio_path
 
     def make_bundle(self) -> Path:
+        """Build a unique temporary download bundle outside the recording folder."""
         self.ensure_aac()
-        # Rebuild exports so old recordings receive current TXT and AI summary files.
+        # Rebuild text exports immediately before the download so the archive
+        # always contains the latest edits. Old persistent bundles are generated
+        # artifacts and are removed once this recording is downloaded again.
         self.save_metadata()
         self.save_transcripts()
         self.save_summary_markdown()
-        temp_bundle = self.bundle_path.with_suffix(".zip.tmp")
-        with zipfile.ZipFile(temp_bundle, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            for path in (
-                self.audio_path,
-                self.raw_transcript_path,
-                self.corrected_transcript_path,
-                self.ai_summary_path,
-                self.transcript_path,
-                self.transcript_json_path,
-                self.meta_path,
-            ):
-                if path.exists():
-                    archive.write(path, arcname=path.name,
-                                  compress_type=zipfile.ZIP_STORED if path == self.audio_path else zipfile.ZIP_DEFLATED)
-        temp_bundle.replace(self.bundle_path)
-        return self.bundle_path
+        self.bundle_path.unlink(missing_ok=True)
+        descriptor, filename = tempfile.mkstemp(
+            prefix=f"qwenasr-export-{safe_component(self.id, 'recording')}-",
+            suffix=".zip",
+        )
+        os.close(descriptor)
+        bundle = Path(filename)
+        try:
+            with zipfile.ZipFile(bundle, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                for path in (
+                    self.audio_path,
+                    self.raw_transcript_path,
+                    self.corrected_transcript_path,
+                    self.ai_summary_path,
+                    self.transcript_path,
+                    self.transcript_json_path,
+                    self.meta_path,
+                    self.directory / "课程来源.json",
+                ):
+                    if path.exists():
+                        archive.write(
+                            path,
+                            arcname=path.name,
+                            compress_type=(
+                                zipfile.ZIP_STORED
+                                if path == self.audio_path
+                                else zipfile.ZIP_DEFLATED
+                            ),
+                        )
+            return bundle
+        except BaseException:
+            bundle.unlink(missing_ok=True)
+            raise
 
     def public(self, include_segments: bool = True) -> dict[str, Any]:
         library_summary, summary_source = self.library_summary()
@@ -915,14 +1021,13 @@ class RecordingRecord:
             self.ai_summary_path = directory / "AI总结.md"
             self.bundle_path = directory / "recording-and-transcript.zip"
         self.save_all()
-        if self.metadata.get("status") == "completed":
-            self.make_bundle()
 
 
 class RecordingStore:
     def __init__(self) -> None:
         self.active: RecordingRecord | None = None
         self.paths: dict[str, Path] = {}
+        self._read_cache = {}
         self.refresh(mark_interrupted=True)
 
     def _metadata_paths(self) -> list[Path]:
@@ -931,18 +1036,30 @@ class RecordingStore:
         for root in roots:
             if not root.exists():
                 continue
-            patterns = ("*/session.json",) if root == LEGACY_RECORDINGS_DIR else ("*/*/session.json",)
+            patterns = ("*/session.json",) if root == LEGACY_RECORDINGS_DIR else (
+                "*/*/session.json", f"*/{RECORDINGS}/*/session.json",
+            )
             for pattern in patterns:
                 for meta_path in root.glob(pattern):
                     found[str(meta_path.resolve())] = meta_path
         return list(found.values())
 
     def refresh(self, mark_interrupted: bool = False) -> None:
+        if not hasattr(self, "_read_cache"):
+            self._read_cache = {}
         active_records: list[RecordingRecord] = []
         self.paths = {}
         for meta_path in self._metadata_paths():
             try:
-                record = RecordingRecord.load(meta_path.parent)
+                stamp = tuple((p.stat().st_mtime_ns, p.stat().st_size) if p.exists() else None for p in (meta_path, meta_path.parent / "transcript.json"))
+                cached = self._read_cache.get(meta_path)
+                record = cached[1] if cached and cached[0] == stamp else RecordingRecord.load(meta_path.parent)
+                self._read_cache[meta_path] = (stamp, record)
+                if shared(app_settings) and record.directory.is_relative_to(app_settings.storage_root):
+                    category = record.directory.relative_to(app_settings.storage_root).parts[0]
+                    if record.metadata.get('category') != category:
+                        record.metadata['category'] = category
+                        record.save_metadata()
                 if (
                     mark_interrupted
                     and record.metadata.get("status") in {"processing", "failed"}
@@ -985,11 +1102,15 @@ class RecordingStore:
                         record.save_metadata()
             except Exception as exc:
                 print(f"忽略无法读取的录音会话 {meta_path}: {exc}", flush=True)
+        live_paths = set(self.paths.values())
+        self._read_cache = {path: cached for path, cached in self._read_cache.items() if path.parent in live_paths}
         if active_records:
             active_records.sort(key=lambda item: str(item.metadata.get("started_at", "")))
             latest = active_records[-1]
             if self.active is None or self.active.id != latest.id:
                 self.active = latest
+            elif shared(app_settings):
+                self.active.refresh_location()
         elif self.active is not None and self.active.metadata.get("status") != "active":
             self.active = None
 
@@ -1002,11 +1123,11 @@ class RecordingStore:
         return self.active, True
 
     def create_upload(
-        self, source: Path, original_filename: str, duration: float, title: str, category: str
+        self, source: Path, original_filename: str, duration: float, title: str, category: str, session_id: str | None = None
     ) -> RecordingRecord:
         category = app_settings.add_category(category)
         record = RecordingRecord.create_upload(
-            source, original_filename, duration, title, category, app_settings.storage_root
+            source, original_filename, duration, title, category, app_settings.storage_root, session_id=session_id
         )
         self.paths[record.id] = record.directory
         return record
@@ -1040,7 +1161,8 @@ class RecordingStore:
         self.refresh()
         records: list[RecordingRecord] = []
         for session_id in self.paths:
-            record = self.find(session_id)
+            cached = self._read_cache.get(self.paths[session_id] / "session.json")
+            record = self.active if self.active is not None and self.active.id == session_id else cached[1] if cached else self.find(session_id)
             if record is not None:
                 records.append(record)
         records.sort(key=lambda item: str(item.metadata.get("started_at") or ""), reverse=True)
@@ -1061,6 +1183,8 @@ class RecordingStore:
             / clean_category
             / f"{safe_component(clean_title, '课堂录音')}__{record.id}"
         )
+        if shared(app_settings):
+            target = recording_path(app_settings.storage_root, clean_category, record.metadata)
         record.relocate(target, clean_title, clean_category)
         self.paths[record.id] = record.directory
         if self.active is not None and self.active.id == record.id:

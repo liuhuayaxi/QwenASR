@@ -4,11 +4,13 @@ import asyncio
 import multiprocessing as mp
 import queue
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
+from .scheduler import PriorityGate
 from .settings import SAMPLE_RATE, normalize_asr_params
 
 
@@ -66,10 +68,30 @@ class ModelManager:
         self.device = "Apple Silicon GPU (MLX · BF16)"
         self.load_seconds: float | None = None
         self.infer_lock = asyncio.Lock()
+        self.scheduler = PriorityGate()
+        self.measurements = deque(maxlen=500)
+        self.last_realtime = 0.0
         self.load_lock = asyncio.Lock()
         self.connected_clients = 0
         self.active_jobs = 0
         self.unload_task: asyncio.Task[Any] | None = None
+        self._unloading = False
+        self._closing = False
+
+    async def _worker_thread(self, operation: Any) -> None:
+        """Keep the caller's locks until an uncancellable worker thread exits."""
+        pending = asyncio.create_task(asyncio.to_thread(operation))
+        cancelled = False
+        while True:
+            try:
+                await asyncio.shield(pending)
+                break
+            except asyncio.CancelledError:
+                if pending.cancelled():
+                    raise
+                cancelled = True
+        if cancelled:
+            raise asyncio.CancelledError
 
     async def load(self) -> None:
         self.cancel_unload()
@@ -82,10 +104,21 @@ class ModelManager:
             try:
                 if not self.model_path.exists():
                     raise FileNotFoundError(f"模型目录不存在：{self.model_path}")
-                await asyncio.to_thread(self._start_worker_sync)
+                await self._worker_thread(self._start_worker_sync)
                 self.load_seconds = round(time.monotonic() - started, 1)
                 self.status = "ready"
                 self.detail = f"Qwen3-ASR-1.7B BF16 已就绪 · {self.device}"
+            except asyncio.CancelledError:
+                # Loading may have completed after its requester disconnected.
+                if self.worker is not None and self.worker.is_alive():
+                    self.status = "ready"
+                    self.detail = f"Qwen3-ASR-1.7B BF16 已就绪 · {self.device}"
+                    self.load_seconds = round(time.monotonic() - started, 1)
+                else:
+                    self.status = "idle"
+                    self.detail = "模型加载已取消 · 下次转写时自动加载"
+                self.schedule_unload()
+                raise
             except Exception as exc:  # pragma: no cover - exposed by health endpoint
                 self.status = "error"
                 self.detail = f"模型加载失败：{exc}"
@@ -180,6 +213,10 @@ class ModelManager:
         return str(message.get("text") or ""), str(message.get("language") or "")
 
     def cancel_unload(self) -> None:
+        # Only the idle timer/lock wait can be cancelled. Once shutdown starts,
+        # a new request must wait for it, then load a fresh worker under the lock.
+        if self._unloading:
+            return
         if self.unload_task is not None and not self.unload_task.done():
             self.unload_task.cancel()
         self.unload_task = None
@@ -193,7 +230,7 @@ class ModelManager:
         self.schedule_unload()
 
     def schedule_unload(self, delay: float = 5.0) -> None:
-        if self.connected_clients or self.active_jobs or self.worker is None:
+        if self._closing or self._unloading or self.connected_clients or self.active_jobs or self.worker is None:
             return
         self.cancel_unload()
         self.unload_task = asyncio.create_task(self._unload_after(delay))
@@ -207,14 +244,50 @@ class ModelManager:
                 async with self.load_lock:
                     if self.connected_clients or self.active_jobs or self.worker is None:
                         return
-                    await asyncio.to_thread(self._stop_worker_sync)
-                    self.status = "idle"
-                    self.detail = "Qwen3-ASR 已卸载释放内存 · 下次转写时自动加载"
+                    await self._unload_worker()
                     print("Qwen3-ASR 子进程已退出，模型内存已归还系统。", flush=True)
         except asyncio.CancelledError:
             pass
         finally:
-            self.unload_task = None
+            if self.unload_task is asyncio.current_task():
+                self.unload_task = None
+
+    async def _unload_worker(self) -> None:
+        # Both worker locks must be held by the caller, including during cancel.
+        self._unloading = True
+        try:
+            await self._worker_thread(self._stop_worker_sync)
+        finally:
+            self._unloading = False
+            self.status = "idle"
+            self.detail = "Qwen3-ASR 已卸载释放内存 · 下次转写时自动加载"
+
+    async def close(self) -> None:
+        self._closing = True
+        timer = self.unload_task
+        self.cancel_unload()
+        if timer is not None:
+            await asyncio.gather(timer, return_exceptions=True)
+        async with self.infer_lock:
+            async with self.load_lock:
+                await self._unload_worker()
+
+    @property
+    def realtime_pending(self):
+        return time.monotonic() - self.last_realtime < 20 or bool(self.scheduler.snapshot()["realtime_queued"])
+
+    def performance(self):
+        result = {"scheduler": self.scheduler.snapshot(), "samples": len(self.measurements)}
+        for kind in ("realtime", "background"):
+            values = [m for m in self.measurements if m["kind"] == kind]
+            result[kind] = {"count": len(values)}
+            for field in ("queue_seconds", "load_seconds", "inference_seconds"):
+                numbers = sorted(v[field] for v in values)
+                result[kind][field] = {
+                    "p50": round(float(np.percentile(numbers, 50)), 3) if numbers else None,
+                    "p95": round(float(np.percentile(numbers, 95)), 3) if numbers else None,
+                }
+        return result
 
     async def transcribe(
         self,
@@ -224,6 +297,9 @@ class ModelManager:
         max_tokens: int = 384,
         asr_params: Any = None,
         timeout_seconds: float = 180.0,
+        priority: int = 10,
+        metrics: dict | None = None,
+        is_current: Any = None,
     ) -> tuple[str, str, float]:
         self.active_jobs += 1
         self.cancel_unload()
@@ -239,21 +315,39 @@ class ModelManager:
             )
             started = time.monotonic()
             audio_np = np.asarray(audio, dtype=np.float32)
-            async with self.infer_lock:
-                await self.load()
-                if self.status != "ready" or self.worker is None or not self.worker.is_alive():
-                    raise RuntimeError(self.detail)
-                text, detected = await asyncio.to_thread(
-                    self._infer_sync,
-                    audio_np,
-                    language,
-                    context,
-                    max_tokens,
-                    validated_asr_params,
-                    max(30.0, min(float(timeout_seconds), 600.0)),
-                )
+            if priority < 10:
+                self.last_realtime = time.monotonic()
+            async with self.scheduler.slot(priority):
+                acquired = time.monotonic()
+                if is_current is not None and not is_current():
+                    return "", "", 0.0
+                async def infer():
+                    async with self.infer_lock:
+                        await self.load()
+                        loaded = time.monotonic()
+                        if self.status != "ready" or self.worker is None or not self.worker.is_alive():
+                            raise RuntimeError(self.detail)
+                        result = await asyncio.to_thread(
+                            self._infer_sync, audio_np, language, context, max_tokens,
+                            validated_asr_params, max(30.0, min(float(timeout_seconds), 600.0)),
+                        )
+                        measured = {"kind": "realtime" if priority < 10 else "background",
+                                    "audio_seconds": round(duration_seconds, 3),
+                                    "queue_seconds": round(acquired - started, 3),
+                                    "load_seconds": round(loaded - acquired, 3),
+                                    "inference_seconds": round(time.monotonic() - loaded, 3)}
+                        self.measurements.append(measured)
+                        if metrics is not None:
+                            metrics.update(measured)
+                        return result
+                # Cancellation must not release the GPU while its thread still owns it.
+                inference = asyncio.create_task(infer())
+                try:
+                    text, detected = await asyncio.shield(inference)
+                except asyncio.CancelledError:
+                    await asyncio.gather(inference, return_exceptions=True)
+                    raise
             return text, detected, round(time.monotonic() - started, 2)
         finally:
             self.active_jobs = max(0, self.active_jobs - 1)
             self.schedule_unload()
-
