@@ -7,8 +7,8 @@
     <title>Qwen3-ASR · 本地语音工作台</title>
     <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
     <script src="/static/js/theme.js?v=20261002-theme-2"></script>
-    <link rel="stylesheet" href="/static/styles.css?v=20261002-theme-2" />
-    <link rel="stylesheet" href="/static/ui.css?v=20261002-theme-2" />
+    <link rel="stylesheet" href="/static/styles.css?v=20261007-replay-links-1" />
+    <link rel="stylesheet" href="/static/ui.css?v=20261007-replay-links-1" />
     <link rel="stylesheet" href="/static/vendor/katex/katex.min.css" />
   <script src="/static/vendor/katex/katex.min.js" defer></script>
 </head>
@@ -549,7 +549,15 @@
             <div><b>录音原文</b><small>保留真实时间范围，便于回溯课堂</small></div><select id="noteTranscriptMode" class="field-select"><option value="refined">精修原文</option><option value="raw">原始识别</option></select>
           </div>
           <div id="unrefinedActions" class="unrefined-actions hidden"><span id="unrefinedStatus"></span><button id="retryUnrefined" class="mini-button primary-mini-button" type="button">重新精修全部</button></div>
-          <div class="note-playback"><audio id="noteAudio" controls preload="none"></audio><small id="notePlaybackHint"></small></div>
+          <div class="note-playback" id="notePlayback">
+            <div class="note-playback-controls">
+              <button id="notePlayToggle" class="mini-button primary-mini-button" type="button" disabled aria-label="播放录音">播放</button>
+              <span class="note-playback-time"><span id="noteCurrentTime">0:00</span><span aria-hidden="true"> / </span><span id="noteDuration">0:00</span></span>
+            </div>
+            <input id="noteProgress" class="note-progress" type="range" min="0" max="1" step="0.1" value="0" disabled aria-label="录音播放进度" />
+            <audio id="noteAudio" preload="none"></audio>
+            <small id="notePlaybackHint"></small>
+          </div>
             <div id="noteTranscript" class="note-transcript"></div>
         </section>
         <section class="note-summary-pane">
@@ -612,7 +620,7 @@
     </dialog>
 
     <div id="toast" class="toast" role="status"></div>
-    <script src="/static/app.js?v=20260923-upgrade-1" type="module"></script>
+    <script src="/static/app.js?v=20261007-search-focus-1" type="module"></script>
     <script src="/static/js/course-sync-link.js?v=20260910"></script>
   </body>
 </html>

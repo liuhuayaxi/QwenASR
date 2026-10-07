@@ -8,10 +8,12 @@ from collections import deque
 from pathlib import Path
 from typing import Any
 
-import numpy as np
+from .lazy import lazy_module
 
 from .scheduler import PriorityGate
 from .settings import SAMPLE_RATE, normalize_asr_params
+
+np = lazy_module("numpy")
 
 
 def model_worker_main(model_path: str, requests: Any, results: Any) -> None:

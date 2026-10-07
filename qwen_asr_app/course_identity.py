@@ -5,12 +5,15 @@ import shutil
 import time
 from pathlib import Path
 
-import numpy as np
+from .lazy import lazy_module
 from fastapi import HTTPException
 
 from .audio import decode_audio_file
 from .durable import atomic_bytes, atomic_json
 from .settings import SAMPLE_RATE
+from .course_replay import replay_sources
+
+np = lazy_module("numpy")
 
 
 def source_keys(sources):
@@ -63,6 +66,9 @@ def supplement(record, sources, key, duration, title):
     if any(record.metadata.get(k, {}).get('status') == 'running' for k in ('summary_job', 'ai_job')):
         raise HTTPException(409, '已有笔记任务正在处理，请完成后再补齐课次')
     previous_sources = record_sources(record)
+    actual = {(s['video_id'], s['segment_id']): s for s in replay_sources(record)}
+    sources = [dict(s, **({'duration_seconds': actual[(str(s['video_id']), str(s['segment_id']))]['duration_seconds']}
+                         if (str(s['video_id']), str(s['segment_id'])) in actual else {})) for s in sources]
     backup = record.directory / '.versions' / ('before-supplement-' + str(time.time_ns()))
     backup.mkdir(parents=True)
     for path in (record.meta_path, record.transcript_json_path, record.audio_path,

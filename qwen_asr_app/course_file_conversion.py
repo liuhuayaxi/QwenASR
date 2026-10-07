@@ -9,7 +9,6 @@ import sys
 import tempfile
 from pathlib import Path
 
-import pymupdf as fitz
 from .pdf_ai import convert_pdf_to_ai, find_mineru_binary, _run_checked
 from .conversion_control import check_stopped
 
@@ -35,6 +34,8 @@ def capabilities():
 
 
 def _text_pdf(source, destination):
+    import pymupdf as fitz
+
     raw = source.read_bytes()
     encodings = ("utf-16",) if raw.startswith((b"\xff\xfe", b"\xfe\xff")) else ("utf-8-sig", "gb18030")
     for encoding in encodings:
@@ -68,6 +69,8 @@ def _text_pdf(source, destination):
 
 
 def _image_pdf(source, destination):
+    import pymupdf as fitz
+
     from PIL import Image, ImageOps, ImageSequence
     doc = fitz.open()
     try:
@@ -87,6 +90,8 @@ def _image_pdf(source, destination):
 
 
 def convert(source, destination, progress=lambda stage, percent: None, stop=None):
+    import pymupdf as fitz
+
     check_stopped(stop)
     source, destination = Path(source), Path(destination)
     suffix = source.suffix.lower()

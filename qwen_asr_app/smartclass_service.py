@@ -22,9 +22,10 @@ from starlette.middleware.cors import CORSMiddleware
 from .smartclass import (STATE_DIR, SmartClassClient, SmartClassError, private_json,
                         course_key, current_term, lesson_groups, extract_audio, connection_error)
 from .course_download import stream_audio
+from .replay_bridge import replay_bridge_router
 
 ROOT = Path(__file__).resolve().parent.parent
-status = {"state": "idle", "message": "请配置统一身份认证账号", "identity": None}
+status = {"state": "idle", "message": "请配置统一身份认证账号", "identity": None, "authenticated": False}
 client = SmartClassClient()
 job = None
 platform_lock = asyncio.Lock()
@@ -168,6 +169,7 @@ async def lifespan(app):
 
 
 app = FastAPI(title="课程回放自动转写", lifespan=lifespan)
+app.include_router(replay_bridge_router(client, platform_lock))
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "testserver"])
 app.add_middleware(CORSMiddleware, allow_origins=["http://127.0.0.1:8765", "http://localhost:8765"],
@@ -198,6 +200,11 @@ class Credentials(BaseModel):
     username: str = Field(min_length=1, max_length=200)
     password: SecretStr
     save: bool = False
+    replay_only: bool = False
+
+
+class ReconnectOptions(BaseModel):
+    replay_only: bool = False
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -229,16 +236,20 @@ async def get_status():
             "imports": list(imports.values()), "options": options, "queue": queue_view()}
 
 
-async def connect(username, password, save):
-    course_rows.clear()
-    group_rows.clear()
-    status.update(state="connecting", message="正在通过南邮统一身份认证登录…", identity=None)
+async def connect(username, password, save, replay_only=False):
+    if not replay_only:
+        course_rows.clear()
+        group_rows.clear()
+    status.update(state="connecting", message="正在通过南邮统一身份认证登录…", identity=None, authenticated=False)
     try:
         async with platform_lock:
             identity = await asyncio.to_thread(client.login, username, password)
         if save:
             private_json(STATE_DIR / "credentials.json", {"username": username, "password": password})
-        status.update(state="syncing", message="登录成功，正在获取本学期课程…", identity=identity)
+        status.update(state="connected" if replay_only else "syncing", identity=identity, authenticated=True,
+                      message="登录成功，可以返回回放" if replay_only else "登录成功，正在获取本学期课程…")
+        if replay_only:
+            return
         await load_courses()
         try:
             await defaults()
@@ -264,12 +275,13 @@ async def connect_account(data: Credentials):
     password = data.password.get_secret_value()
     if not password or len(password) > 2000:
         raise HTTPException(400, "请输入有效密码")
-    job = asyncio.create_task(connect(data.username.strip(), password, data.save))
+    status.update(state="connecting", identity=None, authenticated=False)
+    job = asyncio.create_task(connect(data.username.strip(), password, data.save, data.replay_only))
     return {"started": True}
 
 
 @app.post("/api/reconnect")
-async def reconnect():
+async def reconnect(data: ReconnectOptions = ReconnectOptions()):
     global job
     if job and not job.done():
         raise HTTPException(409, "已有任务正在进行")
@@ -277,7 +289,8 @@ async def reconnect():
         saved = json.loads((STATE_DIR / "credentials.json").read_text())
     except (OSError, ValueError):
         raise HTTPException(400, "尚未保存本机登录配置")
-    job = asyncio.create_task(connect(saved["username"], saved["password"], False))
+    status.update(state="connecting", identity=None, authenticated=False)
+    job = asyncio.create_task(connect(saved["username"], saved["password"], False, data.replay_only))
     return {"started": True}
 
 
@@ -443,9 +456,17 @@ async def import_stream(local, group, config, entry):
 
     try:
         if not state.get("download_complete"):
-            private_json(Path(state["directory"]) / "课程来源.json", {
+            source_path = Path(state["directory"]) / "课程来源.json"
+            previous = read_json(source_path, {})
+            # Legacy imports store decoded lengths in sources, not completed_sources.
+            completed = {(str(s["video_id"]), str(s["segment_id"])): s
+                         for s in previous.get("sources", []) if s.get("duration_seconds")}
+            completed.update({(str(s["video_id"]), str(s["segment_id"])): s
+                              for s in previous.get("completed_sources", [])})
+            private_json(source_path, {**previous,
                 "title": group["title"], "periods": group["periods"],
                 "sources": [{k:v for k,v in source.items() if k != "url"} for source in sources],
+                "completed_sources": list(completed.values()),
             })
             def progress(part, seconds, duration):
                 entry["download_detail"] = f"第 {part + 1}/{len(sources)} 节 · {seconds/60:.1f}/{duration/60:.1f} 分钟"
@@ -460,7 +481,10 @@ async def import_stream(local, group, config, entry):
                 manifest = await downloading
                 source_path = Path(state["directory"]) / "课程来源.json"
                 existing = read_json(source_path, {})
-                private_json(source_path, {**existing, "completed_sources": manifest})
+                completed = {(str(s["video_id"]), str(s["segment_id"])): s
+                             for s in existing.get("completed_sources", [])}
+                completed.update({(str(s["video_id"]), str(s["segment_id"])): s for s in manifest})
+                private_json(source_path, {**existing, "completed_sources": list(completed.values())})
                 r = await local.post(WORKBENCH + f"/api/course-streams/{ident}/finish", json={"count": next_index}, headers=headers)
                 r.raise_for_status()
                 finished_input = True

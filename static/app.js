@@ -1,5 +1,5 @@
 import { createBatchView } from "./js/batch-view.js?v=20260923";
-import { createLibraryTools } from "./js/library-tools.js?v=20260923";
+import { createLibraryTools } from "./js/library-tools.js?v=20261007-search-focus-1";
 import { createMarkdownReader, renderMarkdown } from "./js/markdown-reader.js?v=20260923-upgrade-1";
 import { createNoteAutosave } from "./js/note-autosave.js?v=20260923-upgrade-1";
 import { DEFAULT_NOTE_SUMMARY_PROMPT } from "./js/default-prompts.js";
@@ -935,6 +935,24 @@ function categorySelectOptions(selectedCategory) {
   }).join("") + `<option value="${NEW_CATEGORY_VALUE}">＋ 新建分类…</option>`;
 }
 
+function replayLaunchUrl(record, seconds = 0) {
+  return `/course/replay?${new URLSearchParams({recording: record.id, seconds: String(Math.max(0, Number(seconds) || 0))})}`;
+}
+
+function courseReplayLinks(record) {
+  const seen = new Set();
+  const sources = (record.course_replay_sources || []).filter(source => {
+    if (seen.has(source.video_id)) return false;
+    seen.add(source.video_id);
+    return true;
+  });
+  return sources.map((source, index) => ({
+    url: replayLaunchUrl(record, source.offset_seconds),
+    title: source.title,
+    label: sources.length === 2 ? (index === 0 ? '上半节回放' : '下半节回放') : '课程回放',
+  }));
+}
+
 function renderLibrary() {
   const category = els.libraryCategory.value;
   const categoryRecords = state.library.filter((record) => !category || record.category === category);
@@ -993,11 +1011,12 @@ function renderLibrary() {
         <button class="library-delete" type="button" ${canEdit ? "" : "disabled"}>删除</button>
       </div>
       ${canDownload ? `<div class="library-downloads">
-        <a href="${record.downloads.bundle}" title="按需生成，下载响应结束后从本机临时目录删除">临时整套 ZIP</a>
+        <a href="${record.downloads.bundle}" title="按需生成，下载响应结束后从本机临时目录删除">打包 ZIP</a>
         <a href="${record.downloads.audio}">AAC</a>
         <a href="${record.downloads.raw_transcript || record.downloads.transcript}">原始转写 TXT</a>
         <a href="${record.downloads.corrected_transcript || record.downloads.transcript}">AI 修正 TXT</a>
         <a class="${detailedSummary ? "" : "disabled-download"}" href="${record.downloads.ai_summary}">AI 总结</a>
+        ${courseReplayLinks(record).map((link) => `<a class="library-replay-link" href="${link.url}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(link.title || "在南邮 Smart Class 打开对应回放")}">${escapeHtml(link.label)}</a>`).join("")}
         <button class="library-regenerate-summary" type="button" ${canGenerateSummary ? "" : "disabled"}>重新生成总结</button>
       </div>` : ""}`;
     card.querySelector(".library-open").addEventListener("click", () => openLibraryRecord(record.id));
@@ -1256,7 +1275,7 @@ async function loadLibrary() {
   }
 }
 
-async function openLibraryRecord(sessionId) {
+async function openLibraryRecord(sessionId, focus = null) {
   if (state.noteSession && state.noteSession.id !== sessionId && !await saveNoteSummary({quiet: true})) return;
   try {
     const response = await fetch(`/api/recordings/${encodeURIComponent(sessionId)}`, { cache: "no-store" });
@@ -1265,6 +1284,8 @@ async function openLibraryRecord(sessionId) {
     state.noteSession = payload.session;
     renderNoteDialog(payload.session);
     if (!els.noteDialog.open) els.noteDialog.showModal();
+    if (focus) requestAnimationFrame(() => libraryTools.focusSearch(focus));
+    return payload.session;
   } catch (error) { toast(error.message, 5000); }
 }
 
@@ -1300,12 +1321,18 @@ function renderNoteTranscript(session) {
   const failedIds = new Set(
     (session.segments || []).filter((segment) => segment.ai_error).map((segment) => String(segment.id)),
   );
-  els.noteTranscript.innerHTML = blocks.length ? blocks.map((block) => `
+  els.noteTranscript.innerHTML = blocks.length ? blocks.map((block) => {
+    const replay = session.course_replay_sources?.length ? replayLaunchUrl(session, block.start) : '';
+    return `
     <article class="note-transcript-segment" data-start="${Number(block.start) || 0}" data-end="${Number(block.end) || 0}">
-      <button class="transcript-time" type="button" data-seek="${Number(block.start) || 0}" title="定位并播放这段录音">${formatDuration(block.start)}<br>${formatDuration(block.end)}${refined && !block.refined ? "<br>未精修" : ""}</button>
+      <div class="transcript-source-actions">
+        <button class="transcript-time" type="button" data-seek="${Number(block.start) || 0}" title="定位并播放这段录音">${formatDuration(block.start)}<br>${formatDuration(block.end)}${refined && !block.refined ? "<br>未精修" : ""}</button>
+        ${replay ? `<a class="transcript-smartclass-jump" href="${escapeHtml(replay)}" target="_blank" rel="noopener noreferrer" title="在新标签页登录并跳转到南邮 Smart Class 对应回放时间">跳转</a>` : ""}
+      </div>
       <div class="markdown-body">${renderMarkdown(block.text || "")}${refined && !block.refined && block.segment_ids?.length === 1 && failedIds.has(String(block.segment_ids[0]))
         ? `<button class="segment-retry-button note-segment-retry" type="button" data-segment-id="${escapeHtml(block.segment_ids[0])}">重试该段</button>` : ""}</div>
-    </article>`).join("") : '<div class="note-empty">尚无转写内容</div>';
+    </article>`;
+  }).join("") : '<div class="note-empty">尚无转写内容</div>';
   els.noteTranscript.querySelectorAll(".note-segment-retry").forEach((button) => {
     button.addEventListener("click", () => retrySegmentAi(button.dataset.segmentId, button));
   });

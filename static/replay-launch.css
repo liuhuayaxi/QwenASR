@@ -1,0 +1,15 @@
+.replay-launch { width:min(660px, calc(100% - 32px)); margin:clamp(28px, 8vh, 90px) auto; }
+.back-link { display:inline-block; margin-bottom:20px; font-size:var(--text-control); text-decoration:none; }
+.launch-card { padding:28px; background:var(--card); border:1px solid var(--line); border-radius:var(--radius-lg); }
+.launch-card h1 { margin:8px 0 18px; font-size:24px; font-weight:650; }
+.launch-card p { line-height:1.8; overflow-wrap:anywhere; }
+#replayTitle { color:var(--muted); }
+.replay-target-time { color:var(--green-dark); font-size:16px; font-weight:600; }
+#launchStatus { padding:14px; background:var(--green-soft); border:1px solid var(--green-line); border-radius:var(--radius-sm); }
+#launchStatus[data-state="error"] { background:var(--danger-soft); border-color:var(--danger-line); color:var(--danger); }
+.launch-actions { display:flex; flex-wrap:wrap; gap:8px; }
+.bridge-install { margin-top:24px; padding-top:20px; border-top:1px solid var(--line); }
+.bridge-install h2 { font-size:var(--text-title); font-weight:600; }
+.bridge-install ol { padding-left:20px; color:var(--muted); line-height:1.9; }
+.bridge-install code { display:block; padding:12px; border-radius:var(--radius-sm); background:var(--surface); font-size:var(--text-sm); overflow-wrap:anywhere; }
+.muted { color:var(--muted); font-size:var(--text-sm); }

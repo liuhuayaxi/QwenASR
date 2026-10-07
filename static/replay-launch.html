@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>跳转课堂回放 · QwenASR</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <script src="/static/js/theme.js?v=20261002-theme-2"></script>
+  <link rel="stylesheet" href="/static/ui.css?v=20261006-library-polish-3">
+  <link rel="stylesheet" href="/static/replay-launch.css?v=20261006-userscript-1">
+</head>
+<body>
+  <main class="replay-launch">
+    <a href="/library" class="back-link">‹ 返回录音库</a>
+    <section class="launch-card">
+      <span class="eyebrow">SMART CLASS</span>
+      <h1>跳转课堂回放</h1>
+      <p id="replayTitle"></p>
+      <p id="replayTime" class="replay-target-time"></p>
+      <p id="launchStatus" role="status" aria-live="polite">正在读取对应回放…</p>
+      <div class="launch-actions">
+        <button id="retryReplay" class="ui-button primary" type="button" hidden>重新检查并跳转</button>
+        <a id="loginReplay" class="ui-button" hidden>配置南邮账号</a>
+        <a id="officialReplay" class="ui-button" target="_blank" rel="noopener noreferrer" hidden>仅打开学校回放页</a>
+      </div>
+      <div id="bridgeInstall" class="bridge-install" hidden>
+        <h2>首次使用：安装油猴跳转脚本</h2>
+        <p>使用你已有的篡改猴（Tampermonkey），检查浏览器登录并定位到学校回放的指定时间。只需安装一次。</p>
+        <ol>
+          <li>点击下方“安装油猴脚本”。</li>
+          <li>在篡改猴打开的预览页面点击“安装”。</li>
+          <li>回到本页并刷新，继续这次跳转。</li>
+        </ol>
+        <p class="muted">脚本仅在本机回放入口和南邮 Smart Class 运行。账号密码由本机服务保存。</p>
+        <div class="launch-actions"><a class="ui-button primary" href="/course/replay-script.user.js" target="_blank" rel="noopener">安装油猴脚本</a><button id="copyReplayScript" type="button" class="ui-button">复制脚本</button></div>
+        <p class="muted">若安装页未自动打开，可点击“复制脚本”，在篡改猴中创建新脚本、粘贴后保存。</p>
+      </div>
+    </section>
+  </main>
+  <script src="/static/js/replay-launch.js?v=20261006-userscript-2" type="module"></script>
+</body>
+</html>

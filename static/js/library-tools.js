@@ -3,7 +3,103 @@ export function createLibraryTools({getSession, openRecord, saveNote, renderNote
   const $ = id => document.getElementById(id);
   let queryTimer, queryController, searchOffset = 0, searchTotal = 0, selectedVersion, comparedSummary;
   const player = $('noteAudio');
+  const playToggle = $('notePlayToggle');
+  const progress = $('noteProgress');
+  const currentTime = $('noteCurrentTime');
+  const durationLabel = $('noteDuration');
   let playerRecord = '', pendingSeek = null;
+
+  function escapeRegExp(value) {
+    return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  function searchTerms(query) {
+    return [...new Set(String(query || '').trim().split(/\s+/).filter(Boolean))];
+  }
+
+  function clearHighlights(root) {
+    root?.querySelectorAll('mark.search-highlight').forEach(mark => {
+      mark.replaceWith(document.createTextNode(mark.textContent || ''));
+    });
+    root?.normalize();
+  }
+
+  function highlight(root, query) {
+    if (!root) return null;
+    clearHighlights(root);
+    const terms = searchTerms(query);
+    if (!terms.length) return null;
+    const pattern = new RegExp(terms.map(escapeRegExp).join('|'), 'giu');
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        const parent = node.parentElement;
+        return parent?.closest('script,style,textarea,button,mark')
+          ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    const nodes = [];
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+    let first = null;
+    for (const node of nodes) {
+      const text = node.nodeValue || '';
+      pattern.lastIndex = 0;
+      if (!pattern.test(text)) continue;
+      pattern.lastIndex = 0;
+      const fragment = document.createDocumentFragment();
+      let cursor = 0;
+      for (const match of text.matchAll(pattern)) {
+        if (match.index > cursor) fragment.append(document.createTextNode(text.slice(cursor, match.index)));
+        const mark = document.createElement('mark');
+        mark.className = 'search-highlight';
+        mark.textContent = match[0];
+        fragment.append(mark);
+        first ||= mark;
+        cursor = match.index + match[0].length;
+      }
+      if (cursor < text.length) fragment.append(document.createTextNode(text.slice(cursor)));
+      node.replaceWith(fragment);
+    }
+    return first;
+  }
+
+  function resetPlayer() {
+    progress.value = 0;
+    progress.max = 1;
+    progress.style.setProperty('--progress', '0%');
+    currentTime.textContent = formatPlayerDuration(0);
+    durationLabel.textContent = formatPlayerDuration(0);
+    playToggle.textContent = '播放';
+    playToggle.setAttribute('aria-label', '播放录音');
+  }
+
+  function updatePlayerProgress() {
+    const time = Number(player.currentTime) || 0;
+    const duration = Number(player.duration);
+    if (Number.isFinite(duration) && duration > 0) {
+      progress.max = duration;
+      durationLabel.textContent = formatPlayerDuration(duration);
+      progress.value = Math.min(time, duration);
+      progress.style.setProperty('--progress', `${Math.min(100, Math.max(0, time / duration * 100))}%`);
+    } else {
+      progress.value = 0;
+      progress.style.setProperty('--progress', '0%');
+    }
+    currentTime.textContent = formatPlayerDuration(time);
+  }
+
+  function setPlayerState(playing) {
+    playToggle.textContent = playing ? '暂停' : '播放';
+    playToggle.setAttribute('aria-label', playing ? '暂停录音' : '播放录音');
+  }
+
+  function formatPlayerDuration(seconds) {
+    const total = Math.max(0, Math.round(Number(seconds) || 0));
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    const secs = total % 60;
+    return hours ? `${hours}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}` : `${minutes}:${String(secs).padStart(2, '0')}`;
+  }
+
   async function api(path, body) {
     const response = await fetch(path, body === undefined ? {cache:'no-store'} : {
       method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body),
@@ -15,9 +111,9 @@ export function createLibraryTools({getSession, openRecord, saveNote, renderNote
   function attach(session) {
     if (playerRecord !== session.id) {
       player.pause(); player.removeAttribute('src'); player.load();
-      playerRecord = session.id; pendingSeek = null;
+      playerRecord = session.id; pendingSeek = null; resetPlayer();
     }
-    player.hidden = session.status !== 'completed';
+    playToggle.disabled = progress.disabled = session.status !== 'completed';
     $('notePlaybackHint').textContent = session.status === 'completed' ? '点击左侧时间戳回听；笔记中的“原文”链接定位转写。' : '结束并保存录音后可以回听。';
   }
   async function seek(seconds, play = true) {
@@ -41,11 +137,35 @@ export function createLibraryTools({getSession, openRecord, saveNote, renderNote
     if (!pendingSeek) return;
     const {time, play} = pendingSeek; pendingSeek = null;
     player.currentTime = Number.isFinite(player.duration) ? Math.min(time, Math.max(0, player.duration - .01)) : time;
+    updatePlayerProgress();
     if (play) { try { await player.play(); } catch { toast('音频已定位，请点击播放'); } }
   }
   player.addEventListener('loadedmetadata', applySeek);
+  player.addEventListener('loadedmetadata', updatePlayerProgress);
+  player.addEventListener('timeupdate', updatePlayerProgress);
+  player.addEventListener('play', () => setPlayerState(true));
+  player.addEventListener('pause', () => setPlayerState(false));
+  player.addEventListener('ended', () => { setPlayerState(false); updatePlayerProgress(); });
   player.addEventListener('error', () => toast('音频暂时无法播放，请确认录音已归档并重试'));
   $('noteDialog').addEventListener('close', () => player.pause());
+  playToggle.addEventListener('click', async () => {
+    const session = getSession();
+    if (!session || session.status !== 'completed') { toast('结束并保存后可以回听'); return; }
+    if (!player.getAttribute('src')) { player.src = `/api/recordings/${encodeURIComponent(session.id)}/playback`; player.load(); }
+    try { if (player.paused) await player.play(); else player.pause(); }
+    catch { toast('音频已准备，请再次点击播放'); }
+  });
+  progress.addEventListener('input', () => {
+    const time = Number(progress.value) || 0;
+    const session = getSession();
+    if (session?.status === 'completed' && !player.getAttribute('src')) {
+      player.src = `/api/recordings/${encodeURIComponent(session.id)}/playback`;
+      player.load();
+    }
+    pendingSeek = {time, play: !player.paused};
+    if (player.readyState >= 1) applySeek();
+    updatePlayerProgress();
+  });
   $('noteTranscript').addEventListener('click', event => {
     const button = event.target.closest('[data-seek]');
     if (button) seek(button.dataset.seek);
@@ -88,8 +208,7 @@ export function createLibraryTools({getSession, openRecord, saveNote, renderNote
         const label = {title:'标题',summary:'笔记',transcript:'转写'}[match.kind];
         button.innerHTML = `<b>${escapeHtml(match.title)}</b><small>${escapeHtml(match.category)} · ${label}${match.start !== null ? ' · ' + formatDuration(match.start) : ''}</small><span>${escapeHtml(match.snippet)}</span>`;
         button.addEventListener('click', async () => {
-          await openRecord(match.recording_id);
-          if (getSession()?.id === match.recording_id && match.start !== null) seek(match.start, false);
+          await openRecord(match.recording_id, {query, kind: match.kind, start: match.start});
         });
         $('libraryMatches').append(button);
       }
@@ -133,5 +252,22 @@ export function createLibraryTools({getSession, openRecord, saveNote, renderNote
       renderNote(data.session); $('noteVersionsDialog').close(); toast('已恢复历史版本，恢复前的笔记也已保留');
     } catch(error) { toast(error.message); $('restoreNoteVersion').disabled=false; }
   });
-  return {attach, seek, search};
+  function focusSearch({query, kind, start = null} = {}) {
+    if (!query) return;
+    if (kind === 'transcript' && start !== null) {
+      // Keep navigation tied to the selected timestamp, even when keywords repeat.
+      highlight($('noteTranscript'), query);
+      seek(start, false);
+      return;
+    }
+    if (kind === 'summary') {
+      const match = highlight($('noteSummaryReader'), query);
+      match?.scrollIntoView({behavior: 'smooth', block: 'center'});
+      return;
+    }
+    const match = highlight($('noteDialogTitle'), query);
+    match?.scrollIntoView({behavior: 'smooth', block: 'center'});
+  }
+
+  return {attach, seek, search, focusSearch};
 }

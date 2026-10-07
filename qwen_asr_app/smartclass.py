@@ -11,7 +11,7 @@ from datetime import datetime
 from fractions import Fraction
 from pathlib import Path
 from .paths import PRIVATE_ROOT
-from urllib.parse import parse_qs, urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qs, quote, urlencode, urljoin, urlsplit, urlunsplit
 
 import httpx
 from cryptography.hazmat.primitives import padding
@@ -417,6 +417,36 @@ class SmartClassClient:
                 sources.append({"url": source_url, "video_id": video["NewID"], "segment_id": segment["ID"],
                                 "duration": float(segment["Duration"]), "title": video["Title"], "start": video["StartTime"]})
         return sources
+
+    def browser_login_ticket(self) -> str:
+        """Acquire a fresh CAS service ticket for consumption by the browser.
+
+        Stop before the portal redirect: consuming it here would authenticate
+        only this HTTP client instead of the user's browser.
+        """
+        url = CAS + '/cas/login?service=' + quote(SERVICE, safe='')
+        used_session = False
+        for _ in range(12):
+            parsed = urlsplit(url)
+            if (parsed.hostname not in {'i.njupt.edu.cn', 'njupt.smartclass.cn'}
+                    or parsed.username or parsed.password or parsed.port not in (None, 80, 443)):
+                raise SmartClassError('浏览器认证跳转地址无效')
+            url = urlunsplit(('https', parsed.hostname, parsed.path, parsed.query, ''))
+            if parsed.hostname == 'njupt.smartclass.cn':
+                if parsed.path == '/SystemSpace/Redirect.aspx' and parse_qs(parsed.query).get('ticket'):
+                    return url
+                raise SmartClassError('浏览器认证未返回服务票据')
+            response = self.http.get(url)
+            if response.status_code in (301, 302, 303, 307, 308) and response.headers.get('location'):
+                url = urljoin(str(response.url), response.headers['location'])
+                continue
+            session = parse_qs(response.url.query.decode()).get('service', [''])[0]
+            if not used_session and session:
+                used_session = True
+                url = CAS + '/ssoLogin/index?' + urlencode({'sessionId': session})
+                continue
+            raise LoginRequired('学校登录会话已失效，请重新登录南邮账号')
+        raise SmartClassError('浏览器认证跳转次数过多')
 
     def login(self, username: str, password: str) -> dict:
         # A new Wi-Fi route must not reuse sockets from the previous network.

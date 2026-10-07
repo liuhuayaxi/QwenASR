@@ -117,6 +117,29 @@ class DownloadAvailabilityTests(unittest.IsolatedAsyncioTestCase):
 
 
 class IdeaShellParsingTests(unittest.IsolatedAsyncioTestCase):
+    def test_parses_current_note_search_markdown(self) -> None:
+        from qwen_asr_app.course_file_routes import note_candidates
+
+        payload = {
+            "text": (
+                "# 光电子器件核心知识与系统架构\n"
+                "note_id: 5b386351b8efc03266a64d73f9a2a530\n"
+                "time: 2026-09-03T07:19:37.616Z\n\n"
+                "## Memos\n"
+                "# 正文中的小标题\n"
+                "note_id: 这是不合法的编号\n"
+            )
+        }
+
+        self.assertEqual(
+            note_candidates(payload),
+            [{
+                "note_id": "5b386351b8efc03266a64d73f9a2a530",
+                "title": "光电子器件核心知识与系统架构",
+                "reason": "闪念贝壳搜索结果",
+            }],
+        )
+
     def test_parses_text_folder_listing_and_folder_create_response(self) -> None:
         folders = ideashell_folders(
             {

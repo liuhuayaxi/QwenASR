@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import numpy as np
+from .lazy import lazy_module
 
 from .settings import SAMPLE_RATE
+
+np = lazy_module("numpy")
 
 
 def decode_audio_file(path: Path) -> np.ndarray:

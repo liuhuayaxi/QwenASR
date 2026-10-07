@@ -31,22 +31,41 @@ def note_candidates(payload):
     """Extract only explicit note identifiers, never folder/attachment IDs."""
     result = {}
 
+    def add(ident, title):
+        if isinstance(ident, str) and NOTE_ID.fullmatch(ident):
+            result.setdefault(ident, {"note_id": ident, "title": str(title or "未命名笔记"),
+                                     "reason": "闪念贝壳搜索结果"})
+
     def visit(value):
         if isinstance(value, dict):
             ident = value.get("note_id") or value.get("noteId")
             if not ident and ("title" in value and ("content" in value or "summary" in value)):
                 ident = value.get("id")
-            if isinstance(ident, str) and NOTE_ID.fullmatch(ident):
-                title = str(value.get("title") or value.get("name") or "未命名笔记")
-                result[ident] = {"note_id": ident, "title": title, "reason": "闪念贝壳搜索结果"}
+            add(ident, value.get("title") or value.get("name"))
             for child in value.values():
                 visit(child)
         elif isinstance(value, list):
             for child in value:
                 visit(child)
         elif isinstance(value, str):
+            # Current MCP search returns expanded Markdown notes, each starting
+            # with a title and a separate note_id metadata line. Body headings
+            # and folder/attachment IDs must not become candidate notes.
+            for title, ident in re.findall(
+                r"^#[ \t]+([^\r\n]+)\r?\n(?:[ \t]*\r?\n)*[ \t]*note_id:[ \t]*([a-f0-9]{32})[ \t]*$",
+                value, re.MULTILINE,
+            ):
+                add(ident, title.strip())
             for title, ident in re.findall(r"([^\n]+?)\s*\[note_id:\s*([a-f0-9]{32})\]", value):
-                result[ident] = {"note_id": ident, "title": title.lstrip("-#* "), "reason": "闪念贝壳搜索结果"}
+                add(ident, title.lstrip("-#* "))
+            if value.lstrip().startswith(("{", "[")):
+                try:
+                    decoded = json.loads(value)
+                except json.JSONDecodeError:
+                    pass
+                else:
+                    if isinstance(decoded, (dict, list)):
+                        visit(decoded)
 
     visit(payload)
     return list(result.values())

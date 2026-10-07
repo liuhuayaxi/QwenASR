@@ -1,7 +1,24 @@
 const $ = id => document.getElementById(id);
 let currentGroups = [], courseVersion = '', optionsLoaded = false;
 let busy = false, loadingCourse = '', loadSerial = 0, accountCollapsed = false;
+let replayLoginSubmitted = false;
 function notice(message = '') { $('notice').textContent = message; }
+function pendingReplayURL() {
+  const value = new URLSearchParams(location.search).get('returnTo');
+  if (!value) return null;
+  try {
+    const target = new URL(value, location.origin);
+    if (target.origin === location.origin && target.pathname === '/course/replay'
+        && !target.username && !target.password) return target;
+  } catch (_) {}
+  return null;
+}
+function continuePendingReplay(status) {
+  const target = pendingReplayURL();
+  if (!target || !replayLoginSubmitted || !status.identity || !status.authenticated) return;
+  location.replace(target.href);
+  return true;
+}
 async function post(path, body) {
   const r = await fetch(path, {
     method: 'POST', headers: {'Content-Type':'application/json','X-QwenASR-Client':'smartclass'},
@@ -140,6 +157,7 @@ function renderCourseState(s) {
 async function refresh() {
   try {
     const r = await fetch('/api/status'), s = await r.json();
+    if (continuePendingReplay(s)) return;
     $('state').textContent = s.message;
     $('identity').textContent = s.identity?.name ? '已连接：' + s.identity.name + ' · ' + s.term + ' 学期' : '';
     $('reconnect').hidden = !s.credentials_saved;
@@ -149,6 +167,7 @@ async function refresh() {
       accountCollapsed = true;
     }
     if (s.state === 'error') $('accountDetails').open = true;
+    if (new URLSearchParams(location.search).has('returnTo')) $('accountDetails').open = true;
     $('accountLabel').textContent = s.identity?.name ? '账号已连接 · ' + s.identity.name : '统一身份认证';
     window.courseStatus = s;
     renderCourseState(s);
@@ -157,13 +176,15 @@ async function refresh() {
 $('login').addEventListener('submit', async e => {
   e.preventDefault(); notice();
   try {
-    await post('/api/connect', {username:$('username').value,password:$('password').value,save:$('save').checked});
+    await post('/api/connect', {username:$('username').value,password:$('password').value,save:$('save').checked,
+      replay_only:!!pendingReplayURL()});
+    replayLoginSubmitted = true;
     $('password').value = ''; accountCollapsed = false; await refresh();
   } catch (e) { notice(e.message); }
 });
 $('reconnect').onclick = async () => {
   notice();
-  try { await post('/api/reconnect'); await refresh(); } catch (e) { notice(e.message); }
+  try { await post('/api/reconnect', {replay_only:!!pendingReplayURL()}); replayLoginSubmitted = true; await refresh(); } catch (e) { notice(e.message); }
 };
 $('resumeQueue').onclick = async () => { try { await post('/api/resume'); await refresh(); } catch (e) { notice(e.message); } };
 $('courses').onchange = () => { clearLessons(); if ($('courses').value) loadLessons(); };

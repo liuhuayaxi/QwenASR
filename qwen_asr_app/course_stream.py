@@ -10,7 +10,7 @@ import shutil
 from collections import deque
 from pathlib import Path
 
-import numpy as np
+from .lazy import lazy_module
 from fastapi import APIRouter, HTTPException, Request
 
 from .course_identity import match_record, supplement
@@ -21,6 +21,8 @@ from .review import bisect_audio_range, has_repetitive_tail, trim_repetitive_tai
 from .settings import SAMPLE_RATE, normalize_asr_params, DEFAULT_ASR_PARAMS
 from .storage import RecordingRecord, local_now
 from .terminology import asr_params_with_terminology, asr_terminology_context
+
+np = lazy_module("numpy")
 
 
 def public_config(config):
@@ -148,6 +150,11 @@ class CourseStreamJob:
             return self.snapshot()
 
     def assemble(self):
+        # Legacy uploads use the archived AAC as their working path. Rebuilding
+        # them needs a separate WAV so encoding and cleanup cannot touch the archive.
+        if self.record.working_audio_path == self.record.audio_path:
+            self.record.working_audio_path = self.record.directory / '.recording-recovery.wav'
+            self.record.metadata['working_audio_filename'] = self.record.working_audio_path.name
         target = self.record.working_audio_path
         temporary = target.with_suffix(".partial.wav")
         with wave.open(str(temporary), "wb") as output:
@@ -274,6 +281,8 @@ class CourseStreamJob:
             self.state["stage"] = "音频、转写与精修已归档"
             self.record.save_all()
             for path in [self.record.working_audio_path, *(self.record.directory / ".course-chunks").glob("*.pcm"), *(self.record.directory / ".course-chunks").glob("*.json")]:
+                if path == self.record.audio_path:
+                    continue
                 try:
                     path.unlink(missing_ok=True)
                 except OSError:

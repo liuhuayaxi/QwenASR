@@ -3,9 +3,11 @@ from __future__ import annotations
 import re
 from typing import Any
 
-import numpy as np
+from .lazy import lazy_module
 
 from .settings import SAMPLE_RATE
+
+np = lazy_module("numpy")
 
 
 def has_repetitive_tail(text: str) -> bool:

@@ -73,16 +73,18 @@
       <div class="sync-file"><b id="syncFileName"></b><label for="variant">上传版本</label><select id="variant" class="ui-field"><option value="pdf">AI 易读 PDF</option><option value="original">原件</option></select></div>
       <div class="connection"><label class="sr-only" for="region">闪念贝壳账号区域</label><select id="region" class="ui-field"><option value="china">中国大陆账号</option><option value="global">全球账号</option></select><button id="connect" class="ui-button">连接闪念贝壳</button><span id="connectionStatus" class="muted"></span><a id="authorize" target="_blank" rel="noopener" hidden>打开授权页面</a></div>
       <label class="field-label" for="noteQuery">查找目标笔记</label><div class="search-row"><input id="noteQuery" placeholder="课程名、章节或笔记标题" class="ui-field"><button id="searchNotes" class="ui-button">搜索闪念贝壳</button></div>
-      <p class="muted small">先列出本课程已有的笔记关联，也可以按关键词搜索或填写笔记编号。</p>
+      <p class="muted small">先列出本课程已有的笔记关联，也可以按关键词搜索。选中笔记或填入完整编号后，会自动预览上传目标。</p>
       <div id="candidates" class="candidates"></div>
+      <p id="matchStatus" class="notice" role="status" hidden></p>
       <label class="field-label" for="noteId">目标笔记编号</label><input id="noteId" class="ui-field wide" placeholder="选择上方笔记，或粘贴完整的 32 位编号" maxlength="32" autocomplete="off">
       <p id="syncStatus" class="notice" role="status" hidden></p>
       <div id="preview" class="preview" hidden></div>
+      <p id="syncHint" class="small muted" role="status">请选择目标笔记，预览成功后即可确认上传附件。</p>
       <p class="small muted">上传会追加一个附件。笔记正文保留；成功记录用于去重。文件只在点击下方上传按钮后发送。</p>
     </div>
     <div class="dialog-footer"><button id="previewButton" class="ui-button">预览上传目标</button><button id="syncButton" class="ui-button primary" disabled>确认上传附件</button></div>
   </dialog>
   <div id="toast" role="status" hidden></div>
-  <script type="module" src="/static/js/course-files.js?v=20260923-upgrade-1"></script>
+  <script type="module" src="/static/js/course-files.js?v=20261003-ideashell-1"></script>
 </body>
 </html>

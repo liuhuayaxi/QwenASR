@@ -341,7 +341,10 @@ footer { min-height: 76px; display: flex; justify-content: space-between; align-
 .note-transcript { flex: 1; overflow: auto; padding: 16px 20px 40px; background: var(--surface); }
 .unrefined-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 16px; border-bottom: 1px solid var(--danger-line); color: var(--danger); background: var(--danger-soft); font-size: var(--text-xs); }
 .unrefined-actions .primary-mini-button { color: var(--on-accent); background: var(--green); border-color: var(--green); white-space: nowrap; }
-.note-transcript-segment { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 14px; padding: 18px 0; border-bottom: 1px solid var(--line); }
+.note-transcript-segment { display: grid; grid-template-columns: 105px minmax(0, 1fr); gap: 14px; padding: 18px 12px; border-bottom: 1px solid var(--line); }
+.transcript-source-actions { display: grid; align-content: start; gap: 5px; min-width: 0; }
+.transcript-smartclass-jump { display: block; border: 1px solid var(--green-line); border-radius: 6px; padding: 4px 5px; background: var(--surface); color: var(--green-dark); font: var(--text-xs)/1.4 var(--font-sans); cursor: pointer; white-space: nowrap; text-align: center; text-decoration: none; }
+.transcript-smartclass-jump:hover { background: var(--green-soft); border-color: var(--green); }
 .note-transcript-segment > span { color: var(--muted); font: var(--text-xs) ui-monospace, SFMono-Regular, Menlo, monospace; padding-top: 4px; font-size: var(--text-xs); line-height: 1.8; }
 .note-transcript-segment p { margin: 0; white-space: pre-wrap; font-size: var(--text-control); line-height: 1.75; }
 .note-empty { color: var(--muted); padding: 60px 10px; text-align: center; font-size: var(--text-control); }

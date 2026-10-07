@@ -14,13 +14,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import numpy as np
+from .lazy import lazy_module
 
 from .paths import data_path
 from .durable import atomic_json
 from .library_layout import RECORDINGS, shared, recording_path, manifest_time
 from .audio import convert_audio_to_aac
 from .note_content import transcript_markdown, transcript_blocks
+from .course_replay import replay_sources
 from .settings import (
     DEFAULT_AI_SYSTEM_PROMPT,
     DEFAULT_ASR_PARAMS,
@@ -30,6 +31,8 @@ from .settings import (
     normalize_live_params,
 )
 from .terminology import normalize_terminology
+
+np = lazy_module("numpy")
 
 ROOT = Path(__file__).resolve().parent.parent
 LEGACY_RECORDINGS_DIR = Path(os.getenv("QWEN_ASR_LEGACY_RECORDINGS_DIR", data_path("recordings", ROOT / "recordings")))
@@ -968,6 +971,7 @@ class RecordingRecord:
             "library_summary": library_summary,
             "summary_source": summary_source,
             "library_summary_error": self.library_summary_error(),
+            "course_replay_sources": replay_sources(self),
             "has_transcript": any(
                 str(item.get("corrected") or item.get("raw") or "").strip()
                 for item in self.segments

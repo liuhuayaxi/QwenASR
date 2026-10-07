@@ -6,6 +6,7 @@ from fastapi.responses import FileResponse
 from .library_search import LibrarySearch
 from . import note_history
 from .audio import make_playback_audio
+from .course_replay import replay_target
 
 
 def note_router(store, recording_operation):
@@ -28,6 +29,14 @@ def note_router(store, recording_operation):
     @router.get('/api/recordings/{session_id}/versions')
     async def versions(session_id: str):
         return {'versions': note_history.versions(record_for(session_id))}
+
+    @router.get('/api/recordings/{session_id}/replay-target')
+    async def course_replay_target(session_id: str, seconds: float = 0):
+        record = record_for(session_id)
+        try:
+            return replay_target(record, seconds)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
     @router.get('/api/recordings/{session_id}/versions/{version_id}')
     async def version(session_id: str, version_id: str):

@@ -16,7 +16,6 @@ from functools import wraps
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 from dotenv import load_dotenv
 from fastapi import Request, Body, FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse, StreamingResponse
@@ -91,7 +90,10 @@ from qwen_asr_app.terminology import (
     asr_terminology_context,
     normalize_terminology,
 )
+from qwen_asr_app.lazy import lazy_module
 from qwen_asr_app import smartclass_service
+
+np = lazy_module("numpy")
 
 ROOT = Path(__file__).resolve().parent
 if not os.getenv("QWEN_ASR_DATA_DIR"):

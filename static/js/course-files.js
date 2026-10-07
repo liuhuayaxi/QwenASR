@@ -2,7 +2,8 @@ const $ = (id) => document.getElementById(id);
 const servers = {china: 'https://api.ideashell.cn/ideashell/mcp', global: 'https://api.ideashell.com/ideashell/mcp'};
 const storageKey = 'qwen-asr-ideashell-settings-v1';
 const state = {category: new URLSearchParams(location.search).get('category') || '未分类', files: [], categories: [], selected: null, preview: null, sharedFolder: false, fileAction: null, replacing: null, uploading: false, syncing: false, managing: false, categoryAction: null, epoch: 0, modalEpoch: 0};
-let pollTimer, connectionTimer, toastTimer;
+let pollTimer, connectionTimer, toastTimer, previewTimer;
+let previewEpoch = 0, matchesEpoch = 0;
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c]));
 const size = bytes => bytes < 1024 ** 2 ? `${Math.round(bytes / 1024)} KB` : `${(bytes / 1024 ** 2).toFixed(1)} MB`;
 const query = (values) => new URLSearchParams(values).toString();
@@ -266,27 +267,56 @@ $('replaceInput').addEventListener('change', async () => {
   finally { state.uploading = false; state.replacing = null; updateCategoryControls(); }
 });
 
-function invalidatePreview() { state.preview = null; $('preview').hidden = true; $('syncButton').disabled = true; }
+function validNoteId() { return /^[a-f0-9]{32}$/.test($('noteId').value.trim()); }
+function updateSyncControls() {
+  $('previewButton').disabled = state.syncing || state.previewing || !validNoteId();
+  $('previewButton').textContent = state.previewing ? '正在预览…' : state.preview ? '重新预览上传目标' : '预览上传目标';
+  $('syncButton').disabled = state.syncing || !state.preview || state.preview.duplicate;
+  const hint = state.syncing ? '正在上传附件，请稍候…'
+    : state.previewing ? '正在读取目标笔记并检查文件，预览成功后即可确认上传。'
+    : state.preview?.duplicate ? '这个文件版本已上传到所选笔记，无需重复上传。'
+    : state.preview ? '请核对上方文件和目标笔记，然后点击“确认上传附件”。'
+    : validNoteId() ? '请先完成上传目标预览；若预览失败，按提示处理后点击“预览上传目标”重试。'
+    : $('noteId').value.trim() ? '笔记编号须为完整的 32 位小写字母与数字编号，也可以直接选择上方笔记。'
+    : '请选择目标笔记，预览成功后即可确认上传附件。';
+  $('syncHint').textContent = hint;
+  $('syncButton').title = $('syncButton').disabled ? hint : '';
+}
+function invalidatePreview() {
+  previewEpoch++; clearTimeout(previewTimer);
+  state.preview = null; state.previewing = false; $('preview').hidden = true;
+  updateSyncControls();
+}
+function highlightNote() {
+  const ident = $('noteId').value.trim();
+  $('candidates').querySelectorAll('[data-note]').forEach(node => {
+    const selected = node.dataset.note === ident;
+    node.classList.toggle('selected', selected); node.setAttribute('aria-pressed', String(selected));
+  });
+}
+function schedulePreview() {
+  if (validNoteId()) previewTimer = setTimeout(previewTarget, 400);
+}
 async function openSync(file) {
-  state.modalEpoch++; state.selected = file; invalidatePreview();
+  state.modalEpoch++; state.selected = file;
   $('syncFileName').textContent = file.name;
   $('variant').querySelector('[value="pdf"]').disabled = file.conversion?.status !== 'completed';
   $('variant').value = file.conversion?.status === 'completed' ? 'pdf' : 'original';
   $('noteQuery').value = `${state.category} ${file.name.replace(/\.[^.]+$/, '')}`;
-  $('noteId').value = ''; $('candidates').innerHTML = ''; notice('syncStatus', '');
+  $('noteId').value = ''; $('candidates').innerHTML = ''; notice('syncStatus', ''); notice('matchStatus', ''); invalidatePreview();
   $('authorize').hidden = true; $('syncDialog').showModal();
   await Promise.all([matches(false), connectionStatus()]);
 }
-function closeSync() { if (state.syncing) return; state.modalEpoch++; clearTimeout(connectionTimer); $('syncDialog').close(); }
+function closeSync() { if (state.syncing) return; state.modalEpoch++; clearTimeout(connectionTimer); invalidatePreview(); $('syncDialog').close(); }
 $('closeSync').addEventListener('click', closeSync);
-$('syncDialog').addEventListener('cancel', event => { if (state.syncing) event.preventDefault(); else { state.modalEpoch++; clearTimeout(connectionTimer); } });
+$('syncDialog').addEventListener('cancel', event => { if (state.syncing) event.preventDefault(); else { state.modalEpoch++; clearTimeout(connectionTimer); invalidatePreview(); } });
 async function connectionStatus() {
   const epoch = state.modalEpoch;
   try {
     const status = await api(`/api/ideashell/status?${query({server_url: server()})}`);
     if (epoch !== state.modalEpoch) return;
     showConnection(status);
-  } catch (error) { $('connectionStatus').textContent = error.message; }
+  } catch (error) { if (epoch === state.modalEpoch) $('connectionStatus').textContent = error.message; }
 }
 function showConnection(status) {
   const names = {connected: '已连接，凭证保存在本机', saved: '已保存凭证，将自动恢复连接', disconnected: '首次使用请连接', connecting: '正在恢复连接…', authorization_required: '需要授权，请打开授权页面', error: '连接暂未完成，凭证已保留'};
@@ -304,40 +334,46 @@ $('connect').addEventListener('click', event => busy(event.currentTarget, async 
   if (status.authorization_url) toast('请点击“打开授权页面”，登录并授权闪念贝壳');
 }));
 $('region').addEventListener('change', () => {
-  state.modalEpoch++; clearTimeout(connectionTimer); invalidatePreview(); $('noteId').value = '';
+  state.modalEpoch++; clearTimeout(connectionTimer); $('noteId').value = ''; invalidatePreview(); notice('syncStatus', ''); notice('matchStatus', '');
   localStorage.setItem(storageKey, JSON.stringify({region: $('region').value})); matches(false); connectionStatus();
 });
-$('variant').addEventListener('change', invalidatePreview);
-$('noteId').addEventListener('input', invalidatePreview);
+$('variant').addEventListener('change', () => { invalidatePreview(); notice('syncStatus', ''); schedulePreview(); });
+$('noteId').addEventListener('input', () => { invalidatePreview(); notice('syncStatus', ''); highlightNote(); schedulePreview(); });
 async function matches(search) {
-  const epoch = state.modalEpoch;
+  const epoch = state.modalEpoch, requestEpoch = ++matchesEpoch;
+  if (search) notice('matchStatus', '正在搜索闪念贝壳…');
   try {
     const data = await api(`/api/course-files/${state.selected.id}/matches`, {category: state.category, server_url: server(), search, query: $('noteQuery').value});
-    if (epoch !== state.modalEpoch) return;
+    if (epoch !== state.modalEpoch || requestEpoch !== matchesEpoch) return;
     $('candidates').innerHTML = data.candidates.map(note => `<button class="ui-button candidate" data-note="${esc(note.note_id)}">${esc(note.title)}<small>${esc(note.reason)} · ${esc(note.note_id)}</small></button>`).join('') || '<p class="small muted">暂无候选笔记，可先连接并搜索。</p>';
-    notice('syncStatus', data.warning || '', !!data.warning);
-  } catch (error) { if (epoch === state.modalEpoch) notice('syncStatus', error.message, true); }
+    highlightNote();
+    notice('matchStatus', data.warning || '', !!data.warning);
+  } catch (error) { if (epoch === state.modalEpoch && requestEpoch === matchesEpoch) notice('matchStatus', error.message, true); }
   finally { if (epoch === state.modalEpoch && search) await connectionStatus(); }
 }
 $('searchNotes').addEventListener('click', event => busy(event.currentTarget, () => matches(true)));
 $('candidates').addEventListener('click', event => {
-  const button = event.target.closest('[data-note]'); if (!button) return;
-  $('noteId').value = button.dataset.note; invalidatePreview();
-  document.querySelectorAll('.candidate').forEach(node => node.classList.toggle('selected', node === button));
+  const button = event.target.closest('[data-note]'); if (!button || state.syncing) return;
+  $('noteId').value = button.dataset.note; invalidatePreview(); highlightNote();
+  previewTarget();
 });
-$('previewButton').addEventListener('click', event => busy(event.currentTarget, async () => {
+$('previewButton').addEventListener('click', previewTarget);
+async function previewTarget() {
+  if (!state.selected || state.syncing || state.previewing || !validNoteId()) return;
   invalidatePreview(); notice('syncStatus', '正在读取目标笔记与附件能力…');
-  const epoch = state.modalEpoch;
+  const epoch = state.modalEpoch, requestEpoch = previewEpoch, assetId = state.selected.id;
+  const current = () => epoch === state.modalEpoch && requestEpoch === previewEpoch;
   const selection = {category: state.category, variant: $('variant').value, server_url: server(), note_id: $('noteId').value.trim()};
+  state.previewing = true; updateSyncControls();
   try {
-    const data = await api(`/api/course-files/${state.selected.id}/preview`, selection);
-    if (epoch !== state.modalEpoch || selection.variant !== $('variant').value || selection.note_id !== $('noteId').value.trim()) return;
+    const data = await api(`/api/course-files/${assetId}/preview`, selection);
+    if (!current()) return;
     state.preview = data; $('preview').hidden = false;
     $('preview').innerHTML = `<b>${data.duplicate ? '这个版本已上传，无需重复发送' : '将追加以下附件'}</b><br>文件：${esc(data.filename)}（${size(data.size)}）<br>课程：${esc(data.category)}<br>目标笔记：${esc(data.title)}<br><span class="small">${esc(data.note_id)}</span>`;
-    $('syncButton').disabled = data.duplicate; notice('syncStatus', '');
-  } catch (error) { notice('syncStatus', error.message, true); }
-  finally { if (epoch === state.modalEpoch) await connectionStatus(); }
-}));
+    notice('syncStatus', '');
+  } catch (error) { if (current()) notice('syncStatus', error.message, true); }
+  finally { if (current()) { state.previewing = false; updateSyncControls(); await connectionStatus(); } }
+}
 $('syncButton').addEventListener('click', async () => {
   if (!state.preview || state.syncing) return;
   state.syncing = true;
@@ -350,7 +386,7 @@ $('syncButton').addEventListener('click', async () => {
     notice('syncStatus', result.duplicate ? '该文件版本已上传，已跳过重复发送。' : '附件上传成功，已记录与目标笔记的关联。');
     toast('闪念贝壳附件已同步'); invalidatePreview(); await load();
   } catch (error) { notice('syncStatus', `${error.message}\n如果网络中断，请先在闪念贝壳查看附件是否已收到，再重新预览上传。`, true); invalidatePreview(); await load(); }
-  finally { state.syncing = false; updateCategoryControls(); controls.forEach(node => node.disabled = false); $('syncButton').disabled = true; $('variant').querySelector('[value="pdf"]').disabled = state.selected.conversion?.status !== 'completed'; await connectionStatus(); }
+  finally { state.syncing = false; updateCategoryControls(); controls.forEach(node => node.disabled = false); updateSyncControls(); $('variant').querySelector('[value="pdf"]').disabled = state.selected.conversion?.status !== 'completed'; await connectionStatus(); }
 });
 let liveRefreshTimer;
 const libraryEvents = new EventSource('/api/library/events');

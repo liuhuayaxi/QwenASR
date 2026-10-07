@@ -34,6 +34,34 @@ async def until(predicate):
 
 
 class StreamTests(unittest.IsolatedAsyncioTestCase):
+    async def test_legacy_retranscription_preserves_aac_after_cleanup(self):
+        with tempfile.TemporaryDirectory() as temp:
+            record = make_record(Path(temp))
+            record.metadata.pop('working_audio_filename')
+            record.metadata['recorded_at'] = '2026-09-10 13:45'
+            record.metadata['started_at'] = '2026-09-10T16:57:44+08:00'
+            record.save_all()
+            record = RecordingRecord.load(record.directory)
+            self.assertEqual(record.working_audio_path, record.audio_path)
+            record.audio_path.write_bytes(b'old archive to replace')
+            model = SimpleNamespace(active_jobs=0, cancel_unload=lambda: None, schedule_unload=lambda: None,
+                                    transcribe=AsyncMock(return_value=('重新转写', 'Chinese', .1)))
+            job = CourseStreamJob(record, {}, model, set())
+            job.start()
+            await job.accept(0, (np.ones(3*16000, dtype='<i2') * 500).tobytes(), {'source': 1, 'samples': 0})
+            await job.finish_input(1)
+            await asyncio.wait_for(job.task, 5)
+            loaded = RecordingRecord.load(record.directory)
+            self.assertEqual(loaded.metadata['status'], 'completed')
+            self.assertTrue(loaded.audio_path.exists())
+            self.assertFalse(loaded.working_audio_path.exists())
+            self.assertNotEqual(loaded.audio_path, loaded.working_audio_path)
+            self.assertEqual(loaded.metadata['recorded_at'], '2026-09-10 13:45')
+            self.assertEqual(loaded.metadata['started_at'], '2026-09-10T16:57:44+08:00')
+            with av.open(str(loaded.audio_path)) as audio:
+                self.assertEqual(audio.streams.audio[0].codec_context.name, 'aac')
+                self.assertGreaterEqual(sum(frame.samples for frame in audio.decode(audio=0)), 3*16000)
+
     async def test_download_asr_and_correction_overlap_and_one_archive(self):
         with tempfile.TemporaryDirectory() as temp:
             record = make_record(Path(temp))

@@ -4,10 +4,12 @@ from __future__ import annotations
 import time
 import threading
 
-import av
-import numpy as np
+from .lazy import lazy_module
 
 from .smartclass import PORTAL, SmartClassError, media_url
+
+np = lazy_module("numpy")
+av = lazy_module("av")
 
 RATE = 16000
 

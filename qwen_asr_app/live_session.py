@@ -6,7 +6,7 @@ import wave
 from collections import deque
 from typing import Any
 
-import numpy as np
+from .lazy import lazy_module
 from fastapi import WebSocket, WebSocketDisconnect
 
 from .ai import (
@@ -29,6 +29,8 @@ from .settings import (
 )
 from .storage import RecordingRecord, RecordingStore, format_clock
 from .terminology import asr_params_with_terminology, asr_terminology_context, normalize_terminology
+
+np = lazy_module("numpy")
 
 
 class TranscriptionSession:
