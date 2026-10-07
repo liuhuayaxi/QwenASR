@@ -23,8 +23,18 @@ from .storage import local_now
 from .library_layout import shared
 from .shared_library import discover_courses
 from .conversion_control import ConversionStopped, check_stopped, conversion_worker
+from .ideashell_sync import same_server
 
 NOTE_ID = re.compile(r"[a-f0-9]{32}")
+
+
+def already_synced(receipts, target):
+    return any(
+        receipt.get("status") == "synced"
+        and same_server(receipt.get("server_url"), target["server_url"])
+        and all(receipt.get(key) == target[key] for key in ("note_id", "sha256"))
+        for receipt in receipts
+    )
 
 
 def note_candidates(payload):
@@ -312,11 +322,11 @@ class CourseFileAPI:
                 connection = self.ideashell.connection(payload.get("server_url", ""))
                 candidates = {}
                 for receipt in item.get("sync", []):
-                    if receipt.get("server_url") == connection.server_url:
+                    if same_server(receipt.get("server_url"), connection.server_url):
                         candidates[receipt["note_id"]] = {"note_id": receipt["note_id"], "title": receipt.get("title", "已关联笔记"), "reason": "这个文件此前选择的笔记"}
                 for record in self.recordings.list_records():
                     sync = record.metadata.get("ideashell_sync", {})
-                    if record.metadata.get("category") == payload.get("category") and sync.get("server_url") == connection.server_url and NOTE_ID.fullmatch(sync.get("note_id", "")):
+                    if record.metadata.get("category") == payload.get("category") and same_server(sync.get("server_url"), connection.server_url) and NOTE_ID.fullmatch(sync.get("note_id", "")):
                         candidates.setdefault(sync["note_id"], {"note_id": sync["note_id"], "title": record.metadata.get("title", "课程笔记"), "reason": "本课程已关联的录音笔记"})
                 warning = ""
                 if payload.get("search"):
@@ -364,7 +374,7 @@ class CourseFileAPI:
                     "expires": time.time() + 600}
                 self.previews = {k: v for k, v in self.previews.items() if v["expires"] > time.time()}
                 self.previews[token] = receipt
-                duplicate = any(r.get("status") == "synced" and all(r.get(k) == receipt[k] for k in ("note_id", "server_url", "sha256")) for r in item.get("sync", []))
+                duplicate = already_synced(item.get("sync", []), receipt)
                 return {"token": token, **receipt, "duplicate": duplicate}
             except (ValueError, OSError, RuntimeError) as exc:
                 raise HTTPException(400, str(exc)) from exc
@@ -384,7 +394,7 @@ class CourseFileAPI:
                     import hashlib
                     if hashlib.sha256(data).hexdigest() != preview["sha256"]:
                         raise ValueError("文件已变化，请重新预览")
-                    if any(r.get("status") == "synced" and all(r.get(k) == preview[k] for k in ("note_id", "server_url", "sha256")) for r in item.get("sync", [])):
+                    if already_synced(item.get("sync", []), preview):
                         return {"synced": True, "duplicate": True}
                     connection = self.ideashell.connection(preview["server_url"])
                     schemas = await connection.list_tools()

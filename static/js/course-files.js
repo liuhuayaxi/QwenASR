@@ -1,5 +1,6 @@
+import { IDEASHELL_SERVERS as servers } from './ideashell-config.js?v=20261007';
+
 const $ = (id) => document.getElementById(id);
-const servers = {china: 'https://api.ideashell.cn/ideashell/mcp', global: 'https://api.ideashell.com/ideashell/mcp'};
 const storageKey = 'qwen-asr-ideashell-settings-v1';
 const state = {category: new URLSearchParams(location.search).get('category') || '未分类', files: [], categories: [], selected: null, preview: null, sharedFolder: false, fileAction: null, replacing: null, uploading: false, syncing: false, managing: false, categoryAction: null, epoch: 0, modalEpoch: 0};
 let pollTimer, connectionTimer, toastTimer, previewTimer;

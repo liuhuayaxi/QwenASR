@@ -6,6 +6,7 @@ import { DEFAULT_NOTE_SUMMARY_PROMPT } from "./js/default-prompts.js";
 import { resample } from "./js/audio.js";
 import { createSummaryView } from "./js/summary-view.js?v=20261007-math-1";
 import { createTranscriptView } from "./js/transcript-view.js?v=20260923-upgrade-1";
+import { IDEASHELL_SERVERS, normalizeIdeashellServer } from "./js/ideashell-config.js?v=20261007";
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -82,10 +83,6 @@ const DEFAULT_CONTEXT_TOKENS = 131072;
 const REQUIRED_FEATURE_VERSION = "library-upgrade-v14";
 const PENDING_END_KEY = "qwen-asr-pending-end-v1";
 const IDEASHELL_STORAGE_KEY = "qwen-asr-ideashell-settings-v1";
-const IDEASHELL_SERVERS = {
-  china: "https://api.ideashell.cn/ideashell/mcp",
-  global: "https://api.ideashell.com/ideashell/mcp",
-};
 const DEFAULT_API_PARAMS = {
   reasoning: { effort: "none" },
   text: { verbosity: "low" },
@@ -193,8 +190,7 @@ function requireCurrentBackend() {
 }
 
 function ideashellServerForRecord(record) {
-  const linked = record?.ideashell_sync?.server_url;
-  return Object.values(IDEASHELL_SERVERS).includes(linked) ? linked : currentIdeashellServer();
+  return normalizeIdeashellServer(record?.ideashell_sync?.server_url) || currentIdeashellServer();
 }
 
 const NEW_CATEGORY_VALUE = "__new__";
@@ -1305,7 +1301,7 @@ async function openLibraryRecord(sessionId, focus = null) {
 
 function renderNoteDialog(session) {
   const linkedRegion = Object.entries(IDEASHELL_SERVERS)
-    .find(([, url]) => url === session.ideashell_sync?.server_url)?.[0];
+    .find(([, url]) => url === normalizeIdeashellServer(session.ideashell_sync?.server_url))?.[0];
   if (linkedRegion) els.ideashellRegion.value = linkedRegion;
   const when = session.started_at ? new Date(session.started_at).toLocaleString() : "";
   els.noteDialogTitle.textContent = session.title || "未命名录音";

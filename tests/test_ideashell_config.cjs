@@ -1,0 +1,15 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const path = require('node:path');
+const config = fs.readFileSync(path.join(__dirname, '../static/js/ideashell-config.js'), 'utf8').replace(/^export /gm, '');
+const app = fs.readFileSync(path.join(__dirname, '../static/app.js'), 'utf8');
+const fn = app.slice(app.indexOf('function ideashellServerForRecord('), app.indexOf('const NEW_CATEGORY_VALUE'));
+const ctx = {currentIdeashellServer: () => 'https://api.ideashell.com/ideashell/mcp'};
+vm.createContext(ctx);
+vm.runInContext(config + '\n' + fn, ctx);
+assert.equal(ctx.ideashellServerForRecord({ideashell_sync: {server_url: 'https://api.ideashell.cn/ideashell/mcp/'}}), 'https://mcp.ideashell.cn/mcp');
+assert.equal(ctx.ideashellServerForRecord({ideashell_sync: {server_url: 'https://api.ideashell.com/ideashell/mcp'}}), 'https://api.ideashell.com/ideashell/mcp');
+assert.equal(ctx.ideashellServerForRecord({}), 'https://api.ideashell.com/ideashell/mcp');
+assert.equal(ctx.normalizeIdeashellServer('https://unknown.example/mcp'), '');
+console.log('IdeaShell: legacy mainland links preserve account region and use the new endpoint');

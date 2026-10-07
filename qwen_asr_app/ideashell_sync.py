@@ -12,24 +12,57 @@ from typing import Any
 from urllib.parse import urlparse
 
 IDEASHELL_SERVERS = {
-    "china": "https://api.ideashell.cn/ideashell/mcp",
+    "china": "https://mcp.ideashell.cn/mcp",
     "global": "https://api.ideashell.com/ideashell/mcp",
 }
+LEGACY_CHINA_SERVER = "https://api.ideashell.cn/ideashell/mcp"
 
 
 def normalize_server_url(value: str) -> str:
     url = str(value or "").strip().rstrip("/")
+    if url == LEGACY_CHINA_SERVER:
+        url = IDEASHELL_SERVERS["china"]
     if url not in IDEASHELL_SERVERS.values():
         raise ValueError("IdeaShell 服务地址必须选择中国大陆或全球区域")
     return url
+
+
+def same_server(left: str, right: str) -> bool:
+    """Compare saved links and upload receipts across the mainland migration."""
+    try:
+        return normalize_server_url(left) == normalize_server_url(right)
+    except ValueError:
+        return False
 
 
 class FileTokenStorage:
     """Persist MCP OAuth tokens and dynamic client registration with user-only access."""
 
     def __init__(self, server_url: str) -> None:
-        host = urlparse(server_url).hostname or "ideashell"
+        url = normalize_server_url(server_url)
+        # Keep one credential store for this region so old and new URLs cannot
+        # race to refresh separate copies of the same refresh token.
+        host = urlparse(LEGACY_CHINA_SERVER if url == IDEASHELL_SERVERS["china"] else url).hostname
         self.path = PRIVATE_ROOT / f"{host}-oauth.json"
+
+    def oauth_resource_url(self, server_url: str) -> str:
+        """Retain the issuer/resource binding of an existing mainland grant.
+
+        The new transport accepts existing grants, but its discovery document
+        still advertises the old resource. Existing registrations must refresh
+        with their original issuer; never relabel a registration or disable the
+        SDK's resource/issuer checks. New grants use normal new-URL discovery.
+        """
+        url = normalize_server_url(server_url)
+        saved = self._read()
+        discovery = saved.get("discovery") or {}
+        client = saved.get("client_info") or {}
+        if (url == IDEASHELL_SERVERS["china"]
+                and client.get("issuer") == "https://api.ideashell.cn"
+                and discovery.get("server_url") == LEGACY_CHINA_SERVER
+                and discovery.get("auth_server_url") == "https://api.ideashell.cn"):
+            return LEGACY_CHINA_SERVER
+        return url
 
     def _read(self) -> dict[str, Any]:
         try:
@@ -183,7 +216,7 @@ class IdeaShellConnection:
         from pydantic import AnyUrl
 
         return PersistentOAuthProvider(
-            server_url=self.server_url,
+            server_url=self.storage.oauth_resource_url(self.server_url),
             client_metadata=OAuthClientMetadata(
                 client_name="QwenASR IdeaShell Sync",
                 redirect_uris=[AnyUrl(self._callback_url)],
