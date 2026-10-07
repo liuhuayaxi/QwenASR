@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QwenASR 南邮回放跳转
 // @namespace    qwenasr.local/smartclass-replay
-// @version      1.0.1
+// @version      1.1.0
 // @description  从录音库打开南邮 Smart Class，检查浏览器登录并准确定位课堂时间。
 // @match        http://127.0.0.1/course/replay*
 // @match        http://localhost/course/replay*
@@ -9,27 +9,20 @@
 // @run-at       document-end
 // @noframes
 // @grant        unsafeWindow
-// @grant        GM_getValue
-// @grant        GM_setValue
-// @grant        GM_deleteValue
-// @grant        GM_addValueChangeListener
-// @grant        GM_removeValueChangeListener
 // @grant        GM_getTab
 // @grant        GM_saveTab
-// @grant        GM_openInTab
 // ==/UserScript==
 
 (() => {
   'use strict';
   const PORTAL = 'https://njupt.smartclass.cn';
   const CHANNEL = 'qwenasr-userscript-v1';
-  const PREFIX = 'qwenasr-replay/job/';
-  const TAB_KEY = 'qwenasrReplayJob';
-  const VERSION = '1.0.1';
+  const TAB_KEY = 'qwenasrReplayDirect';
+  const VERSION = '1.1.0';
   const MAX_NAVIGATIONS = 2;
   const page = unsafeWindow;
   const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
-  const jobKey = id => PREFIX + id;
+  let currentJob = null;
   const tabInfo = () => new Promise(resolve => GM_getTab(resolve));
   const saveTab = data => new Promise(resolve => GM_saveTab(data, resolve));
 
@@ -53,75 +46,82 @@
         && url.pathname === '/SystemSpace/Redirect.aspx' && Boolean(url.searchParams.get('ticket'));
     } catch (_) { return false; }
   }
+  function localURL(value) {
+    const url = new URL(value);
+    if (url.protocol !== 'http:' || !['127.0.0.1','localhost'].includes(url.hostname)
+        || url.username || url.password || url.pathname !== '/course/replay') {
+      throw new Error('本机回放入口无效');
+    }
+    return url.href;
+  }
   function updateJob(id, patch) {
-    const job = GM_getValue(jobKey(id));
-    if (job) GM_setValue(jobKey(id), {...job, ...patch});
+    if (currentJob?.id === id) currentJob = {...currentJob, ...patch};
   }
   function usableJob(id) {
-    const job = GM_getValue(jobKey(id));
-    return job && job.expires > Date.now() && !['done','error'].includes(job.phase) ? job : null;
+    return currentJob?.id === id && currentJob.expires > Date.now() ? currentJob : null;
+  }
+  async function saveJob() {
+    const tab = await tabInfo();
+    if (currentJob) tab[TAB_KEY] = currentJob;
+    else delete tab[TAB_KEY];
+    await saveTab(tab);
+  }
+  async function clearJob() {
+    currentJob = null;
+    await saveJob();
+  }
+  async function navigate(url) {
+    await saveJob();
+    location.replace(url);
   }
 
-  function attachLocal() {
-    let current = null;
+  async function attachLocal() {
     const send = payload => window.postMessage({channel:CHANNEL, ...payload}, location.origin);
-    window.addEventListener('message', event => {
+    currentJob = (await tabInfo())[TAB_KEY] || null;
+    const resuming = currentJob && usableJob(currentJob.id) && currentJob.phase === 'need_login'
+      && currentJob.returnURL === location.href;
+    if (!resuming) await clearJob();
+    let starting = Boolean(resuming);
+    const ready = () => send({type:'ready', version:VERSION, sameTab:true, resuming:Boolean(resuming)});
+    window.addEventListener('message', async event => {
       if ((event.source !== window && event.source !== page) || event.origin !== location.origin
           || event.data?.channel !== CHANNEL) return;
-      if (event.data.type === 'probe') { send({type:'ready', version:VERSION}); return; }
-      if (event.data.type !== 'open' || current) return;
-      let target;
-      try { target = validateTarget(event.data.target); }
-      catch (error) { send({type:'result', ok:false, error:error.message}); return; }
-      const id = crypto.randomUUID();
-      const key = jobKey(id);
-      let authenticating = false;
-      const finish = result => {
-        if (current?.id !== id) return;
-        clearTimeout(current.timer);
-        GM_removeValueChangeListener(current.listener);
-        GM_deleteValue(key);
-        current = null;
-        send({type:'result', ...result});
-      };
-      const observe = async (_key, _old, job) => {
-        if (current?.id !== id || !job) return;
-        if (job.message) send({type:'progress', text:job.message});
-        if (job.phase === 'done') { finish({ok:true, seconds:job.observed}); return; }
-        if (job.phase === 'error') { finish({ok:false, error:job.error, needs_credentials:job.needs_credentials}); return; }
-        if (job.phase !== 'need_login' || authenticating) return;
-        authenticating = true;
-        try {
-          const response = await page.fetch('/course/api/browser-login', {
-            method:'POST', headers:{'X-QwenASR-Client':'smartclass','Content-Type':'application/json'},
-            body:'{}', cache:'no-store', signal:AbortSignal.timeout(90000),
-          });
-          const data = await response.json();
-          if (current?.id !== id || !usableJob(id)) return;
-          if (!response.ok || !validTicket(data.login_url)) {
-            updateJob(id,{phase:'error', needs_credentials:response.status === 401,
-              error:typeof data.detail === 'string' ? data.detail : '学校未返回有效登录票据'});
-            return;
-          }
-          updateJob(id,{phase:'ticket_ready', ticket:data.login_url});
-        } catch (_) {
-          if (current?.id === id) updateJob(id,{phase:'error', error:'登录服务暂时无法连接，请检查本地服务与校园网络'});
-        }
-      };
-      const listener = GM_addValueChangeListener(key, observe);
-      current = {id, listener, timer:setTimeout(() => finish({ok:false,
-        error:'回放跳转超时，请确认油猴脚本已在南邮网站启用，并检查校园网络'}), 180000)};
-      GM_setValue(key,{target, phase:'checking', expires:Date.now()+180000, authAttempts:0, navigationAttempts:0,
-        message:'正在检查浏览器中的 Smart Class 登录…'});
+      if (event.data.type === 'probe') { ready(); return; }
+      // Never execute the old two-tab protocol if an older launch page is cached.
+      if (event.data.type !== 'open' || !event.data.sameTab || starting) return;
+      starting = true;
       try {
-        const replay = GM_openInTab(PORTAL + '/UserSpace/CourseCenter.aspx#qwenasr-replay=' + id,
-          {active:true, setParent:true});
-        replay.onclose = () => {
-          if (current?.id === id) finish({ok:false, error:'回放窗口已关闭，可以重新跳转'});
-        };
-      } catch (_) { finish({ok:false, error:'无法打开回放窗口，请检查油猴是否允许打开标签页'}); }
+        const target = validateTarget(event.data.target);
+        currentJob = {id:crypto.randomUUID(), target, returnURL:localURL(location.href),
+          phase:'checking', expires:Date.now()+180000, authAttempts:0, navigationAttempts:0};
+        send({type:'accepted'});
+        await navigate(PORTAL + '/UserSpace/CourseCenter.aspx');
+      } catch (error) {
+        await clearJob(); starting = false;
+        send({type:'result', ok:false, error:error.message});
+      }
     });
-    send({type:'ready', version:VERSION});
+    ready();
+    if (!resuming) return;
+    try {
+      const response = await page.fetch('/course/api/browser-login', {
+        method:'POST', headers:{'X-QwenASR-Client':'smartclass','Content-Type':'application/json'},
+        body:'{}', cache:'no-store', signal:AbortSignal.timeout(90000),
+      });
+      const data = await response.json();
+      if (!response.ok || !validTicket(data.login_url)) {
+        const error = new Error(typeof data.detail === 'string' ? data.detail : '学校未返回有效登录票据');
+        error.needs_credentials = response.status === 401;
+        throw error;
+      }
+      if (!usableJob(currentJob.id)) throw new Error('回放请求已过期，请重新跳转');
+      updateJob(currentJob.id, {phase:'authenticating'});
+      // The ticket is consumed directly by this tab, never saved in extension storage.
+      await navigate(data.login_url);
+    } catch (error) {
+      await clearJob(); starting = false;
+      send({type:'result', ok:false, error:error.message, needs_credentials:Boolean(error.needs_credentials)});
+    }
   }
 
   function activePlayer() {
@@ -156,14 +156,14 @@
     }
     return '';
   }
-  function navigateToTarget(id, url) {
+  async function navigateToTarget(id, url) {
     const job = usableJob(id);
     if (!job) throw new Error('回放请求已经结束');
     const attempts = Number(job.navigationAttempts) || 0;
     if (attempts >= MAX_NAVIGATIONS) throw new Error('学校未能打开目标回放，已停止重复跳转；请检查视频权限或是否已删除');
     updateJob(id,{phase:'loading', navigationAttempts:attempts + 1,
       message:'登录已确认，正在打开对应课堂回放…'});
-    location.replace(url);
+    await navigate(url);
   }
   function historyResumeReady() {
     // Current school Video.js sets evaluationStart in the history response,
@@ -268,57 +268,42 @@
   }
 
   async function attachPortal() {
-    const tab = await tabInfo();
-    const incoming = /^#qwenasr-replay=([a-f0-9-]{36})$/i.exec(location.hash)?.[1];
-    const id = incoming || tab[TAB_KEY];
-    if (!id || !usableJob(id)) return;
-    tab[TAB_KEY] = id;
-    await saveTab(tab);
+    currentJob = (await tabInfo())[TAB_KEY] || null;
+    if (!currentJob) return; // Ordinary school tabs are left untouched.
+    const id = currentJob.id;
     let resume;
     try {
-      const job = usableJob(id), target = validateTarget(job.target);
-      // A normal school tab has no per-tab job ID and is left untouched.
+      if (!usableJob(id)) throw new Error('回放请求已过期，请从原页面重新跳转');
+      const target = validateTarget(currentJob.target);
+      const returnURL = localURL(currentJob.returnURL);
       await until(id, () => document.readyState !== 'loading' && Array.isArray(page.userInfo));
       if (!page.userInfo[0]?.UserID) {
-        if (job.authAttempts >= 1) throw new Error('浏览器登录未成功，请重新配置南邮账号后再试');
-        updateJob(id,{phase:'need_login', authAttempts:1,
-          message:'浏览器尚未登录，正在使用本机保存的南邮账号登录…'});
-        const auth = await until(id, () => {
-          const value = GM_getValue(jobKey(id));
-          if (value?.phase === 'error') throw new Error(value.error);
-          return value?.phase === 'ticket_ready' ? value : null;
-        }, 100000);
-        if (!validTicket(auth.ticket)) throw new Error('学校登录票据无效');
-        const ticket = auth.ticket;
-        const {ticket:unused, ...rest} = auth;
-        GM_setValue(jobKey(id), {...rest, phase:'authenticating'});
-        location.replace(ticket);
+        if (currentJob.authAttempts >= 1) throw new Error('浏览器登录未成功，请在课程回放页重新配置南邮账号');
+        updateJob(id,{phase:'need_login', authAttempts:1});
+        // Briefly return to the invisible local endpoint for its same-origin login call.
+        await navigate(returnURL);
         return;
       }
       const current = new URL(location.href), destination = new URL(target.url);
       if (current.pathname !== destination.pathname
           || current.searchParams.get('NewID') !== destination.searchParams.get('NewID')) {
-        navigateToTarget(id, target.url);
+        await navigateToTarget(id, target.url);
         return;
       }
-      updateJob(id,{phase:'seeking', message:'正在定位到所选时间…'});
+      updateJob(id,{phase:'seeking'});
       resume = monitorHistoryResume();
       await selectMediaSegment(id, target);
-      const observed = await seekMedia(id, target.seconds, resume);
-      delete tab[TAB_KEY];
-      await saveTab(tab);
-      updateJob(id,{phase:'done', observed});
+      await seekMedia(id, target.seconds, resume);
+      await clearJob();
     } catch (error) {
-      const current = GM_getValue(jobKey(id));
-      if (current && current.phase !== 'error') updateJob(id,{phase:'error', error:error.message});
-      delete tab[TAB_KEY];
-      await saveTab(tab);
+      await clearJob();
+      page.alert('QwenASR：' + error.message);
     } finally {
       resume?.close();
     }
   }
 
   if (location.protocol === 'http:' && ['127.0.0.1','localhost'].includes(location.hostname)
-      && location.pathname === '/course/replay') attachLocal();
+      && location.pathname === '/course/replay') attachLocal().catch(() => {});
   else if (location.origin === PORTAL) attachPortal().catch(() => {});
 })();
