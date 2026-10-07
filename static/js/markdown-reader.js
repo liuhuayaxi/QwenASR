@@ -6,6 +6,8 @@ function canonicalMathExpression(value) {
   const subscriptDigits = { "₀":"0", "₁":"1", "₂":"2", "₃":"3", "₄":"4", "₅":"5", "₆":"6", "₇":"7", "₈":"8", "₉":"9" };
   let text = String(value || "").trim()
     .replace(/([A-Za-zΑ-Ωα-ω])([₀₁₂₃₄₅₆₇₈₉]+)/g, (_all, symbol, digits) => `${symbol}_${[...digits].map((digit) => subscriptDigits[digit]).join("")}`)
+    // TeX commands consume following letters: πa must become \pi a, not \pia.
+    .replace(/([θλπΔ])(?=[A-Za-z])/g, "$1 ")
     .replaceAll("θ", "\\theta").replaceAll("λ", "\\lambda")
     .replaceAll("π", "\\pi").replaceAll("Δ", "\\Delta")
     .replace(/\bn([012])\b/g, "n_$1")

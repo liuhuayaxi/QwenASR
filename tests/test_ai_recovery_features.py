@@ -209,6 +209,16 @@ class StructuredOutputRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
 
 class MarkdownMathTests(unittest.TestCase):
+    def test_greek_symbols_do_not_swallow_adjacent_variables(self) -> None:
+        for source, expected in (
+            ("V = (2πa / λ) √(n₁² - n₂²)", r"V = (2\pi a / \lambda) \sqrt{n_1^2 - n_2^2}"),
+            ("V = (2πa / λ) × NA", r"V = (2\pi a / \lambda) \times NA"),
+            ("Δn ≈ θx + λf", r"\Delta n \approx \theta x + \lambda f"),
+        ):
+            for wrapper in ("`", "**"):
+                with self.subTest(source=source, wrapper=wrapper):
+                    self.assertEqual(normalize_markdown_math(f"{wrapper}{source}{wrapper}"), f"${expected}$")
+
     def test_formula_code_spans_become_math_but_normal_code_stays_code(self) -> None:
         markdown = "计算 `sin θ_c = n2 / n1 ≈ 0.9865`，命令 `git status`。"
         normalized = normalize_markdown_math(markdown)

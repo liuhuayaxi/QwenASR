@@ -295,7 +295,7 @@ async def summary_status(session_id: str) -> dict[str, Any]:
     return {"running": bool(job) or session_id in background_summary_tasks,
             "status": saved_job.get("status", ""), "error": saved_job.get("error", ""),
             "completed_parts": len(draft.get("parts", [])),
-            "total_parts": draft.get("total_parts", 0), "phase": draft.get("phase", ""),
+            "total_parts": draft.get("total_parts", 0), "phase": (job or {}).get("phase") or draft.get("phase", ""),
             "elapsed_seconds": round(time.monotonic() - job["started"]) if job else 0,
             "has_summary": bool(record.metadata.get("ai_note_summary", {}).get("summary"))}
 
@@ -1298,6 +1298,15 @@ async def update_recording(session_id: str, payload: dict[str, Any] = Body(...))
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def apply_recording_title(record: RecordingRecord, title: str) -> RecordingRecord:
+    updated = recording_store.update(record.id, title, str(record.metadata.get("category") or "未分类"))
+    summary = updated.metadata.get("ai_note_summary")
+    if isinstance(summary, dict) and "title_error" in summary:
+        summary.pop("title_error")
+        updated.save_metadata()
+    return updated
+
+
 @app.post("/api/recordings/{session_id}/generate-title")
 @recording_operation
 async def generate_title(session_id: str, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
@@ -1326,7 +1335,7 @@ async def generate_title(session_id: str, payload: dict[str, Any] = Body(...)) -
         )
         result = {"title": title, "summary": summary, "summary_source": "ai"}
         if payload.get("apply") is True:
-            updated = recording_store.update(session_id, title, str(record.metadata.get("category") or "未分类"))
+            updated = apply_recording_title(record, title)
             result["session"] = updated.public(include_segments=False)
         return result
     except ValueError as exc:
@@ -1368,6 +1377,27 @@ async def generate_library_summary(
     ).strip()[:20_000]
     try:
         summary = await build_note_summary(record, config)
+        # Keep naming inside the server-owned operation, after the note is saved.
+        # Its failure must not discard the note or restart expensive generation.
+        job = summary_jobs.get(session_id)
+        if job is not None:
+            job["phase"] = "AI 取名"
+        try:
+            prompt = str(payload.get("title_prompt") or ai_preferences.read().get("title_prompt")
+                         or DEFAULT_AI_TITLE_PROMPT).strip()
+            title = await generate_recording_title(
+                summary["summary"], prompt, config,
+                current_title=str(record.metadata.get("title") or ""),
+                category=str(record.metadata.get("category") or ""),
+            )
+            # update() can move the directory and returns a fresh record instance.
+            record = apply_recording_title(record, title)
+            summary = record.metadata["ai_note_summary"]
+        except Exception as exc:
+            record = recording_store.find(session_id) or record
+            summary = record.metadata["ai_note_summary"]
+            summary["title_error"] = str(exc)
+            record.save_metadata()
         return {"summary": summary, "session": record.public(include_segments=False)}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

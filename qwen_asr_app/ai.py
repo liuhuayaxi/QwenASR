@@ -330,6 +330,8 @@ def _canonical_math_expression(value: str) -> str:
         lambda match: f"{match.group(1)}_{match.group(2).translate(subscripts)}",
         text,
     )
+    # Keep an adjacent variable outside the TeX command (πa -> \pi a).
+    text = re.sub(r"([θλπΔ])(?=[A-Za-z])", r"\1 ", text)
     for symbol, latex in (("θ", r"\theta"), ("λ", r"\lambda"), ("π", r"\pi"), ("Δ", r"\Delta")):
         text = text.replace(symbol, latex)
     text = re.sub(r"\bn([012])\b", r"n_\1", text)

@@ -1,10 +1,10 @@
 import { createBatchView } from "./js/batch-view.js?v=20260923";
 import { createLibraryTools } from "./js/library-tools.js?v=20261007-search-focus-1";
-import { createMarkdownReader, renderMarkdown } from "./js/markdown-reader.js?v=20260923-upgrade-1";
+import { createMarkdownReader, renderMarkdown } from "./js/markdown-reader.js?v=20261007-math-1";
 import { createNoteAutosave } from "./js/note-autosave.js?v=20260923-upgrade-1";
 import { DEFAULT_NOTE_SUMMARY_PROMPT } from "./js/default-prompts.js";
 import { resample } from "./js/audio.js";
-import { createSummaryView } from "./js/summary-view.js?v=20260923-upgrade-1";
+import { createSummaryView } from "./js/summary-view.js?v=20261007-math-1";
 import { createTranscriptView } from "./js/transcript-view.js?v=20260923-upgrade-1";
 
 const $ = (selector) => document.querySelector(selector);
@@ -1005,6 +1005,7 @@ function renderLibrary() {
         <p>${summaryBusy ? "AI 总结与课堂笔记正在后台生成，刷新或关闭网页后仍会继续。" : summaryFailure ? `上次生成未完成：${escapeHtml(summaryFailure)}。可点击重新生成，已有笔记仍保留。` : hasSummary ? escapeHtml(record.library_summary) : summaryError ? `短摘要生成失败：${escapeHtml(summaryError)}` : detailedSummary ? "详细 AI 总结已生成，但录音库短摘要尚未生成。" : "尚未生成，可重新生成 AI 总结与课堂笔记。"}</p>
         ${hasSummary ? "" : canRegenerateAbstract ? `<button class="library-regenerate-abstract" type="button">重新生成短摘要</button>` : `<button class="library-generate-summary" type="button" ${canGenerateSummary ? "" : "disabled"}>AI 生成总结</button>`}
       </div>
+      ${!summaryBusy && record.ai_note_summary?.title_error ? `<p class="library-card-meta">自动取名未完成：${escapeHtml(record.ai_note_summary.title_error)}。可点击“AI 取名”重试。</p>` : ""}
       <div class="library-card-actions">
         <input class="library-title-input" value="${escapeHtml(record.title || "")}" aria-label="录音名称" />
         <button class="library-ai-title" type="button" ${canEdit ? "" : "disabled"}>AI 取名</button>
@@ -1061,7 +1062,15 @@ function automaticSummaryPayload(record) {
   return { config: { terminology: record?.course_settings?.terminology || terminologyValues(), ai: { summary_provider: rawProvider("summary"),
     system_prompt: record?.course_settings?.ai_system_prompt || els.systemPrompt.value.trim() } },
     summary_system_prompt: els.summarySystemPrompt.value.trim(),
-    abstract_system_prompt: els.abstractPrompt.value.trim() };
+    abstract_system_prompt: els.abstractPrompt.value.trim(),
+    title_prompt: els.titlePrompt.value.trim() };
+}
+
+function summaryCompletionMessage(summary) {
+  const notices = [];
+  if (summary.abstract_error) notices.push(`录音库短摘要生成失败：${summary.abstract_error}`);
+  if (summary.title_error) notices.push(`自动取名未完成，可点击“AI 取名”重试：${summary.title_error}`);
+  return notices.length ? `详细 AI 总结已保存；${notices.join("；")}` : "AI 总结与课堂笔记已保存，名称已自动更新";
 }
 
 async function waitForSummaryJob(sessionId) {
@@ -1091,7 +1100,7 @@ async function watchSummaryJob(record) {
       state.noteSession = payload.session;
       renderNoteSummary(payload.session);
     }
-    toast(payload.summary.abstract_error ? "详细笔记已保存，短摘要未完成，可单独重试" : "AI 总结与课堂笔记已生成并保存", 5200);
+    toast(summaryCompletionMessage(payload.summary), 7200);
   } catch (error) {
     toast(`AI 生成未完成：${error.message}；可在录音库重新生成`, 6200);
   } finally {
@@ -1136,6 +1145,7 @@ async function generateLibrarySummary(record, card = null, promptOverrides = {})
         config,
         summary_system_prompt: summaryPrompt,
         abstract_system_prompt: abstractPrompt,
+        title_prompt: els.titlePrompt.value.trim(),
         custom_prompt: promptOverrides.customPrompt || "",
       }),
     });
@@ -1148,9 +1158,7 @@ async function generateLibrarySummary(record, card = null, promptOverrides = {})
       renderNoteSummary(state.noteSession);
     }
     await loadLibrary();
-    toast(payload.summary?.abstract_error
-      ? `详细 AI 总结已保存，但录音库短摘要生成失败：${payload.summary.abstract_error}`
-      : "已生成完成后的 AI 总结，可在“查看笔记”中编辑", payload.summary?.abstract_error ? 7200 : 4600);
+    toast(summaryCompletionMessage(payload.summary), 7200);
     return payload.summary;
   } catch (error) {
     if (state.noteSession?.id === record.id) {
@@ -1239,7 +1247,7 @@ async function generateLibraryTitle(record, card) {
     input.value = payload.title;
     if (payload.session && state.noteSession?.id === record.id) {
       state.noteSession = {...state.noteSession, ...payload.session};
-      els.noteDialogTitle.textContent = payload.session.title;
+      renderNoteSummary(state.noteSession);
     }
     if (payload.session && state.activeSession?.id === record.id) state.activeSession = payload.session;
     await loadLibrary();
@@ -1345,6 +1353,7 @@ function renderNoteTranscript(session) {
 }
 
 function renderNoteSummary(session) {
+  els.noteDialogTitle.textContent = session.title || "未命名录音";
   const summary = session.ai_note_summary || {};
   const markdown = summary.summary || "";
   const doc = noteAutosave.open(session.id, markdown, {preserve: els.noteSummaryEditor.dataset.noteId === session.id && noteReader.hasActive()});
@@ -1371,7 +1380,8 @@ function renderNoteSummary(session) {
       ? " · 有尚未推送的修改"
       : session.ideashell_sync?.note_id ? " · 已关联 IdeaShell" : "";
     const abstractNotice = summary.abstract_error ? ` · 录音库短摘要失败：${summary.abstract_error}` : "";
-    els.noteSummaryHint.textContent = `Markdown 总结${edited}${syncState}${abstractNotice}${summary.updated_at ? ` · ${new Date(summary.updated_at).toLocaleString()}` : ""}`;
+    const titleNotice = summary.title_error ? " · 自动取名未完成，可在录音库点击“AI 取名”重试" : "";
+    els.noteSummaryHint.textContent = `Markdown 总结${edited}${syncState}${abstractNotice}${titleNotice}${summary.updated_at ? ` · ${new Date(summary.updated_at).toLocaleString()}` : ""}`;
   } else {
     els.noteSummaryHint.textContent = summary.abstract_error
       ? `详细总结已保存，但录音库短摘要生成失败：${summary.abstract_error}`

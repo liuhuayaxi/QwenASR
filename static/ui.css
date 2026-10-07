@@ -156,13 +156,13 @@ input::placeholder, textarea::placeholder { color: var(--placeholder); }
 .mini-button:hover:not(:disabled), .ghost-button:hover:not(:disabled),
 .library-downloads a:hover, .library-card-actions button:hover:not(:disabled),
 .ai-task-actions button:hover:not(:disabled) { background: var(--green-soft); border-color: var(--green-line); color: var(--green-dark); }
-.ui-button.primary, .primary-mini-button, .library-card-actions .library-ai-title,
+.ui-button.primary, .primary-mini-button, .library-card-actions .library-save,
 .library-card-actions .library-resume, .library-downloads a:first-child,
 .download-links a:first-child, .ai-task-actions button.primary {
   background: var(--green); border-color: var(--green); color: var(--on-accent);
 }
 .ui-button.primary:hover:not(:disabled), .primary-mini-button:hover:not(:disabled),
-.library-card-actions .library-ai-title:hover:not(:disabled),
+.library-card-actions .library-save:hover:not(:disabled),
 .library-card-actions .library-resume:hover:not(:disabled),
 .library-downloads a:first-child:hover, .download-links a:first-child:hover,
 .ai-task-actions button.primary:hover:not(:disabled) { background: var(--green-dark); border-color: var(--green-dark); color: var(--on-accent); }
