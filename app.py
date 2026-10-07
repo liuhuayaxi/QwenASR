@@ -23,6 +23,7 @@ from fastapi.staticfiles import StaticFiles
 
 from qwen_asr_app.batch_pipeline import SegmentCorrectionPipeline
 from qwen_asr_app.ai_secrets import ai_secret_store
+from qwen_asr_app.ai_preferences import ai_preferences
 from qwen_asr_app.audio import decode_audio_file, vad_split_ranges
 from qwen_asr_app.batch_ai import (
     build_note_summary,
@@ -229,6 +230,30 @@ def _remember_ai_keys(config: Any) -> None:
 @app.get("/api/ai/secrets")
 async def ai_secret_status() -> dict[str, Any]:
     return {"saved": ai_secret_store.status(), "storage": "local_user_only"}
+
+
+@app.get('/api/ai/settings')
+async def get_ai_settings():
+    try:
+        return {'settings': ai_preferences.read(), 'saved': ai_secret_store.status()}
+    except (OSError, ValueError) as exc:
+        raise HTTPException(500, '本机 AI 配置读取失败，未用默认值覆盖') from exc
+
+
+@app.put('/api/ai/settings')
+async def save_ai_settings(payload: dict[str, Any] = Body(...)):
+    try:
+        settings = ai_preferences.save(payload.get('settings'), ai_secret_store)
+        return {'settings': settings, 'saved': ai_secret_store.status()}
+    except (OSError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.delete('/api/ai/settings')
+async def clear_ai_settings():
+    ai_preferences.clear()
+    ai_secret_store.clear()
+    return {'cleared': True}
 
 
 @app.put("/api/ai/secrets")
@@ -2137,6 +2162,7 @@ async def batch_transcription_stream(
                 title,
                 category,
                 session_id=config.get("_upload_recording_id"),
+                course_time=config.get('course_time') if original_filename.startswith('smartclass_') else None,
             ))
             cancelled = False
             while True:
@@ -2530,6 +2556,7 @@ app.include_router(note_router(recording_store, recording_operation))
 # The course replay UI and API share this process and port.  Its internal
 # routes remain unchanged, so the old course service can still be tested in
 # isolation while the desktop launcher exposes it at http://127.0.0.1:8765/course/.
+smartclass_service.app.state.recording_store = recording_store
 app.mount("/course", smartclass_service.app)
 
 

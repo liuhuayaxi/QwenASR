@@ -23,6 +23,8 @@ from .smartclass import (STATE_DIR, SmartClassClient, SmartClassError, private_j
                         course_key, current_term, lesson_groups, extract_audio, connection_error)
 from .course_download import stream_audio
 from .replay_bridge import replay_bridge_router
+from .course_import_status import lesson_import_statuses, recording_inventory, video_ids
+from .ai_preferences import ai_preferences, PROVIDER_FIELDS
 
 ROOT = Path(__file__).resolve().parent.parent
 status = {"state": "idle", "message": "请配置统一身份认证账号", "identity": None, "authenticated": False}
@@ -118,6 +120,17 @@ def complete_import_progress(entry):
 async def defaults():
     if options.get("summary_provider"):
         return
+    saved = ai_preferences.read()
+    providers = saved.get('function_providers', {})
+    if providers.get('summary'):
+        options['summary_provider'] = providers['summary']
+        options.setdefault('correction_provider', providers.get('correction') or providers['summary'])
+        options.setdefault('summary_system_prompt', saved.get('detailed_summary_prompt', ''))
+        options.setdefault('abstract_system_prompt', saved.get('abstract_prompt', ''))
+        options.setdefault('generate_summary', True)
+        options.setdefault('ai_correction', True)
+        private_json(STATE_DIR / 'options.json', options)
+        return
     async with httpx.AsyncClient(timeout=15, trust_env=False) as local:
         response = await local.get(WORKBENCH + "/api/library")
         response.raise_for_status()
@@ -131,6 +144,7 @@ async def defaults():
                 break
     options.setdefault("generate_summary", True)
     options.setdefault("ai_correction", True)
+    private_json(STATE_DIR / 'options.json', options)
 
 
 async def reconcile_imports():
@@ -230,10 +244,27 @@ async def service_stop_guard(action: str, request: Request):
 
 
 @app.get("/api/status")
-async def get_status():
+async def get_status(course: str = ''):
+    groups = [group for group in group_rows.values() if group.get('course_key') == course] if course else []
     return {**status, "service": "courses", "pid": os.getpid(), "instance": os.getenv("QWEN_ASR_INSTANCE", ""), "credentials_saved": (STATE_DIR / "credentials.json").exists(),
             "term": current_term(), "courses": list(course_rows.values()),
-            "imports": list(imports.values()), "options": options, "queue": queue_view()}
+            "imports": list(imports.values()), "options": options, "queue": queue_view(),
+            "lesson_course": course, "lesson_statuses": await import_statuses(groups)}
+
+
+async def import_statuses(groups):
+    if not groups:
+        return {}
+    store = getattr(app.state, 'recording_store', None)
+    if store is not None:
+        records = recording_inventory(store.list_records())
+    else:
+        # Compatibility with the standalone course service.
+        async with httpx.AsyncClient(timeout=5, trust_env=False) as local:
+            response = await local.get(WORKBENCH + '/api/library')
+            response.raise_for_status()
+            records = response.json().get('records', [])
+    return lesson_import_statuses(groups, records, imports, queue_state['items'])
 
 
 async def connect(username, password, save, replay_only=False):
@@ -335,7 +366,8 @@ async def lessons(course: str):
             videos = await asyncio.to_thread(client.videos, course_rows[course])
         groups = lesson_groups(videos, course_rows[course])
         group_rows.update({g["id"]: g for g in groups})
-        return {"groups": groups}
+        states = await import_statuses(groups)
+        return {"groups": [{**group, 'import_status': states[group['id']]} for group in groups]}
     except (SmartClassError, httpx.HTTPError, ValueError):
         raise HTTPException(502, "获取回放失败，请刷新登录状态后重试")
 
@@ -346,8 +378,7 @@ async def set_options(request: Request):
     for name in ("summary_provider", "correction_provider"):
         provider = data.get(name) or {}
         if provider:
-            allowed = {"base_url", "model", "api_mode", "context_window", "max_output_tokens", "concurrency", "extra_params", "system_prompt"}
-            options[name] = {k: v for k, v in provider.items() if k in allowed}
+            options[name] = {k: v for k, v in provider.items() if k in PROVIDER_FIELDS}
     for key in ("summary_system_prompt", "abstract_system_prompt", "generate_summary", "ai_correction"):
         if key in data:
             options[key] = data[key]
@@ -546,7 +577,7 @@ async def import_group(group: dict, run_options: dict | None = None):
     options = run_options if run_options is not None else globals()["options"]
     ident = group["id"]
     entry = imports.setdefault(ident, {"id": ident, "title": group["title"]})
-    entry.update(state="running", message="准备回放", progress=0)
+    entry.update(state="running", message="准备回放", progress=0, video_ids=video_ids(group))
     begin_import_progress(entry, options)
     save_imports()
     directory = STATE_DIR / "audio" / ident
@@ -568,6 +599,7 @@ async def import_group(group: dict, run_options: dict | None = None):
         category = category_for(group["course_name"], library.get("category_profiles", {}))
         profile = library.get("category_profiles", {}).get(category, {})
         config = {"title": group["title"], "category": category, "language": "", "translation": "off",
+                  "course_time": {'start': group['start'], 'end': group['stop']},
                   "ai_correction": options.get("ai_correction", True), "context": profile.get("asr_prompt", group["course_name"]),
                   "terminology": profile.get("terminology", []), "asr_params": profile.get("asr_params", {}),
                   "ai": {"summary_provider": options.get("summary_provider", {}),
@@ -714,8 +746,11 @@ async def start_import(data: Selection):
             item = {"group": json.loads(json.dumps(group_rows[ident]))}
             queue_state["items"].append(item)
         item.update(state="queued", options=json.loads(json.dumps(options)))
+        entry = imports.setdefault(ident, {"id": ident, "title": group_rows[ident]["title"]})
+        entry.update(state="queued", message="已加入入库队列", video_ids=video_ids(group_rows[ident]))
     queue_state["paused"] = False
     save_queue()  # Persist acceptance before returning to the browser.
+    save_imports()
     stop_event.clear()
     status.update(state="running", message="选中课次已加入队列")
     job = asyncio.create_task(run_queue())

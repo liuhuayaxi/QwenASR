@@ -121,6 +121,26 @@ class ReplayClockTests(unittest.TestCase):
 
 
 class BrowserLoginTicketTests(unittest.TestCase):
+    def test_unimported_video_uses_first_segment_without_downloading_audio(self):
+        client = SmartClassClient(transport=httpx.MockTransport(lambda request: self.fail('Unexpected network call')))
+        try:
+            with patch.object(client, 'api', return_value={'Title':'上半节', 'VideoSegmentInfo':[
+                {'ID':102, 'Index':2, 'IsProcessSuccess':True},
+                {'ID':101, 'Index':1, 'IsProcessSuccess':True}]}):
+                target = client.browser_replay_target(FIRST)
+                self.assertEqual(target['segment_id'], '101')
+                self.assertEqual(target['seconds'], 0)
+                self.assertEqual(parse_qs(urlsplit(target['url']).query)['NewID'], [FIRST])
+            with patch.object(client, 'api') as request:
+                with self.assertRaises(SmartClassError): client.browser_replay_target('../invalid')
+                request.assert_not_called()
+            with patch.object(client, 'api', return_value={'VideoSegmentInfo':[
+                {'ID':101, 'Index':1, 'IsProcessing':True},
+                {'ID':102, 'Index':2, 'IsProcessSuccess':True}]}):
+                with self.assertRaisesRegex(SmartClassError, '仍在处理'): client.browser_replay_target(FIRST)
+        finally:
+            client.close()
+
     def test_ticket_is_not_consumed_by_backend(self):
         seen = []
         def handler(request):
@@ -180,11 +200,29 @@ class BrowserHandoffRoutesTests(unittest.TestCase):
         client = SimpleNamespace(state_dir=Path(directory),
             request=Mock(side_effect=LoginRequired('expired')) if expired else Mock(return_value=SimpleNamespace(
                 text='var userInfo=[{"UserID":123}];')),
-            login=Mock(), browser_login_ticket=Mock(return_value=
+            login=Mock(), browser_replay_target=Mock(return_value={'video_id':FIRST, 'segment_id':'101', 'seconds':0}),
+            browser_login_ticket=Mock(return_value=
                 'https://njupt.smartclass.cn/SystemSpace/Redirect.aspx?ticket=ST-browser'))
         app = FastAPI()
         app.include_router(replay_bridge_router(client, asyncio.Lock()))
         return TestClient(app), client
+
+    def test_video_target_is_available_without_a_recording_or_lesson_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            api, client = self.app(directory)
+            response = api.get('/api/replay-video-target', params={'video':FIRST})
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()['seconds'], 0)
+            client.browser_replay_target.assert_called_once_with(FIRST)
+            self.assertEqual(api.get('/api/replay-video-target', params={'video':'bad'}).status_code, 400)
+
+    def test_video_target_reauthenticates_expired_session_without_importing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory)/'credentials.json').write_text(json.dumps({'username':'test','password':'dummy'}))
+            api, client = self.app(directory)
+            client.browser_replay_target.side_effect = [LoginRequired('expired'), {'seconds':0,'video_id':FIRST}]
+            self.assertEqual(api.get('/api/replay-video-target',params={'video':FIRST}).status_code,200)
+            client.login.assert_called_once_with('test','dummy')
 
     def test_existing_server_session_yields_a_fresh_browser_ticket(self):
         with tempfile.TemporaryDirectory() as directory:

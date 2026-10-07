@@ -7,7 +7,7 @@
   <title>课程回放 · QwenASR</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <script src="/static/js/theme.js?v=20261002-theme-2"></script>
-  <link rel="stylesheet" href="/static/smartclass.css?v=20261002-theme-2">
+  <link rel="stylesheet" href="/static/smartclass.css?v=20261007-lesson-links-1">
   <link rel="stylesheet" href="/static/ui.css?v=20261002-theme-2">
 </head>
 <body class="replay-page">
@@ -49,7 +49,7 @@
 
 <section class="card">
         <h2>选择课程与课次</h2>
-        <p class="muted">只获取你勾选的回放。同一天、同一课程的两节相邻回放会合成一份笔记。</p>
+        <p class="muted">只获取你勾选的回放。同一天、同一课程的两节相邻回放会合成一份笔记；课次后会显示已入库、排队或待继续等状态。</p>
         <label>本学期课程<select id="courses" class="ui-field"><option value="">登录后选择课程…</option></select></label>
         <button id="refresh" class="ui-button secondary" type="button">刷新课程</button>
         <button id="loadLessons" class="ui-button secondary" type="button">查看 / 刷新回放</button><div id="lessons" aria-live="polite"></div>
@@ -64,7 +64,9 @@
         <div class="fields">
         <label>精修接口地址<input id="correctionBase" type="url" class="ui-field"></label>
         <label>AI 精修模型<input id="correctionModel" placeholder="默认使用笔记模型" class="ui-field"></label></div>
-        <p class="muted">使用语音工作台已保存的 AI 密钥。从工作台顶部点击“课程回放”可同步当前模型和提示词。</p>
+        <p class="muted">设置自动保存到本机文件，清空浏览器不会丢失。AI 密钥共用工作台的本机密钥库；首次使用会采用工作台已保存的模型配置。</p>
+        <button id="saveOptions" class="ui-button secondary" type="button">保存笔记设置</button>
+        <p id="optionsStatus" class="muted" role="status">已保存的配置会在下次打开时自动恢复。</p>
         </details>
         <button id="import" type="button" disabled class="ui-button primary">获取选中课次并生成笔记</button>
         <button id="stop" class="ui-button secondary" type="button" hidden>暂停队列</button>
@@ -90,6 +92,6 @@
       return nativeFetch(input, init);
     };
   </script>
-  <script src="/static/js/smartclass.js?v=20261006-replay-login-1"></script>
+  <script src="/static/js/smartclass.js?v=20261007-lesson-links-1"></script>
 </body>
 </html>

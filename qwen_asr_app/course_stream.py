@@ -336,7 +336,7 @@ class CourseStreamManager:
             not isinstance(v, dict) or not v.get("video_id") or "segment_id" not in v for v in supplied
         ):
             raise HTTPException(400, "回放来源标识无效")
-        sources = [{k: v[k] for k in ("video_id", "segment_id", "duration", "title", "start") if k in v} for v in supplied]
+        sources = [{k: v[k] for k in ("video_id", "segment_id", "duration", "title", "start", "end") if k in v} for v in supplied]
         filename = "smartclass_" + key + ".flac"
         async with self.lock:
             record, extending = match_record(self.store.list_records(), key, sources)
@@ -366,6 +366,7 @@ class CourseStreamManager:
                 record = RecordingRecord.create_live(config.get("title") or "课程回放", category,
                     self.settings.storage_root, recorded_at=starts[0] if starts else None)
                 record.metadata.update(kind="upload", status="processing", source_filename=filename,
+                                       course_time=config.get('course_time') or {},
                                        course_stream={"chunks": [], "completed_chunks": 0, "expected_seconds": float(data["duration"]),
                                                       "sources": sources, "keys": [key], "automatic_title": config.get("title")},
                                        course_settings={"asr_prompt": config.get("context", ""), "terminology": config.get("terminology", []),

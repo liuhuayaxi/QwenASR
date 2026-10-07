@@ -407,9 +407,11 @@ function applyLiveParams(raw) {
   renderLiveSettingValues();
 }
 
+let apiSettingsReady = false, apiSettingsDirty = false;
 function saveApiSettings() {
+  if (!apiSettingsReady) return;
   els.saveApiConfig.checked = true;
-  localStorage.setItem(API_STORAGE_KEY, JSON.stringify({
+  const saved = {
     base_url: els.aiBaseUrl.value, model: els.aiModel.value,
     context_window: els.contextWindow.value, summary_interval: els.summaryInterval.value,
     summary_enabled: els.summaryEnabled.checked, api_key: els.aiApiKey.value,
@@ -425,37 +427,38 @@ function saveApiSettings() {
     summary_base_url: els.summaryBaseUrl.value, summary_model: els.summaryModel.value,
     summary_api_key: els.summaryApiKey.value, summary_api_mode: els.summaryApiMode.value,
     summary_context_window: els.summaryContextWindow.value, summary_extra_params: els.summaryApiParams.value,
-  }));
-  persistAiSecrets();
-}
-
-function persistAiSecrets() {
-  const keys = {
-    sentence: els.aiApiKey.value.trim(),
-    review: els.reviewApiKey.value.trim(),
-    summary: els.summaryApiKey.value.trim(),
-    correction: $("#correctionApiKey")?.value.trim() || "",
-    global: $("#globalApiKey")?.value.trim() || "",
   };
-  if (!Object.values(keys).some(Boolean)) return;
-  fetch("/api/ai/secrets", {
+  try { localStorage.setItem(API_STORAGE_KEY, JSON.stringify(saved)); } catch (_) { /* Disk remains authoritative. */ }
+  return fetch("/api/ai/settings", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ keys, base_urls: Object.fromEntries(["sentence", "review", "summary", "correction", "global"].map(mode => [mode, rawProvider(mode).base_url])) }),
+    body: JSON.stringify({settings: saved}),
     keepalive: true,
-  }).catch(() => { /* Browser storage still retains a local fallback. */ });
+  }).then(async response => {
+    if (!response.ok) throw new Error((await response.json()).detail || '本机配置保存失败');
+    // A later edit must still be flushed when the page closes.
+    try { if (localStorage.getItem(API_STORAGE_KEY) === JSON.stringify(saved)) apiSettingsDirty = false; } catch (_) {}
+  }).catch(error => { toast(`AI 配置尚未保存到本机：${error.message}，请恢复服务后修改或重新保存`, 6000); });
 }
 
 function scheduleApiSave() {
+  apiSettingsDirty = true;
   clearTimeout(scheduleApiSave.timer);
   scheduleApiSave.timer = setTimeout(saveApiSettings, 250);
 }
 
-function restoreApiSettings() {
+async function restoreApiSettings() {
   els.saveApiConfig.checked = true;
   try {
-    const saved = JSON.parse(localStorage.getItem(API_STORAGE_KEY) || "null");
-    if (!saved) return;
+    const response = await fetch('/api/ai/settings', {cache: 'no-store'});
+    if (!response.ok) throw new Error('读取本机 AI 配置失败');
+    const payload = await response.json();
+    const fromDisk = Boolean(payload.settings?.function_providers);
+    let saved = payload.settings;
+    if (!fromDisk) {
+      try { saved = JSON.parse(localStorage.getItem(API_STORAGE_KEY) || 'null'); } catch (_) { saved = null; }
+    }
+    if (!saved || !Object.keys(saved).length) { apiSettingsReady = true; return; }
     els.aiBaseUrl.value = saved.base_url || els.aiBaseUrl.value;
     els.aiModel.value = saved.model || els.aiModel.value;
     els.contextWindow.value = saved.context_window || String(DEFAULT_CONTEXT_TOKENS);
@@ -484,10 +487,13 @@ function restoreApiSettings() {
     els.summaryContextWindow.value = saved.summary_context_window || saved.context_window || String(DEFAULT_CONTEXT_TOKENS);
     els.summaryApiParams.value = saved.summary_extra_params || saved.extra_params || JSON.stringify(DEFAULT_API_PARAMS, null, 2);
     restoreFunctionProviders(saved);
-    upgradeKnownContextDefaults();
+    if (!fromDisk) upgradeKnownContextDefaults();
     renderProviderSummaries();
+    apiSettingsReady = true;
+    if (!fromDisk) await saveApiSettings();
   } catch (_) {
-    localStorage.removeItem(API_STORAGE_KEY);
+    apiSettingsReady = false;
+    toast('本机 AI 配置暂时无法读取，请恢复服务后刷新；不会用默认值覆盖已保存配置', 6000);
   }
 }
 
@@ -554,7 +560,7 @@ async function loadConfig() {
   els.historyChars.value = "2000";
   els.summaryInterval.value = "10";
   restoreFunctionProviders({});
-  restoreApiSettings();
+  await restoreApiSettings();
   renderProviderSummaries();
 }
 
@@ -2267,11 +2273,16 @@ els.asrParams.addEventListener("blur", () => { try { parseAsrParams(false); } ca
 els.saveApiConfig.addEventListener("change", () => {
   els.saveApiConfig.checked = true;
   saveApiSettings();
-  toast("API 配置与 Key 会持续保存在本机浏览器");
+  toast("API 地址、模型、参数、提示词与密钥会保存在本机文件");
 });
-els.clearApiConfig.addEventListener("click", () => {
+els.clearApiConfig.addEventListener("click", async () => {
+  clearTimeout(scheduleApiSave.timer);
+  try {
+    const response = await fetch('/api/ai/settings', {method: 'DELETE'});
+    if (!response.ok) throw new Error('清除失败');
+  } catch (_) { toast('未能清除本机配置，请恢复服务后重试'); return; }
+  apiSettingsDirty = false;
   localStorage.removeItem(API_STORAGE_KEY);
-  fetch("/api/ai/secrets", { method: "DELETE" }).catch(() => {});
   els.aiApiKey.value = "";
   els.reviewApiKey.value = "";
   els.summaryApiKey.value = "";
@@ -2312,8 +2323,8 @@ document.addEventListener("keydown", (event) => {
   event.preventDefault();
   if (!els.recordButton.disabled) els.recordButton.click();
 });
-window.addEventListener("pagehide", saveApiSettings);
-window.addEventListener("beforeunload", () => { saveApiSettings(); stopAudioNodes(); state.ws?.close(); });
+window.addEventListener("pagehide", () => { if (apiSettingsDirty) saveApiSettings(); });
+window.addEventListener("beforeunload", () => { if (apiSettingsDirty) saveApiSettings(); stopAudioNodes(); state.ws?.close(); });
 
 async function init() {
   drawIdleMeter();

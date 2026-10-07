@@ -415,8 +415,29 @@ class SmartClassClient:
                     raise SmartClassError("当前只适配平台 MP4 回放")
                 source_url = media_url(urljoin(index_url, track["Src"].replace("\\", "/")))
                 sources.append({"url": source_url, "video_id": video["NewID"], "segment_id": segment["ID"],
-                                "duration": float(segment["Duration"]), "title": video["Title"], "start": video["StartTime"]})
+                                "duration": float(segment["Duration"]), "title": video["Title"], "start": video["StartTime"],
+                                "end": video.get('EndTime') or video.get('StopTime')})
         return sources
+
+    def browser_replay_target(self, video_id: str) -> dict:
+        """Resolve the first playable segment without downloading audio or creating a recording."""
+        if not re.fullmatch(r'[0-9a-fA-F]{32}', video_id):
+            raise SmartClassError('回放编号无效')
+        info = self.api('/Video/GetVideoInfoDtoByID', {
+            'NewId': video_id, 'isGetLink': 'true', 'isloadstudent': 'false',
+        })
+        segments = info.get('VideoSegmentInfo') or []
+        if not segments:
+            raise SmartClassError('这节回放尚未生成可用视频')
+        segment = min(segments, key=lambda item: item.get('Index', 0))
+        if segment.get('IsProcessing') or not segment.get('IsProcessSuccess'):
+            raise SmartClassError('平台仍在处理这节视频，请稍后刷新')
+        ident = str(segment.get('ID') or '')
+        if not re.fullmatch(r'[1-9][0-9]*', ident):
+            raise SmartClassError('学校返回的视频片段编号无效')
+        return {'video_id': video_id, 'segment_id': ident, 'seconds': 0,
+                'source_title': str(info.get('Title') or '课堂回放'),
+                'url': PORTAL + '/PlayPages/Video.aspx?' + urlencode({'NewID': video_id, 'SegementID': ident})}
 
     def browser_login_ticket(self) -> str:
         """Acquire a fresh CAS service ticket for consumption by the browser.

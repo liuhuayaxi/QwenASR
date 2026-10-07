@@ -39,12 +39,31 @@ function clearLessons() {
   $('lessons').replaceChildren();
   updateSelection();
 }
+function renderLessonStatus(row, state) {
+  const badge = row.querySelector('.lesson-badge');
+  badge.textContent = state?.label || '';
+  badge.hidden = !state?.label;
+  badge.dataset.state = state?.state || 'new';
+  badge.title = state?.detail || '';
+  const detail = row.querySelector('.lesson-import-detail');
+  detail.textContent = state?.detail || '';
+  detail.hidden = !state?.label || state.state === 'completed';
+}
+function updateLessonStatuses(statuses) {
+  for (const group of currentGroups) {
+    if (statuses[group.id]) group.import_status = statuses[group.id];
+  }
+  for (const row of $('lessons').querySelectorAll('.lesson')) {
+    renderLessonStatus(row, currentGroups.find(group => group.id === row.dataset.group)?.import_status);
+  }
+}
 function renderLessons() {
   const chosen = new Set([...document.querySelectorAll('#lessons input:checked')].map(e => e.value));
   $('lessons').replaceChildren();
   for (const g of currentGroups) {
-    const row = document.createElement('label');
-    row.className = 'lesson';
+    const row = document.createElement('div'), choice = document.createElement('label');
+    row.className = 'lesson'; row.dataset.group = g.id;
+    choice.className = 'lesson-choice';
     const checkbox = document.createElement('input');
     checkbox.type = 'checkbox'; checkbox.value = g.id;
     checkbox.disabled = g.videos.length === 1 && !$('allowSingle').checked;
@@ -55,7 +74,22 @@ function renderLessons() {
     detail.textContent = g.videos.length === 2
       ? `第 ${g.periods.join('、')} 节 · 合计约 ${Math.round(g.duration / 60)} 分钟 → 一份笔记`
       : `第 ${g.periods[0]} 节 · 暂无相邻回放配对`;
-    text.append(title, detail); row.append(checkbox, text); $('lessons').append(row);
+    const heading = document.createElement('div'), badge = document.createElement('span');
+    heading.className = 'lesson-heading'; badge.className = 'lesson-badge';
+    const importDetail = document.createElement('small'); importDetail.className = 'lesson-import-detail';
+    heading.append(title, badge); text.append(heading, detail, importDetail);
+    choice.append(checkbox, text); row.append(choice);
+    const replays = document.createElement('div'); replays.className = 'lesson-replays';
+    for (const [index, video] of g.videos.entries()) {
+      const link = document.createElement('a');
+      link.className = 'ui-button lesson-replay';
+      link.textContent = g.videos.length === 2 ? (index === 0 ? '上半节回放' : '下半节回放') : '课程回放';
+      link.href = '/course/replay?' + new URLSearchParams({video:video.NewID});
+      link.target = '_blank'; link.rel = 'noopener noreferrer';
+      link.title = `打开第 ${g.periods[index]} 节学校回放`;
+      replays.append(link);
+    }
+    row.append(replays); renderLessonStatus(row, g.import_status); $('lessons').append(row);
   }
   if (!currentGroups.length) $('lessons').textContent = '此课程暂无可用回放。';
   updateSelection();
@@ -152,11 +186,13 @@ function renderCourseState(s) {
     }
     $('result').append(box);
   }
+  if (s.lesson_course === $('courses').value) updateLessonStatuses(s.lesson_statuses || {});
   updateSelection();
 }
 async function refresh() {
   try {
-    const r = await fetch('/api/status'), s = await r.json();
+    const course = $('courses').value;
+    const r = await fetch('/api/status' + (course ? '?course=' + encodeURIComponent(course) : '')), s = await r.json();
     if (continuePendingReplay(s)) return;
     $('state').textContent = s.message;
     $('identity').textContent = s.identity?.name ? '已连接：' + s.identity.name + ' · ' + s.term + ' 学期' : '';
@@ -194,13 +230,46 @@ $('refresh').onclick = async () => {
   notice();
   try { await post('/api/refresh'); await refresh(); } catch (e) { notice(e.message); }
 };
+let optionsSaveTimer = 0, optionsDirty = false;
+function selectedOptions() {
+  const existing = window.courseStatus?.options || {};
+  const summary = {...(existing.summary_provider || {}), base_url:$('summaryBase').value.trim(), model:$('summaryModel').value.trim()};
+  const correction = {...(existing.correction_provider || summary), base_url:$('correctionBase').value.trim() || summary.base_url, model:$('correctionModel').value.trim() || summary.model};
+  return {generate_summary:$('generateSummary').checked, ai_correction:$('aiCorrection').checked,
+    summary_provider:summary, correction_provider:correction};
+}
+async function saveOptions() {
+  clearTimeout(optionsSaveTimer);
+  const values = selectedOptions();
+  $('optionsStatus').textContent = '正在保存到本机…';
+  try {
+    await post('/api/options', values);
+    if (JSON.stringify(values) === JSON.stringify(selectedOptions())) {
+      optionsDirty = false;
+      if (window.courseStatus) window.courseStatus.options = {...window.courseStatus.options, ...values};
+      $('optionsStatus').textContent = '已保存到本机，清空浏览器不会丢失。';
+    }
+  } catch (error) { $('optionsStatus').textContent = `尚未保存：${error.message}`; throw error; }
+}
+for (const id of ['summaryBase','summaryModel','correctionBase','correctionModel','generateSummary','aiCorrection']) {
+  $(id).addEventListener('input', () => {
+    optionsDirty = true;
+    clearTimeout(optionsSaveTimer);
+    $('optionsStatus').textContent = '配置已修改，等待保存…';
+    optionsSaveTimer = window.setTimeout(() => saveOptions().catch(() => {}), 400);
+  });
+}
+$('saveOptions').onclick = () => saveOptions().catch(error => notice(error.message));
+window.addEventListener('pagehide', () => {
+  if (!optionsDirty || !optionsLoaded) return;
+  fetch('/api/options', {method:'POST', headers:{'Content-Type':'application/json','X-QwenASR-Client':'smartclass'},
+    body:JSON.stringify(selectedOptions()), keepalive:true}).catch(() => {});
+});
 $('import').onclick = async () => {
   const ids = [...document.querySelectorAll('#lessons input:checked:not(:disabled)')].map(e => e.value);
   $('import').disabled = true; notice();
   try {
-    const p = {...(window.courseStatus?.options?.summary_provider || {}), base_url:$('summaryBase').value.trim(), model:$('summaryModel').value.trim()};
-    const correction = {...(window.courseStatus?.options?.correction_provider || p), base_url:$('correctionBase').value.trim() || p.base_url, model:$('correctionModel').value.trim() || p.model};
-    await post('/api/options', {generate_summary:$('generateSummary').checked, ai_correction:$('aiCorrection').checked, summary_provider:p, correction_provider:correction});
+    await saveOptions();
     await post('/api/import', {ids}); await refresh();
   } catch (e) { notice(e.message); updateSelection(); }
 };

@@ -22,7 +22,7 @@
         <nav class="app-nav" aria-label="主导航">
           <a href="/" id="workbenchNav" aria-current="page">录音工作台</a>
           <a href="/library" id="libraryTab">录音库</a>
-          <a href="/course/" id="courseSyncLink" target="_blank" rel="noopener">课程回放</a>
+          <a href="/course/" id="courseSyncLink">课程回放</a>
           <a href="/course-files">课程资料库</a>
           <a href="/tasks">任务中心</a>
         </nav>
@@ -482,11 +482,11 @@
           <section class="settings-group wide">
             <div class="settings-group-heading">
               <b>本机保存</b>
-              <small>仅影响当前浏览器里的 AI 接口配置</small>
+              <small>本机文件保存 AI 接口配置，浏览器缓存仅作备用</small>
             </div>
             <div class="settings-group-grid single-column">
               <div class="wide local-save-row">
-                <label><input id="saveApiConfig" type="checkbox" checked hidden /> API 配置与 Key 始终保存在本机浏览器，直到手动清除</label>
+                <label><input id="saveApiConfig" type="checkbox" checked hidden /> API 配置与 Key 保存到本机文件，清空浏览器不会丢失，直到手动清除</label>
                 <button id="clearApiConfig" class="mini-button" type="button">清除已保存配置</button>
               </div>
             </div>
@@ -620,7 +620,6 @@
     </dialog>
 
     <div id="toast" class="toast" role="status"></div>
-    <script src="/static/app.js?v=20261007-search-focus-1" type="module"></script>
-    <script src="/static/js/course-sync-link.js?v=20260910"></script>
+    <script src="/static/app.js?v=20261007-local-settings-1" type="module"></script>
   </body>
 </html>

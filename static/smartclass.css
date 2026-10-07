@@ -23,8 +23,17 @@
 .step b { display: grid; place-items: center; width: 24px; height: 24px; border: 1px solid var(--green-line); border-radius: 50%; color: var(--green); font-size: var(--text-xs); font-weight: 600; }
 .lesson { display: flex !important; gap: 12px; align-items: flex-start; padding: 15px 0; border-bottom: 1px solid var(--line); }
 .lesson strong { display: block; font-size: var(--text-control); font-weight: 600; }
+.lesson .lesson-choice { display: flex; gap: 12px; min-width: 0; flex: 1; }
+.lesson-choice > div { min-width: 0; }
+.lesson-replays { display: flex; flex: 0 0 auto; flex-direction: column; gap: 6px; }
+.lesson-replays .lesson-replay { padding: 5px 9px; font-size: var(--text-xs); white-space: nowrap; }
+.lesson-heading { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 10px; }
+.lesson-badge { flex: 0 0 auto; padding: 2px 8px; border-radius: 20px; border: 1px solid var(--line); color: var(--muted); background: var(--surface); font-size: var(--text-xs); font-weight: 600; }
+.lesson-badge[data-state="completed"], .lesson-badge[data-state="running"] { color: var(--green-dark); background: var(--green-soft); border-color: var(--green-line); }
+.lesson-badge[data-state="interrupted"] { color: var(--danger); background: var(--danger-soft); border-color: var(--danger-line); }
+.lesson-badge[hidden], .lesson-import-detail[hidden] { display: none; }
 .lesson small { display: block; color: var(--muted); font-size: var(--text-sm); margin-top: 4px; }
-.lesson:has(input:disabled) { opacity: .55; }
+.lesson-choice:has(input:disabled) { opacity: .55; }
 #lessons:not(:empty) { margin: 8px 0 16px; font-size: var(--text-control); color: var(--muted); }
 details { margin: 20px 0; }
 summary { cursor: pointer; font-size: var(--text-control); margin-bottom: 14px; color: var(--green-dark); }

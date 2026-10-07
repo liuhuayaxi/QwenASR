@@ -35,24 +35,29 @@ window.addEventListener('message', event => {
     }
   }
 });
-$('retryReplay').addEventListener('click', () => { finished = false; launch(); });
+$('retryReplay').addEventListener('click', () => { finished = false; if (target) launch(); else initialize(); });
 
 async function initialize() {
   const recording = query.get('recording');
+  const video = query.get('video');
   const seconds = Number(query.get('seconds') || 0);
-  if (!recording || !Number.isFinite(seconds) || seconds < 0 || seconds > 7200) {
+  if ((!recording && !video) || (video && !/^[a-f0-9]{32}$/i.test(video)) || !Number.isFinite(seconds) || seconds < 0 || seconds > 7200) {
     status('录音或时间无效，请从录音库重新跳转。', 'error'); return;
   }
+  $('loginReplay').href = `/course/?returnTo=${encodeURIComponent(location.href)}`;
+  if (video) { $('replayBack').href = '/course/'; $('replayBack').textContent = '‹ 返回课程回放'; }
   try {
-    const response = await fetch(`/api/recordings/${encodeURIComponent(recording)}/replay-target?seconds=${seconds}`, {cache:'no-store'});
+    const path = video ? `/course/api/replay-video-target?video=${encodeURIComponent(video)}`
+      : `/api/recordings/${encodeURIComponent(recording)}/replay-target?seconds=${seconds}`;
+    const response = await fetch(path, {cache:'no-store'});
     const data = await response.json();
+    if (!response.ok) { $('loginReplay').hidden = response.status !== 401; $('retryReplay').hidden = false; }
     if (!response.ok) throw new Error(data.detail || '没有找到对应回放');
     target = data;
     $('replayTitle').textContent = target.source_title || target.recording_title;
-    $('replayTime').textContent = `录音 ${timeText(seconds)} → 此节回放 ${timeText(target.seconds)}`;
+    $('replayTime').textContent = video ? '从此节课的开头播放' : `录音 ${timeText(seconds)} → 此节回放 ${timeText(target.seconds)}`;
     $('officialReplay').href = target.url;
     $('officialReplay').hidden = false;
-    $('loginReplay').href = `/course/?returnTo=${encodeURIComponent(location.href)}`;
     launch();
     for (let attempt = 0; attempt < 5 && !bridgeReady; attempt += 1) {
       window.postMessage({channel, type:'probe'}, location.origin);

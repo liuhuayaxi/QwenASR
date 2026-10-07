@@ -22,6 +22,7 @@ from .library_layout import RECORDINGS, shared, recording_path, manifest_time
 from .audio import convert_audio_to_aac
 from .note_content import transcript_markdown, transcript_blocks
 from .course_replay import replay_sources
+from .course_dates import apply_course_dates
 from .settings import (
     DEFAULT_AI_SYSTEM_PROMPT,
     DEFAULT_ASR_PARAMS,
@@ -456,6 +457,7 @@ class RecordingRecord:
         category: str,
         storage_root: Path,
         session_id: str | None = None,
+        course_time: dict | None = None,
     ) -> "RecordingRecord":
         started = datetime.now().astimezone()
         session_id = session_id or f"upload-{started:%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}"
@@ -463,7 +465,8 @@ class RecordingRecord:
         clean_category = safe_component(category, "未分类")
         directory = storage_root / clean_category / f"{safe_component(clean_title, '上传录音')}__{session_id}"
         if shared(app_settings):
-            directory = recording_path(storage_root, clean_category, {"id": session_id, "started_at": started.isoformat()})
+            directory = recording_path(storage_root, clean_category, {"id": session_id, "started_at": started.isoformat(),
+                "recorded_at": (course_time or {}).get('start')})
         if (directory / "session.json").exists():
             existing = cls.load(directory)
             if existing.id != session_id:
@@ -488,6 +491,8 @@ class RecordingRecord:
             "audio_filename": audio_filename,
         }
         record = cls(directory, metadata)
+        if course_time:
+            record.metadata['course_time'] = course_time
         record.save_all()
         return record
 
@@ -506,6 +511,7 @@ class RecordingRecord:
                 segments = saved
         payload["segments"] = segments
         record = cls(directory, payload)
+        apply_course_dates(record.metadata, directory)
         return record
 
     @property
@@ -622,6 +628,7 @@ class RecordingRecord:
 
     def save_metadata(self) -> None:
         self.refresh_location()
+        apply_course_dates(self.metadata, self.directory)
         from .note_history import capture
         capture(self, self._persisted_note)
         atomic_json(self.meta_path, self.metadata)
@@ -1127,11 +1134,13 @@ class RecordingStore:
         return self.active, True
 
     def create_upload(
-        self, source: Path, original_filename: str, duration: float, title: str, category: str, session_id: str | None = None
+        self, source: Path, original_filename: str, duration: float, title: str, category: str, session_id: str | None = None,
+        course_time: dict | None = None,
     ) -> RecordingRecord:
         category = app_settings.add_category(category)
         record = RecordingRecord.create_upload(
-            source, original_filename, duration, title, category, app_settings.storage_root, session_id=session_id
+            source, original_filename, duration, title, category, app_settings.storage_root, session_id=session_id,
+            course_time=course_time,
         )
         self.paths[record.id] = record.directory
         return record

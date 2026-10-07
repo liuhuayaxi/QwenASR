@@ -56,8 +56,9 @@ class StreamTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(loaded.audio_path.exists())
             self.assertFalse(loaded.working_audio_path.exists())
             self.assertNotEqual(loaded.audio_path, loaded.working_audio_path)
-            self.assertEqual(loaded.metadata['recorded_at'], '2026-09-10 13:45')
-            self.assertEqual(loaded.metadata['started_at'], '2026-09-10T16:57:44+08:00')
+            self.assertEqual(loaded.metadata['recorded_at'], '2026-09-10T13:45:00+08:00')
+            self.assertEqual(loaded.metadata['started_at'], '2026-09-10T13:45:00+08:00')
+            self.assertEqual(loaded.metadata['imported_at'], '2026-09-10T16:57:44+08:00')
             with av.open(str(loaded.audio_path)) as audio:
                 self.assertEqual(audio.streams.audio[0].codec_context.name, 'aac')
                 self.assertGreaterEqual(sum(frame.samples for frame in audio.decode(audio=0)), 3*16000)
