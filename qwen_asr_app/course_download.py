@@ -7,6 +7,8 @@ import threading
 from .lazy import lazy_module
 
 from .smartclass import PORTAL, SmartClassError, media_url
+from .parallel_media import parallel_media
+import httpx
 
 np = lazy_module("numpy")
 av = lazy_module("av")
@@ -35,7 +37,7 @@ def stream_audio(sources, on_chunk, progress=lambda *args: None, stop=None, resu
             if stop.is_set():
                 raise SmartClassError("已停止下载，已接收音频与转写保留")
             try:
-                with av.open(media_url(item["url"]), options={
+                with parallel_media(media_url(item["url"]), stop) as media, av.open(media, options={
                     "rw_timeout": "20000000", "user_agent": "Mozilla/5.0", "protocol_whitelist": "https,tls,tcp",
                     "headers": f"Referer: {PORTAL}/\r\n",
                 }) as source:
@@ -93,7 +95,7 @@ def stream_audio(sources, on_chunk, progress=lambda *args: None, stop=None, resu
                 break
             except SmartClassError:
                 raise
-            except (OSError, av.error.FFmpegError):
+            except (OSError, httpx.HTTPError, av.error.FFmpegError):
                 if attempt == 2:
                     raise SmartClassError("视频服务器连续连接失败；已下载分段保留，恢复校园网络后可继续") from None
                 if stop.wait(attempt + 1):

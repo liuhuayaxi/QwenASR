@@ -1,8 +1,8 @@
 const $ = id => document.getElementById(id);
 let currentGroups = [], courseVersion = '', optionsLoaded = false;
-let busy = false, loadingCourse = '', loadSerial = 0, accountCollapsed = false;
+let busy = false, submitting = false, loadingCourse = '', loadSerial = 0, accountCollapsed = false;
 let replayLoginSubmitted = false;
-function notice(message = '') { $('notice').textContent = message; }
+function notice(message = '', kind = 'error') { $('notice').textContent = message; $('notice').dataset.kind = kind; }
 function pendingReplayURL() {
   const value = new URLSearchParams(location.search).get('returnTo');
   if (!value) return null;
@@ -29,7 +29,7 @@ async function post(path, body) {
   return value;
 }
 function updateSelection() {
-  $('import').disabled = busy || !!loadingCourse || !document.querySelector('#lessons input:checked:not(:disabled)');
+  $('import').disabled = busy || submitting || !!loadingCourse || !document.querySelector('#lessons input:checked:not(:disabled)');
   $('loadLessons').disabled = busy || !!loadingCourse || !$('courses').value;
 }
 function clearLessons() {
@@ -115,11 +115,11 @@ async function loadLessons() {
   }
 }
 function renderCourseState(s) {
-  busy = ['connecting','syncing','running'].includes(s.state);
+  busy = ['connecting','syncing'].includes(s.state);
   $('refresh').disabled = busy || !s.identity;
   $('courses').disabled = busy;
   $('stop').hidden = s.state !== 'running';
-  $('resumeQueue').hidden = busy || !(s.queue?.remaining);
+  $('resumeQueue').hidden = busy || s.state === 'running' || !(s.queue?.remaining);
   $('resumeQueue').disabled = !s.identity;
   const version = JSON.stringify([s.course_revision, s.courses.map(c => [c.key, c.VideoTotal])]);
   if (version !== courseVersion) {
@@ -150,18 +150,23 @@ function renderCourseState(s) {
     optionsLoaded = true;
   }
   $('result').replaceChildren();
-  for (const j of [...s.imports].reverse()) {
+  const activeImports = s.imports.filter(j => ['running', 'queued'].includes(j.state));
+  if (!activeImports.length) {
+    const empty = document.createElement('p'); empty.className = 'muted';
+    empty.textContent = '暂无正在运行的任务。已完成的笔记可在录音库查看。'; $('result').append(empty);
+  }
+  for (const j of activeImports) {
     const box = document.createElement('div'); box.className = 'job';
     const head = document.createElement('div'); head.className = 'job-head';
     const title = document.createElement('strong'), badge = document.createElement('span'), message = document.createElement('p');
-    title.textContent = j.title; badge.className = 'job-percent'; badge.textContent = Math.round(Number(j.progress) || 0) + '%';
+    title.textContent = j.title; badge.className = 'job-percent'; badge.textContent = j.state === 'queued' ? '排队中' : Math.round(Number(j.progress) || 0) + '%';
     message.textContent = j.message; head.append(title, badge); box.append(head, message);
     if (j.metrics?.first_text_seconds != null) { const timing = document.createElement('p'); timing.textContent = '首段文字 ' + j.metrics.first_text_seconds.toFixed(1) + ' 秒 · ASR 排队 ' + (j.metrics.asr_queue_seconds || 0).toFixed(1) + ' 秒 · 推理 ' + (j.metrics.asr_inference_seconds || 0).toFixed(1) + ' 秒'; box.append(timing); }
     if (j.ai_errors) { const warning = document.createElement('p'); warning.textContent = j.ai_errors + ' 段精修未完成，原文已保留，可在顶部任务中心重试'; box.append(warning); }
     if (j.state === 'running') {
       const meter = document.createElement('progress'); meter.className = 'overall-progress'; meter.max = 100; meter.value = j.progress || 0; meter.setAttribute('aria-label', '课次总体进度'); box.append(meter);
     }
-    if (j.phases && Object.keys(j.phases).length) {
+    if (j.state === 'running' && j.phases && Object.keys(j.phases).length) {
       const phases = document.createElement('div'); phases.className = 'phase-list';
       for (const key of ['download','asr','correction','summary']) {
         const phase = j.phases[key]; if (!phase) continue;
@@ -176,13 +181,6 @@ function renderCourseState(s) {
         row.append(phaseHead, track, detail); phases.append(row);
       }
       box.append(phases);
-    }
-    if (j.state === 'completed') {
-      for (const [name, url] of [['下载笔记',j.summary], ['临时音频与转写 ZIP',j.bundle]]) {
-        if (!url) continue;
-        const a = document.createElement('a'); a.href = url; a.textContent = name;
-        a.target = '_blank'; a.rel = 'noopener'; box.append(a);
-      }
     }
     $('result').append(box);
   }
@@ -266,15 +264,23 @@ window.addEventListener('pagehide', () => {
     body:JSON.stringify(selectedOptions()), keepalive:true}).catch(() => {});
 });
 $('import').onclick = async () => {
+  if (submitting) return;
   const ids = [...document.querySelectorAll('#lessons input:checked:not(:disabled)')].map(e => e.value);
-  $('import').disabled = true; notice();
+  if (!ids.length) return;
+  submitting = true; updateSelection(); notice();
   try {
     await saveOptions();
-    await post('/api/import', {ids}); await refresh();
-  } catch (e) { notice(e.message); updateSelection(); }
+    const result = await post('/api/import', {ids});
+    for (const input of document.querySelectorAll('#lessons input:checked')) {
+      if (ids.includes(input.value)) input.checked = false;
+    }
+    notice(result.already_queued ? '所选课次已在队列中。' : `已添加 ${result.added?.length || ids.length} 个课次，可以继续选择其他课程。`, 'success');
+    await refresh();
+  } catch (e) { notice(e.message); }
+  finally { submitting = false; updateSelection(); }
 };
 $('stop').onclick = async () => {
-  try { await post('/api/stop'); notice('正在停止，已保存的转写进度会保留…'); } catch (e) { notice(e.message); }
+  try { await post('/api/stop'); notice('正在暂停队列，已保存的转写进度会保留…', 'success'); } catch (e) { notice(e.message); }
 };
 let refreshTimer = 0;
 async function scheduledRefresh() {

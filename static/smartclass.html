@@ -7,7 +7,7 @@
   <title>课程回放 · QwenASR</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <script src="/static/js/theme.js?v=20261002-theme-2"></script>
-  <link rel="stylesheet" href="/static/smartclass.css?v=20261007-lesson-links-1">
+  <link rel="stylesheet" href="/static/smartclass.css?v=20261008-pipeline-1">
   <link rel="stylesheet" href="/static/ui.css?v=20261002-theme-2">
 </head>
 <body class="replay-page">
@@ -49,7 +49,7 @@
 
 <section class="card">
         <h2>选择课程与课次</h2>
-        <p class="muted">只获取你勾选的回放。同一天、同一课程的两节相邻回放会合成一份笔记；课次后会显示已入库、排队或待继续等状态。</p>
+        <p class="muted">只获取你勾选的回放。同一天、同一课程的两节相邻回放会合成一份笔记。下载、转写和笔记会流水线处理，运行期间可以切换课程、继续添加课次。</p>
         <label>本学期课程<select id="courses" class="ui-field"><option value="">登录后选择课程…</option></select></label>
         <button id="refresh" class="ui-button secondary" type="button">刷新课程</button>
         <button id="loadLessons" class="ui-button secondary" type="button">查看 / 刷新回放</button><div id="lessons" aria-live="polite"></div>
@@ -68,7 +68,7 @@
         <button id="saveOptions" class="ui-button secondary" type="button">保存笔记设置</button>
         <p id="optionsStatus" class="muted" role="status">已保存的配置会在下次打开时自动恢复。</p>
         </details>
-        <button id="import" type="button" disabled class="ui-button primary">获取选中课次并生成笔记</button>
+        <button id="import" type="button" disabled class="ui-button primary">将选中课次加入队列</button>
         <button id="stop" class="ui-button secondary" type="button" hidden>暂停队列</button>
         <button id="resumeQueue" hidden class="ui-button primary">继续已保存队列</button>
         </section>
@@ -92,6 +92,6 @@
       return nativeFetch(input, init);
     };
   </script>
-  <script src="/static/js/smartclass.js?v=20261007-lesson-links-1"></script>
+  <script src="/static/js/smartclass.js?v=20261008-pipeline-1"></script>
 </body>
 </html>

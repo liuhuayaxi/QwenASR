@@ -30,7 +30,11 @@ ROOT = Path(__file__).resolve().parent.parent
 status = {"state": "idle", "message": "请配置统一身份认证账号", "identity": None, "authenticated": False}
 client = SmartClassClient()
 job = None
+catalog_job = None
 platform_lock = asyncio.Lock()
+download_slots = asyncio.Semaphore(2)
+queue_wakeup = asyncio.Event()
+PIPELINE_CONCURRENCY = 3
 course_rows = {}
 group_rows = {}
 stop_event = threading.Event()
@@ -177,8 +181,11 @@ async def lifespan(app):
         job = asyncio.create_task(connect(saved["username"], saved["password"], False))
     yield
     stop_event.set()
+    queue_wakeup.set()
     if job and not job.done():
         await job
+    if catalog_job and not catalog_job.done():
+        await catalog_job
     client.close()
 
 
@@ -237,7 +244,7 @@ async def service_stop_guard(action: str, request: Request):
         return {"ready": False}
     if action != "prepare-stop":
         raise HTTPException(404, "操作不存在")
-    if job and not job.done():
+    if (job and not job.done()) or (catalog_job and not catalog_job.done()):
         raise HTTPException(409, "课程任务仍在进行，请先暂停队列")
     service_draining = True
     return {"ready": True}
@@ -248,7 +255,8 @@ async def get_status(course: str = ''):
     groups = [group for group in group_rows.values() if group.get('course_key') == course] if course else []
     return {**status, "service": "courses", "pid": os.getpid(), "instance": os.getenv("QWEN_ASR_INSTANCE", ""), "credentials_saved": (STATE_DIR / "credentials.json").exists(),
             "term": current_term(), "courses": list(course_rows.values()),
-            "imports": list(imports.values()), "options": options, "queue": queue_view(),
+            "imports": [entry for entry in imports.values() if entry.get("state") in {"running", "queued"}],
+            "options": options, "queue": queue_view(),
             "lesson_course": course, "lesson_statuses": await import_statuses(groups)}
 
 
@@ -337,23 +345,29 @@ async def load_courses():
     group_rows.clear()
     for row in rows:
         course_rows[course_key(row)] = {**row, "key": course_key(row)}
-    status.update(state="connected", message=f"本学期 {len(rows)} 条课程记录，选择课程查看回放",
-                  course_revision=time.time_ns())
+    status["course_revision"] = time.time_ns()
+    if status.get("state") != "running":
+        status.update(state="connected", message=f"本学期 {len(rows)} 条课程记录，选择课程查看回放")
 
 
 @app.post("/api/refresh")
 async def refresh_courses():
-    global job
-    check_idle()
+    global catalog_job
+    if status.get("state") in {"connecting", "syncing"}:
+        raise HTTPException(409, "正在连接或刷新课程，请稍后重试")
+    if catalog_job and not catalog_job.done():
+        return {"started": False}
     if not status.get("identity"):
         raise HTTPException(400, "请先登录")
     async def refresh():
-        status.update(state="syncing", message="正在刷新本学期课程…")
+        if status.get("state") != "running":
+            status.update(state="syncing", message="正在刷新本学期课程…")
         try:
             await load_courses()
         except Exception:
-            status.update(state="error", message="刷新课程失败，请重新连接账号后重试")
-    job = asyncio.create_task(refresh())
+            if status.get("state") != "running":
+                status.update(state="error", message="刷新课程失败，请重新连接账号后重试")
+    catalog_job = asyncio.create_task(refresh())
     return {"started": True}
 
 
@@ -503,7 +517,15 @@ async def import_stream(local, group, config, entry):
                 entry["download_detail"] = f"第 {part + 1}/{len(sources)} 节 · {seconds/60:.1f}/{duration/60:.1f} 分钟"
                 value = 100 * (part + min(1, seconds / max(duration, 1))) / max(1, len(sources))
                 update_import_phase(entry, "download", value, entry["download_detail"])
-            downloading = asyncio.create_task(asyncio.to_thread(stream_audio, sources, on_chunk, progress, local_stop, state.get("resume")))
+            resume = state.get("resume")
+            async def download():
+                update_import_phase(entry, "download", 0, "等待下载通道", "pending")
+                async with download_slots:
+                    if stop_event.is_set() or local_stop.is_set():
+                        raise SmartClassError("下载已暂停，已保存进度可继续")
+                    update_import_phase(entry, "download", 1, "正在并行获取回放音频")
+                    return await asyncio.to_thread(stream_audio, sources, on_chunk, progress, local_stop, resume)
+            downloading = asyncio.create_task(download())
         finished_input = bool(state.get("download_complete"))
         while True:
             if stop_event.is_set():
@@ -536,8 +558,8 @@ async def import_stream(local, group, config, entry):
                 entry,
                 "download",
                 100 if state.get("download_complete") else download_percent,
-                f"{state['download_seconds']/60:.1f}/{expected/60:.1f} 分钟",
-                "completed" if state.get("download_complete") else "running",
+                f"{state['download_seconds']/60:.1f}/{expected/60:.1f} 分钟" if state["download_seconds"] or finished_input else entry["phases"]["download"]["detail"],
+                "completed" if state.get("download_complete") else entry["phases"]["download"]["state"],
             )
             update_import_phase(
                 entry,
@@ -694,15 +716,14 @@ class Selection(BaseModel):
 
 
 async def run_queue():
-    status.update(state="running", message="准备继续已提交的课次…")
+    """Keep a bounded pipeline alive, including selections appended during a run."""
+    active = {}
     for item in queue_state["items"]:
-        if stop_event.is_set() or queue_state.get("paused"):
-            break
-        if item["state"] not in {"queued", "interrupted"}:
-            continue
+        if item["state"] == "interrupted":
+            item["state"] = "queued"
+
+    async def execute(item):
         group = item["group"]
-        item["state"] = "running"
-        save_queue()
         try:
             await import_group(group, item["options"])
             item["state"] = "completed"
@@ -719,7 +740,50 @@ async def run_queue():
             if isinstance(exc, asyncio.CancelledError):
                 save_queue()
                 raise
-        save_queue()
+        finally:
+            save_queue()
+            queue_wakeup.set()
+
+    status.update(state="running", message="准备继续已提交的课次…")
+    try:
+        while True:
+            queue_wakeup.clear()
+            for task in tuple(active):
+                if task.done():
+                    active.pop(task)
+                    await task
+            stopping = stop_event.is_set() or queue_state.get("paused")
+            if not stopping:
+                admitted = False
+                active_videos = {video for item in active.values() for video in video_ids(item["group"])}
+                for item in queue_state["items"]:
+                    if len(active) >= PIPELINE_CONCURRENCY:
+                        break
+                    if item["state"] != "queued":
+                        continue
+                    sources = set(video_ids(item["group"]))
+                    if sources & active_videos:
+                        continue
+                    item["state"] = "running"
+                    active[asyncio.create_task(execute(item))] = item
+                    active_videos.update(sources)
+                    admitted = True
+                if admitted:
+                    save_queue()
+            if not active:
+                break
+            pending = sum(item["state"] == "queued" for item in queue_state["items"])
+            status.update(state="running", message="正在暂停队列，保存各课次进度…" if stopping else
+                          f"流水线处理中：{len(active)} 个课次 · 等待 {pending} 个；可以继续添加课次")
+            # Wake on appended work or completion. A short timeout also observes stop.
+            try:
+                await asyncio.wait_for(queue_wakeup.wait(), .5)
+            except TimeoutError:
+                pass
+    finally:
+        if active:
+            stop_event.set()
+            await asyncio.gather(*active, return_exceptions=True)
     remaining = queue_view()["remaining"]
     status.update(state="connected", message=f"还有 {remaining} 项已保存，可点击继续队列" if remaining else "选中课次已全部归档")
 
@@ -727,34 +791,39 @@ async def run_queue():
 @app.post("/api/import")
 async def start_import(data: Selection):
     global job
-    # A repeated click/replayed HTTP response is the same accepted selection.
-    if job and not job.done() and status.get("state") == "running":
-        accepted = {i["group"]["id"] for i in queue_state["items"] if i["state"] in {"queued", "running", "completed"}}
-        if set(data.ids) <= accepted:
-            return {"started": False, "already_queued": True}
-    check_idle()
+    running = bool(job and not job.done())
+    if running and (status.get("state") != "running" or stop_event.is_set() or queue_state.get("paused")):
+        raise HTTPException(409, "正在连接或暂停队列，请稍后再添加课次")
+    if not status.get("identity"):
+        raise HTTPException(400, "请先登录")
     if any(ident not in group_rows for ident in data.ids):
         raise HTTPException(400, "课次列表已更新，请重新选择")
-    # Keep unfinished unselected items paused when starting a new selection.
-    for item in queue_state["items"]:
-        if item["state"] != "completed":
-            item["state"] = "paused"
-    queue_state["items"] = [i for i in queue_state["items"] if i["state"] != "completed" or i["group"]["id"] in data.ids]
+    added = []
     for ident in dict.fromkeys(data.ids):
         item = next((i for i in queue_state["items"] if i["group"]["id"] == ident), None)
+        # HTTP retries and overlapping selections must not reset a live task.
+        if item and item["state"] in {"queued", "running"}:
+            continue
         if item is None:
             item = {"group": json.loads(json.dumps(group_rows[ident]))}
             queue_state["items"].append(item)
+        else:
+            item["group"] = json.loads(json.dumps(group_rows[ident]))
         item.update(state="queued", options=json.loads(json.dumps(options)))
         entry = imports.setdefault(ident, {"id": ident, "title": group_rows[ident]["title"]})
         entry.update(state="queued", message="已加入入库队列", video_ids=video_ids(group_rows[ident]))
+        added.append(ident)
+    if not added:
+        return {"started": False, "already_queued": True, "added": []}
     queue_state["paused"] = False
     save_queue()  # Persist acceptance before returning to the browser.
     save_imports()
     stop_event.clear()
     status.update(state="running", message="选中课次已加入队列")
-    job = asyncio.create_task(run_queue())
-    return {"started": True}
+    queue_wakeup.set()
+    if not running:
+        job = asyncio.create_task(run_queue())
+    return {"started": True, "added": added}
 
 
 @app.post("/api/resume")
@@ -779,9 +848,15 @@ async def stop():
     queue_state["paused"] = True
     for item in queue_state["items"]:
         if item["state"] in {"queued", "running", "interrupted"}:
+            if item["state"] != "running":
+                entry = imports.get(item["group"]["id"])
+                if entry:
+                    entry.update(state="paused", message="队列已暂停，可继续已保存进度")
             item["state"] = "paused"
     save_queue()
+    save_imports()
     stop_event.set()
+    queue_wakeup.set()
     return {"stopping": True, "paused": True}
 
 

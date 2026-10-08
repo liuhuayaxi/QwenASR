@@ -8,7 +8,7 @@ const source = fs.readFileSync(path.join(__dirname, '../static/js/smartclass.js'
 function environment(returnTo) {
   const elements = new Map(), requests = [], navigations = [];
   const element = id => {
-    if (!elements.has(id)) elements.set(id, {value:'',checked:false, addEventListener(event, callback){this[event]=callback}});
+    if (!elements.has(id)) elements.set(id, {value:'',checked:false,dataset:{}, addEventListener(event, callback){this[event]=callback}});
     return elements.get(id);
   };
   const context = {URL, URLSearchParams,

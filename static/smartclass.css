@@ -17,6 +17,7 @@
 #identity { color: var(--green); font-size: var(--text-sm); }
 #notice { margin: 0 0 20px; padding: 12px 16px; color: var(--danger); background: var(--danger-soft); border: 1px solid var(--danger-line); border-radius: var(--radius-sm); font-size: var(--text-control); overflow-wrap: anywhere; }
 #notice:empty { display: none; }
+#notice[data-kind="success"] { color: var(--green-dark); background: var(--green-soft); border-color: var(--green-line); }
 #result { overflow-wrap: anywhere; }
 .replay-workflow { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; margin: 26px 0 0; color: var(--muted); }
 .step { display: inline-flex; align-items: center; gap: 8px; font-size: var(--text-sm); }
