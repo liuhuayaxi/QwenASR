@@ -142,6 +142,16 @@ Qwen3-ASR 本身负责语音识别，不包含说话人分离（diarization）�
 - `~/.qwenasr/uploads/jobs.json`：上传转写任务及可恢复进度。
 - 录音目录中的 `.note-history/`：笔记历史版本。
 
+## MinerU 4 文件识别
+
+本地 PDF 工具和课程资料库使用 MinerU 4.0.10，运行在独立环境 `~/.qwenasr/runtimes/mineru4/`。首次安装或换机器时运行 `scripts/install_mineru4.command`，它会下载并校验 Apple Silicon 所需的小模型与 llama.cpp 视觉模型。模型保存在 `~/.qwenasr/mineru4/models/`，不纳入 Git。
+
+打开“全部设置 → MinerU 文件识别”，或访问 <http://127.0.0.1:8765/?settings=mineru>。质量档位包括极速 Flash、基础 Basic、标准 Standard 和高级 Advanced；标准适合日常识别，高级使用更多推理计算，适合难识别的公式与排版。可调整自动／强制 OCR／原生文字层、图像分析、小模型后端、视觉引擎、模型下载来源、处理窗口页数、视觉并发和推理内存预算。内存预算影响小模型批量大小，不是进程内存硬限制；视觉并发也受本地引擎实际容量约束。Mac 推荐 Torch/MPS 自动后端和 llama.cpp。ONNX 需要对应模型；vLLM、LMDeploy 需要各自支持的操作系统、硬件与依赖。
+
+点击“保存 MinerU 设置”后写入 `~/.qwenasr/mineru-settings.json`（0600）。新任务保存参数快照，运行中的任务保持原参数；继续或重试未完成文件时使用最新配置。既有结果不会因设置变化自动重做；课程资料库会显示“按新参数重新识别”。本地 PDF 工具保留同名结果保护，比较不同参数前需先重命名或移走原件旁已有的 `(AI).pdf`。所有页面在本机处理，不配置远程文档服务，也不继承全局远程视觉模型地址。
+
+识别一次同时导出 Markdown、逐页内容列表和结构化结果，再把逐页正文、表格与 LaTeX 写入保留原页的 AI 友好 PDF。4.0 使用官方 Content List V1 渲染器适配打包器，避免沿用 3.x 的旧 JSON 结构；旧版 MLX 解码补丁不再参与 4.0 调用。官方档位和升级说明：[Tiers and Runtimes](https://opendatalab.github.io/MinerU/usage/tiers/)、[Migration to 4.0](https://opendatalab.github.io/MinerU/reference/migration_4/)。
+
 ## 回归验证
 
 使用 `.venv/bin/python scripts/check_tests.py` 运行 Python 回归测试，并核对真实凭证、设置和录音文件没有被测试修改。测试自动使用临时 `QWEN_ASR_DATA_DIR`，网络请求必须模拟；不会登录真实学校账号或调用真实 AI。前端控制测试：`node --test tests/test_session_controls.cjs`。

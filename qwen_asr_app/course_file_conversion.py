@@ -11,13 +11,14 @@ from pathlib import Path
 
 from .pdf_ai import convert_pdf_to_ai, find_mineru_binary, _run_checked
 from .conversion_control import check_stopped
+from .mineru_settings import mineru_settings, normalize_mineru_settings
 
 OFFICE = {".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx", ".odt", ".odp", ".ods", ".rtf"}
 TEXT = {".txt", ".md", ".csv", ".tsv"}
 IMAGES = {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".bmp"}
 SUPPORTED = OFFICE | TEXT | IMAGES | {".pdf"}
 ROOT = Path(__file__).resolve().parent.parent
-ENGINE = "mineru-hybrid-ocr-v1"
+ENGINE = "mineru-4-v1"
 
 
 def office_binary():
@@ -89,10 +90,11 @@ def _image_pdf(source, destination):
         doc.close()
 
 
-def convert(source, destination, progress=lambda stage, percent: None, stop=None):
+def convert(source, destination, progress=lambda stage, percent: None, stop=None, settings=None):
     import pymupdf as fitz
 
     check_stopped(stop)
+    settings = normalize_mineru_settings(settings) if settings is not None else mineru_settings.read()
     source, destination = Path(source), Path(destination)
     suffix = source.suffix.lower()
     if suffix not in SUPPORTED:
@@ -133,7 +135,7 @@ def convert(source, destination, progress=lambda stage, percent: None, stop=None
         finally:
             doc.close()
         result = convert_pdf_to_ai(base, builder_script=ROOT / "scripts" / "build_ai_friendly_pdf.py",
-            python_executable=Path(sys.executable), progress=progress, stop=stop)
+            python_executable=Path(sys.executable), progress=progress, stop=stop, settings=settings)
         with fitz.open(result) as generated:
             pages = len(generated)
             page_texts = [page.get_text().strip() for page in generated]
@@ -145,4 +147,4 @@ def convert(source, destination, progress=lambda stage, percent: None, stop=None
     if uncertain_pages:
         warnings.append("生成 PDF 的这些页含无法还原的字符（�），请对照原页核对：" + "、".join(map(str, uncertain_pages)))
     return {"engine": ENGINE, "pages": pages, "source_pages": source_pages,
-            "text_chars": total_chars, "warnings": warnings}
+            "text_chars": total_chars, "warnings": warnings, "mineru_settings": settings}

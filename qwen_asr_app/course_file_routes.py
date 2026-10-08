@@ -19,6 +19,7 @@ from fastapi.responses import FileResponse
 
 from .course_files import CourseFiles, KINDS, MAX_BYTES, digest_file
 from .course_file_conversion import convert, capabilities, ENGINE
+from .mineru_settings import mineru_settings
 from .storage import local_now
 from .library_layout import shared
 from .shared_library import discover_courses
@@ -161,9 +162,13 @@ class CourseFileAPI:
                 if category not in store.settings.categories:
                     category = "未分类"
                 items = store.list(category)
+                current_settings = mineru_settings.read()
                 for item in items:
                     state = item.get("conversion", {})
                     item["needs_mineru_upgrade"] = state.get("status") == "completed" and state.get("engine") != ENGINE and not state.get("external")
+                    item["mineru_settings_changed"] = (state.get("status") == "completed"
+                        and state.get("engine") == ENGINE and not state.get("external")
+                        and state.get("mineru_settings") != current_settings)
                     if state.get("status") in {"queued", "running", "stopping"} and (category, item["id"]) not in self.tasks:
                         item["conversion"] = {**state, "status": "interrupted", "stage": "上次转换中断，可重新转换"}
                 return {"categories": store.settings.categories, "category": category,
@@ -443,7 +448,9 @@ class CourseFileAPI:
             item, source = self.store.file(category, asset_id)
             item["sha256"] = current_digest
             previous = item.get("conversion", {})
-            if not force and previous.get("status") == "completed" and previous.get("engine") == ENGINE:
+            settings = mineru_settings.read()
+            if (not force and previous.get("status") == "completed" and previous.get("engine") == ENGINE
+                    and previous.get("mineru_settings") == settings):
                 try:
                     _, existing = self.store.file(category, asset_id, "pdf")
                 except ValueError:
@@ -451,6 +458,7 @@ class CourseFileAPI:
                 if existing and digest_file(existing) == previous.get("sha256"):
                     return {"file": item, "reused": True}
             item["conversion"] = {**previous, "status": "queued", "stage": "等待 MinerU 识别",
+                                  "mineru_settings": settings,
                                   "progress": 0, "error": "", "external": False,
                                   "created_at": previous.get("created_at") or local_now(), "updated_at": local_now()}
             self.store.save(category, item)
@@ -504,6 +512,8 @@ class CourseFileAPI:
 
     async def run_conversion(self, category, asset_id, source, stop):
         try:
+            item, _ = self.store.get(category, asset_id)
+            settings = item["conversion"].get("mineru_settings") or mineru_settings.read()
             async with self.conversion_lock:
                 check_stopped(stop)
                 loop = asyncio.get_running_loop()
@@ -529,7 +539,7 @@ class CourseFileAPI:
                           else directory / "PDF" / (Path(item["name"]).stem + "(AI).pdf"))
                 update("正在准备 MinerU 识别", 1)
                 report = await conversion_worker(convert, source, output,
-                    lambda stage, percent: loop.call_soon_threadsafe(update, stage, percent), stop=stop)
+                    lambda stage, percent: loop.call_soon_threadsafe(update, stage, percent), stop=stop, settings=settings)
                 item, _ = self.store.get(category, asset_id)
                 changed = digest_file(source) != source_digest
                 item["conversion"] = {"status": "stale" if changed else "completed",

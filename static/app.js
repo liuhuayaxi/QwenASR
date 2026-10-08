@@ -7,6 +7,7 @@ import { resample } from "./js/audio.js";
 import { createSummaryView } from "./js/summary-view.js?v=20261007-math-1";
 import { createTranscriptView } from "./js/transcript-view.js?v=20260923-upgrade-1";
 import { IDEASHELL_SERVERS, normalizeIdeashellServer } from "./js/ideashell-config.js?v=20261007";
+import { createMineruSettings } from "./js/mineru-settings.js?v=20261008-1";
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -171,7 +172,10 @@ function toast(message, duration = 2600) {
   toast.timer = setTimeout(() => els.toast.classList.remove("show"), duration);
 }
 
+const mineruSettingsPanel = createMineruSettings();
+
 function openAdvancedSettings(focusTarget = null) {
+  if (!mineruSettingsPanel.isReady()) mineruSettingsPanel.load();
   const panel = focusTarget?.closest("[data-ai-section]");
   if (panel) selectAiSettings(panel.dataset.aiSection);
   if (!els.settingsDialog.open) els.settingsDialog.showModal();
@@ -2342,8 +2346,12 @@ async function init() {
   const query = new URLSearchParams(location.search);
   if (query.get("recording")) await openLibraryRecord(query.get("recording"));
   if (query.get("settings") === "ai") {
-    els.settingsDialog.showModal();
+    openAdvancedSettings();
     selectAiSettings("summary");
+  }
+  if (query.get("settings") === "mineru") {
+    openAdvancedSettings();
+    $("#mineruSettingsGroup").scrollIntoView({block: 'start'});
   }
 }
 

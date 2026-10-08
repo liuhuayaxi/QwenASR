@@ -55,6 +55,7 @@ from qwen_asr_app.ideashell_sync import ideashell_manager
 from qwen_asr_app.model_runtime import ModelManager
 from qwen_asr_app.request_security import websocket_origin_allowed, http_request_allowed
 from qwen_asr_app.pdf_ai import find_mineru_binary
+from qwen_asr_app.mineru_settings import mineru_settings, runtime_info, DEFAULT_MINERU_SETTINGS
 from qwen_asr_app.pdf_jobs import PDFJobs
 from qwen_asr_app.task_center import task_center_router
 from qwen_asr_app.course_file_routes import CourseFileAPI
@@ -238,6 +239,24 @@ async def get_ai_settings():
         return {'settings': ai_preferences.read(), 'saved': ai_secret_store.status()}
     except (OSError, ValueError) as exc:
         raise HTTPException(500, '本机 AI 配置读取失败，未用默认值覆盖') from exc
+
+
+@app.get('/api/mineru/settings')
+async def get_mineru_settings():
+    try:
+        return {"settings": mineru_settings.read(), "defaults": DEFAULT_MINERU_SETTINGS,
+                "runtime": runtime_info(find_mineru_binary())}
+    except (OSError, ValueError) as exc:
+        raise HTTPException(500, "本机 MinerU 配置读取失败，未用默认值覆盖") from exc
+
+
+@app.put('/api/mineru/settings')
+async def save_mineru_settings(payload: dict[str, Any] = Body(...)):
+    try:
+        return {"settings": mineru_settings.save(payload.get("settings")),
+                "runtime": runtime_info(find_mineru_binary())}
+    except (OSError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @app.put('/api/ai/settings')

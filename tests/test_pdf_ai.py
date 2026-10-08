@@ -109,19 +109,24 @@ class PdfAiPackagingTests(unittest.TestCase):
             )
             reader.close()
 
-    def test_conversion_uses_ocr_formula_profile_and_atomic_target_name(self) -> None:
+    def test_conversion_uses_mineru4_settings_and_atomic_target_name(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             folder = Path(raw)
             source = folder / "讲义.pdf"
             source.write_bytes(b"%PDF-source")
             calls: list[list[str]] = []
             progress: list[tuple[str, int]] = []
+            binary = folder / "mineru-kit"
+            binary.write_text(f"#!{sys.executable}\n", encoding="utf-8")
+            profile = {"tier": "advanced", "ocr_mode": "ocr", "image_analysis": True}
+            used_settings = []
 
             def fake_run(command: list[str], log_path: Path, *args, **kwargs) -> str:
                 calls.append(command)
                 log_path.parent.mkdir(parents=True, exist_ok=True)
                 log_path.write_text("ok", encoding="utf-8")
                 if "--content-list" not in command:
+                    used_settings.append(json.loads(Path(command[command.index('--settings') + 1]).read_text()))
                     output_root = Path(command[command.index("-o") + 1]) / "doc" / "hybrid_ocr"
                     output_root.mkdir(parents=True)
                     (output_root / "doc.md").write_text("正文", encoding="utf-8")
@@ -132,21 +137,22 @@ class PdfAiPackagingTests(unittest.TestCase):
 
             with patch(
                 "qwen_asr_app.pdf_ai.find_mineru_binary",
-                return_value=Path("/usr/bin/true"),
-            ), patch("qwen_asr_app.pdf_ai._run_mineru", side_effect=lambda command, log, progress_callback, *args: fake_run(command, log)), patch("qwen_asr_app.pdf_ai._run_checked", side_effect=fake_run):
+                return_value=binary,
+            ), patch('qwen_asr_app.pdf_ai.runtime_info', return_value={'compatible': True}), patch("qwen_asr_app.pdf_ai._run_mineru", side_effect=lambda command, log, progress_callback, *args: fake_run(command, log)), patch("qwen_asr_app.pdf_ai._run_checked", side_effect=fake_run):
                 result = convert_pdf_to_ai(
                     source,
                     builder_script=ROOT / "scripts" / "build_ai_friendly_pdf.py",
                     python_executable=Path(sys.executable),
                     progress=lambda stage, percent: progress.append((stage, percent)),
+                    settings=profile,
                 )
 
             self.assertEqual(result, (folder / "讲义(AI).pdf").resolve())
             self.assertEqual(result.read_bytes(), b"%PDF-result")
             mineru_command = calls[0]
-            self.assertIn("ocr", mineru_command)
-            self.assertIn("hybrid-engine", mineru_command)
-            self.assertIn("--image-analysis", mineru_command)
+            self.assertEqual(mineru_command[0], sys.executable)
+            self.assertTrue(mineru_command[1].endswith('run_mineru4.py'))
+            self.assertEqual({key: used_settings[0][key] for key in profile}, profile)
             self.assertEqual(progress[-1], ("转换完成", 100))
 
 

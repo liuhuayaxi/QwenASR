@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import re
 import shutil
 import signal
@@ -9,7 +10,7 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Callable, Iterable
-from .mineru_runtime_patch import ensure_mineru_utf8_patch
+from .mineru_settings import RUNTIME_ROOT, mineru_settings, normalize_mineru_settings, runtime_info
 from .conversion_control import check_stopped
 
 
@@ -27,6 +28,7 @@ def find_mineru_binary() -> Path | None:
     configured = os.getenv("QWEN_ASR_MINERU", "").strip()
     candidates = [
         Path(configured).expanduser() if configured else None,
+        RUNTIME_ROOT / "bin" / "mineru-kit",
         Path(shutil.which("mineru")) if shutil.which("mineru") else None,
         Path.home() / ".local" / "bin" / "mineru",
     ]
@@ -148,6 +150,8 @@ def _mineru_progress(text: str) -> tuple[str, int] | None:
         window_hint = f" · 处理段 {window}/{window_count}" if window_count > 1 else ""
         return f" · 约处理到原 PDF 第 {current}/{total_pages} 页{window_hint}"
 
+    if windows:
+        cleaned = cleaned[windows[-1].end():]
     candidates: list[tuple[int, str, int]] = []
     layout = _last_progress(cleaned, r"(?:^|[\r\n])Layout Predict:\s*(\d+)%")
     if layout:
@@ -178,10 +182,10 @@ def _mineru_progress(text: str) -> tuple[str, int] | None:
         )
 
     later_phases = [
-        (r"(?:^|[\r\n])MFR Predict:\s*(\d+)%", "公式复核", 74, 84),
-        (r"(?:^|[\r\n])OCR-det:\s*(\d+)%", "文字区域检测", 84, 91),
-        (r"(?:^|[\r\n])OCR-rec Predict:\s*(\d+)%", "文字识别", 91, 97),
-        (r"(?:^|[\r\n])Processing pages:\s*(\d+)%", "整理逐页结果", 97, 99),
+        (r"(?:^|[\r\n])MFR Predict:\s*(\d+)%", "公式复核", .15, .35),
+        (r"(?:^|[\r\n])OCR-det:\s*(\d+)%", "文字区域检测", .35, .45),
+        (r"(?:^|[\r\n])OCR-rec Predict:\s*(\d+)%", "文字识别", .45, .90),
+        (r"(?:^|[\r\n])Processing pages:\s*(\d+)%", "整理逐页结果", .90, 1.0),
     ]
     for pattern, label, start, end in later_phases:
         parsed = _last_progress(cleaned, pattern)
@@ -189,8 +193,8 @@ def _mineru_progress(text: str) -> tuple[str, int] | None:
             candidates.append(
                 (
                     parsed[0],
-                    f"MinerU · {label} {parsed[1]}%",
-                    round(start + (end - start) * parsed[1] / 100),
+                    f"MinerU · {window_label} · {label} {parsed[1]}%",
+                    round(base + segment * (start + (end - start) * parsed[1] / 100)),
                 )
             )
     if not candidates:
@@ -204,10 +208,8 @@ def _run_mineru(
 ) -> str:
     check_stopped(stop)
     last_update: tuple[str, int] | None = None
-    patch = ensure_mineru_utf8_patch(Path(command[0]))
+    highest = 0
     with log_path.open("wb") as log:
-        log.write(f"QwenASR MinerU UTF-8 compatibility: {patch['status']} ({patch.get('version', 'upstream')})\n".encode())
-        log.flush()
         process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         try:
             while process.poll() is None:
@@ -215,6 +217,9 @@ def _run_mineru(
                 time.sleep(0.75)
                 text = log_path.read_text(encoding="utf-8", errors="replace")
                 update = _mineru_progress(text)
+                if update:
+                    highest = max(highest, update[1])
+                    update = (update[0], highest)
                 if update and update != last_update:
                     last_update = update
                     if progress:
@@ -225,6 +230,8 @@ def _run_mineru(
     check_stopped(stop)
     output = log_path.read_text(encoding="utf-8", errors="replace")
     update = _mineru_progress(output)
+    if update:
+        update = (update[0], max(highest, update[1]))
     if update and update != last_update and progress:
         progress(*update)
     if returncode:
@@ -247,6 +254,7 @@ def convert_pdf_to_ai(
     python_executable: Path,
     progress: ProgressCallback | None = None,
     stop=None,
+    settings=None,
 ) -> Path:
     """Convert one PDF and atomically create its sibling ``(AI).pdf`` file."""
     source = Path(source).resolve()
@@ -256,9 +264,12 @@ def convert_pdf_to_ai(
     mineru = find_mineru_binary()
     if mineru is None:
         raise RuntimeError(
-            "未找到 MinerU。请先运行：uv tool install mineru，"
-            "再运行 mineru-models-download -s modelscope -m vlm"
+            "未找到 MinerU 4。请先运行 scripts/install_mineru4.command"
         )
+    info = runtime_info(mineru)
+    if not info["compatible"]:
+        raise RuntimeError(f"需要 MinerU 4.x，当前为 {info['version'] or '未知版本'}；请运行 scripts/install_mineru4.command")
+    settings = normalize_mineru_settings(settings) if settings is not None else mineru_settings.read()
     if not builder_script.is_file():
         raise RuntimeError("AI 友好 PDF 打包脚本不存在")
 
@@ -272,25 +283,23 @@ def convert_pdf_to_ai(
     with tempfile.TemporaryDirectory(prefix="qwenasr-pdf-ai-") as raw_work:
         work = Path(raw_work)
         mineru_output = work / "mineru"
-        mineru_log = _run_mineru(
+        settings_path = work / "settings.json"
+        settings_path.write_text(json.dumps(settings), encoding="utf-8")
+        # The SDK runs in its own environment, outside the ASR process. This
+        # retains process-group cancellation and uses a single parse for exports.
+        first_line = mineru.read_text(encoding="utf-8").splitlines()[0]
+        runtime_python = first_line.removeprefix("#!").strip()
+        if not Path(runtime_python).is_file():
+            raise RuntimeError("MinerU 启动脚本没有有效的 Python 解释器")
+        _run_mineru(
             [
-                str(mineru),
-                "-p",
+                runtime_python,
+                str(builder_script.parent / "run_mineru4.py"),
                 str(source),
                 "-o",
                 str(mineru_output),
-                "-m",
-                "ocr",
-                "-b",
-                "hybrid-engine",
-                "--effort",
-                "medium",
-                "--image-analysis",
-                "false",
-                "-f",
-                "true",
-                "-t",
-                "true",
+                "--settings",
+                str(settings_path),
             ],
             work / "mineru.log",
             report,
@@ -301,6 +310,7 @@ def convert_pdf_to_ai(
         content_list = _single_output(
             mineru_output, "*_content_list.json", "逐页内容映射"
         )
+        uncertain = "\ufffd" in markdown.read_text(encoding="utf-8")
 
         descriptor, temporary_name = tempfile.mkstemp(
             prefix=f".{source.stem}-ai-", suffix=".pdf", dir=source.parent
@@ -340,5 +350,5 @@ def convert_pdf_to_ai(
                 temporary_output.unlink(missing_ok=True)
 
     if progress:
-        progress("转换完成 · 识别包含 � 标记，请对照原页核对" if "QWENASR_MINERU_UTF8_REPLACEMENT" in mineru_log else "转换完成", 100)
+        progress("转换完成 · 识别包含 � 标记，请对照原页核对" if uncertain else "转换完成", 100)
     return target

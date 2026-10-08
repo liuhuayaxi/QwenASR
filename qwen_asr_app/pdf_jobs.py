@@ -14,6 +14,7 @@ from .conversion_control import ConversionStopped, check_stopped, conversion_wor
 from .durable import atomic_json
 from .paths import PRIVATE_ROOT, ROOT
 from .pdf_ai import convert_pdf_to_ai, find_mineru_binary, validate_pdf_sources
+from .mineru_settings import mineru_settings
 
 ACTIVE = {"queued", "running", "stopping"}
 
@@ -53,6 +54,7 @@ class PDFJobs:
         if not find_mineru_binary():
             raise ValueError("未找到 MinerU，请先安装并下载模型")
         job = {"id": uuid.uuid4().hex, "status": "queued", "stage": "等待 MinerU 识别",
+               "mineru_settings": mineru_settings.read(),
                "progress": 0, "created_at": time.time(), "updated_at": time.time(),
                "files": [{"source_path": str(source), "source_name": source.name,
                           "status": "pending", "stage": "等待处理", "progress": 0,
@@ -111,9 +113,11 @@ class PDFJobs:
                               if other["status"] in ACTIVE for item in other["files"]}
             if any(item["source_path"] in active_sources for item in pending):
                 raise ValueError("文件已在另一项任务中识别")
+            settings = mineru_settings.read()
             for item in pending:
                 item.update(status="pending", progress=0, error="", stage="等待重新识别")
             job.update(status="queued", stage="等待 MinerU 识别", finished_at=0)
+            job["mineru_settings"] = settings
             self.schedule(job)
         else:
             raise ValueError("无效的任务操作")
@@ -128,6 +132,9 @@ class PDFJobs:
                 job.update(status="running", started_at=time.time())
                 self.save()
                 loop = asyncio.get_running_loop()
+                settings = job.get("mineru_settings")
+                if settings is None:
+                    settings = job["mineru_settings"] = mineru_settings.read()
                 total = len(job["files"])
                 for index, item in enumerate(job["files"]):
                     if item["status"] == "completed":
@@ -148,9 +155,10 @@ class PDFJobs:
                         output = await conversion_worker(convert_pdf_to_ai, Path(item["source_path"]),
                             builder_script=ROOT / "scripts" / "build_ai_friendly_pdf.py",
                             python_executable=Path(sys.executable), stop=stop,
+                            settings=settings,
                             progress=lambda stage, percent, callback=update: loop.call_soon_threadsafe(callback, stage, percent))
                         item.update(status="completed", stage="转换完成", progress=100,
-                                    output_path=str(output), output_name=output.name, error="")
+                                    output_path=str(output), output_name=output.name, error="", mineru_settings=dict(settings))
                     except ConversionStopped:
                         raise
                     except Exception as exc:

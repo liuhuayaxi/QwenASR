@@ -64,7 +64,7 @@
   </div>
   <dialog id="pdfDialog" class="ui-dialog" aria-labelledby="pdfDialogTitle">
     <form id="pdfForm"><div class="dialog-header"><h2 id="pdfDialogTitle">新建 PDF 识别任务</h2><button id="closePdf" class="ui-button" type="button" aria-label="关闭">✕</button></div>
-      <div class="dialog-body"><p>选择本机 PDF，使用 MinerU 识别正文、表格与公式，生成 AI 友好版本。</p><button id="choosePdf" class="ui-button" type="button">从 Finder 选择 PDF</button><label class="field-label" for="pdfPaths">文件绝对路径（每行一个，最多 20 个）</label><textarea id="pdfPaths" class="ui-field" rows="5" placeholder="/Users/你的用户名/Desktop/讲义.pdf" required></textarea><p class="muted">课程目录内的原件会自动归入对应课程任务，结果放入“AI友好型”。其他本地 PDF 会在原文件旁生成“(AI).pdf”；已存在的同名结果不会被覆盖。</p><p id="pdfError" class="task-notice error" role="alert" hidden></p></div>
+      <div class="dialog-body"><p>选择本机 PDF，使用 MinerU 识别正文、表格与公式，生成 AI 友好版本。 <a href="/?settings=mineru" target="_blank" rel="noopener">设置识别质量与参数 ↗</a></p><button id="choosePdf" class="ui-button" type="button">从 Finder 选择 PDF</button><label class="field-label" for="pdfPaths">文件绝对路径（每行一个，最多 20 个）</label><textarea id="pdfPaths" class="ui-field" rows="5" placeholder="/Users/你的用户名/Desktop/讲义.pdf" required></textarea><p class="muted">课程目录内的原件会自动归入对应课程任务，结果放入“AI友好型”。其他本地 PDF 会在原文件旁生成“(AI).pdf”；已存在的同名结果不会被覆盖。</p><p id="pdfError" class="task-notice error" role="alert" hidden></p></div>
       <div class="dialog-footer"><button id="submitPdf" class="ui-button primary">加入识别队列</button></div></form>
   </dialog>
   <div id="toast" class="task-toast" role="status" hidden></div>
