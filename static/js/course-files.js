@@ -120,7 +120,7 @@ function openCategoryDialog(action) {
   $('categoryDialogTitle').textContent = deleting ? '删除分类' : '重命名分类';
   $('categoryDescription').textContent = deleting
     ? `删除“${state.category}”后，其中的课程资料和录音会移入“未分类”，文件和笔记内容都会保留。`
-    : `为“${state.category}”设置新名称，课程资料、录音库分类和本地课程配置会一起更新。`;
+    : `为“${state.category}”设置新名称，课程资料、课堂记录分类和本地课程配置会一起更新。`;
   $('categoryNameField').hidden = deleting;
   $('categoryName').disabled = deleting;
   $('categoryName').value = state.category;

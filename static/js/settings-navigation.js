@@ -5,7 +5,7 @@ export function createSettingsNavigation() {
   const dialog = $("#settingsDialog"), content = dialog.querySelector(".settings-page-body");
   const pages = {
     ai: ["AI 模型与提示词", "按功能分别选择模型与回答方式。"],
-    recording: ["实时录音", "调整收音灵敏度、分段和实时总结。"],
+    recording: ["实时录音", "调整收音灵敏度、分段和课堂实时提纲。"],
     course: ["课程背景与术语", "为当前课程保存背景、提示词与专业术语。"],
     inference: ["推理位置", "选择语音和文档识别使用的设备。"],
     documents: ["文件识别", "调整 PDF 识别质量与处理方式。"],

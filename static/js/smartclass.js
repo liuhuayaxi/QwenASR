@@ -184,6 +184,16 @@ function renderCourseState(s) {
     }
     $('result').append(box);
   }
+  const completedImports = (s.imports || []).filter(item => item.state === 'completed' && item.record_id).slice(-5).reverse();
+  if (completedImports.length) {
+    const heading = document.createElement('h3'); heading.textContent = '最近入库 · 课堂记录'; $('result').append(heading);
+    for (const item of completedImports) {
+      const link = document.createElement('a'); link.className = 'ui-button';
+      link.href = '/library?' + new URLSearchParams({recording: item.record_id});
+      link.textContent = `${item.title || '课堂记录'} · 阅读原文 / 打开课堂笔记`;
+      $('result').append(link);
+    }
+  }
   if (s.lesson_course === $('courses').value) updateLessonStatuses(s.lesson_statuses || {});
   updateSelection();
 }

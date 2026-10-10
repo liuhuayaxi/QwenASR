@@ -124,7 +124,7 @@ export function createMarkdownReader({ container, source, toc, onChange }) {
     if (!markdown.trim()) {
       const empty = document.createElement("p");
       empty.className = "note-empty";
-      empty.textContent = "生成 AI 总结后，在这里阅读完整课堂笔记。点击段落即可编辑。";
+      empty.textContent = "生成课后复习笔记后，在这里阅读完整课堂笔记。点击段落即可编辑。";
       fragment.append(empty);
     }
     for (const [index, token] of tokens.entries()) {

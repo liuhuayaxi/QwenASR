@@ -104,7 +104,7 @@ async function transcribeUploadedFile(file, config, fileIndex, fileCount, resume
         addBatchBlock(els.batchAi, {}, event.summary?.summary || "", "课堂总结");
       } else if (event.type === "summary_error") {
         summaryView.renderError(event.message || "未知错误");
-        addBatchBlock(els.batchAi, {}, `AI 总结未完成：${event.message}`, "课堂总结");
+        addBatchBlock(els.batchAi, {}, `课后复习笔记未完成：${event.message}`, "课堂总结");
       } else if (event.type === "ai_error") {
         const label = event.scope === "segment" ? `逐段修正 ${event.id}` : `AI 处理 ${event.id}`;
         addBatchBlock(els.batchAi, { id: event.id }, `AI 处理未完成：${event.message}`, label);
@@ -129,7 +129,7 @@ async function uploadRecordings(fileList) {
   state.uploading = true;
   els.batchRaw.innerHTML = "";
   els.batchAi.textContent = els.aiCorrection.checked || els.translation.value !== "off"
-    ? "等待转写与 AI 精修"
+    ? "等待转写与 转写校对"
     : "等待转写";
   els.batchAi.dataset.placeholder = "true";
   els.batchAi.classList.add("muted-output");

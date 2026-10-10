@@ -67,7 +67,7 @@ export function createTranscriptView({
     const statusText = active
       ? state.capturing ? "会话进行中 · 正在收音" : "会话进行中 · 已暂停"
       : session.status === "interrupted" || session.status === "failed"
-        ? "批量转写已暂停 · 可在录音库继续"
+        ? "批量转写已暂停 · 可在课堂记录继续"
         : session.kind === "upload" ? "上传录音 · 已完成" : "会话已结束 · AAC 已生成";
     els.sessionState.textContent = `${session.title || "未命名录音"} · ${statusText}`;
     const when = session.started_at ? new Date(session.started_at).toLocaleString() : "";

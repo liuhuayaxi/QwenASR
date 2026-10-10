@@ -30,3 +30,6 @@ ai-infer-node/*-cache/
 ai-infer-node/mineru-home/
 ai-infer-node/cuda-toolkit/
 ai-infer-node/benchmark-result/
+
+# Independent course-workspace preview data.
+.workspace-preview/

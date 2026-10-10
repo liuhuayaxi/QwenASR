@@ -449,9 +449,9 @@ async def cancel_summary(session_id: str) -> dict[str, Any]:
 
 
 AI_TASK_LABELS = {
-    "summary": "课后 AI 总结",
-    "refinement": "未精修内容",
-    "live_summary": "实时累计总结",
+    "summary": "课后复习笔记",
+    "refinement": "转写校对",
+    "live_summary": "课堂实时提纲",
 }
 
 
@@ -2925,6 +2925,11 @@ app.include_router(note_library_router(app_settings, recording_store))
 # isolation while the desktop launcher exposes it at http://127.0.0.1:8765/course/.
 smartclass_service.app.state.recording_store = recording_store
 app.mount("/course", smartclass_service.app)
+
+
+@app.get("/workspace")
+async def workspace_page() -> FileResponse:
+    return FileResponse(ROOT / "static" / "workspace.html", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/library")

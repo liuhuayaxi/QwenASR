@@ -6,7 +6,8 @@
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <script src="/static/js/theme.js?v=20261010-routing-progress"></script>
   <link rel="stylesheet" href="/static/ui.css?v=20261002-theme-2">
-  <link rel="stylesheet" href="/static/tasks.css?v=20261010-task-history-1">
+  <link rel="stylesheet" href="/static/tasks.css?v=20261011-20261010-task-history-1">
+<link rel="stylesheet" href="/static/workspace.css?v=20261011"><script>if (new URLSearchParams(location.search).get("embedded") === "1") document.addEventListener("DOMContentLoaded", () => document.body.classList.add("workspace-embedded"));</script>
 </head>
 <body class="tasks-page">
     <header class="app-header">
@@ -16,9 +17,10 @@
           <span><b>QwenASR</b></span>
         </a>
         <nav class="app-nav" aria-label="主导航">
+          <a href="/workspace">课程工作区</a>
           <a href="/">录音工作台</a>
-          <a href="/library">录音库</a>
-          <a href="/notes">笔记管理</a>
+          <a href="/library">课堂记录</a>
+          <a href="/notes">复习资料</a>
           <a href="/course/">课程回放</a>
           <a href="/course-files">课程资料库</a>
           <a href="/tasks" aria-current="page">任务中心</a>
@@ -30,7 +32,8 @@
     <aside class="task-sidebar">
       <p class="nav-label">任务管理</p>
       <nav id="statusFilters" class="task-nav" aria-label="任务状态">
-        <button data-status="all" aria-current="page">全部任务 <span data-count="all">0</span></button>
+        <button data-status="daily" aria-current="page">需要继续</button>
+        <button data-status="all">全部任务 <span data-count="all">0</span></button>
         <button data-status="active">进行中 <span data-count="active">0</span></button>
         <button data-status="attention">待处理 <span data-count="attention">0</span></button>
         <button data-status="paused">已暂停 <span data-count="paused">0</span></button>
@@ -48,13 +51,13 @@
         <button data-summary="completed"><span>已完成</span><b data-count="completed">0</b></button>
       </section>
       <section class="task-section" aria-labelledby="listTitle">
-        <div class="task-toolbar"><h2 id="listTitle">全部任务</h2><div class="task-filters">
+        <div class="task-toolbar"><h2 id="listTitle">需要继续</h2><div class="task-filters">
           <label class="sr-only" for="taskSearch">搜索任务</label><input id="taskSearch" class="ui-field" type="search" placeholder="搜索任务、文件或课程…">
-          <label class="sr-only" for="typeFilter">任务类型</label><select id="typeFilter" class="ui-field"><option value="">全部类型</option><option value="asr">录音转写与课程回放</option><option value="ai">录音 AI 任务</option><option value="summary">课后 AI 总结</option><option value="refinement">未精修内容</option><option value="live_summary">实时累计总结</option><option value="mineru">全部 MinerU 识别</option><option value="course_pdf">课程资料识别</option><option value="pdf">本地 PDF 识别</option></select>
+          <label class="sr-only" for="typeFilter">任务类型</label><select id="typeFilter" class="ui-field"><option value="">全部类型</option><option value="asr">录音转写与课程回放</option><option value="ai">录音 AI 任务</option><option value="summary">课后 课后复习笔记</option><option value="refinement">未精修内容</option><option value="live_summary">实时累计总结</option><option value="mineru">全部 MinerU 识别</option><option value="course_pdf">课程资料识别</option><option value="pdf">本地 PDF 识别</option></select>
           <label class="sr-only" for="categoryFilter">课程</label><select id="categoryFilter" class="ui-field"><option value="">全部课程</option></select>
           <button id="refreshTasks" class="ui-button">刷新</button>
         </div></div>
-        <div class="task-bulk"><label><input id="selectAll" type="checkbox"> 全选当前列表</label><span id="selectionCount">未选择任务</span><div><button id="retryFailed" class="ui-button primary" type="button">一键重试失败任务</button><button data-bulk="continue" class="ui-button" disabled>继续</button><button data-bulk="pause" class="ui-button" disabled>暂停</button><button data-bulk="retry" class="ui-button" disabled>重试</button><button data-bulk="cancel" class="ui-button danger" disabled>取消</button><button id="clearCompleted" class="ui-button" type="button">一键清理已完成</button><button id="restoreCompleted" class="ui-button" type="button" hidden>恢复刚清理的任务</button></div></div>
+        <div class="task-bulk"><label><input id="selectAll" type="checkbox"> 全选当前列表</label><span id="selectionCount">未选择任务</span><div><button data-bulk="continue" class="ui-button" disabled>继续</button><button data-bulk="pause" class="ui-button" disabled>暂停</button><button data-bulk="retry" class="ui-button" disabled>重试</button><button data-bulk="cancel" class="ui-button danger" disabled>取消</button><details class="task-history-tools"><summary>高级历史操作</summary><button id="retryFailed" class="ui-button primary" type="button">一键重试失败任务</button><button id="clearCompleted" class="ui-button" type="button">一键清理已完成</button><button id="restoreCompleted" class="ui-button" type="button" hidden>恢复刚清理的任务</button></details></div></div>
         <p id="loadError" class="task-notice error" role="alert" hidden></p>
         <p id="sourceWarning" class="task-notice" role="status" hidden></p>
         <p id="actionResult" class="task-notice" role="status" hidden></p>
@@ -69,6 +72,6 @@
       <div class="dialog-footer"><button id="submitPdf" class="ui-button primary">加入识别队列</button></div></form>
   </dialog>
   <div id="toast" class="task-toast" role="status" hidden></div>
-  <script type="module" src="/static/js/tasks.js?v=20261010-task-history-1"></script>
+  <script type="module" src="/static/js/tasks.js?v=20261011-20261010-task-history-1"></script>
 </body>
 </html>

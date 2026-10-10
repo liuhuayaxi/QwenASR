@@ -1,13 +1,14 @@
+import {groupTasks, attentionStatuses} from './workbench/continuation.js?v=20261011';
 import {aiTaskPayload} from './task-config.js?v=20260913-tasks-1';
 
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c]));
 const active = new Set(['running', 'queued', 'waiting_retry', 'stopping']);
-const attention = new Set(['failed', 'interrupted', 'pending', 'stale', 'completed_with_errors']);
+const attention = attentionStatuses;
 const labels = {running:'进行中', queued:'排队中', waiting_retry:'等待自动重试', stopping:'正在停止', paused:'已暂停', failed:'失败', error:'失败', interrupted:'已中断', pending:'待处理', stale:'原件已更新', completed_with_errors:'部分失败', completed:'已完成', cancelled:'已取消'};
 const actionLabels = {continue:'继续', retry:'重试', pause:'暂停', cancel:'取消', download:'仅恢复下载', new_recognition:'新建识别', new_local:'新建本地任务'};
-const filterLabels = {all:'全部任务', active:'进行中', attention:'待处理', paused:'已暂停', completed:'已完成', cancelled:'已取消'};
-const state = {tasks: [], counts: {}, history: {}, filter: 'all', selected: new Set(), busy: false, loading: false, ready: false};
+const filterLabels = {daily:'需要继续', all:'全部任务', active:'进行中', attention:'待处理', paused:'已暂停', completed:'已完成', cancelled:'已取消'};
+const state = {tasks: [], counts: {}, history: {}, filter: 'daily', selected: new Set(), busy: false, loading: false, ready: false};
 let timer, toastTimer, lastPayload = '';
 
 function notice(id, message) { $(id).textContent = message; $(id).hidden = !message; }
@@ -24,8 +25,8 @@ async function api(path, body) {
 function filteredTasks() {
   const query = $('taskSearch').value.trim().toLocaleLowerCase();
   const type = $('typeFilter').value, category = $('categoryFilter').value;
-  return state.tasks.filter(task => (state.filter === 'all' || (state.filter === 'active' ? active.has(task.status) : state.filter === 'attention' ? attention.has(task.status) : task.status === state.filter))
-    && (!type || task.type === type || task.family === type) && (!category || (category === '__local__' ? !task.category : task.category === category))
+  return state.tasks.filter(task => (state.filter === 'all' || (state.filter === 'daily' ? active.has(task.status) || attention.has(task.status) : state.filter === 'active' ? active.has(task.status) : state.filter === 'attention' ? attention.has(task.status) : task.status === state.filter))
+    && (!type || task.type === type || task.family === type) && (!category || (category === '__local__' ? !task.category : task.category === category || task.type === 'course_queue' && !task.category))
     && (!query || [task.title, task.category, task.label, ...(task.files || []).map(file => file.source_name)].join(' ').toLocaleLowerCase().includes(query)));
 }
 function dateLabel(value) {
@@ -96,6 +97,7 @@ function selectionControls() {
   const visible = filteredTasks();
   const selectable = visible.filter(task => (task.actions || []).length);
   const selected = selectable.filter(task => state.selected.has(task.id));
+  document.querySelectorAll('[data-bulk]').forEach(button => button.hidden = !selected.length);
   $('selectionCount').textContent = selected.length ? `已选 ${selected.length} 项` : '未选择任务';
   $('selectAll').checked = selectable.length > 0 && selected.length === selectable.length;
   $('selectAll').indeterminate = selected.length > 0 && selected.length < selectable.length;
@@ -118,7 +120,7 @@ function render() {
   const focusSelector = focused?.matches('.task-select') ? '.task-select' : focused?.matches('summary') ? 'summary' : focused?.dataset.action ? `[data-action="${focused.dataset.action}"]` : null;
   const tasks = filteredTasks();
   $('listTitle').textContent = `${filterLabels[state.filter]} · ${tasks.length}`;
-  $('taskList').innerHTML = tasks.length ? tasks.map(card).join('') : `<div class="task-empty"><b>${state.tasks.length ? '没有符合条件的任务' : '目前没有任务'}</b>${state.tasks.length ? '可以切换状态、类型或课程，或清空搜索。' : '在工作台生成 AI 笔记，或添加 PDF 识别任务，进度会显示在这里。'}</div>`;
+  $('taskList').innerHTML = tasks.length ? groupTasks(tasks).map(group => `<section class="task-group"><h3>${esc(group.title)}${group.category && group.category !== group.title ? ` · ${esc(group.category)}` : ''}</h3>${group.tasks.map(card).join('')}</section>`).join('') : `<div class="task-empty"><b>${state.tasks.length ? '没有符合条件的任务' : '目前没有任务'}</b>${state.tasks.length ? '可以切换状态、类型或课程，或清空搜索。' : '在工作台生成 AI 笔记，或添加 PDF 识别任务，进度会显示在这里。'}</div>`;
   $('taskList').querySelectorAll('[data-id]').forEach(node => {
     if (opened.has(node.dataset.id) && node.querySelector('details')) node.querySelector('details').open = true;
     if (node.dataset.id === focusedId && focusSelector) node.querySelector(focusSelector)?.focus({preventScroll: true});
@@ -137,8 +139,8 @@ async function load() {
     const data = await api('/api/tasks');
     state.tasks = data.tasks || []; state.counts = data.counts || {}; state.history = data.history || {}; state.ready = true;
     state.selected = new Set([...state.selected].filter(id => state.tasks.some(task => task.id === id)));
-    const categories = [...new Set(state.tasks.map(task => task.category).filter(Boolean))].sort((a,b) => a.localeCompare(b,'zh-CN'));
-    const categoryValue = $('categoryFilter').value;
+    const categories = [...new Set([...state.tasks.map(task => task.category), new URLSearchParams(location.search).get('category')].filter(Boolean))].sort((a,b) => a.localeCompare(b,'zh-CN'));
+    const categoryValue = state.ready && lastPayload ? $('categoryFilter').value : new URLSearchParams(location.search).get('category') || '';
     $('categoryFilter').innerHTML = '<option value="">全部课程</option>' + categories.map(value => `<option value="${esc(value)}">${esc(value)}</option>`).join('') + '<option value="__local__">本地 PDF</option>';
     if ([...$('categoryFilter').options].some(option => option.value === categoryValue)) $('categoryFilter').value = categoryValue;
     const signature = JSON.stringify(data);

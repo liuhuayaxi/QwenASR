@@ -2,18 +2,20 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="theme-color" content="#f5f7f5"><title>笔记管理 · QwenASR</title>
+  <meta name="theme-color" content="#f5f7f5"><title>复习资料 · QwenASR</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <script src="/static/js/theme.js?v=20261010-routing-progress"></script>
   <link rel="stylesheet" href="/static/ui.css?v=20261002-theme-2">
   <link rel="stylesheet" href="/static/notes.css?v=20261010-notes-1">
+<link rel="stylesheet" href="/static/workspace.css?v=20261011"><script>if (new URLSearchParams(location.search).get("embedded") === "1") document.addEventListener("DOMContentLoaded", () => document.body.classList.add("workspace-embedded"));</script>
 </head>
 <body class="notes-page">
   <header class="app-header">
     <div class="app-header-inner">
       <a class="app-brand" href="/" aria-label="QwenASR 本地学习工作台"><span class="app-brand-mark" aria-hidden="true"><i></i><i></i><i></i></span><span><b>QwenASR</b></span></a>
       <nav class="app-nav" aria-label="主导航">
-        <a href="/">录音工作台</a><a href="/library">录音库</a><a href="/notes" aria-current="page">笔记管理</a><a href="/course/">课程回放</a><a href="/course-files">课程资料库</a><a href="/tasks">任务中心</a>
+          <a href="/workspace">课程工作区</a>
+        <a href="/">录音工作台</a><a href="/library">课堂记录</a><a href="/notes" aria-current="page">复习资料</a><a href="/course/">课程回放</a><a href="/course-files">课程资料库</a><a href="/tasks">任务中心</a>
       </nav>
       <div class="app-header-tools"><button class="theme-toggle" type="button" data-theme-toggle aria-pressed="false" aria-label="切换深色模式" title="切换深色模式"><span data-theme-icon aria-hidden="true">☾</span><span data-theme-label>深色</span></button><span class="app-local">本地工作空间</span></div>
     </div>
@@ -25,18 +27,19 @@
       <div class="notes-sidebar-foot"><span class="dot"></span>每份 PDF 都单独保存，可重复归档<br><a href="/course-files">去课程资料库查看课件 →</a></div>
     </aside>
     <main class="notes-main">
-      <header class="page-heading"><div><p class="eyebrow">NOTE LIBRARY</p><h1 id="courseTitle">笔记管理</h1><p id="courseMeta" class="muted">按课程保存 AI 生成的复习笔记，期中、期末和阶段性版本可以并存。</p></div><button id="refresh" class="ui-button" type="button">刷新</button></header>
+      <header class="page-heading"><div><p class="eyebrow">NOTE LIBRARY</p><h1 id="courseTitle">复习资料</h1><p id="courseMeta" class="muted">按课程归档外部 PDF 与手动上传的复习资料。课堂笔记可在课堂记录中阅读和编辑。</p></div><button id="refresh" class="ui-button" type="button">刷新</button></header>
       <p id="loadError" class="notice error" role="alert" hidden></p>
       <section class="path-card" aria-label="笔记保存位置"><div><b>笔记保存位置</b><p id="storagePath" class="muted"></p></div><div class="path-actions"><button id="chooseRoot" class="ui-button" type="button">选择文件夹</button><button id="saveRoot" class="ui-button" type="button">保存路径</button></div><input id="rootInput" class="ui-field wide" spellcheck="false" aria-label="笔记保存绝对路径"></section>
-      <div class="notes-grid">
+      <details class="external-import"><summary>导入外部复习资料 · 生成提示词或上传 PDF</summary><div class="notes-grid">
         <section class="panel lesson-panel" aria-labelledby="lessonHeading"><div class="panel-heading"><div><h2 id="lessonHeading">选择课次</h2><p class="muted">选择一节或多节课；同一课程可以再次选择并生成另一版笔记。</p></div><span id="lessonCount" class="count-badge">0</span></div><div id="lessons" class="lesson-list"></div><p id="lessonEmpty" class="empty-inline" hidden>这门课还没有保存的录音课次。</p><div class="selection-bar"><span id="selectionText">尚未选择课次</span><button id="clearSelection" class="ui-button" type="button">清除选择</button></div></section>
         <section class="panel prompt-panel" aria-labelledby="promptHeading"><div class="panel-heading"><div><h2 id="promptHeading">生成提示词</h2><p class="muted">标题和日期会自动排版成闪念贝壳检索线索。</p></div><button id="copyPrompt" class="ui-button primary" type="button" disabled>复制提示词</button></div><label class="field-label" for="promptTemplate">提示词模板 <small>可使用 {{course}} 和 {{lessons}}</small></label><textarea id="promptTemplate" class="ui-field prompt-editor" rows="16" spellcheck="false"></textarea><div class="prompt-actions"><button id="saveTemplate" class="ui-button" type="button">保存模板</button><button id="generatePrompt" class="ui-button primary" type="button">生成并复制</button></div><p id="promptStatus" class="notice" role="status" hidden></p><label class="field-label" for="promptOutput">本次生成结果</label><textarea id="promptOutput" class="ui-field prompt-output" rows="8" readonly placeholder="选择课次后点击“生成并复制”"></textarea></section>
       </div>
-      <section class="panel upload-panel" aria-labelledby="uploadHeading"><div class="panel-heading"><div><h2 id="uploadHeading">归档生成的 PDF</h2><p class="muted">上传 AI 生成的 PDF，系统会按当前课程保存；每次上传都会新建一条记录。</p></div><span id="selectedForUpload" class="muted"></span></div><form id="uploadForm"><div class="upload-fields"><label class="field-label">笔记名称<input id="noteTitle" class="ui-field" maxlength="120" placeholder="例如：物理光学·期中复习" required></label><label class="field-label">PDF 文件<input id="noteFile" class="ui-field" type="file" accept="application/pdf,.pdf" required></label></div><div class="upload-actions"><button class="ui-button primary" type="submit">保存这份笔记</button><span id="uploadStatus" class="muted" role="status"></span></div></form></section>
-      <section class="panel saved-panel" aria-labelledby="savedHeading"><div class="panel-heading"><div><h2 id="savedHeading">已保存笔记</h2><p class="muted">同一课程可以保存多份版本，来源课次会显示在每条记录上。</p></div><span id="noteCount" class="count-badge">0</span></div><div id="notes" class="saved-list"></div><p id="notesEmpty" class="empty-inline" hidden>这门课还没有归档笔记。</p></section>
+      <section class="panel upload-panel" aria-labelledby="uploadHeading"><div class="panel-heading"><div><h2 id="uploadHeading">上传外部复习资料</h2><p class="muted">上传 AI 生成的 PDF，系统会按当前课程保存；每次上传都会新建一条记录。</p></div><span id="selectedForUpload" class="muted"></span></div><form id="uploadForm"><div class="upload-fields"><label class="field-label">资料名称<input id="noteTitle" class="ui-field" maxlength="120" placeholder="例如：物理光学·期中复习" required></label><label class="field-label">PDF 文件<input id="noteFile" class="ui-field" type="file" accept="application/pdf,.pdf" required></label></div><div class="upload-actions"><button class="ui-button primary" type="submit">保存复习资料</button><span id="uploadStatus" class="muted" role="status"></span></div></form></section>
+      </details>
+      <section class="panel saved-panel" aria-labelledby="savedHeading"><div class="panel-heading"><div><h2 id="savedHeading">已保存复习资料</h2><p class="muted">同一课程可以保存多份版本，来源课次会显示在每条记录上。</p></div><span id="noteCount" class="count-badge">0</span></div><div id="notes" class="saved-list"></div><p id="notesEmpty" class="empty-inline" hidden>这门课还没有外部复习资料。</p></section>
     </main>
   </div>
   <div id="toast" role="status" hidden></div>
-  <script type="module" src="/static/js/notes.js?v=20261010-notes-2"></script>
+  <script type="module" src="/static/js/notes.js?v=20261011-20261010-notes-2"></script>
 </body>
 </html>

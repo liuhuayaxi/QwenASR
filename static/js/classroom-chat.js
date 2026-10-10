@@ -1,4 +1,4 @@
-import { renderMarkdown } from "./markdown-reader.js?v=20261007-math-1";
+import { renderMarkdown } from "./markdown-reader.js?v=20261011-20261007-math-1";
 
 const $ = (selector) => document.querySelector(selector);
 const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];

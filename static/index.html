@@ -13,6 +13,8 @@
     <link rel="stylesheet" href="/static/settings-layout.css?v=20261010-settings-3" />
     <link rel="stylesheet" href="/static/vendor/katex/katex.min.css" />
   <script src="/static/vendor/katex/katex.min.js" defer></script>
+<link rel="stylesheet" href="/static/workspace.css?v=20261011" />
+<script>if (new URLSearchParams(location.search).get("embedded") === "1") document.addEventListener("DOMContentLoaded", () => document.body.classList.add("workspace-embedded"));</script>
 </head>
   <body class="workbench-page">
     <header class="app-header">
@@ -22,9 +24,10 @@
           <span><b>QwenASR</b></span>
         </a>
         <nav class="app-nav" aria-label="主导航">
+          <a href="/workspace">课程工作区</a>
           <a href="/" id="workbenchNav" aria-current="page">录音工作台</a>
-          <a href="/library" id="libraryTab">录音库</a>
-          <a href="/notes">笔记管理</a>
+          <a href="/library" id="libraryTab">课堂记录</a>
+          <a href="/notes">复习资料</a>
           <a href="/course/" id="courseSyncLink">课程回放</a>
           <a href="/course-files">课程资料库</a>
           <a href="/tasks">任务中心</a>
@@ -44,13 +47,15 @@
             网页已更新，但后台仍是旧版本。请关闭当前启动终端并重新运行启动脚本。
           </div>
 
+          <div id="recognitionStatus" class="recognition-status" role="status"></div>
+
           <div class="record-identity">
             <label>
-              <span>录音名称 <b>必填</b></span>
-              <input id="recordName" type="text" maxlength="120" placeholder="例如：通信原理第 3 讲" />
+              <span>课堂标题</span>
+              <input id="recordName" type="text" maxlength="120" placeholder="留空自动使用课程名与日期" />
             </label>
             <label>
-              <span>分类</span>
+              <span>课程</span>
               <div class="category-picker">
                 <select id="recordCategory" aria-label="分类">
                   <option value="未分类">未分类</option>
@@ -80,11 +85,13 @@
             <input id="fileInput" class="hidden" type="file" multiple accept="audio/*,video/mp4,video/quicktime,video/webm" />
           </div>
 
+          <section class="continuation-panel" aria-labelledby="continuationHeading"><h2 id="continuationHeading">继续处理</h2><div id="continuationList" aria-live="polite">正在读取课堂与任务…</div><p id="continuationError" role="status" hidden></p></section>
           <div id="sessionBar" class="session-bar hidden">
             <div>
               <span id="sessionState" class="session-state">会话进行中</span>
               <small id="sessionInfo"></small>
             </div>
+            <button id="openCompletedNote" class="secondary-button hidden" type="button">打开课堂笔记</button>
             <div id="downloadLinks" class="download-links hidden">
               <a id="bundleDownload" href="#">下载 AAC + 转写 ZIP</a>
               <a id="audioDownload" href="#">AAC</a>
@@ -104,7 +111,7 @@
               </select>
             </label>
             <label class="toggle-row">
-              <span><b>AI 实时修正</b></span>
+              <span><b>实时转写校对</b></span>
               <input id="aiCorrection" type="checkbox" />
               <i class="toggle"></i>
             </label>
@@ -118,7 +125,7 @@
               </select>
             </label>
             <label class="toggle-row">
-              <span><b>实时总结</b></span>
+              <span><b>课堂实时提纲</b></span>
               <input id="summaryEnabled" type="checkbox" />
               <i class="toggle"></i>
             </label>
@@ -151,7 +158,7 @@
               <h2 id="panelTitle" class="visually-hidden">当前笔记</h2>
               <div class="view-tabs" role="group" aria-label="内容视图">
                 <button id="transcriptTab" aria-controls="transcriptView" aria-pressed="true" class="view-tab active" type="button">当前笔记</button>
-                <button id="summaryTab" aria-controls="summaryView" aria-pressed="false" class="view-tab" type="button">实时总结</button>
+                <button id="summaryTab" aria-controls="summaryView" aria-pressed="false" class="view-tab" type="button">课堂实时提纲</button>
               </div>
             </div>
             <div class="panel-actions">
@@ -163,7 +170,7 @@
           <div id="transcriptView" class="content-view">
             <div id="emptyState" class="empty-state">
               <div class="empty-orbit"><span></span></div>
-              <p>填写录音名称，然后点击“新建并开始转写”</p>
+              <p>选择课程，然后点击“新建并开始转写”</p>
             </div>
             <div id="transcript" class="transcript" aria-live="polite"></div>
             <div id="partialCard" class="partial-card hidden">
@@ -173,7 +180,7 @@
           </div>
 
           <div id="libraryView" class="library-view hidden">
-            <div class="page-heading"><div><span class="eyebrow">RECORDINGS</span><h1>录音库</h1></div><button id="librarySettings" class="ui-button">设置</button></div>
+            <div class="page-heading"><div><span class="eyebrow">RECORDINGS</span><h1>课堂记录</h1></div><button id="librarySettings" class="ui-button">设置</button></div>
             <div class="library-toolbar">
               <input id="librarySearch" class="ui-field" type="search" maxlength="200" placeholder="搜索标题、逐字稿和笔记…" aria-label="全文搜索录音" />
               <label>分类
@@ -206,7 +213,7 @@
 
           <div id="summaryView" class="summary-view hidden">
             <div id="summaryEmpty" class="empty-state summary-empty">
-              <p>尚未生成实时总结</p>
+              <p>尚未生成课堂实时提纲</p>
             </div>
             <div id="summaryStatus" class="summary-status hidden"></div>
             <div id="summaryList" class="summary-list"></div>
@@ -315,10 +322,10 @@
             </div>
             <nav class="ai-settings-tabs" aria-label="AI 功能设置">
 <button type="button" data-ai-tab="sentence" class="active">实时转写</button>
-<button type="button" data-ai-tab="correction">AI 精修</button>
-<button type="button" data-ai-tab="review">5 分钟整理</button>
-<button type="button" data-ai-tab="global">长上下文整理</button>
-<button type="button" data-ai-tab="summary">AI 总结</button>
+<button type="button" data-ai-tab="correction">转写校对</button>
+<button type="button" data-ai-tab="review">分段整理</button>
+<button type="button" data-ai-tab="global">长文本复核</button>
+<button type="button" data-ai-tab="summary">课后复习笔记</button>
 <button type="button" data-ai-tab="chat">课堂问答</button>
 </nav><div class="provider-stack">
               <details class="provider-settings" data-ai-section="sentence" open>
@@ -370,7 +377,7 @@
 
               <details class="provider-settings hidden" data-ai-section="review" open>
                 <summary>
-                  <b>5 分钟整理</b>
+                  <b>分段整理</b>
                   <span><i id="reviewBaseSummary">https://api.openai.com/v1</i><strong id="reviewModelSummary">gpt-5-mini</strong></span>
                 </summary>
                 <div class="provider-settings-body settings-group-grid">
@@ -390,13 +397,13 @@
   "text": { "verbosity": "low" },
   "store": false
 }</textarea></label>
-<label class="wide"><span>5 分钟整理提示词</span><textarea id="reviewPrompt" rows="6"></textarea></label>
+<label class="wide"><span>分段整理提示词</span><textarea id="reviewPrompt" rows="6"></textarea></label>
                 <label class="wide"><span>API 最大并发请求数 </span><input id="reviewConcurrency" type="number" min="1" max="8" step="1" value="2" /></label></div>
               </details>
 
               <details class="provider-settings hidden" data-ai-section="summary" open>
                 <summary>
-                  <b>AI 总结</b>
+                  <b>课后复习笔记</b>
                   <span><i id="summaryBaseSummary">https://api.openai.com/v1</i><strong id="summaryModelSummary">gpt-5-mini</strong></span>
                 </summary>
                 <div class="provider-settings-body settings-group-grid">
@@ -418,21 +425,21 @@
 }</textarea></label>
 
 <label class="wide">
-                <span>详细 AI 总结提示词 </span>
+                <span>课后复习笔记提示词 </span>
                 <textarea id="summarySystemPrompt" rows="10">你是大学课堂复习笔记编辑。基于课堂转写生成详细、准确、可独立复习的 Markdown 笔记。
 开头先给知识点速览，逐项列全本节涉及的概念、定理、方法、例题主题；再给公式速览，列出全部出现或实际使用的公式、符号含义、单位、适用条件及对应时间。
 正文按课堂讲授时间顺序详细展开，每节注明提供的真实时间范围。完整保留定义、物理或实际含义、条件、推导中间步骤、因果关系、方法步骤、概念对比、易错点、老师强调事项及考试作业要求。例题保留题目条件、已知与所求、公式选择、代入计算、解答过程和结论。同一主题后面再次出现时，保留新增解释、反例和练习，不因前面提过而省略。
 以知识覆盖和解释完整为准，不追求简短；禁止把一段推导或一道例题压成一句结论。完成前逐段核对，确保知识点、公式、例题和后半节内容没有遗漏。删除点名、设备调试和无关闲聊。只展开原文有依据的内容，不编造老师没讲过的事实、题目、推导或时间戳；缺失或听不清的公式、数字和论证标注“待核对”。公式使用 $...$ 或 $$...$$，段落与标题层次清楚，只返回 Markdown 正文。</textarea>
               </label>
 <label class="wide">
-                <span>录音库短摘要提示词 </span>
-                <textarea id="abstractPrompt" rows="5">你是课程资料库编辑。请把已经生成的详细 AI 总结压缩成一句录音库短摘要，让读者立即知道这份笔记讲什么。只保留核心知识主题，不写课堂过程，不使用 Markdown，不换行，不超过 100 个汉字。只返回短摘要正文。</textarea>
+                <span>课堂记录短摘要提示词 </span>
+                <textarea id="abstractPrompt" rows="5">你是课程资料库编辑。请把已经生成的课后复习笔记压缩成一句课堂记录短摘要，让读者立即知道这份笔记讲什么。只保留核心知识主题，不写课堂过程，不使用 Markdown，不换行，不超过 100 个汉字。只返回短摘要正文。</textarea>
               </label>
 <label class="wide"><span>AI 标题提示词 </span><textarea id="titlePrompt" rows="4">请根据录音总结生成一个准确、具体、便于日后检索的中文标题。优先体现课程主题或核心议题，不要使用“录音总结”“课堂记录”等空泛词，不要添加总结中没有的信息，控制在 6–20 个汉字。</textarea></label>
                 <label class="wide"><span>API 最大并发请求数 </span><input id="summaryConcurrency" type="number" min="1" max="8" step="1" value="3" /></label></div>
               </details>
 <details class="provider-settings hidden" data-ai-section="correction" open>
- <summary><b>AI 精修</b><span><i id="correctionBaseSummary"></i><strong id="correctionModelSummary"></strong></span></summary>
+ <summary><b>转写校对</b><span><i id="correctionBaseSummary"></i><strong id="correctionModelSummary"></strong></span></summary>
  <div class="provider-settings-body settings-group-grid">
  <label class="wide"><span>Base URL</span><span class="provider-url-row"><input id="correctionBaseUrl" type="url" placeholder="https://api.openai.com/v1" autocomplete="off" /><button type="button" class="mini-button test-provider" data-provider="correction">测试连接</button></span><output class="provider-test-result" id="test-correction" role="status"></output></label>
  <label><span>整理通道</span><select id="correctionTransport" class="field-select"><option value="api">OpenAI 兼容 API</option><option value="agy_cli">AGY 本地 CLI</option></select></label>
@@ -443,9 +450,9 @@
  <label><span>接口格式</span><select id="correctionApiMode" class="field-select"><option value="auto">自动识别</option><option value="responses">Responses API</option><option value="chat_completions">Chat Completions API</option></select></label>
  <label><span>API Key</span><input id="correctionApiKey" type="password" autocomplete="off" /></label>
  <label class="wide"><span>自定义发送参数（JSON）</span><textarea id="correctionApiParams" rows="5" class="code-input">{}</textarea></label>
- <label class="wide"><span>AI 精修提示词</span><textarea id="correctionPrompt" rows="7">你是课堂录音精修编辑。逐段校对识别错误、术语、标点和断句，整理成连贯自然段。完整保留所有实质陈述、公式、推导、例题、数字与不确定信息，不做摘要、不添加解释。删除无意义语气词与卡顿重复，保留有意强调。</textarea></label>
+ <label class="wide"><span>转写校对提示词</span><textarea id="correctionPrompt" rows="7">你是课堂录音精修编辑。逐段校对识别错误、术语、标点和断句，整理成连贯自然段。完整保留所有实质陈述、公式、推导、例题、数字与不确定信息，不做摘要、不添加解释。删除无意义语气词与卡顿重复，保留有意强调。</textarea></label>
  <label class="wide"><span>API 最大并发请求数 </span><input id="correctionConcurrency" type="number" min="1" max="8" step="1" value="2" /></label></div></details><details class="provider-settings hidden" data-ai-section="global" open>
- <summary><b>长上下文整理</b><span><i id="globalBaseSummary"></i><strong id="globalModelSummary"></strong></span></summary>
+ <summary><b>长文本复核</b><span><i id="globalBaseSummary"></i><strong id="globalModelSummary"></strong></span></summary>
  <div class="provider-settings-body settings-group-grid">
  <label class="wide"><span>Base URL</span><span class="provider-url-row"><input id="globalBaseUrl" type="url" placeholder="https://api.openai.com/v1" autocomplete="off" /><button type="button" class="mini-button test-provider" data-provider="global">测试连接</button></span><output class="provider-test-result" id="test-global" role="status"></output></label>
  <label><span>整理通道</span><select id="globalTransport" class="field-select"><option value="api">OpenAI 兼容 API</option><option value="agy_cli">AGY 本地 CLI</option></select></label>
@@ -456,7 +463,7 @@
  <label><span>接口格式</span><select id="globalApiMode" class="field-select"><option value="auto">自动识别</option><option value="responses">Responses API</option><option value="chat_completions">Chat Completions API</option></select></label>
  <label><span>API Key</span><input id="globalApiKey" type="password" autocomplete="off" /></label>
  <label class="wide"><span>自定义发送参数（JSON）</span><textarea id="globalApiParams" rows="5" class="code-input">{}</textarea></label>
- <label class="wide"><span>长上下文整理提示词</span><textarea id="globalPrompt" rows="7">你是课堂长文本整理编辑。结合上下文统一术语、标点、段落和指代，修复跨段断句。按照原始时间顺序保留每个实质陈述、公式、推导和例题；不得总结、压缩或编造内容。保持提供的时间标记，不生成无来源的时间戳。</textarea></label>
+ <label class="wide"><span>长文本复核提示词</span><textarea id="globalPrompt" rows="7">你是课堂长文本整理编辑。结合上下文统一术语、标点、段落和指代，修复跨段断句。按照原始时间顺序保留每个实质陈述、公式、推导和例题；不得总结、压缩或编造内容。保持提供的时间标记，不生成无来源的时间戳。</textarea></label>
  <label class="wide"><span>API 最大并发请求数 </span><input id="globalConcurrency" type="number" min="1" max="8" step="1" value="2" /></label></div></details>
               <details class="provider-settings hidden" data-ai-section="chat" open>
                 <summary><b>课堂问答</b><span><i id="chatProviderSummary">AGY CLI</i><strong id="chatModelSummary">读取配置中…</strong></span></summary>
@@ -544,7 +551,7 @@
             </div>
             <div class="settings-group-grid single-column">
               <label class="wide history-setting">
-                <span>实时总结间隔</span>
+                <span>课堂实时提纲间隔</span>
                 <input id="summaryInterval" type="number" min="1" max="120" step="1" value="10" />
                 <output>分钟</output>
               </label>
@@ -609,9 +616,9 @@
       </div>
     </dialog>
 
-    <dialog id="regenerateSummaryDialog" class="ui-dialog summary-prompt-dialog" aria-label="重新生成 AI 总结">
+    <dialog id="regenerateSummaryDialog" class="ui-dialog summary-prompt-dialog" aria-label="重新生成课后复习笔记">
       <div class="settings-dialog-header">
-        <div><b>重新生成 AI 总结</b><small id="regenerateSummaryTitle">使用完整转写生成复习笔记</small></div>
+        <div><b>重新生成课后复习笔记</b><small id="regenerateSummaryTitle">使用完整转写生成复习笔记</small></div>
         <button id="closeRegenerateSummary" class="ghost-button" type="button">取消</button>
       </div>
       <div class="summary-prompt-body">
@@ -621,7 +628,7 @@
           <textarea class="ui-field" id="summaryCustomPrompt" rows="5" placeholder="例如：重点整理第三章公式，并补充容易混淆的概念对比。"></textarea>
         </label>
         <div class="summary-prompt-actions">
-          <button id="confirmRegenerateSummary" class="mini-button primary-mini-button" type="button">重新生成总结</button>
+          <button id="confirmRegenerateSummary" class="mini-button primary-mini-button" type="button">重新生成复习笔记</button>
         </div>
       </div>
     </dialog>
@@ -655,11 +662,12 @@
           <div class="note-pane-heading">
             <div><b>课堂笔记</b></div>
             <div class="note-summary-actions">
-              <a id="downloadNoteSummary" class="mini-button note-download-button" href="#">下载 AI 总结</a>
+              <a id="downloadNoteSummary" class="mini-button note-download-button" href="#">下载 课后复习笔记</a>
               <button id="pullNoteSummary" class="mini-button" type="button">从 IdeaShell 拉取</button>
               <button id="pushNoteSummary" class="mini-button" type="button">推送到 IdeaShell ▾</button>
+              <button id="askNoteClass" class="mini-button" type="button">课堂问答</button>
               <button id="openSummarySettings" class="mini-button" type="button">总结设置</button>
-              <button id="generateNoteSummary" class="mini-button primary-mini-button" type="button">AI 生成总结</button>
+              <button id="generateNoteSummary" class="mini-button primary-mini-button" type="button">生成课后复习笔记</button>
               <button id="regenerateNoteAbstract" class="mini-button" type="button" disabled>重新生成短摘要</button>
               <span id="noteSaveStatus" class="note-save-status" role="status">修改会自动保存</span><button id="saveNoteSummary" class="mini-button" type="button" hidden disabled>重试保存</button>
             </div>
@@ -681,16 +689,16 @@
             <span>Markdown · 支持 $...$ 与 $$...$$ 公式语法</span>
           </div>
           <div class="reader-layout"><nav id="noteToc" class="note-toc hidden" aria-label="笔记目录"></nav><div id="noteSummaryReader" class="note-summary-reader"></div></div>
-          <textarea id="noteSummaryEditor" class="note-summary-editor hidden" spellcheck="false" placeholder="点击“AI 生成总结”，完成后可在这里直接修改 Markdown。"></textarea>
+          <textarea id="noteSummaryEditor" class="note-summary-editor hidden" spellcheck="false" placeholder="点击“生成课后复习笔记”，完成后可在这里直接修改 Markdown。"></textarea>
           <div id="summaryJobStatus" class="summary-job-status hidden"><span id="summaryJobText" role="status"></span><button id="cancelSummaryJob" class="mini-button" type="button">取消生成</button></div>
-          <p id="noteSummaryHint" class="note-summary-hint">尚未生成 AI 总结</p>
+          <p id="noteSummaryHint" class="note-summary-hint">尚未生成课后复习笔记</p>
         </section>
       </div>
     </dialog>
 
     <dialog aria-label="推送到 IdeaShell" id="pushDialog" class="push-dialog">
       <div class="settings-dialog-header"><div><b>推送到 IdeaShell</b><small id="pushTarget"></small></div><button id="closePushDialog" class="ghost-button" type="button">取消</button></div>
-      <div class="push-options"><label for="pushContentMode">选择推送内容</label><select id="pushContentMode" class="field-select"><option value="combined">总结＋精修原文（默认）</option><option value="summary">仅 AI 总结</option><option value="transcript">仅精修原文（含时间戳）</option></select><p id="pushPreviewStatus" role="status"></p></div>
+      <div class="push-options"><label for="pushContentMode">选择推送内容</label><select id="pushContentMode" class="field-select"><option value="combined">总结＋精修原文（默认）</option><option value="summary">仅 课后复习笔记</option><option value="transcript">仅精修原文（含时间戳）</option></select><p id="pushPreviewStatus" role="status"></p></div>
       <div id="pushPreview" class="push-preview markdown-body"></div>
       <div class="push-footer"><span>下方按钮会推送当前预览的内容，并自动附带录音文件</span><button id="confirmPush" class="mini-button primary-mini-button" type="button" disabled>推送此内容</button></div>
     </dialog>
@@ -711,6 +719,6 @@
     </dialog>
 
     <div id="toast" class="toast" role="status"></div>
-    <script src="/static/app.js?v=20261010-settings-6" type="module"></script>
+    <script src="/static/app.js?v=20261011-20261010-settings-6" type="module"></script>
   </body>
 </html>
