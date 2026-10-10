@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import html
 import json
 import os
@@ -248,6 +249,46 @@ async def get_mineru_settings():
                 "runtime": runtime_info(find_mineru_binary())}
     except (OSError, ValueError) as exc:
         raise HTTPException(500, "本机 MinerU 配置读取失败，未用默认值覆盖") from exc
+
+
+@app.get('/api/inference/settings')
+async def get_inference_settings():
+    from qwen_asr_app.inference_providers import inference_settings, DEFAULTS
+    try:
+        return {"settings": inference_settings.read(), "defaults": DEFAULTS}
+    except (OSError, ValueError) as exc:
+        raise HTTPException(500, "推理配置读取失败") from exc
+
+
+@app.put('/api/inference/settings')
+async def save_inference_settings(payload: dict[str, Any] = Body(...)):
+    from qwen_asr_app.inference_providers import inference_settings
+    try:
+        return {"settings": inference_settings.save(payload.get('settings'))}
+    except (OSError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post('/api/inference/test')
+async def test_inference_connection(payload: dict[str, Any] = Body(...)):
+    import httpx
+    from qwen_asr_app.inference_providers import normalize, remote_client
+    try:
+        cfg = normalize(payload.get('settings'))
+        health = await asyncio.to_thread(lambda: remote_client(cfg).health())
+        return {'health': health}
+    except Exception as exc:
+        if isinstance(exc, httpx.ConnectTimeout):
+            message = '远程连接超时，请检查 Windows Tailscale 节点和内网服务入口'
+        elif isinstance(exc, httpx.TransportError):
+            message = '远程网络连接中断，请稍后重试；新入口应使用 Windows 原生 Tailscale 地址'
+        elif str(exc) == 'REMOTE_HTTP_401':
+            message = '远程鉴权失败，请核对本机受保护的访问令牌'
+        elif str(exc) == 'REMOTE_HTTP_403':
+            message = '远程服务拒绝此连接来源，请核对 Tailscale Serve 和后端访问规则'
+        else:
+            message = '无法连接远程网关：' + type(exc).__name__
+        raise HTTPException(400, message) from exc
 
 
 @app.put('/api/mineru/settings')
@@ -2164,17 +2205,37 @@ async def batch_transcription_stream(
     existing_record: RecordingRecord | None = None,
     preserve_source: bool = False,
 ):
+    from qwen_asr_app.remote_operations import saved_config
+    config = dict(config)
+    if 'inference_settings' not in config:
+        # Older queued/uploaded work has no provider snapshot. Treat it as a
+        # legacy local operation; reading today's global remote preference
+        # could silently move an old task to Windows during recovery.
+        config['inference_settings'] = (
+            existing_record.metadata.get('batch_options', {}).get('inference_settings')
+            or saved_config()
+            if existing_record
+            else saved_config()
+        )
+    remote_cfg = config['inference_settings']
     record: RecordingRecord | None = existing_record
     pipeline = None
     warmup = None
     inference_task = None
+    remote_recording_task = None
     model_manager.active_jobs += 1
     model_manager.cancel_unload()
     started_processing = time.monotonic()
     try:
         source_path = temp_path
+        canonical = Path(config['_remote_operation_dir'])/'audio.wav' if config.get('_remote_operation_dir') else None
+        if canonical is not None and canonical.is_file():
+            temp_path = canonical
+            source_path = canonical
         if record is not None:
-            source_path = record.audio_path
+            # Durable upload source is retained until completion. Reuse it for
+            # the same remote digest; AAC archival encoding is lossy.
+            source_path = temp_path if temp_path is not None and temp_path.exists() else record.audio_path
             record.metadata["status"] = "processing"
             record.metadata.pop("error", None)
             record.metadata["updated_at"] = local_now()
@@ -2197,7 +2258,8 @@ async def batch_transcription_stream(
 
         # Validate and decode first. Invalid uploads must not wake the 4 GB
         # ASR worker just to fail after the file check.
-        warmup = asyncio.create_task(model_manager.load())
+        if remote_cfg['asr_provider'] == 'local':
+            warmup = asyncio.create_task(model_manager.load(force_local=True))
 
         if record is None:
             title = str(config.get("title") or Path(original_filename).stem or "上传录音").strip()
@@ -2238,11 +2300,13 @@ async def batch_transcription_stream(
             ),
             "ai_system_prompt": str(ai_options.get("system_prompt") or DEFAULT_AI_SYSTEM_PROMPT),
         }
+        record.metadata['inference_settings'] = remote_cfg
+        record.metadata.setdefault('inference_attempts', []).append({'config_snapshot': remote_cfg, 'started_at': local_now()})
         record.metadata["batch_options"] = redacted_batch_config(config)
         record.metadata.setdefault("ai_groups", [])
         corrupt_segments = [
             segment for segment in record.segments if has_repetitive_tail(str(segment.get("raw") or ""))
-        ]
+        ] if remote_cfg['asr_provider'] == 'local' else []
         if corrupt_segments:
             rewind_seconds = min(float(segment.get("start", 0)) for segment in corrupt_segments)
             removed_ids = {
@@ -2301,11 +2365,70 @@ async def batch_transcription_stream(
                 if not segment_ai_complete(saved_segment, config):
                     await pipeline.submit(saved_segment)
 
-        ranges = deque(vad_split_ranges(audio, start_sample=start_sample))
+        # An offline recording is one remote job: load Qwen once, process every
+        # remote segment, then reuse the existing storage/AI correction pipeline.
+        from qwen_asr_app.inference_providers import inference_settings, RemoteASRProvider
+        remote_segments = None
+        remote_batch_fallback = None
+        remote_batch_metadata = {}
+        if remote_cfg["asr_provider"] != "local" and start_sample < len(audio):
+            inference_task = asyncio.create_task(RemoteASRProvider().transcribe_segments(
+                audio, config.get("language"),
+                asr_terminology_context(str(config.get("context", "")), config.get("terminology")),
+                int((config.get('asr_params') or {}).get('max_tokens', 2048)), remote_cfg, operation_dir=config.get('_remote_operation_dir'),
+                operation_key=config.get('_remote_operation_key'), asr_params=config.get('asr_params')))
+            remote_recording_task = inference_task
+            try:
+                while not inference_task.done():
+                    await asyncio.wait({inference_task}, timeout=15)
+                    if not inference_task.done():
+                        yield stream_event("progress", progress=record.metadata["batch_progress"]["percent"],
+                                           stage="Windows 正在处理整段录音 · 冷启动及排队可耗时较长")
+                value, remote_batch_metadata = inference_task.result()
+                remote_segments = value["segments"]
+                if not remote_segments:
+                    raise RuntimeError("远程没有返回音频分段")
+                record.metadata["inference"] = remote_batch_metadata
+                record.save_all()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if remote_cfg["asr_provider"] == "remote_only" or not getattr(exc, 'proven_not_accepted', False):
+                    raise
+                from qwen_asr_app.remote_operations import mark_local_fallback
+                mark_local_fallback(Path(config['_remote_operation_dir'])/'receipt.json')
+                remote_segments = None
+                remote_batch_fallback = type(exc).__name__
+                record.metadata["inference"] = {"provider":"local", "fallback":True,
+                    "fallback_reason":remote_batch_fallback, 'config_snapshot': remote_cfg,
+                    'metrics': {'model': str(getattr(model_manager, 'model_path', Path('未知模型')).name),
+                                'dtype': 'bfloat16', 'device': 'Apple Silicon MLX',
+                                'gpu_release_state': 'unknown'}}
+                record.save_all()
+        if remote_cfg['asr_provider'] == 'local':
+            record.metadata['inference'] = {'provider': 'local', 'fallback': False, 'config_snapshot': remote_cfg,
+                'metrics': {'model': str(getattr(model_manager, 'model_path', Path('未知模型')).name), 'dtype': 'bfloat16', 'device': 'Apple Silicon MLX', 'gpu_release_state': 'unknown'}}
+        record.metadata['inference_attempts'][-1]['actual'] = record.metadata.get('inference', {})
+        record.save_metadata()
+        remote_by_range = {}
+        if remote_segments is not None:
+            ranges = deque()
+            for segment in remote_segments:
+                start = round(float(segment['start'])*SAMPLE_RATE)
+                end = min(len(audio), round(float(segment['end'])*SAMPLE_RATE))
+                if end <= start_sample:
+                    continue
+                start = max(start_sample, start)
+                if not start_sample <= start < end <= len(audio):
+                    raise RuntimeError("远程分段时间范围无效")
+                ranges.append((start,end))
+                remote_by_range[(start,end)] = segment
+        else:
+            ranges = deque(vad_split_ranges(audio, start_sample=start_sample))
         estimated_total = len(record.segments) + len(ranges)
         while ranges:
             segment_start_sample, segment_end_sample = ranges.popleft()
-            if getattr(model_manager, "realtime_pending", False) and segment_end_sample - segment_start_sample > 25 * SAMPLE_RATE:
+            if remote_segments is None and getattr(model_manager, "realtime_pending", False) and segment_end_sample - segment_start_sample > 25 * SAMPLE_RATE:
                 ranges.appendleft((segment_start_sample + 25 * SAMPLE_RATE, segment_end_sample))
                 segment_end_sample = segment_start_sample + 25 * SAMPLE_RATE
             block = audio[segment_start_sample:segment_end_sample]
@@ -2313,18 +2436,30 @@ async def batch_transcription_stream(
             max_tokens = min(1_536, max(256, int(block_duration * 10) + 128))
             metrics = {}
             try:
-                inference_task = asyncio.create_task(model_manager.transcribe(
-                    block,
-                    config.get("language"),
-                    asr_terminology_context(
-                        str(config.get("context", "")), config.get("terminology")
-                    ),
-                    max_tokens=max_tokens,
-                    asr_params=asr_params_with_terminology(
-                        config.get("asr_params"), config.get("terminology")
-                    ),
-                    timeout_seconds=180, metrics=metrics,
-                ))
+                if remote_segments is not None:
+                    segment = remote_by_range[(segment_start_sample,segment_end_sample)]
+                    async def prepared_result(segment=segment):
+                        return segment.get("merged_text", segment["text"]), segment.get("language", ""), 0.0
+                    metrics.update(remote_batch_metadata)
+                    inference_task = asyncio.create_task(prepared_result())
+                else:
+                    transcribe = model_manager._transcribe_local if remote_batch_fallback else model_manager.transcribe
+                    inference_kwargs = {} if remote_batch_fallback else {'inference_config': remote_cfg}
+                    inference_task = asyncio.create_task(transcribe(
+                        block,
+                        config.get("language"),
+                        asr_terminology_context(
+                            str(config.get("context", "")), config.get("terminology")
+                        ),
+                        max_tokens=max_tokens,
+                        asr_params=asr_params_with_terminology(
+                            config.get("asr_params"), config.get("terminology")
+                        ),
+                        timeout_seconds=180, metrics=metrics,
+                        **inference_kwargs,
+                    ))
+                    if remote_batch_fallback:
+                        metrics.update(provider="local", fallback=True, fallback_reason=remote_batch_fallback)
                 while not inference_task.done():
                     event_task = asyncio.create_task(pipeline.events.get()) if pipeline else None
                     waiting = {inference_task} | ({event_task} if event_task else set())
@@ -2341,7 +2476,7 @@ async def batch_transcription_stream(
                             event_task.cancel()
                             await asyncio.gather(event_task, return_exceptions=True)
                 raw, language, seconds = inference_task.result()
-                if has_repetitive_tail(raw):
+                if remote_segments is None and has_repetitive_tail(raw):
                     if block_duration > 35:
                         raise RuntimeError("检测到异常重复输出")
                     raw = trim_repetitive_tail(raw)
@@ -2383,6 +2518,9 @@ async def batch_transcription_stream(
                 "ai_pending": bool(config.get("ai_correction"))
                 or config.get("translation", "off") != "off",
             }
+            if remote_segments is not None:
+                original = remote_by_range[(segment_start_sample, segment_end_sample)]
+                segment['remote_raw_segment'] = copy.deepcopy(original)
             if segment["ai_pending"]:
                 segment["ai_requested"] = {
                     "correction": bool(config.get("ai_correction")),
@@ -2471,7 +2609,9 @@ async def batch_transcription_stream(
             record.save_all()
 
         record.metadata["processing_seconds"] = round(time.monotonic() - started_processing, 2)
-        record.metadata["asr_seconds"] = round(sum(float(s.get("latency", 0)) for s in record.segments), 2)
+        record.metadata["asr_seconds"] = round(
+            float(remote_batch_metadata.get("metrics", {}).get("inference_seconds", 0))
+            if remote_segments is not None else sum(float(s.get("latency", 0)) for s in record.segments), 2)
         record.metadata["ai_warnings"] = sum(bool(s.get("ai_error")) for s in record.segments) + sum(
             bool(part.get("ai_error")) for part in record.metadata.get("ai_global_rewrite", {}).get("parts", []))
         record.complete()
@@ -2505,6 +2645,10 @@ async def batch_transcription_stream(
         if pipeline:
             await pipeline.close()
         # A to_thread GPU call must finish before releasing its lifetime lease.
+        if remote_recording_task and not remote_recording_task.done():
+            # Propagate pause/cancel to the remote client so it cancels the Job
+            # ID and waits for its streaming/polling thread to exit safely.
+            remote_recording_task.cancel()
         if inference_task and not inference_task.done():
             await asyncio.gather(inference_task, return_exceptions=True)
         if warmup:

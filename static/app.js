@@ -8,6 +8,7 @@ import { createSummaryView } from "./js/summary-view.js?v=20261007-math-1";
 import { createTranscriptView } from "./js/transcript-view.js?v=20260923-upgrade-1";
 import { IDEASHELL_SERVERS, normalizeIdeashellServer } from "./js/ideashell-config.js?v=20261007";
 import { createMineruSettings } from "./js/mineru-settings.js?v=20261008-1";
+import { createInferenceSettings } from "./js/inference-settings.js?v=20261008-direct-3";
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -173,9 +174,11 @@ function toast(message, duration = 2600) {
 }
 
 const mineruSettingsPanel = createMineruSettings();
+const inferenceSettingsPanel = createInferenceSettings();
 
 function openAdvancedSettings(focusTarget = null) {
   if (!mineruSettingsPanel.isReady()) mineruSettingsPanel.load();
+  if (!inferenceSettingsPanel.isReady()) inferenceSettingsPanel.load();
   const panel = focusTarget?.closest("[data-ai-section]");
   if (panel) selectAiSettings(panel.dataset.aiSection);
   if (!els.settingsDialog.open) els.settingsDialog.showModal();
@@ -2349,9 +2352,9 @@ async function init() {
     openAdvancedSettings();
     selectAiSettings("summary");
   }
-  if (query.get("settings") === "mineru") {
+  if (["mineru", "inference"].includes(query.get("settings"))) {
     openAdvancedSettings();
-    $("#mineruSettingsGroup").scrollIntoView({block: 'start'});
+    $(query.get("settings") === "inference" ? "#inferenceSettingsGroup" : "#mineruSettingsGroup").scrollIntoView({block: 'start'});
   }
 }
 

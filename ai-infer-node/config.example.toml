@@ -1,0 +1,61 @@
+# Server config. Copy to ~/ai-infer-node/config.toml on WSL.
+[server]
+host = "127.0.0.1"
+port = 8765
+allowed_client_networks = ["127.0.0.0/8", "::1/128"]
+data_dir = "~/ai-infer-node/data"
+results_dir = "~/ai-infer-node/results"
+token_file = "~/ai-infer-node/private/token"
+max_upload_bytes = 2147483648
+upload_timeout_seconds = 1800
+job_timeout_seconds = 14400
+history_days = 7
+max_queued_jobs = 32
+max_concurrent_gpu_jobs = 1
+model_idle_timeout_seconds = 0
+reclaim_model_file_cache = true
+reclaim_runtime_file_cache = false
+# All production/candidate data directories must use this same GPU coordination root.
+gpu_coordination_dir = "~/.local/state/ai-infer-node/gpu0"
+# Must be the running service's delegated cgroup v2 path. Configure only in the
+# isolated acceptance service; no existing service is modified by these sources.
+worker_cgroup_root = "/sys/fs/cgroup/system.slice/ai-infer-gateway.service"
+
+[mineru]
+manifest_file = "~/ai-infer-node/models/mineru-manifest.json"
+manifest_sha256 = "REQUIRED_AFTER_OFFICIAL_MODEL_VERIFICATION"
+python = "~/ai-infer-node/venvs/mineru/bin/python"
+home = "~/ai-infer-node/mineru-home"
+version = "4.0.10"
+tier = "advanced"
+small_backend = "torch"
+vlm_engine = "vllm"
+processing_window_size = 1
+vlm_concurrency = 1
+gpu_memory_utilization = 0.55
+max_model_len = 8192
+enforce_eager = true
+
+[asr]
+manifest_file = "~/ai-infer-node/models/asr-manifest.json"
+manifest_sha256 = "REQUIRED_AFTER_OFFICIAL_MODEL_VERIFICATION"
+python = "~/ai-infer-node/venvs/asr/bin/python"
+model_path = "~/ai-infer-node/models/Qwen3-ASR-1.7B-hf"
+model_id = "Qwen/Qwen3-ASR-1.7B-hf"
+dtype = "bfloat16"
+chunk_seconds = 25
+overlap_seconds = 1
+max_new_tokens = 512
+
+# Mac settings live in ~/.qwenasr/inference-providers.json, separate from local
+# MinerU model/quality options. The UI and client CLI edit the same file.
+[client]
+base_url = "http://100.81.62.69:8765"
+token_file = "~/.qwenasr/remote-infer/token"
+connect_timeout_seconds = 10
+request_timeout_seconds = 1800
+job_timeout_seconds = 14400
+poll_seconds = 2
+network_recovery_seconds = 60
+mineru_provider = "local"
+asr_provider = "local"

@@ -95,7 +95,7 @@ class ModelManager:
         if cancelled:
             raise asyncio.CancelledError
 
-    async def load(self) -> None:
+    async def load(self, force_local: bool = False, inference_config=None) -> None:
         self.cancel_unload()
         async with self.load_lock:
             if self.worker is not None and self.worker.is_alive():
@@ -291,7 +291,52 @@ class ModelManager:
                 }
         return result
 
-    async def transcribe(
+    async def transcribe(self, audio, language, context, max_tokens=384, asr_params=None,
+                         timeout_seconds=180.0, priority=10, metrics=None, is_current=None, inference_config=None, operation_dir=None):
+        from .inference_providers import inference_settings, LocalASRProvider, RemoteASRProvider, normalize
+        cfg = inference_settings.for_task('asr', inference_config or {'asr_provider': 'local'})
+        mode = cfg["asr_provider"]
+        async def local():
+            return await self._transcribe_local(audio, language, context, max_tokens, asr_params,
+                                                timeout_seconds, priority, metrics, is_current)
+        if mode == "local":
+            result = await LocalASRProvider().transcribe(local)
+            if metrics is not None:
+                metrics.update(provider="local", fallback=False, config_snapshot=cfg,
+                    model='Qwen3-ASR-1.7B-MLX-bf16', dtype='bfloat16', device='Apple Silicon MLX', gpu_verification='unknown')
+            return result
+        normalize_asr_params(asr_params, max_tokens)
+        if is_current is not None and not is_current():
+            return "", "", 0.0
+        self.active_jobs += 1
+        try:
+            remote = RemoteASRProvider()
+            if operation_dir is None:
+                result, metadata = await remote.transcribe(audio, language, context, max_tokens, cfg)
+            else:
+                result, metadata = await remote.transcribe(audio, language, context, max_tokens, cfg, operation_dir=operation_dir, asr_params=asr_params)
+            if metrics is not None:
+                metrics.update(metadata)
+            return result
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if mode == "remote_only" or not getattr(exc, 'proven_not_accepted', False):
+                raise
+            from .remote_operations import mark_local_fallback
+            mark_local_fallback(Path(operation_dir)/'receipt.json')
+            self.detail = '远程确认未接受，正在回退本机 Qwen3-ASR'
+            result = await LocalASRProvider().transcribe(local)
+            if metrics is not None:
+                metrics.update(provider="local", fallback=True, fallback_reason=type(exc).__name__,
+                    config_snapshot=cfg, model='Qwen3-ASR-1.7B-MLX-bf16', dtype='bfloat16',
+                    device='Apple Silicon MLX', gpu_verification='unknown')
+            return result
+        finally:
+            self.active_jobs = max(0, self.active_jobs - 1)
+            self.schedule_unload()
+
+    async def _transcribe_local(
         self,
         audio: np.ndarray,
         language: str | None,
@@ -325,6 +370,8 @@ class ModelManager:
                     return "", "", 0.0
                 async def infer():
                     async with self.infer_lock:
+                        # Existing local tests and integrations call load() with
+                        # no keyword arguments. Bypass only for actual fallback.
                         await self.load()
                         loaded = time.monotonic()
                         if self.status != "ready" or self.worker is None or not self.worker.is_alive():

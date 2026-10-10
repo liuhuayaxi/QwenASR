@@ -15,7 +15,9 @@ ACTIVE = {"running", "queued", "waiting_retry", "stopping"}
 ATTENTION = {"failed", "interrupted", "pending", "stale", "completed_with_errors"}
 
 
-def actions_for(status):
+def actions_for(status, remote=False):
+    if remote and status not in ACTIVE:
+        return ['continue', 'download', 'new_recognition', 'new_local'] + ([] if status == 'completed' else ['cancel'])
     if status == "stopping":
         return []
     if status in ACTIVE:
@@ -57,26 +59,33 @@ def task_center_router(ai_tasks, ai_action, courses, pdfs, uploads=None):
                     "source": "课程资料库", "asset_id": item["id"], "status": status,
                     "stage": "上次识别中断，可继续" if status == "interrupted" else state.get("stage", ""),
                     "progress": state.get("progress", 0), "error": state.get("error", "") or (state.get("stage", "") if status == "failed" else ""),
-                    "updated_at": state.get("updated_at", ""), "actions": actions_for(status),
+                    "updated_at": state.get("updated_at", ""), "actions": actions_for(status, state.get('inference_settings', {}).get('mineru_provider', 'local') != 'local'),
                     "warnings": state.get("warnings", []),
+                    "inference": state.get('inference', {}),
+                    "configured_provider": state.get('inference_settings', {}).get('mineru_provider', 'local'),
+                    "mineru_settings": state.get('mineru_settings', {}),
                     "result_url": "/course-files?" + urlencode({"category": category, "asset": item["id"]}),
                     "download_url": f"/api/course-files/{item['id']}/download?" + urlencode({"category": category, "variant": "pdf"}) if status == "completed" else ""})
-        for job in pdfs.jobs.values():
+        for job in list(pdfs.jobs.values()):
             tasks.append({"id": f"pdf:{job['id']}", "type": "pdf", "family": "mineru",
                 "job_id": job["id"], "title": job["files"][0]["source_name"] + (f" 等 {len(job['files'])} 个文件" if len(job["files"]) > 1 else ""),
+                "configured_provider": job.get('inference_settings', {}).get('mineru_provider', 'local'),
+                "mineru_settings": job.get('mineru_settings', {}),
                 "label": "本地 PDF 识别", "category": "", "source": "本地 PDF 工具",
                 "status": job["status"], "stage": job.get("stage", ""), "progress": job.get("progress", 0),
                 "updated_at": job.get("updated_at") or job.get("finished_at") or job["created_at"],
-                "actions": actions_for(job["status"]), "files": [
+                "actions": actions_for(job["status"], job.get('inference_settings', {}).get('mineru_provider', 'local') != 'local'), "files": [
                     {**item, "download_url": f"/api/tasks/pdf/{job['id']}/files/{index}" if item["status"] == "completed" else ""}
                     for index, item in enumerate(job["files"])],
                 "completed": sum(item["status"] == "completed" for item in job["files"]), "total": len(job["files"])})
 
         if uploads:
-            for job in uploads.jobs.values():
+            for job in list(uploads.jobs.values()):
                 tasks.append({**uploads.snapshot(job), "id": "upload:" + job["id"], "job_id": job["id"],
                     "type": "upload", "family": "asr", "label": "上传录音转写", "source": "录音工作台",
-                    "actions": actions_for(job["status"]),
+                    'inference': job.get('inference', {}),
+                    'configured_provider': job['config'].get('inference_settings', {}).get('asr_provider', 'unknown'),
+                    "actions": actions_for(job["status"], job['config'].get('inference_settings', {}).get('asr_provider', 'local') != 'local'),
                     "result_url": "/library?" + urlencode({"recording": job["recording_id"]}) if job["recording_id"] else "/library"})
 
         def timestamp(task):
@@ -109,6 +118,8 @@ def task_center_router(ai_tasks, ai_action, courses, pdfs, uploads=None):
         action = payload.get("action")
         if action not in task["actions"]:
             raise HTTPException(409, "任务状态已改变，当前不能执行这项操作")
+        if action in {'new_local', 'new_recognition'} and payload.get('acknowledge_duplicate') is not True:
+            raise HTTPException(409, '旧远端任务可能仍在执行；请确认重复计算风险后新建任务')
         try:
             if task["type"] == "course_queue":
                 return await course_action(action)
@@ -138,7 +149,8 @@ def task_center_router(ai_tasks, ai_action, courses, pdfs, uploads=None):
         if not isinstance(paths, list) or not 1 <= len(paths) <= 20 or any(not isinstance(path, str) for path in paths):
             raise HTTPException(400, "请选择 1–20 个 PDF 文件")
         try:
-            if not find_mineru_binary():
+            from .inference_providers import inference_settings
+            if inference_settings.for_task('mineru')['mineru_provider'] == 'local' and not find_mineru_binary():
                 raise ValueError("未找到 MinerU，请先安装并下载模型")
             discover_courses(courses.store.settings)
             root = courses.store.settings.storage_root.resolve()

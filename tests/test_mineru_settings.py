@@ -58,7 +58,7 @@ class SettingsTests(unittest.TestCase):
 
 
 class JobSettingsTests(unittest.IsolatedAsyncioTestCase):
-    async def test_queued_job_keeps_profile_and_retry_uses_latest_profile(self):
+    async def test_queued_job_and_retry_keep_frozen_profile(self):
         with tempfile.TemporaryDirectory() as raw:
             source = Path(raw) / 'sample.pdf'; source.write_bytes(b'%PDF-test')
             jobs = PDFJobs(asyncio.Lock())
@@ -83,7 +83,7 @@ class JobSettingsTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(jobs, 'save'), patch.object(jobs, 'schedule'), \
                  patch('qwen_asr_app.pdf_jobs.mineru_settings.read', return_value=new):
                 updated = jobs.action(job['id'], 'retry')
-            self.assertEqual(updated['mineru_settings'], new)
+            self.assertEqual(updated['mineru_settings'], old)
 
     async def test_course_result_reuses_same_parameters_but_reparses_changed_profile(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -92,13 +92,14 @@ class JobSettingsTests(unittest.IsolatedAsyncioTestCase):
             old = normalize_mineru_settings({'tier': 'basic'})
             new = normalize_mineru_settings({'tier': 'advanced'})
             item = {'id': 'file', 'conversion': {'status': 'completed', 'engine': ENGINE,
-                    'sha256': digest_file(output), 'mineru_settings': old}}
+                    'sha256': digest_file(output), 'output_sha256': digest_file(output), 'source_sha256': digest_file(source),
+                    'runtime_fingerprint': 'verified-local-fixture', 'mineru_settings': old}}
             api = CourseFileAPI.__new__(CourseFileAPI)
             api.lock = asyncio.Lock(); api.tasks = {}; api.controls = {}; api.store = Mock()
             api.store.file.side_effect = lambda category, ident, *variant: (item, output if variant else source)
             api.store.get.return_value = (item, Path(raw))
             api.run_conversion = AsyncMock()
-            with patch('qwen_asr_app.course_file_routes.mineru_settings.read', return_value=old):
+            with patch('qwen_asr_app.course_file_routes.mineru_settings.read', return_value=old), patch('qwen_asr_app.inference_providers.runtime_fingerprint', return_value='verified-local-fixture'):
                 reused = await api.start_conversion('course', 'file')
             self.assertTrue(reused['reused']); api.run_conversion.assert_not_awaited()
             with patch('qwen_asr_app.course_file_routes.mineru_settings.read', return_value=new):

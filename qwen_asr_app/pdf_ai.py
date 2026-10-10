@@ -8,6 +8,8 @@ import signal
 import subprocess
 import tempfile
 import time
+import zipfile
+import contextlib
 from pathlib import Path
 from typing import Callable, Iterable
 from .mineru_settings import RUNTIME_ROOT, mineru_settings, normalize_mineru_settings, runtime_info
@@ -255,20 +257,16 @@ def convert_pdf_to_ai(
     progress: ProgressCallback | None = None,
     stop=None,
     settings=None,
+    inference_metadata=None,
+    inference_config=None,
+    receipt_path=None,
+    local_guard=None,
 ) -> Path:
     """Convert one PDF and atomically create its sibling ``(AI).pdf`` file."""
     source = Path(source).resolve()
     target = ai_pdf_output_path(source)
     if target.exists():
         raise FileExistsError(f"同目录已存在：{target.name}")
-    mineru = find_mineru_binary()
-    if mineru is None:
-        raise RuntimeError(
-            "未找到 MinerU 4。请先运行 scripts/install_mineru4.command"
-        )
-    info = runtime_info(mineru)
-    if not info["compatible"]:
-        raise RuntimeError(f"需要 MinerU 4.x，当前为 {info['version'] or '未知版本'}；请运行 scripts/install_mineru4.command")
     settings = normalize_mineru_settings(settings) if settings is not None else mineru_settings.read()
     if not builder_script.is_file():
         raise RuntimeError("AI 友好 PDF 打包脚本不存在")
@@ -280,37 +278,59 @@ def convert_pdf_to_ai(
 
     temporary_output: Path | None = None
     report("MinerU · 正在启动模型", 2)
-    with tempfile.TemporaryDirectory(prefix="qwenasr-pdf-ai-") as raw_work:
+    from .remote_operations import accepted_result_guard
+    with accepted_result_guard(receipt_path), tempfile.TemporaryDirectory(prefix='qwenasr-pdf-ai-') as raw_work:
         work = Path(raw_work)
         mineru_output = work / "mineru"
         settings_path = work / "settings.json"
         settings_path.write_text(json.dumps(settings), encoding="utf-8")
         # The SDK runs in its own environment, outside the ASR process. This
         # retains process-group cancellation and uses a single parse for exports.
-        first_line = mineru.read_text(encoding="utf-8").splitlines()[0]
-        runtime_python = first_line.removeprefix("#!").strip()
-        if not Path(runtime_python).is_file():
-            raise RuntimeError("MinerU 启动脚本没有有效的 Python 解释器")
-        _run_mineru(
-            [
-                runtime_python,
-                str(builder_script.parent / "run_mineru4.py"),
-                str(source),
-                "-o",
-                str(mineru_output),
-                "--settings",
-                str(settings_path),
-            ],
-            work / "mineru.log",
-            report,
-            stop,
-        )
+        def compute_local():
+            started = time.monotonic()
+            mineru = find_mineru_binary()
+            if mineru is None:
+                raise RuntimeError("未找到 MinerU 4。请先运行 scripts/install_mineru4.command")
+            info = runtime_info(mineru)
+            if not info["compatible"]:
+                raise RuntimeError(f"需要 MinerU 4.x，当前为 {info['version'] or '未知版本'}")
+            first_line = mineru.read_text(encoding="utf-8").splitlines()[0]
+            runtime_python = first_line.removeprefix("#!").strip()
+            if not Path(runtime_python).is_file():
+                raise RuntimeError("MinerU 启动脚本没有有效的 Python 解释器")
+            _run_mineru(
+                [runtime_python, str(builder_script.parent / "run_mineru4.py"),
+                 str(source), "-o", str(mineru_output), "--settings", str(settings_path)],
+                work / "mineru.log", report, stop,
+            )
+            return {"metrics": {"mineru_version": info.get("version", ""), "tier": settings["tier"],
+                                "configured_vlm_engine": settings["vlm_engine"],
+                                "parse_seconds_including_load": time.monotonic() - started}}
+        def local_parse():
+            with local_guard or contextlib.nullcontext():
+                return compute_local()
+        from .inference_providers import parse_document
+        provider_metadata = parse_document(source, mineru_output, local_parse, report, stop, config=inference_config, receipt_path=receipt_path)
+        if inference_metadata is not None:
+            inference_metadata.update(provider_metadata)
         report("正在整理逐页转写与 LaTeX", 84)
         markdown = _single_output(mineru_output, "*.md", "Markdown")
         content_list = _single_output(
             mineru_output, "*_content_list.json", "逐页内容映射"
         )
         uncertain = "\ufffd" in markdown.read_text(encoding="utf-8")
+        # Preserve all relative image references when the work directory is
+        # removed: the complete result travels inside the generated PDF.
+        bundle = mineru_output / "result.zip"
+        if bundle.exists():
+            with zipfile.ZipFile(bundle, "a", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("provider.json", json.dumps(provider_metadata, ensure_ascii=False))
+        else:
+            with zipfile.ZipFile(bundle, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                for path in sorted(mineru_output.rglob("*")):
+                    if path.is_file() and path != bundle:
+                        archive.write(path, path.relative_to(mineru_output).as_posix())
+                archive.writestr("provider.json", json.dumps(provider_metadata, ensure_ascii=False))
 
         descriptor, temporary_name = tempfile.mkstemp(
             prefix=f".{source.stem}-ai-", suffix=".pdf", dir=source.parent
@@ -334,6 +354,8 @@ def convert_pdf_to_ai(
                     str(temporary_output),
                     "--title",
                     source.stem,
+                    "--result-bundle",
+                    str(bundle),
                 ],
                 work / "package.log",
                 stop,

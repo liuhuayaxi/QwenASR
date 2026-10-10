@@ -252,9 +252,21 @@
             </div>
           </section>
 
+          <section class="settings-group wide" id="inferenceSettingsGroup">
+            <div class="settings-group-heading"><b>推理位置与远程回退</b><small>Windows WSL2 备用节点</small></div>
+            <div class="settings-group-grid">
+              <label><span>文档识别</span><select id="inferenceMineruProvider" class="field-select"><option value="local">本机 Mac</option><option value="remote_preferred">优先 Windows，确认未接受时回退</option><option value="remote_only">仅 Windows</option></select></label>
+              <label><span>语音识别</span><select id="inferenceAsrProvider" class="field-select"><option value="local">本机 Mac</option><option value="remote_preferred">优先 Windows，确认未接受时回退</option><option value="remote_only">仅 Windows</option></select></label>
+              <label class="wide"><span>远程网关地址</span><input id="inferenceRemoteUrl" type="url" value="http://100.81.62.69:8765" /><small class="setting-hint">使用 Windows 原生 Tailscale 节点直连；其他设备加入同一网络后使用此地址及访问令牌。</small></label>
+            </div>
+            <div class="settings-actions"><button id="saveInferenceSettings" type="button" class="ui-button primary" disabled>保存推理位置</button><button id="testInferenceConnection" type="button" class="ui-button" disabled>测试远程连接</button></div>
+            <p class="setting-hint">恢复任务沿用原参数和操作。Windows 语音模式仅识别已保存的完整段，关闭滚动预览；文档 PDF/图像固定 Advanced，原生 Office 使用 Flash。</p>
+            <p id="inferenceSettingsStatus" class="setting-hint" role="status" aria-live="polite">打开设置后读取配置</p>
+            <p class="setting-hint">Windows 模式会把原始文件发送至配置的网关。远程语音使用原生 Transformers 确定性解码；下方 MLX 生成参数用于本机模型。</p>
+          </section>
           <section class="settings-group wide" id="mineruSettingsGroup">
             <div class="settings-group-heading"><b>MinerU 文件识别</b><small id="mineruRuntimeStatus">打开设置后读取本机版本</small></div>
-            <p class="setting-hint">选择 PDF 与课程资料的识别质量。全部页面在本机处理，原页保留供核对。</p>
+            <p class="setting-hint">本机 Provider 的解析参数；原页保留供核对。Windows PDF 固定使用 Advanced 档位。</p>
             <div class="settings-group-grid">
               <label class="wide"><span>质量档位</span><select id="mineruTier" class="field-select"><option value="flash">极速 · Flash</option><option value="basic">基础 · Basic</option><option value="standard" selected>标准 · Standard（推荐）</option><option value="advanced">高级 · Advanced（更高计算量）</option></select><small id="mineruTierHint" class="setting-hint"></small></label>
               <label><span>文字识别方式</span><select id="mineruOcrMode" class="field-select"><option value="auto">自动判断（推荐）</option><option value="ocr">强制 OCR · 扫描件或文字层有误</option><option value="txt">优先原生文字层</option></select></label>
@@ -534,7 +546,7 @@
             </div>
           </section>
         </form>
-        <p class="privacy-note">修正、翻译、总结或生成标题时，只有文字会发送到你填写的 AI 接口；原始音频仍留在本机。</p>
+        <p class="privacy-note">修正、翻译、总结或生成标题时，文字会发送到你填写的 AI 接口。本机推理保留原始文件；Windows 推理会将原始文件发送至你配置的网关。</p>
         <p class="privacy-note">MLX 当前提供 CPU/GPU 设备，不能直接调用 Apple Neural Engine。现用 GPU 按需加载，空闲自动卸载。</p>
         <p class="privacy-note">当前 Qwen3-ASR 不自带说话人分离；说话人标记需要额外的专用模型。</p>
       </div>
@@ -642,6 +654,6 @@
     </dialog>
 
     <div id="toast" class="toast" role="status"></div>
-    <script src="/static/app.js?v=20261008-mineru4-1" type="module"></script>
+    <script src="/static/app.js?v=20261009-native-tailnet-1" type="module"></script>
   </body>
 </html>

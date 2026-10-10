@@ -5,7 +5,7 @@ const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;',
 const active = new Set(['running', 'queued', 'waiting_retry', 'stopping']);
 const attention = new Set(['failed', 'interrupted', 'pending', 'stale', 'completed_with_errors']);
 const labels = {running:'进行中', queued:'排队中', waiting_retry:'等待自动重试', stopping:'正在停止', paused:'已暂停', failed:'失败', error:'失败', interrupted:'已中断', pending:'待处理', stale:'原件已更新', completed_with_errors:'部分失败', completed:'已完成', cancelled:'已取消'};
-const actionLabels = {continue:'继续', retry:'重试', pause:'暂停', cancel:'取消'};
+const actionLabels = {continue:'继续', retry:'重试', pause:'暂停', cancel:'取消', download:'仅恢复下载', new_recognition:'新建识别', new_local:'新建本地任务'};
 const filterLabels = {all:'全部任务', active:'进行中', attention:'待处理', paused:'已暂停', completed:'已完成', cancelled:'已取消'};
 const state = {tasks: [], counts: {}, filter: 'all', selected: new Set(), busy: false, loading: false, ready: false};
 let timer, toastTimer, lastPayload = '';
@@ -40,10 +40,18 @@ function friendlyError(task) {
     input_too_long: '请求超过服务商窗口，继续后会拆成更小的片段。',
     rate_limit: '模型服务临时限流。', provider_busy: '模型服务暂时繁忙。',
     provider_quota: '服务商余额或额度不足，请补充额度或更换模型后重试。',
+    provider_auth: '模型服务认证失败，请检查该功能已保存的接口和密钥。',
     invalid_json: '模型返回的 JSON 结构不完整，可继续重新生成。',
     invalid_segment_mapping: '模型返回的段落编号不可靠，可继续重新处理。',
   };
   return messages[task.error_kind] || task.error || '';
+}
+function operationLabel(inference = {}, receipt = {}, mode) {
+  return [({local:'配置：本机', remote_preferred:'配置：优先 Windows', remote_only:'配置：仅 Windows'}[mode] || ''),
+    inference.provider ? `实际：${inference.provider === 'remote' ? 'Windows' : 'Mac'}` : '实际来源待确认',
+    inference.fallback ? `已回退：${inference.fallback_reason || '远端确认未接受'}` : '',
+    (inference.job_id || receipt.job_id) ? `Job ID：${inference.job_id || receipt.job_id}` : '',
+    receipt.state ? `操作阶段：${receipt.state}` : ''].filter(Boolean).join(' · ');
 }
 function card(task) {
   const progress = task.status === 'completed' ? 100 : task.progress ?? (task.total ? Math.round((task.completed || 0) / task.total * 100) : null);
@@ -52,14 +60,23 @@ function card(task) {
   const wait = task.status === 'waiting_retry' && task.retry_in_seconds ? ` · 约 ${task.retry_in_seconds} 秒后自动重试` : '';
   const stage = (task.stage || (task.status === 'pending' ? '等待手动开始处理' : labels[task.status])) + wait;
   const error = friendlyError(task);
-  const details = [task.error && task.error !== error ? task.error : '',
+  const inference = task.inference || {}; // Mixed batches report each file separately.
+  const inferMetrics = inference.metrics || {};
+  const mode = task.configured_provider;
+  const providerName = inference.provider ? (inference.provider === 'remote' ? 'Windows 远程' : 'Mac 本机')
+    : ({local: '配置为 Mac 本机', remote_preferred: '配置为优先 Windows', remote_only: '配置为仅 Windows'}[mode] || '');
+  const tier = inferMetrics.tier || task.mineru_settings?.tier;
+  const recognition = task.family === 'mineru' ? [providerName,
+    inferMetrics.mineru_version ? `MinerU ${inferMetrics.mineru_version}` : '',
+    tier ? `${tier === 'advanced' ? 'Advanced' : tier} 档位` : '', inference.fallback ? '已回退本机' : ''].filter(Boolean).join(' · ') : task.family === 'asr' ? [providerName || '来源未验证', inferMetrics.model || inference.model || '', inferMetrics.dtype || inference.dtype || '', inferMetrics.device || inference.device || '', inference.fallback ? '已回退本机' : '', inferMetrics.gpu_release_state === 'verified' ? '显存释放已验证' : '资源遥测未验证'].filter(Boolean).join(' · ') : '';
+  const details = [operationLabel(inference, {job_id: task.remote_job_id, state: task.remote_operation_state}, mode), recognition ? `识别环境：${recognition}` : '', task.error && task.error !== error ? task.error : '',
     task.range_end ? `片段范围：${Math.floor(task.range_start / 60)}–${Math.ceil(task.range_end / 60)} 分钟` : '',
     task.attempts > 1 ? `历史尝试 ${task.attempts} 次` : '', ...(task.warnings || [])].filter(Boolean);
-  const files = (task.files || []).map(file => `<li class="task-file"><div><b>${esc(file.source_name)}</b><span>${esc(labels[file.status] || file.status)}${file.status === 'running' ? ` · ${Math.round(file.progress || 0)}%` : ''}</span></div><p>${esc(file.error || file.stage)}</p><p>${esc(file.output_path || file.source_path)}</p>${file.download_url ? `<a href="${esc(file.download_url)}" download>下载 AI 友好 PDF</a>` : ''}</li>`).join('');
+  const files = (task.files || []).map(file => `<li class="task-file"><div><b>${esc(file.source_name)}</b><span>${esc(labels[file.status] || file.status)}${file.status === 'running' ? ` · ${Math.round(file.progress || 0)}%` : ''}</span></div><p>${esc(file.error || file.stage)}</p><p>${esc(operationLabel(file.inference, file.remote_operation, task.configured_provider))}</p><p>${esc(file.output_path || file.source_path)}</p>${file.download_url ? `<a href="${esc(file.download_url)}" download>下载 AI 友好 PDF</a>` : ''}</li>`).join('');
   return `<article class="task-card" data-id="${esc(task.id)}" data-status="${esc(task.status)}"><div class="task-card-top">
     <input class="task-select" type="checkbox" aria-label="选择 ${esc(task.label)}：${esc(task.title)}" ${state.selected.has(task.id) ? 'checked' : ''} ${state.busy ? 'disabled' : ''}>
     <div class="task-main"><div class="task-title"><h3>${esc(task.title)}</h3><span class="task-status">${esc(labels[task.status] || task.status)}</span></div>
-    <div class="task-meta"><span class="task-type">${esc(task.label)}</span><span>${esc(task.category || task.source)}</span>${dateLabel(task.updated_at) ? `<span>更新于 ${esc(dateLabel(task.updated_at))}</span>` : ''}</div>
+    <div class="task-meta"><span class="task-type">${esc(task.label)}</span><span>${esc(task.category || task.source)}</span>${recognition ? `<span>${esc(recognition)}</span>` : ''}${dateLabel(task.updated_at) ? `<span>更新于 ${esc(dateLabel(task.updated_at))}</span>` : ''}</div>
     <div class="task-stage"><span>${esc(stage)}</span><span>${esc(count)}${bounded !== null ? `${count ? ' · ' : ''}${bounded}%` : ''}</span></div>
     ${bounded !== null || active.has(task.status) ? `<progress class="task-progress" max="100" ${bounded !== null ? `value="${bounded}"` : ''} aria-label="${esc(task.label)}进度"></progress>` : ''}
     ${error ? `<div class="task-error">${esc(error)}</div>` : ''}
@@ -125,6 +142,8 @@ async function load() {
   }
 }
 async function perform(targets, action, bulk = false) {
+  const newOperation = ['new_local', 'new_recognition'].includes(action);
+  if (newOperation && !confirm('旧远端任务可能仍在运行。新任务可能重复计算，旧收据与结果会保留。确认创建新任务？')) return;
   if (state.busy || !targets.length) return;
   state.busy = true; render(); notice('actionResult', '');
   try {
@@ -132,7 +151,7 @@ async function perform(targets, action, bulk = false) {
     if (targets.some(task => task.family === 'ai') && ['continue','retry'].includes(action)) {
       [defaults, library] = await Promise.all([api('/api/config'), api('/api/library')]);
     }
-    const items = targets.map(task => aiTaskPayload(task, action, defaults, library));
+    const items = targets.map(task => ({...aiTaskPayload(task, action, defaults, library), ...(newOperation ? {acknowledge_duplicate:true} : {})}));
     if (bulk) {
       const result = await api('/api/tasks/bulk-action', {action, items});
       const failures = result.results.filter(item => !item.ok).map(item => `${targets.find(task => task.id === item.id)?.title || '任务'}：${item.error}`);
