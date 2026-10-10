@@ -110,7 +110,9 @@ async function transcribeUploadedFile(file, config, fileIndex, fileCount, resume
         addBatchBlock(els.batchAi, { id: event.id }, `AI 处理未完成：${event.message}`, label);
       } else if (event.type === "complete") {
         completedSession = event.session;
-        $("#batchTiming").textContent = `本次处理耗时 ${formatDuration(completedSession.processing_seconds)} · 本地识别累计 ${formatDuration(completedSession.asr_seconds)}${completedSession.ai_warnings ? ` · ${completedSession.ai_warnings} 项 AI 处理未完成` : ""}`;
+        const inference = completedSession.inference || {};
+        const origin = inference.provider === 'remote' ? 'Windows 识别' : inference.provider === 'local' ? 'Mac 识别' : '来源未验证';
+        $("#batchTiming").textContent = `本次处理耗时 ${formatDuration(completedSession.processing_seconds)} · ${origin}累计 ${formatDuration(completedSession.asr_seconds)}${inference.fallback ? ' · 已回退本机' : ''}${completedSession.ai_warnings ? ` · ${completedSession.ai_warnings} 项 AI 处理未完成` : ""}`;
       } else if (event.type === "error") {
         throw new Error(event.message || "录音转写失败");
       }
@@ -127,8 +129,8 @@ async function uploadRecordings(fileList) {
   state.uploading = true;
   els.batchRaw.innerHTML = "";
   els.batchAi.textContent = els.aiCorrection.checked || els.translation.value !== "off"
-    ? "本地转写与 AI 精修同时进行；最后按时间分块统一整理…"
-    : "本次只做转写；完成后可在录音库按需生成 AI 总结";
+    ? "等待转写与 AI 精修"
+    : "等待转写";
   els.batchAi.dataset.placeholder = "true";
   els.batchAi.classList.add("muted-output");
   els.batchQueue.textContent = `队列：${files.map((file) => file.name).join(" · ")}`;

@@ -4,7 +4,7 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#f5f7f5"><title>课程资料库 · QwenASR</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
-  <script src="/static/js/theme.js?v=20261002-theme-2"></script>
+  <script src="/static/js/theme.js?v=20261010-routing-progress"></script>
   <link rel="stylesheet" href="/static/course-files.css?v=20261002-theme-2">
   <link rel="stylesheet" href="/static/ui.css?v=20261002-theme-2">
 </head>
@@ -13,11 +13,12 @@
       <div class="app-header-inner">
         <a class="app-brand" href="/" aria-label="QwenASR 本地学习工作台">
           <span class="app-brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
-          <span><b>QwenASR</b><small>本地学习工作台</small></span>
+          <span><b>QwenASR</b></span>
         </a>
         <nav class="app-nav" aria-label="主导航">
           <a href="/">录音工作台</a>
           <a href="/library">录音库</a>
+          <a href="/notes">笔记管理</a>
           <a href="/course/">课程回放</a>
           <a href="/course-files" aria-current="page">课程资料库</a>
           <a href="/tasks">任务中心</a>
@@ -33,20 +34,20 @@
     <div class="side-bottom"><span class="dot"></span>文件保存在本机<a href="/">← 返回录音工作台</a></div>
   </aside>
   <main class="course-content">
-    <header class="page-heading"><div><p class="eyebrow">COURSE LIBRARY</p><h1 id="courseTitle">课程资料库</h1><p id="courseMeta" class="muted">把课件、讲义与课堂笔记放在一起。</p></div><div class="category-actions" aria-label="当前分类操作"><button id="renameCategory" class="ui-button" disabled>重命名分类</button><button id="deleteCategory" class="ui-button danger" disabled>删除分类</button><button id="reveal" class="ui-button">在 Finder 中打开</button></div></header>
+    <header class="page-heading"><div><p class="eyebrow">COURSE LIBRARY</p><h1 id="courseTitle">课程资料库</h1><p id="courseMeta" class="muted"></p></div><div class="category-actions" aria-label="当前分类操作"><button id="renameCategory" class="ui-button" disabled>重命名分类</button><button id="deleteCategory" class="ui-button danger" disabled>删除分类</button><button id="reveal" class="ui-button">在 Finder 中打开</button></div></header>
     <section class="workflow" aria-label="使用流程"><span><b>01</b> 添加课程文件</span><i>→</i><span><b>02</b> 按需生成 PDF</span><i>→</i><span><b>03</b> 复制或匹配笔记上传</span></section>
     <section id="dropzone" class="dropzone" aria-label="添加课程文件">
-      <div class="upload-icon" aria-hidden="true">↑</div><div><h2>把文件拖到这里，归入当前课程</h2><p>保留原件，按内容去重。每个文件最多 200 MB。</p></div>
+      <div class="upload-icon" aria-hidden="true">↑</div><div><h2>把文件拖到这里，归入当前课程</h2></div>
       <div class="upload-controls"><label for="uploadKind" class="sr-only">资料类型</label><select id="uploadKind" class="ui-field"><option>课件</option><option>讲义</option><option>作业</option><option>参考资料</option><option>其他</option></select><button id="addFiles" class="ui-button primary">＋ 添加文件</button></div>
       <input id="filesInput" type="file" multiple hidden><input id="replaceInput" type="file" hidden>
     </section>
     <p id="uploadStatus" class="notice" role="status" hidden></p>
     <section class="file-section">
-      <div class="section-toolbar"><h2>课程文件 <span id="fileCount">0</span></h2><div><label for="search" class="sr-only">搜索文件</label><input id="search" type="search" placeholder="搜索文件名…" class="ui-field"><label class="sr-only" for="kindFilter">筛选类型</label><select id="kindFilter" class="ui-field"><option value="">所有类型</option><option>课件</option><option>讲义</option><option>作业</option><option>参考资料</option><option>其他</option></select><button id="refresh" aria-label="刷新文件" class="ui-button">刷新</button></div></div>
+      <div class="section-toolbar"><h2>课程文件 <span id="fileCount">0</span></h2><div><button id="upgradeLegacy" class="ui-button primary" type="button" hidden>升级旧版识别</button><label for="search" class="sr-only">搜索文件</label><input id="search" type="search" placeholder="搜索文件名…" class="ui-field"><label class="sr-only" for="kindFilter">筛选类型</label><select id="kindFilter" class="ui-field"><option value="">所有类型</option><option>课件</option><option>讲义</option><option>作业</option><option>参考资料</option><option>其他</option></select><button id="refresh" aria-label="刷新文件" class="ui-button">刷新</button></div></div>
       <p id="loadError" class="notice error" role="alert" hidden></p>
       <div id="files" class="files"></div>
     </section>
-    <footer class="file-footer"><p>支持课件、讲义与作业，按需生成方便 AI 阅读的 PDF。原件与原始页面保留，随时可以核对。</p><p id="directory"></p><p id="capabilities"></p></footer>
+    <footer class="file-footer"><p id="directory"></p><p id="capabilities"></p></footer>
   </main>
   </div>
   <dialog id="fileDialog" class="ui-dialog category-dialog" aria-labelledby="fileDialogTitle">
@@ -73,18 +74,18 @@
       <div class="sync-file"><b id="syncFileName"></b><label for="variant">上传版本</label><select id="variant" class="ui-field"><option value="pdf">AI 易读 PDF</option><option value="original">原件</option></select></div>
       <div class="connection"><label class="sr-only" for="region">闪念贝壳账号区域</label><select id="region" class="ui-field"><option value="china">中国大陆账号</option><option value="global">全球账号</option></select><button id="connect" class="ui-button">连接闪念贝壳</button><span id="connectionStatus" class="muted"></span><a id="authorize" target="_blank" rel="noopener" hidden>打开授权页面</a></div>
       <label class="field-label" for="noteQuery">查找目标笔记</label><div class="search-row"><input id="noteQuery" placeholder="课程名、章节或笔记标题" class="ui-field"><button id="searchNotes" class="ui-button">搜索闪念贝壳</button></div>
-      <p class="muted small">先列出本课程已有的笔记关联，也可以按关键词搜索。选中笔记或填入完整编号后，会自动预览上传目标。</p>
+
       <div id="candidates" class="candidates"></div>
       <p id="matchStatus" class="notice" role="status" hidden></p>
       <label class="field-label" for="noteId">目标笔记编号</label><input id="noteId" class="ui-field wide" placeholder="选择上方笔记，或粘贴完整的 32 位编号" maxlength="32" autocomplete="off">
       <p id="syncStatus" class="notice" role="status" hidden></p>
       <div id="preview" class="preview" hidden></div>
-      <p id="syncHint" class="small muted" role="status">请选择目标笔记，预览成功后即可确认上传附件。</p>
-      <p class="small muted">上传会追加一个附件。笔记正文保留；成功记录用于去重。文件只在点击下方上传按钮后发送。</p>
+      <p id="syncHint" class="small muted" role="status"></p>
+
     </div>
     <div class="dialog-footer"><button id="previewButton" class="ui-button">预览上传目标</button><button id="syncButton" class="ui-button primary" disabled>确认上传附件</button></div>
   </dialog>
   <div id="toast" role="status" hidden></div>
-  <script type="module" src="/static/js/course-files.js?v=20261008-mineru4-1"></script>
+  <script type="module" src="/static/js/course-files.js?v=20261010-routing-progress"></script>
 </body>
 </html>

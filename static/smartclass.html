@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#f5f7f5">
   <title>课程回放 · QwenASR</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
-  <script src="/static/js/theme.js?v=20261002-theme-2"></script>
+  <script src="/static/js/theme.js?v=20261010-routing-progress"></script>
   <link rel="stylesheet" href="/static/smartclass.css?v=20261008-pipeline-1">
   <link rel="stylesheet" href="/static/ui.css?v=20261002-theme-2">
 </head>
@@ -15,11 +15,12 @@
       <div class="app-header-inner">
         <a class="app-brand" href="/" aria-label="QwenASR 本地学习工作台">
           <span class="app-brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
-          <span><b>QwenASR</b><small>本地学习工作台</small></span>
+          <span><b>QwenASR</b></span>
         </a>
         <nav class="app-nav" aria-label="主导航">
           <a href="/">录音工作台</a>
           <a href="/library">录音库</a>
+          <a href="/notes">笔记管理</a>
           <a href="/course/" aria-current="page">课程回放</a>
           <a href="/course-files">课程资料库</a>
           <a href="/tasks">任务中心</a>
@@ -28,7 +29,7 @@
       </div>
     </header>
   <main class="replay-main">
-    <header class="page-heading"><div><span class="eyebrow">COURSE REPLAY</span><h1>课程回放</h1><p>选择课程与课次，将课堂回放整理成文字和笔记。</p></div></header>
+    <header class="page-heading"><div><span class="eyebrow">COURSE REPLAY</span><h1>课程回放</h1></div></header>
     <p id="notice" role="alert"></p>
     <div class="replay-grid">
       <div class="replay-setup">
@@ -40,7 +41,7 @@
         <label>学号 / 工号<input id="username" name="username" autocomplete="username" required class="ui-field"></label>
         <label>统一认证密码<input id="password" name="password" type="password" autocomplete="current-password" required class="ui-field"></label></div>
         <label class="save"><input id="save" type="checkbox" checked>保存在本机，用于以后自动登录</label>
-        <p class="muted">凭证仅保存到当前系统用户可读的 ~/.qwenasr/smartclass/，通过 HTTPS 发送到南邮统一认证服务器。</p>
+
         <button id="connect" type="submit" class="ui-button primary">保存并测试自动登录</button>
         <button id="reconnect" class="ui-button secondary" type="button" hidden>使用已保存账号登录</button>
         </form>
@@ -49,7 +50,7 @@
 
 <section class="card">
         <h2>选择课程与课次</h2>
-        <p class="muted">只获取你勾选的回放。同一天、同一课程的两节相邻回放会合成一份笔记。下载、转写和笔记会流水线处理，运行期间可以切换课程、继续添加课次。</p>
+
         <label>本学期课程<select id="courses" class="ui-field"><option value="">登录后选择课程…</option></select></label>
         <button id="refresh" class="ui-button secondary" type="button">刷新课程</button>
         <button id="loadLessons" class="ui-button secondary" type="button">查看 / 刷新回放</button><div id="lessons" aria-live="polite"></div>
@@ -64,9 +65,9 @@
         <div class="fields">
         <label>精修接口地址<input id="correctionBase" type="url" class="ui-field"></label>
         <label>AI 精修模型<input id="correctionModel" placeholder="默认使用笔记模型" class="ui-field"></label></div>
-        <p class="muted">设置自动保存到本机文件，清空浏览器不会丢失。AI 密钥共用工作台的本机密钥库；首次使用会采用工作台已保存的模型配置。</p>
+
         <button id="saveOptions" class="ui-button secondary" type="button">保存笔记设置</button>
-        <p id="optionsStatus" class="muted" role="status">已保存的配置会在下次打开时自动恢复。</p>
+        <p id="optionsStatus" class="muted" role="status"></p>
         </details>
         <button id="import" type="button" disabled class="ui-button primary">将选中课次加入队列</button>
         <button id="stop" class="ui-button secondary" type="button" hidden>暂停队列</button>
@@ -92,6 +93,6 @@
       return nativeFetch(input, init);
     };
   </script>
-  <script src="/static/js/smartclass.js?v=20261008-pipeline-1"></script>
+  <script src="/static/js/smartclass.js?v=20261010-routing-progress"></script>
 </body>
 </html>

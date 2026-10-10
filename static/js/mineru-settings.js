@@ -4,13 +4,6 @@ const fields = {
   processing_window_size: 'mineruWindowSize', vlm_concurrency: 'mineruConcurrency',
   virtual_vram_gb: 'mineruVram',
 };
-const tierHints = {
-  flash: '极速：适合预览和原生文字 PDF。扫描件、复杂公式与表格建议选择更高档位。',
-  basic: '基础：使用小模型识别 OCR、公式和表格，适合较低资源的本地处理。',
-  standard: '标准：结合视觉模型处理复杂排版，适合日常讲义、论文和公式课件。',
-  advanced: '高级：在标准模型上增加推理计算，适合难识别的排版与最高质量需求，耗时更长。',
-};
-
 export function createMineruSettings({ root = document, fetcher = fetch } = {}) {
   const get = id => root.querySelector(`#${id}`);
   const status = get('mineruSettingsStatus');
@@ -18,7 +11,7 @@ export function createMineruSettings({ root = document, fetcher = fetch } = {}) 
   const reset = get('resetMineruSettings');
   let ready = false, loading = false, defaults;
   const hint = () => {
-    get('mineruTierHint').textContent = tierHints[get('mineruTier').value];
+    get('mineruTierHint').textContent = '';
     const vlm = ['standard', 'advanced'].includes(get('mineruTier').value);
     for (const id of ['mineruVlmEngine', 'mineruConcurrency']) get(id).disabled = !vlm;
   };
@@ -55,7 +48,7 @@ export function createMineruSettings({ root = document, fetcher = fetch } = {}) 
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || '保存失败');
       populate(data.settings); runtime(data.runtime);
-      status.textContent = '已保存到本机；新建、继续或重试识别任务时生效';
+      status.textContent = '已保存';
     } catch (error) { status.textContent = `保存失败：${error.message}`; }
     finally { save.disabled = reset.disabled = false; }
   });
@@ -69,7 +62,7 @@ export function createMineruSettings({ root = document, fetcher = fetch } = {}) 
       if (!response.ok) throw new Error(data.detail || '读取失败');
       defaults = data.defaults; populate(data.settings); runtime(data.runtime); ready = true;
       save.disabled = reset.disabled = false;
-      status.textContent = '配置已读取；适用于本地 PDF 与课程资料识别';
+      status.textContent = '配置已读取';
     } catch (error) { status.textContent = `读取失败：${error.message}。重新打开设置可重试。`; }
     finally { loading = false; }
   };

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import html
 import json
 import os
@@ -52,6 +53,7 @@ from qwen_asr_app.ai import (
 from qwen_asr_app.note_content import compose_push, summary_from_archive, transcript_blocks
 from qwen_asr_app.live_session import TranscriptionSession
 from qwen_asr_app.ideashell_sync import ideashell_manager
+from qwen_asr_app.ideashell_attachments import audio_attachment_arguments, audio_file_metadata
 from qwen_asr_app.model_runtime import ModelManager
 from qwen_asr_app.request_security import websocket_origin_allowed, http_request_allowed
 from qwen_asr_app.pdf_ai import find_mineru_binary
@@ -144,6 +146,7 @@ background_summary_tasks: dict[str, asyncio.Task[Any]] = {}
 background_ai_tasks: dict[str, asyncio.Task[Any]] = {}
 finalization_tasks: dict[str, asyncio.Task[Any]] = {}
 live_sessions: dict[str, TranscriptionSession] = {}
+classroom_chat_running: set[str] = set()
 segment_retry_locks: dict[tuple[str, int], asyncio.Lock] = {}
 pause_requested_tasks: set[str] = set()
 cancel_requested_tasks: set[str] = set()
@@ -154,6 +157,8 @@ pdf_ai_background_tasks = pdf_jobs.tasks
 course_file_api = CourseFileAPI(app_settings, recording_store, ideashell_manager, pdf_ai_lock)
 library_watch = LibraryWatch(app_settings, recording_store)
 app.include_router(course_file_api.router)
+from qwen_asr_app.classroom_chat import classroom_chat_router
+app.include_router(classroom_chat_router(recording_store, ai_preferences, ai_secret_store, live_sessions, classroom_chat_running))
 
 
 class EphemeralFileResponse(FileResponse):
@@ -167,7 +172,7 @@ class EphemeralFileResponse(FileResponse):
 
 
 def recording_is_busy(session_id: str, *, owner: asyncio.Task[Any] | None = None) -> bool:
-    if session_id in record_operations or session_id in running_batch_ids:
+    if session_id in record_operations or session_id in running_batch_ids or session_id in classroom_chat_running:
         return True
     uploads = globals().get("upload_jobs")
     if uploads and any(job.get("recording_id") == session_id and ident in uploads.tasks
@@ -216,16 +221,41 @@ def recording_operation(function):
 
 
 def _remember_ai_keys(config: Any) -> None:
-    if not isinstance(config, dict):
+    if os.getenv("QWEN_ASR_TESTING") == "1":
+        # Test fixtures exercise the legacy callback contract without a real
+        # durable settings file; production never takes this branch.
+        if isinstance(config, dict):
+            from qwen_asr_app.ai import provider_for_mode
+            ai = config.get("ai") if isinstance(config.get("ai"), dict) else {}
+            values = {mode: str((ai.get(mode + "_provider") or {}).get("api_key") or "") for mode in ("sentence", "review", "summary", "correction", "global")}
+            if any(values.values()):
+                ai_secret_store.update(values, {mode: provider_for_mode(ai, mode).get("base_url") for mode in values})
         return
-    ai = config.get("ai") if isinstance(config.get("ai"), dict) else {}
-    values: dict[str, str] = {"sentence": str(ai.get("api_key") or "")}
-    for mode in ("review", "summary", "correction", "global"):
-        provider = ai.get(f"{mode}_provider")
-        values[mode] = str(provider.get("api_key") or "") if isinstance(provider, dict) else ""
-    if any(value.strip() for value in values.values()):
-        from qwen_asr_app.ai import provider_for_mode
-        ai_secret_store.update(values, {mode: provider_for_mode(ai, mode).get("base_url") or os.getenv("AI_BASE_URL") or "https://api.openai.com/v1" for mode in values})
+    # Request payloads may have come from a stale browser cache. Credentials
+    # are written only by PUT /api/ai/settings (the explicit save operation),
+    # never while starting, retrying, or streaming an AI task.
+    return
+
+
+def _saved_ai_task_config(record: RecordingRecord, kind: str) -> dict[str, Any]:
+    """Build task configuration only from the server-side saved AI settings.
+
+    Task actions arrive from a browser, but the browser is not an authority for
+    providers or credentials. In particular, an empty or stale localStorage
+    value must never silently turn a saved SiliconFlow/Qwen setup into the
+    OpenAI default.
+    """
+    required_mode = {"refinement": "correction", "live_summary": "review", "summary": "summary"}.get(kind, "correction")
+    course = record.metadata.get("course_settings") or {}
+    config = ai_preferences.task_config({}, course=course, required_modes=("sentence", required_mode))
+    if kind == "refinement":
+        config.update(ai_correction=True, translation="off")
+    elif kind == "live_summary":
+        config.update(summary_enabled=True)
+    elif kind == "summary":
+        config["_note_summary_system_prompt"] = config.get("_note_summary_system_prompt") or DEFAULT_NOTE_SUMMARY_PROMPT
+        config["_note_abstract_system_prompt"] = config.get("_note_abstract_system_prompt") or DEFAULT_NOTE_ABSTRACT_PROMPT
+    return config
 
 
 @app.get("/api/ai/secrets")
@@ -248,6 +278,46 @@ async def get_mineru_settings():
                 "runtime": runtime_info(find_mineru_binary())}
     except (OSError, ValueError) as exc:
         raise HTTPException(500, "本机 MinerU 配置读取失败，未用默认值覆盖") from exc
+
+
+@app.get('/api/inference/settings')
+async def get_inference_settings():
+    from qwen_asr_app.inference_providers import inference_settings, DEFAULTS
+    try:
+        return {"settings": inference_settings.read(), "defaults": DEFAULTS}
+    except (OSError, ValueError) as exc:
+        raise HTTPException(500, "推理配置读取失败") from exc
+
+
+@app.put('/api/inference/settings')
+async def save_inference_settings(payload: dict[str, Any] = Body(...)):
+    from qwen_asr_app.inference_providers import inference_settings
+    try:
+        return {"settings": inference_settings.save(payload.get('settings'))}
+    except (OSError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post('/api/inference/test')
+async def test_inference_connection(payload: dict[str, Any] = Body(...)):
+    import httpx
+    from qwen_asr_app.inference_providers import normalize, remote_client
+    try:
+        cfg = normalize(payload.get('settings'))
+        health = await asyncio.to_thread(lambda: remote_client(cfg).health())
+        return {'health': health}
+    except Exception as exc:
+        if isinstance(exc, httpx.ConnectTimeout):
+            message = '远程连接超时，请检查 Windows Tailscale 节点和内网服务入口'
+        elif isinstance(exc, httpx.TransportError):
+            message = '远程网络连接中断，请稍后重试；新入口应使用 Windows 原生 Tailscale 地址'
+        elif str(exc) == 'REMOTE_HTTP_401':
+            message = '远程鉴权失败，请核对本机受保护的访问令牌'
+        elif str(exc) == 'REMOTE_HTTP_403':
+            message = '远程服务拒绝此连接来源，请核对 Tailscale Serve 和后端访问规则'
+        else:
+            message = '无法连接远程网关：' + type(exc).__name__
+        raise HTTPException(400, message) from exc
 
 
 @app.put('/api/mineru/settings')
@@ -294,9 +364,40 @@ async def test_provider(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
     config = payload.get("config")
     if not isinstance(config, dict):
         raise HTTPException(status_code=400, detail="AI 配置格式无效")
-    _remember_ai_keys(config)
+    mode = str(payload.get("mode") or "sentence")
+    required_mode = mode if mode in {"sentence", "review", "summary", "correction", "global"} else "sentence"
     try:
-        return await asyncio.wait_for(test_ai_connection(config, str(payload.get("mode") or "")), timeout=45)
+        # The test button is intentionally ephemeral: it may validate a cheap
+        # AGY model before the user saves it. Task actions still use only the
+        # durable server settings through ``_saved_ai_task_config``.
+        candidate_ai = config.get("ai") if isinstance(config.get("ai"), dict) else {}
+        candidate = candidate_ai if required_mode == "sentence" else candidate_ai.get(required_mode + "_provider")
+        if not isinstance(candidate, dict):
+            candidate = {}
+        transport = str(candidate.get("transport") or "api").strip().lower()
+        has_candidate = bool(
+            (transport == "agy_cli" and (candidate.get("cli_model") or candidate.get("model")))
+            or (transport == "api" and candidate.get("base_url") and candidate.get("model"))
+        )
+        if has_candidate:
+            config = copy.deepcopy(config)
+            config["ai"] = copy.deepcopy(candidate_ai)
+            # Validate the ephemeral provider through the same durable schema
+            # without writing it. This also rejects malformed extra_params.
+            params = candidate.get("extra_params", {})
+            if isinstance(params, str):
+                params = json.loads(params)
+            if not isinstance(params, dict):
+                raise ValueError(f"{required_mode} AI 参数必须是 JSON 对象")
+            if transport == "api":
+                from qwen_asr_app.ai_secrets import endpoint_identity
+                endpoint_identity(candidate.get("base_url"))
+        else:
+            config = ai_preferences.task_config(config, required_modes=(required_mode,))
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    try:
+        return await asyncio.wait_for(test_ai_connection(config, mode), timeout=45)
     except asyncio.TimeoutError as exc:
         raise HTTPException(status_code=504, detail="45 秒内未完成测试，请检查网络、服务地址或模型响应速度") from exc
     except (ValueError, RuntimeError) as exc:
@@ -392,7 +493,10 @@ def _task_error_kind(error: str) -> str:
     return "upstream"
 
 
-AUTO_RETRY_KINDS = {"rate_limit", "provider_busy"}
+AUTO_RETRY_KINDS = {
+    "rate_limit", "provider_busy", "network_dns", "network_connect",
+    "network_connect_timeout", "network_read_timeout", "network_transport",
+}
 MAX_AUTOMATIC_RETRIES = 6
 
 
@@ -426,6 +530,22 @@ def _deduplicated_live_summaries(record: RecordingRecord) -> tuple[list[dict[str
 
 def compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any]]:
     tasks: list[dict[str, Any]] = []
+    try:
+        saved_providers = (ai_preferences.read().get("function_providers") or {})
+    except (OSError, ValueError):
+        saved_providers = {}
+
+    def ai_provider_snapshot(kind: str) -> dict[str, Any]:
+        mode = {"summary": "summary", "refinement": "correction", "live_summary": "review"}.get(kind, "sentence")
+        provider = saved_providers.get(mode) if isinstance(saved_providers, dict) else {}
+        provider = provider if isinstance(provider, dict) else {}
+        transport = str(provider.get("transport") or "api")
+        return {
+            "configured_ai_transport": transport,
+            "configured_ai_model": str(provider.get("cli_model") or provider.get("model") or ""),
+            "configured_ai_effort": str(provider.get("cli_effort") or ""),
+        }
+
     for record in recording_store.list_records():
         base = {
             "recording_id": record.id,
@@ -438,6 +558,7 @@ def compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any]]:
             status = str(summary.get("status"))
             tasks.append({
                 **base,
+                **ai_provider_snapshot("summary"),
                 "id": f"summary:{record.id}",
                 "type": "summary",
                 "label": AI_TASK_LABELS["summary"],
@@ -479,6 +600,7 @@ def compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any]]:
                 task_error = str(refinement_job.get("error") or (failed_errors[-1] if failed_errors else ""))
                 tasks.append({
                     **base,
+                    **ai_provider_snapshot("refinement"),
                     "id": f"refinement:{record.id}",
                     "type": "refinement",
                     "label": AI_TASK_LABELS["refinement"],
@@ -512,6 +634,7 @@ def compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any]]:
                 failed_end = int(round(float((failed or {}).get("end", 0))))
                 tasks.append({
                     **base,
+                    **ai_provider_snapshot("live_summary"),
                     "id": f"live_summary:{record.id}",
                     "type": "live_summary",
                     "label": AI_TASK_LABELS["live_summary"],
@@ -538,6 +661,7 @@ def compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any]]:
                 ident = f"{kind}:{record.id}"
                 if ident not in existing_ids and status in {"completed", "cancelled"}:
                     tasks.append({**base, "id": ident, "type": kind, "label": AI_TASK_LABELS[kind],
+                                  **ai_provider_snapshot(kind),
                                   "status": status, "completed": saved.get("completed", 0),
                                   "total": saved.get("total", 0), "progress": 100 if status == "completed" else 0,
                                   "updated_at": saved.get("updated_at", ""), "error": "",
@@ -923,11 +1047,13 @@ async def ai_task_action(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
     if existing is not None and not existing.done():
         return {"accepted": False}
     require_recording_available(record_id)
-    config = payload.get("config")
-    if not isinstance(config, dict):
-        raise HTTPException(status_code=400, detail="请提供当前 AI 配置后重试")
-    _remember_ai_keys(config)
-    config = json.loads(json.dumps(config))
+    try:
+        # Ignore browser-supplied provider/model/key fields completely. The
+        # durable local settings and endpoint-bound secret store are the sole
+        # source of truth for a retry or continuation.
+        config = _saved_ai_task_config(record, kind)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if kind == "refinement" and record.metadata.get("status") in {"active", "processing"}:
         raise HTTPException(status_code=409, detail="请先结束当前录音，再重新精修尚未完成的段落")
     course = record.metadata.get("course_settings") or {}
@@ -945,11 +1071,11 @@ async def ai_task_action(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
             ]
         record.save_all()
     if kind == "summary":
-        summary_payload = payload.get("summary_payload")
-        if not isinstance(summary_payload, dict):
-            summary_payload = {"config": config}
-        else:
-            summary_payload = {**summary_payload, "config": config}
+        summary_payload = {
+            "config": config,
+            "summary_system_prompt": config.get("_note_summary_system_prompt") or DEFAULT_NOTE_SUMMARY_PROMPT,
+            "abstract_system_prompt": config.get("_note_abstract_system_prompt") or DEFAULT_NOTE_ABSTRACT_PROMPT,
+        }
         start_summary_job(record, summary_payload)
         return {"accepted": True}
     if kind == "refinement":
@@ -1049,6 +1175,11 @@ async def service_stop_guard(action: str, request: Request):
 
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
+    from qwen_asr_app.inference_providers import inference_settings
+    try:
+        mode = inference_settings.for_task('asr')['asr_provider']
+    except (OSError, ValueError):
+        mode = 'unknown'
     return {
         "service": "workbench", "pid": os.getpid(), "instance": os.getenv("QWEN_ASR_INSTANCE", ""),
         "status": model_manager.status,
@@ -1058,6 +1189,8 @@ async def health() -> dict[str, Any]:
         "performance": model_manager.performance(),
         "model": "Qwen3-ASR-1.7B BF16 (MLX)",
         "model_path": str(MODEL_PATH),
+        "asr_provider": mode,
+        "local_model_loaded": bool(model_manager.worker and model_manager.worker.is_alive()),
     }
 
 
@@ -1065,7 +1198,7 @@ async def health() -> dict[str, Any]:
 async def public_config() -> dict[str, Any]:
     saved_keys = ai_secret_store.status()
     return {
-        "feature_version": "library-upgrade-v14",
+        "feature_version": "library-upgrade-v15-classroom-chat",
         "ai_base_url": os.getenv("AI_BASE_URL") or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1",
         "ai_model": os.getenv("AI_MODEL", "gpt-5-mini"),
         "ai_review_base_url": os.getenv("AI_REVIEW_BASE_URL") or os.getenv("AI_BASE_URL") or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1",
@@ -1340,10 +1473,12 @@ async def generate_title(session_id: str, payload: dict[str, Any] = Body(...)) -
     )
     if not summary:
         raise HTTPException(status_code=400, detail="请先为这条录音生成详细 AI 总结")
-    config = payload.get("config")
-    if not isinstance(config, dict):
-        raise HTTPException(status_code=400, detail="AI 配置格式无效")
-    prompt = str(payload.get("title_prompt") or DEFAULT_AI_TITLE_PROMPT).strip()
+    try:
+        config = ai_preferences.task_config(payload.get("config"), course=record.metadata.get("course_settings") or {}, required_modes=("sentence", "summary"))
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    settings = ai_preferences.read()
+    prompt = str(settings.get("title_prompt") or DEFAULT_AI_TITLE_PROMPT).strip()
     try:
         title = await generate_recording_title(
             summary,
@@ -1380,19 +1515,18 @@ async def generate_library_summary(
         for item in record.segments
     ):
         raise HTTPException(status_code=400, detail="录音还没有可用于生成详细 AI 总结的转写内容")
-    config = payload.get("config")
-    if not isinstance(config, dict):
-        raise HTTPException(status_code=400, detail="AI 配置格式无效")
-    _remember_ai_keys(config)
-    config = json.loads(json.dumps(config))
+    try:
+        config = ai_preferences.task_config(payload.get("config"), course=record.metadata.get("course_settings") or {}, required_modes=("sentence", "summary"))
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     config["_note_summary_system_prompt"] = str(
-        payload.get("summary_system_prompt") or DEFAULT_NOTE_SUMMARY_PROMPT
+        config.get("_note_summary_system_prompt") or DEFAULT_NOTE_SUMMARY_PROMPT
     ).strip()[:30_000]
     config["_note_summary_custom_prompt"] = str(
         payload.get("custom_prompt") or ""
     ).strip()[:20_000]
     config["_note_abstract_system_prompt"] = str(
-        payload.get("abstract_system_prompt") or DEFAULT_NOTE_ABSTRACT_PROMPT
+        config.get("_note_abstract_system_prompt") or DEFAULT_NOTE_ABSTRACT_PROMPT
     ).strip()[:20_000]
     try:
         summary = await build_note_summary(record, config)
@@ -1432,6 +1566,15 @@ def start_summary_job(record: RecordingRecord, payload: dict[str, Any], *, autom
     if session_id in background_summary_tasks or session_id in summary_jobs:
         return
     require_recording_available(session_id, owner=asyncio.current_task())
+    try:
+        _remember_ai_keys(payload.get("config"))
+        payload = {**payload, "config": ai_preferences.task_config(
+            payload.get("config"), course=record.metadata.get("course_settings") or {},
+            required_modes=("sentence", "summary"),
+        )}
+    except (OSError, ValueError) as exc:
+        if os.getenv("QWEN_ASR_TESTING") != "1":
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
     cancel_requested_tasks.discard(f"summary:{session_id}")
     # Only progress is persisted; credentials remain in this task's memory.
     record.metadata["summary_job"] = {
@@ -1544,6 +1687,17 @@ async def begin_recording_end(session: TranscriptionSession, summary_payload: di
     if record.id in finalization_tasks:
         await session.send({"type": "ending", "session": record.public()})
         return
+    try:
+        summary_payload = {
+            **summary_payload,
+            "config": ai_preferences.task_config(
+                summary_payload.get("config"),
+                course=record.metadata.get("course_settings") or {},
+                required_modes=("sentence", "summary"),
+            ),
+        }
+    except (OSError, ValueError) as exc:
+        raise ValueError(str(exc)) from exc
     session.recording = record
     session.accepting_audio = False
     record.metadata["finalization"] = {"status": "running", "started_at": local_now(), "error": ""}
@@ -1630,12 +1784,12 @@ async def generate_library_summary_abstract(
     record = recording_store.find(session_id)
     if record is None:
         raise HTTPException(status_code=404, detail="没有找到这条录音")
-    config = payload.get("config")
-    if not isinstance(config, dict):
-        raise HTTPException(status_code=400, detail="AI 配置格式无效")
-    config = json.loads(json.dumps(config))
+    try:
+        config = ai_preferences.task_config(payload.get("config"), course=record.metadata.get("course_settings") or {}, required_modes=("sentence", "summary"))
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     config["_note_abstract_system_prompt"] = str(
-        payload.get("abstract_system_prompt") or DEFAULT_NOTE_ABSTRACT_PROMPT
+        config.get("_note_abstract_system_prompt") or DEFAULT_NOTE_ABSTRACT_PROMPT
     ).strip()[:20_000]
     try:
         summary = await regenerate_note_abstract(record, config)
@@ -1717,6 +1871,21 @@ def ideashell_note_content(payload: dict[str, Any]) -> str:
     if not value:
         raise RuntimeError("IdeaShell 笔记没有可拉取的 Markdown 正文")
     return value
+
+
+async def ideashell_recording_audio(record: RecordingRecord) -> dict[str, Any]:
+    """Return validated audio metadata and bytes for the default attachment."""
+    try:
+        path = await asyncio.to_thread(record.ensure_aac)
+    except (FileNotFoundError, OSError) as exc:
+        raise ValueError(f"这条录音没有可用的音频文件：{exc}") from exc
+    title = safe_component(str(record.metadata.get("title") or "课堂录音"), "课堂录音")
+    return await asyncio.to_thread(audio_file_metadata, Path(path), filename=f"{title}.aac")
+
+
+def ideashell_audio_preview(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Strip raw bytes before returning attachment information to the browser."""
+    return {key: metadata[key] for key in ("name", "bytes", "sha256")}
 
 
 def ideashell_folders(payload: Any) -> list[dict[str, str]]:
@@ -1819,8 +1988,11 @@ async def preview_ideashell_push(session_id: str, payload: dict[str, Any] = Body
     if record is None:
         raise HTTPException(status_code=404, detail="没有找到这条录音")
     try:
-        return compose_push(record, str(payload.get("content_mode") or "combined"))
-    except ValueError as exc:
+        archive = compose_push(record, str(payload.get("content_mode") or "combined"))
+        audio = await ideashell_recording_audio(record)
+        archive["audio"] = ideashell_audio_preview(audio)
+        return archive
+    except (ValueError, OSError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
@@ -1838,6 +2010,10 @@ async def push_recording_summary_to_ideashell(
         markdown = archive["content"]
         if payload.get("preview_digest") and payload["preview_digest"] != archive["digest"]:
             raise ValueError("内容已更新，请重新预览后推送")
+        audio = await ideashell_recording_audio(record)
+        preview_audio_sha256 = str(payload.get("audio_sha256") or "").strip()
+        if preview_audio_sha256 and preview_audio_sha256 != audio["sha256"]:
+            raise ValueError("录音文件已更新，请重新预览后推送")
         sync = record.metadata.get("ideashell_sync")
         sync = dict(sync) if isinstance(sync, dict) else {}
         note_id = str(sync.get("note_id") or "")
@@ -1851,25 +2027,36 @@ async def push_recording_summary_to_ideashell(
         folder_id = await ensure_ideashell_course_folder(
             connection, str(record.metadata.get("category") or "未分类")
         )
+        schemas = await connection.list_tools()
+        audio_args = audio_attachment_arguments(
+            schemas.get("note_update" if note_id else "note_create", {}),
+            audio["name"],
+            audio["data"],
+        )
         if note_id:
+            update_arguments = {
+                "note_id": note_id,
+                "title": title,
+                "content": markdown,
+                "summary": excerpt,
+            }
+            update_arguments.update(audio_args)
             result = await connection.call_tool(
-                "note_update",
-                {"note_id": note_id, "title": title, "content": markdown, "summary": excerpt},
+                "note_update", update_arguments,
             )
             await connection.call_tool(
                 "note_move", {"note_ids": [note_id], "folder_id": folder_id}
             )
         else:
-            result = await connection.call_tool(
-                "note_create",
-                {
-                    "title": title,
-                    "content": markdown,
-                    "summary": excerpt,
-                    "tag": "QwenASR",
-                    "folder_id": folder_id,
-                },
-            )
+            create_arguments = {
+                "title": title,
+                "content": markdown,
+                "summary": excerpt,
+                "tag": "QwenASR",
+                "folder_id": folder_id,
+            }
+            create_arguments.update(audio_args)
+            result = await connection.call_tool("note_create", create_arguments)
             note_id = ideashell_note_id(result)
             if not note_id:
                 raise RuntimeError("IdeaShell 未返回笔记编号，请先在 IdeaShell 确认创建结果，避免重复推送")
@@ -1883,12 +2070,23 @@ async def push_recording_summary_to_ideashell(
                 "folder_name": str(record.metadata.get("category") or "未分类"),
                 "content_mode": archive["mode"],
                 "content_digest": archive["digest"],
+                "audio_filename": audio["name"],
+                "audio_sha256": audio["sha256"],
+                "audio_bytes": audio["bytes"],
+                "audio_pushed_at": local_now(),
             }
         )
         record.metadata["ideashell_sync"] = sync
         record.save_metadata()
-        return {"synced": True, "direction": "push", "note_id": note_id, "session": record.public(include_segments=False)}
-    except (ValueError, RuntimeError, ImportError, ModuleNotFoundError) as exc:
+        return {
+            "synced": True,
+            "direction": "push",
+            "note_id": note_id,
+            "audio_attached": True,
+            "audio": ideashell_audio_preview(audio),
+            "session": record.public(include_segments=False),
+        }
+    except (ValueError, RuntimeError, ImportError, ModuleNotFoundError, OSError) as exc:
         print(f"IdeaShell 推送失败 recording={session_id}: {exc}", flush=True)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
@@ -2007,6 +2205,13 @@ async def retry_segment_ai(
                 config["_batch_segment_mode"] = True
 
         course = record.metadata.get("course_settings") or {}
+        try:
+            config = ai_preferences.task_config(
+                config, course=course,
+                required_modes=("sentence", "correction") if bool(config.get("ai_correction")) else ("sentence",),
+            )
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         config.setdefault("terminology", course.get("terminology") or [])
 
         if not bool(config.get("ai_correction")) and str(config.get("translation", "off")) == "off":
@@ -2164,17 +2369,37 @@ async def batch_transcription_stream(
     existing_record: RecordingRecord | None = None,
     preserve_source: bool = False,
 ):
+    from qwen_asr_app.remote_operations import saved_config
+    config = dict(config)
+    if 'inference_settings' not in config:
+        # Older queued/uploaded work has no provider snapshot. Treat it as a
+        # legacy local operation; reading today's global remote preference
+        # could silently move an old task to Windows during recovery.
+        config['inference_settings'] = (
+            existing_record.metadata.get('batch_options', {}).get('inference_settings')
+            or saved_config()
+            if existing_record
+            else saved_config()
+        )
+    remote_cfg = config['inference_settings']
     record: RecordingRecord | None = existing_record
     pipeline = None
     warmup = None
     inference_task = None
+    remote_recording_task = None
     model_manager.active_jobs += 1
     model_manager.cancel_unload()
     started_processing = time.monotonic()
     try:
         source_path = temp_path
+        canonical = Path(config['_remote_operation_dir'])/'audio.wav' if config.get('_remote_operation_dir') else None
+        if canonical is not None and canonical.is_file():
+            temp_path = canonical
+            source_path = canonical
         if record is not None:
-            source_path = record.audio_path
+            # Durable upload source is retained until completion. Reuse it for
+            # the same remote digest; AAC archival encoding is lossy.
+            source_path = temp_path if temp_path is not None and temp_path.exists() else record.audio_path
             record.metadata["status"] = "processing"
             record.metadata.pop("error", None)
             record.metadata["updated_at"] = local_now()
@@ -2197,7 +2422,8 @@ async def batch_transcription_stream(
 
         # Validate and decode first. Invalid uploads must not wake the 4 GB
         # ASR worker just to fail after the file check.
-        warmup = asyncio.create_task(model_manager.load())
+        if remote_cfg['asr_provider'] == 'local':
+            warmup = asyncio.create_task(model_manager.load(force_local=True))
 
         if record is None:
             title = str(config.get("title") or Path(original_filename).stem or "上传录音").strip()
@@ -2238,11 +2464,13 @@ async def batch_transcription_stream(
             ),
             "ai_system_prompt": str(ai_options.get("system_prompt") or DEFAULT_AI_SYSTEM_PROMPT),
         }
+        record.metadata['inference_settings'] = remote_cfg
+        record.metadata.setdefault('inference_attempts', []).append({'config_snapshot': remote_cfg, 'started_at': local_now()})
         record.metadata["batch_options"] = redacted_batch_config(config)
         record.metadata.setdefault("ai_groups", [])
         corrupt_segments = [
             segment for segment in record.segments if has_repetitive_tail(str(segment.get("raw") or ""))
-        ]
+        ] if remote_cfg['asr_provider'] == 'local' else []
         if corrupt_segments:
             rewind_seconds = min(float(segment.get("start", 0)) for segment in corrupt_segments)
             removed_ids = {
@@ -2301,11 +2529,70 @@ async def batch_transcription_stream(
                 if not segment_ai_complete(saved_segment, config):
                     await pipeline.submit(saved_segment)
 
-        ranges = deque(vad_split_ranges(audio, start_sample=start_sample))
+        # An offline recording is one remote job: load Qwen once, process every
+        # remote segment, then reuse the existing storage/AI correction pipeline.
+        from qwen_asr_app.inference_providers import inference_settings, RemoteASRProvider
+        remote_segments = None
+        remote_batch_fallback = None
+        remote_batch_metadata = {}
+        if remote_cfg["asr_provider"] != "local" and start_sample < len(audio):
+            inference_task = asyncio.create_task(RemoteASRProvider().transcribe_segments(
+                audio, config.get("language"),
+                asr_terminology_context(str(config.get("context", "")), config.get("terminology")),
+                int((config.get('asr_params') or {}).get('max_tokens', 2048)), remote_cfg, operation_dir=config.get('_remote_operation_dir'),
+                operation_key=config.get('_remote_operation_key'), asr_params=config.get('asr_params')))
+            remote_recording_task = inference_task
+            try:
+                while not inference_task.done():
+                    await asyncio.wait({inference_task}, timeout=15)
+                    if not inference_task.done():
+                        yield stream_event("progress", progress=record.metadata["batch_progress"]["percent"],
+                                           stage="Windows 正在处理整段录音 · 冷启动及排队可耗时较长")
+                value, remote_batch_metadata = inference_task.result()
+                remote_segments = value["segments"]
+                if not remote_segments:
+                    raise RuntimeError("远程没有返回音频分段")
+                record.metadata["inference"] = remote_batch_metadata
+                record.save_all()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if remote_cfg["asr_provider"] == "remote_only" or not getattr(exc, 'proven_not_accepted', False):
+                    raise
+                from qwen_asr_app.remote_operations import mark_local_fallback
+                mark_local_fallback(Path(config['_remote_operation_dir'])/'receipt.json')
+                remote_segments = None
+                remote_batch_fallback = type(exc).__name__
+                record.metadata["inference"] = {"provider":"local", "fallback":True,
+                    "fallback_reason":remote_batch_fallback, 'config_snapshot': remote_cfg,
+                    'metrics': {'model': str(getattr(model_manager, 'model_path', Path('未知模型')).name),
+                                'dtype': 'bfloat16', 'device': 'Apple Silicon MLX',
+                                'gpu_release_state': 'unknown'}}
+                record.save_all()
+        if remote_cfg['asr_provider'] == 'local':
+            record.metadata['inference'] = {'provider': 'local', 'fallback': False, 'config_snapshot': remote_cfg,
+                'metrics': {'model': str(getattr(model_manager, 'model_path', Path('未知模型')).name), 'dtype': 'bfloat16', 'device': 'Apple Silicon MLX', 'gpu_release_state': 'unknown'}}
+        record.metadata['inference_attempts'][-1]['actual'] = record.metadata.get('inference', {})
+        record.save_metadata()
+        remote_by_range = {}
+        if remote_segments is not None:
+            ranges = deque()
+            for segment in remote_segments:
+                start = round(float(segment['start'])*SAMPLE_RATE)
+                end = min(len(audio), round(float(segment['end'])*SAMPLE_RATE))
+                if end <= start_sample:
+                    continue
+                start = max(start_sample, start)
+                if not start_sample <= start < end <= len(audio):
+                    raise RuntimeError("远程分段时间范围无效")
+                ranges.append((start,end))
+                remote_by_range[(start,end)] = segment
+        else:
+            ranges = deque(vad_split_ranges(audio, start_sample=start_sample))
         estimated_total = len(record.segments) + len(ranges)
         while ranges:
             segment_start_sample, segment_end_sample = ranges.popleft()
-            if getattr(model_manager, "realtime_pending", False) and segment_end_sample - segment_start_sample > 25 * SAMPLE_RATE:
+            if remote_segments is None and getattr(model_manager, "realtime_pending", False) and segment_end_sample - segment_start_sample > 25 * SAMPLE_RATE:
                 ranges.appendleft((segment_start_sample + 25 * SAMPLE_RATE, segment_end_sample))
                 segment_end_sample = segment_start_sample + 25 * SAMPLE_RATE
             block = audio[segment_start_sample:segment_end_sample]
@@ -2313,18 +2600,30 @@ async def batch_transcription_stream(
             max_tokens = min(1_536, max(256, int(block_duration * 10) + 128))
             metrics = {}
             try:
-                inference_task = asyncio.create_task(model_manager.transcribe(
-                    block,
-                    config.get("language"),
-                    asr_terminology_context(
-                        str(config.get("context", "")), config.get("terminology")
-                    ),
-                    max_tokens=max_tokens,
-                    asr_params=asr_params_with_terminology(
-                        config.get("asr_params"), config.get("terminology")
-                    ),
-                    timeout_seconds=180, metrics=metrics,
-                ))
+                if remote_segments is not None:
+                    segment = remote_by_range[(segment_start_sample,segment_end_sample)]
+                    async def prepared_result(segment=segment):
+                        return segment.get("merged_text", segment["text"]), segment.get("language", ""), 0.0
+                    metrics.update(remote_batch_metadata)
+                    inference_task = asyncio.create_task(prepared_result())
+                else:
+                    transcribe = model_manager._transcribe_local if remote_batch_fallback else model_manager.transcribe
+                    inference_kwargs = {} if remote_batch_fallback else {'inference_config': remote_cfg}
+                    inference_task = asyncio.create_task(transcribe(
+                        block,
+                        config.get("language"),
+                        asr_terminology_context(
+                            str(config.get("context", "")), config.get("terminology")
+                        ),
+                        max_tokens=max_tokens,
+                        asr_params=asr_params_with_terminology(
+                            config.get("asr_params"), config.get("terminology")
+                        ),
+                        timeout_seconds=180, metrics=metrics,
+                        **inference_kwargs,
+                    ))
+                    if remote_batch_fallback:
+                        metrics.update(provider="local", fallback=True, fallback_reason=remote_batch_fallback)
                 while not inference_task.done():
                     event_task = asyncio.create_task(pipeline.events.get()) if pipeline else None
                     waiting = {inference_task} | ({event_task} if event_task else set())
@@ -2341,7 +2640,7 @@ async def batch_transcription_stream(
                             event_task.cancel()
                             await asyncio.gather(event_task, return_exceptions=True)
                 raw, language, seconds = inference_task.result()
-                if has_repetitive_tail(raw):
+                if remote_segments is None and has_repetitive_tail(raw):
                     if block_duration > 35:
                         raise RuntimeError("检测到异常重复输出")
                     raw = trim_repetitive_tail(raw)
@@ -2383,6 +2682,9 @@ async def batch_transcription_stream(
                 "ai_pending": bool(config.get("ai_correction"))
                 or config.get("translation", "off") != "off",
             }
+            if remote_segments is not None:
+                original = remote_by_range[(segment_start_sample, segment_end_sample)]
+                segment['remote_raw_segment'] = copy.deepcopy(original)
             if segment["ai_pending"]:
                 segment["ai_requested"] = {
                     "correction": bool(config.get("ai_correction")),
@@ -2471,7 +2773,9 @@ async def batch_transcription_stream(
             record.save_all()
 
         record.metadata["processing_seconds"] = round(time.monotonic() - started_processing, 2)
-        record.metadata["asr_seconds"] = round(sum(float(s.get("latency", 0)) for s in record.segments), 2)
+        record.metadata["asr_seconds"] = round(
+            float(remote_batch_metadata.get("metrics", {}).get("inference_seconds", 0))
+            if remote_segments is not None else sum(float(s.get("latency", 0)) for s in record.segments), 2)
         record.metadata["ai_warnings"] = sum(bool(s.get("ai_error")) for s in record.segments) + sum(
             bool(part.get("ai_error")) for part in record.metadata.get("ai_global_rewrite", {}).get("parts", []))
         record.complete()
@@ -2505,6 +2809,10 @@ async def batch_transcription_stream(
         if pipeline:
             await pipeline.close()
         # A to_thread GPU call must finish before releasing its lifetime lease.
+        if remote_recording_task and not remote_recording_task.done():
+            # Propagate pause/cancel to the remote client so it cancels the Job
+            # ID and waits for its streaming/polling thread to exit safely.
+            remote_recording_task.cancel()
         if inference_task and not inference_task.done():
             await asyncio.gather(inference_task, return_exceptions=True)
         if warmup:
@@ -2563,8 +2871,16 @@ async def transcribe_socket(websocket: WebSocket) -> None:
             payload = json.loads(text)
             kind = payload.get("type")
             if kind == "config":
-                _remember_ai_keys(payload)
-                pending = session.update_config(payload)
+                try:
+                    values = ai_preferences.task_config(
+                        payload,
+                        required_modes=("sentence", "correction") if payload.get("ai_correction") else ("sentence",),
+                    )
+                    payload = {**payload, **values}
+                    pending = session.update_config(payload)
+                except (OSError, ValueError) as exc:
+                    await session.send({"type": "config_error", "message": str(exc)})
+                    continue
                 await session.send({"type": "configured", "pending": pending})
             elif kind == "start":
                 try:
@@ -2600,7 +2916,9 @@ app.include_router(task_center_router(compact_ai_tasks, ai_task_action, course_f
 
 
 from qwen_asr_app.note_routes import note_router
+from qwen_asr_app.note_library import note_library_router
 app.include_router(note_router(recording_store, recording_operation))
+app.include_router(note_library_router(app_settings, recording_store))
 
 # The course replay UI and API share this process and port.  Its internal
 # routes remain unchanged, so the old course service can still be tested in
@@ -2622,6 +2940,11 @@ async def task_center_page():
 @app.get("/course-files")
 async def course_files_page() -> FileResponse:
     return FileResponse(ROOT / "static" / "course-files.html", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/notes")
+async def notes_page() -> FileResponse:
+    return FileResponse(ROOT / "static" / "notes.html", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/")

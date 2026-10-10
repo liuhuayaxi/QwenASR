@@ -36,19 +36,24 @@ def main():
                        ("MINERU_VIRTUAL_VRAM_SIZE", "virtual_vram_gb")):
         if settings[field]:
             os.environ[key] = str(settings[field])
+    from mineru_observer import install_stage_observer
+    install_stage_observer()
     from mineru.parser import parse
     from mineru.parser.writer import FileBasedDataWriter
     from mineru.render.content_list import render_content_list
 
     print(f"QwenASR MinerU {version} · tier={settings['tier']} · all pages", flush=True)
+    print('QWENASR_STAGE parse', flush=True)
     result = parse(args.source, tier=settings["tier"], ocr_mode=settings["ocr_mode"],
                    image_analysis=settings["image_analysis"], page_range="all")
     args.output.mkdir(parents=True, exist_ok=True)
+    print('QWENASR_STAGE save', flush=True)
     result.save(FileBasedDataWriter(str(args.output)))
+    print('QWENASR_STAGE content_list', flush=True)
     content = render_content_list(result.middle_json)
     (args.output / "document_content_list.json").write_text(
         json.dumps(content, ensure_ascii=False), encoding="utf-8")
-    print(f"QwenASR MinerU completed · {len(result.pages)} pages", flush=True)
+    print('QWENASR_STAGE done', flush=True)
 
 
 if __name__ == "__main__":

@@ -7,7 +7,10 @@ import { resample } from "./js/audio.js";
 import { createSummaryView } from "./js/summary-view.js?v=20261007-math-1";
 import { createTranscriptView } from "./js/transcript-view.js?v=20260923-upgrade-1";
 import { IDEASHELL_SERVERS, normalizeIdeashellServer } from "./js/ideashell-config.js?v=20261007";
-import { createMineruSettings } from "./js/mineru-settings.js?v=20261008-1";
+import { createMineruSettings } from "./js/mineru-settings.js?v=20261010-routing-progress";
+import { createInferenceSettings } from "./js/inference-settings.js?v=20261010-routing-progress";
+import { createClassroomChat } from "./js/classroom-chat.js?v=20261010-chat-5";
+import { createSettingsNavigation } from "./js/settings-navigation.js?v=20261010-settings-2";
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -81,7 +84,7 @@ const els = {
 const API_STORAGE_KEY = "qwen-asr-api-settings-v1";
 const CONTEXT_MIGRATION_KEY = "qwen-asr-context-model-aware-v2";
 const DEFAULT_CONTEXT_TOKENS = 131072;
-const REQUIRED_FEATURE_VERSION = "library-upgrade-v14";
+const REQUIRED_FEATURE_VERSION = "library-upgrade-v15-classroom-chat";
 const PENDING_END_KEY = "qwen-asr-pending-end-v1";
 const IDEASHELL_STORAGE_KEY = "qwen-asr-ideashell-settings-v1";
 const DEFAULT_API_PARAMS = {
@@ -116,6 +119,7 @@ const state = {
   aiTasks: [], aiTasksLoading: false,
   endPolling: new Set(),
 };
+const settingsNavigation = createSettingsNavigation();
 
 
 document.getElementById("courseFilesLink")?.addEventListener("click", (event) => {
@@ -123,6 +127,7 @@ document.getElementById("courseFilesLink")?.addEventListener("click", (event) =>
 });
 
 let summaryView = null;
+let classroomChat = null;
 const {
   clearAll, copyAll, ensureSegment, escapeHtml, formatDuration, renderAiError,
   refreshEmptyState, renderAiResult, renderError, renderFinal,
@@ -130,9 +135,10 @@ const {
 } = createTranscriptView({
   els, state, toast, updateButtons, switchView,
   onRetrySegment: retrySegmentAi,
-  onSessionShown: (session) => summaryView?.renderSession(session),
+  onSessionShown: (session) => { summaryView?.renderSession(session); classroomChat?.showSession(session); },
 });
 summaryView = createSummaryView({ els, escapeHtml, formatDuration });
+classroomChat = createClassroomChat({openSettings: openAdvancedSettings, toast});
 const noteReader = createMarkdownReader({
   container: $("#noteSummaryReader"), source: els.noteSummaryEditor, toc: $("#noteToc"),
   onChange: () => els.noteSummaryEditor.dispatchEvent(new Event("input")),
@@ -173,13 +179,25 @@ function toast(message, duration = 2600) {
 }
 
 const mineruSettingsPanel = createMineruSettings();
+const inferenceSettingsPanel = createInferenceSettings();
+// Load the provider snapshot before a recording can open its WebSocket.  The
+// previous lazy-only load meant the first live session could omit
+// `inference_settings` and resume an older local snapshot.
+void inferenceSettingsPanel.load().catch(() => {});
 
 function openAdvancedSettings(focusTarget = null) {
   if (!mineruSettingsPanel.isReady()) mineruSettingsPanel.load();
+  if (!inferenceSettingsPanel.isReady()) void inferenceSettingsPanel.load().catch(() => {});
   const panel = focusTarget?.closest("[data-ai-section]");
   if (panel) selectAiSettings(panel.dataset.aiSection);
+  settingsNavigation.reveal(focusTarget);
+  if (!panel && !$("[data-ai-section=chat]").classList.contains("hidden")) void classroomChat?.refreshModels();
   if (!els.settingsDialog.open) els.settingsDialog.showModal();
-  if (focusTarget) requestAnimationFrame(() => focusTarget.focus());
+  if (focusTarget) requestAnimationFrame(() => focusTarget.focus({preventScroll: true}));
+  if (focusTarget) requestAnimationFrame(() => {
+    const rect = focusTarget.getBoundingClientRect(), frame = $(".settings-page-body").getBoundingClientRect();
+    if (rect.top < frame.top || rect.bottom > frame.bottom) focusTarget.scrollIntoView({block: "center"});
+  });
 }
 
 function currentIdeashellServer() {
@@ -306,14 +324,18 @@ function requiredProviderText(input, label) {
 }
 
 function renderProviderSummaries() {
-  els.realtimeBaseSummary.textContent = els.aiBaseUrl.value.trim() || "未设置 Base URL";
+  const providerSummary = (mode, baseId) => {
+    const transport = $(`#${mode}Transport`)?.value;
+    return transport === "agy_cli" ? "AGY CLI" : $("#" + baseId).value.trim() || "未设置 Base URL";
+  };
+  els.realtimeBaseSummary.textContent = providerSummary("sentence", "aiBaseUrl");
   els.realtimeModelSummary.textContent = els.aiModel.value.trim() || "未设置模型";
-  els.reviewBaseSummary.textContent = els.reviewBaseUrl.value.trim() || "未设置 Base URL";
+  els.reviewBaseSummary.textContent = providerSummary("review", "reviewBaseUrl");
   els.reviewModelSummary.textContent = els.reviewModel.value.trim() || "未设置模型";
-  els.summaryBaseSummary.textContent = els.summaryBaseUrl.value.trim() || "未设置 Base URL";
+  els.summaryBaseSummary.textContent = providerSummary("summary", "summaryBaseUrl");
   els.summaryModelSummary.textContent = els.summaryModel.value.trim() || "未设置模型";
   for (const mode of ["global", "correction"]) {
-    $(`#${mode}BaseSummary`).textContent = $(`#${mode}BaseUrl`).value.trim() || "未设置 Base URL";
+    $(`#${mode}BaseSummary`).textContent = providerSummary(mode, `${mode}BaseUrl`);
     $(`#${mode}ModelSummary`).textContent = $(`#${mode}Model`).value.trim() || "未设置模型";
   }
 }
@@ -363,7 +385,7 @@ function sessionConfig(requireName = false) {
     throw new Error("开始前请先填写录音名称");
   }
   const category = selectedRecordCategory(true);
-  return {
+  const config = {
     type: "config", language: els.language.value || null, context: els.context.value.trim(),
     terminology: terminologyValues(),
     title, category,
@@ -381,6 +403,9 @@ function sessionConfig(requireName = false) {
       ...(els.summaryEnabled.checked ? ["review"] : []),
     ]),
   };
+  const inference = inferenceSettingsPanel.current();
+  if (inference) config.inference_settings = inference;
+  return config;
 }
 
 function sendLiveConfigUpdate(label) {
@@ -428,7 +453,18 @@ function saveApiSettings() {
     summary_api_key: els.summaryApiKey.value, summary_api_mode: els.summaryApiMode.value,
     summary_context_window: els.summaryContextWindow.value, summary_extra_params: els.summaryApiParams.value,
   };
-  try { localStorage.setItem(API_STORAGE_KEY, JSON.stringify(saved)); } catch (_) { /* Disk remains authoritative. */ }
+  // The browser cache is only a non-secret display hint. Never persist API
+  // keys there, and never use it as a request source.
+  try {
+    const browserCopy = JSON.parse(JSON.stringify(saved));
+    for (const provider of Object.values(browserCopy.function_providers || {})) {
+      if (provider && typeof provider === 'object') delete provider.api_key;
+    }
+    delete browserCopy.api_key;
+    delete browserCopy.review_api_key;
+    delete browserCopy.summary_api_key;
+    localStorage.setItem(API_STORAGE_KEY, JSON.stringify(browserCopy));
+  } catch (_) { /* Disk remains authoritative. */ }
   return fetch("/api/ai/settings", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -454,11 +490,12 @@ async function restoreApiSettings() {
     if (!response.ok) throw new Error('读取本机 AI 配置失败');
     const payload = await response.json();
     const fromDisk = Boolean(payload.settings?.function_providers);
-    let saved = payload.settings;
+    const saved = payload.settings;
+    try { localStorage.removeItem(API_STORAGE_KEY); } catch (_) { /* Cache is never authoritative. */ }
     if (!fromDisk) {
-      try { saved = JSON.parse(localStorage.getItem(API_STORAGE_KEY) || 'null'); } catch (_) { saved = null; }
+      apiSettingsReady = false;
+      throw new Error('本机尚未保存 AI 设置；网页缓存不会作为配置来源，请在设置中填写并保存');
     }
-    if (!saved || !Object.keys(saved).length) { apiSettingsReady = true; return; }
     els.aiBaseUrl.value = saved.base_url || els.aiBaseUrl.value;
     els.aiModel.value = saved.model || els.aiModel.value;
     els.contextWindow.value = saved.context_window || String(DEFAULT_CONTEXT_TOKENS);
@@ -487,10 +524,8 @@ async function restoreApiSettings() {
     els.summaryContextWindow.value = saved.summary_context_window || saved.context_window || String(DEFAULT_CONTEXT_TOKENS);
     els.summaryApiParams.value = saved.summary_extra_params || saved.extra_params || JSON.stringify(DEFAULT_API_PARAMS, null, 2);
     restoreFunctionProviders(saved);
-    if (!fromDisk) upgradeKnownContextDefaults();
     renderProviderSummaries();
     apiSettingsReady = true;
-    if (!fromDisk) await saveApiSettings();
   } catch (_) {
     apiSettingsReady = false;
     toast('本机 AI 配置暂时无法读取，请恢复服务后刷新；不会用默认值覆盖已保存配置', 6000);
@@ -1503,7 +1538,8 @@ async function refreshPushPreview() {
     if (!response.ok) throw new Error(data.detail || "无法生成预览");
     pushPreviewData = data;
     $("#pushPreview").innerHTML = renderMarkdown(data.content);
-    $("#pushPreviewStatus").textContent = `${data.characters.toLocaleString()} 字符${data.unrefined_blocks ? ` · ${data.unrefined_blocks} 个片段尚未精修，已在正文标注` : " · 内容已就绪"}`;
+    const audioHint = data.audio ? ` · 将同时上传录音 ${data.audio.name}（${(data.audio.bytes / 1024 / 1024).toFixed(1)} MB）` : "";
+    $("#pushPreviewStatus").textContent = `${data.characters.toLocaleString()} 字符${data.unrefined_blocks ? ` · ${data.unrefined_blocks} 个片段尚未精修，已在正文标注` : " · 内容已就绪"}${audioHint}`;
     $("#confirmPush").disabled = false;
   } catch (error) { if (request === previewRequest) $("#pushPreviewStatus").textContent = error.message; }
 }
@@ -1526,7 +1562,7 @@ async function confirmPush() {
     await ensureIdeashellConnected(serverUrl);
     const response = await fetch(`/api/recordings/${encodeURIComponent(record.id)}/ideashell/push`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ server_url: serverUrl, content_mode: preview.mode, preview_digest: preview.digest }),
+      body: JSON.stringify({ server_url: serverUrl, content_mode: preview.mode, preview_digest: preview.digest, audio_sha256: preview.audio?.sha256 || "" }),
     });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.detail || "IdeaShell 推送失败");
@@ -1536,7 +1572,7 @@ async function confirmPush() {
     }
     $("#pushDialog").close();
     await loadLibrary();
-    toast("所选内容已推送到 IdeaShell", 4200);
+    toast("正文和录音已推送到 IdeaShell（录音不会自动转写）", 5200);
   } catch (error) { $("#pushPreviewStatus").textContent = error.message; }
   finally { button.disabled = false; button.textContent = "推送此内容"; $("#pushContentMode").disabled = false; }
 }
@@ -1648,6 +1684,7 @@ async function deleteLibraryRecord(record) {
     if (!response.ok) throw new Error(payload.detail || "删除失败");
     if (state.shownSession?.id === record.id) {
       state.shownSession = null;
+      classroomChat?.showSession(null);
       clearAll();
       els.sessionBar.classList.add("hidden");
       els.downloadLinks.classList.add("hidden");
@@ -1781,9 +1818,11 @@ async function pollHealth() {
     const response = await fetch("/api/health", { cache: "no-store" });
     const health = await response.json();
     els.modelBadge.className = `status-badge ${health.status}`;
-    els.modelStatus.textContent = health.detail || health.status;
-    els.footerDevice.textContent = `${health.model} · ${health.device}`;
-    state.modelReady = ["ready", "idle", "loading"].includes(health.status);
+    const remote = ['remote_only', 'remote_preferred'].includes(health.asr_provider);
+    const mode = health.asr_provider === 'remote_only' ? 'Windows' : '优先 Windows';
+    els.modelStatus.textContent = remote ? mode + ' · 语音识别' : health.detail || health.status;
+    els.footerDevice.textContent = remote ? mode + ' · Qwen3-ASR' : health.model + ' · ' + health.device;
+    state.modelReady = remote || ["ready", "idle", "loading"].includes(health.status);
     updateButtons();
     setTimeout(pollHealth, health.status === "loading" ? 1200 : 5000);
   } catch (_) {
@@ -1820,7 +1859,7 @@ function connectFor(command, commandPayload = {}) {
     ws.onmessage = (event) => {
       const message = JSON.parse(event.data);
       handleMessage(message);
-      if (!settled && ["start_error", "end_error"].includes(message.type)) {
+      if (!settled && ["config_error", "start_error", "end_error"].includes(message.type)) {
         settled = true;
         clearTimeout(timer);
         reject(new Error(message.message || "无法开始录音"));
@@ -1854,6 +1893,7 @@ async function startCapture() {
   if (!state.modelReady || state.capturing || state.pausing || state.ending) return;
   let stream;
   try {
+    await inferenceSettingsPanel.load();
     sessionConfig(!state.activeSession);
     if (!navigator.mediaDevices?.getUserMedia) throw new Error("当前浏览器不支持麦克风采集，请使用最新版 Safari 或 Chrome");
     stream = await navigator.mediaDevices.getUserMedia({
@@ -2259,11 +2299,11 @@ els.summaryEnabled.addEventListener("change", () => {
   sendLiveConfigUpdate(els.summaryEnabled.checked ? "实时总结已开启" : "实时总结已关闭");
   if (els.summaryEnabled.checked && !els.reviewApiKey.value && !els.reviewKeyHint.textContent) openAdvancedSettings(els.reviewApiKey);
 });
-[els.aiBaseUrl, els.aiModel, els.contextWindow, els.aiApiKey, els.apiParams,
+[els.aiBaseUrl, els.aiModel, els.contextWindow, els.aiApiKey, els.apiParams, $("#sentenceTransport"), $("#sentenceEffort"), $("#sentenceMaxOutput"),
   els.reviewBaseUrl, els.reviewModel, els.reviewContextWindow, els.reviewApiKey, els.reviewApiParams,
-  els.summaryBaseUrl, els.summaryModel, els.summaryContextWindow, els.summaryApiKey, els.summaryApiParams,
+  els.summaryBaseUrl, els.summaryModel, els.summaryContextWindow, els.summaryApiKey, els.summaryApiParams, $("#reviewTransport"), $("#reviewEffort"), $("#reviewMaxOutput"), $("#summaryTransport"), $("#summaryEffort"), $("#summaryMaxOutput"),
   els.summaryInterval, els.historyChars, els.titlePrompt, els.summarySystemPrompt, els.abstractPrompt]
-  .forEach((input) => input.addEventListener("input", () => {
+  .filter(Boolean).forEach((input) => input.addEventListener("input", () => {
     scheduleApiSave();
     renderProviderSummaries();
   }));
@@ -2319,6 +2359,7 @@ els.clearApiConfig.addEventListener("click", async () => {
   restoreFunctionProviders({});
   renderProviderSummaries();
   toast("已清除本机保存的 API 配置");
+  void classroomChat?.loadSettings(true);
 });
 els.vadThreshold.addEventListener("input", () => {
   const value = Number(els.vadThreshold.value);
@@ -2349,9 +2390,9 @@ async function init() {
     openAdvancedSettings();
     selectAiSettings("summary");
   }
-  if (query.get("settings") === "mineru") {
+  if (["mineru", "inference"].includes(query.get("settings"))) {
     openAdvancedSettings();
-    $("#mineruSettingsGroup").scrollIntoView({block: 'start'});
+    $(query.get("settings") === "inference" ? "#inferenceSettingsGroup" : "#mineruSettingsGroup").scrollIntoView({block: 'start'});
   }
 }
 
@@ -2367,9 +2408,15 @@ function readProvider(mode, required = true) {
   };
   const [base, model, key, format, context, params, label] = fields[mode];
   const maxOutput = $(`#${mode}MaxOutput`);
+  const transport = $(`#${mode}Transport`);
+  const effort = $(`#${mode}Effort`);
+  const useAgy = transport?.value === "agy_cli";
   return {
-    base_url: required ? requiredProviderText(base, `${label} Base URL`) : base.value.trim(),
-    model: required ? requiredProviderText(model, `${label}模型`) : model.value.trim(),
+    transport: transport?.value || "api",
+    base_url: useAgy ? base.value.trim() : (required ? requiredProviderText(base, `${label} Base URL`) : base.value.trim()),
+    model: required ? requiredProviderText(model, `${label}模型或 AGY 模型`) : model.value.trim(),
+    cli_model: useAgy ? model.value.trim() : "",
+    cli_effort: settingsNavigation.readEffort(effort),
     api_key: key.value.trim(), api_mode: format.value,
     concurrency: Math.max(1, Math.min(8, Number($(`#${mode}Concurrency`).value) || 2)),
     context_window: required ? contextWindowValue(context, label) : Number(context.value) || DEFAULT_CONTEXT_TOKENS,
@@ -2455,8 +2502,12 @@ window.addEventListener("online", () => {
 });
 
 function selectAiSettings(mode) {
+  settingsNavigation.select("ai");
+  settingsNavigation.resetScroll();
   document.querySelectorAll("[data-ai-section]").forEach((panel) => { panel.classList.toggle("hidden", panel.dataset.aiSection !== mode); panel.open = true; });
   document.querySelectorAll("[data-ai-tab]").forEach((button) => { button.classList.toggle("active", button.dataset.aiTab === mode); button.setAttribute("aria-pressed", String(button.dataset.aiTab === mode)); });
+  settingsNavigation.syncActions();
+  if (mode === "chat") void classroomChat?.refreshModels();
 }
 function rawProvider(mode) {
   const provider = readProvider(mode, false);
@@ -2466,11 +2517,15 @@ function rawProvider(mode) {
 }
 function fillProvider(mode, provider) {
   $(`#${mode}Concurrency`).value = provider.concurrency || (mode === "summary" ? 3 : 2);
-  const map = mode === "sentence" ? {base_url: "aiBaseUrl", model:"aiModel", api_key:"aiApiKey", api_mode:"aiApiMode", context_window:"contextWindow", max_output_tokens:"sentenceMaxOutput", extra_params:"apiParams", system_prompt:"systemPrompt"}
-    : {base_url: mode+"BaseUrl", model:mode+"Model", api_key:mode+"ApiKey", api_mode:mode+"ApiMode", context_window:mode+"ContextWindow", max_output_tokens:mode+"MaxOutput", extra_params:mode+"ApiParams", system_prompt:mode === "summary" ? "summarySystemPrompt" : mode+"Prompt"};
+  const map = mode === "sentence" ? {transport:"sentenceTransport", base_url: "aiBaseUrl", model:"aiModel", cli_model:"aiModel", cli_effort:"sentenceEffort", api_key:"aiApiKey", api_mode:"aiApiMode", context_window:"contextWindow", max_output_tokens:"sentenceMaxOutput", extra_params:"apiParams", system_prompt:"systemPrompt"}
+    : {transport:mode+"Transport", base_url: mode+"BaseUrl", model:mode+"Model", cli_model:mode+"Model", cli_effort:mode+"Effort", api_key:mode+"ApiKey", api_mode:mode+"ApiMode", context_window:mode+"ContextWindow", max_output_tokens:mode+"MaxOutput", extra_params:mode+"ApiParams", system_prompt:mode === "summary" ? "summarySystemPrompt" : mode+"Prompt"};
   for (const [key, id] of Object.entries(map)) {
-    if (provider[key] !== undefined && $("#"+id)) $("#"+id).value = typeof provider[key] === "object" ? JSON.stringify(provider[key], null, 2) : provider[key];
+    if (provider[key] !== undefined && $("#"+id)) {
+      if (key === "cli_effort") settingsNavigation.setEffort($("#"+id), provider[key]);
+      else $("#"+id).value = typeof provider[key] === "object" ? JSON.stringify(provider[key], null, 2) : provider[key];
+    }
   }
+  settingsNavigation.syncProvider(mode);
 }
 function restoreFunctionProviders(saved) {
   const precise = saved.function_providers;
@@ -2490,7 +2545,7 @@ function restoreFunctionProviders(saved) {
 document.querySelectorAll("[data-ai-tab]").forEach((button) => button.addEventListener("click", () => selectAiSettings(button.dataset.aiTab)));
 $("#openSummarySettings").addEventListener("click", () => { selectAiSettings("summary"); openAdvancedSettings(els.summaryModel); });
 for (const mode of ["global","correction","review"]) {
-  for (const suffix of ["BaseUrl","Model","ApiKey","ApiMode","ContextWindow","ApiParams","Prompt"]) {
+  for (const suffix of ["Transport","Effort","BaseUrl","Model","ApiKey","ApiMode","ContextWindow","MaxOutput","ApiParams","Prompt"]) {
     const input = $(`#${mode}${suffix}`);
     input?.addEventListener("input", () => { scheduleApiSave(); renderProviderSummaries(); });
   }
@@ -2531,7 +2586,7 @@ document.addEventListener("visibilitychange", () => {
 });
 
 document.querySelectorAll('[id$="Concurrency"]').forEach((input) => input.addEventListener("input", scheduleApiSave));
-document.querySelectorAll('[id$="MaxOutput"]').forEach((input) => input.addEventListener("input", scheduleApiSave));
+document.querySelectorAll('[id$="MaxOutput"]:not(#chatMaxOutput)').forEach((input) => input.addEventListener("input", scheduleApiSave));
 
 // Keep course names and recording paths in step with Finder changes.
 const sharedLibraryEvents = new EventSource('/api/library/events');

@@ -153,7 +153,7 @@ function renderCourseState(s) {
   const activeImports = s.imports.filter(j => ['running', 'queued'].includes(j.state));
   if (!activeImports.length) {
     const empty = document.createElement('p'); empty.className = 'muted';
-    empty.textContent = '暂无正在运行的任务。已完成的笔记可在录音库查看。'; $('result').append(empty);
+    empty.textContent = '暂无运行任务'; $('result').append(empty);
   }
   for (const j of activeImports) {
     const box = document.createElement('div'); box.className = 'job';
@@ -245,7 +245,7 @@ async function saveOptions() {
     if (JSON.stringify(values) === JSON.stringify(selectedOptions())) {
       optionsDirty = false;
       if (window.courseStatus) window.courseStatus.options = {...window.courseStatus.options, ...values};
-      $('optionsStatus').textContent = '已保存到本机，清空浏览器不会丢失。';
+      $('optionsStatus').textContent = '已保存';
     }
   } catch (error) { $('optionsStatus').textContent = `尚未保存：${error.message}`; throw error; }
 }

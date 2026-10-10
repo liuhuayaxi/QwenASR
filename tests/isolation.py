@@ -5,6 +5,7 @@ import tempfile
 
 _root = tempfile.TemporaryDirectory(prefix="qwenasr-tests-")
 os.environ["QWEN_ASR_DATA_DIR"] = _root.name
+os.environ["QWEN_ASR_TESTING"] = "1"
 for key in ("QWEN_ASR_STORAGE_ROOT", "QWEN_ASR_SETTINGS_PATH", "QWEN_ASR_LEGACY_RECORDINGS_DIR"):
     os.environ.pop(key, None)
 for key in tuple(os.environ):

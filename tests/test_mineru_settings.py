@@ -10,20 +10,74 @@ from unittest.mock import AsyncMock, Mock, patch
 from qwen_asr_app.mineru_settings import DEFAULT_MINERU_SETTINGS, MinerUSettings, normalize_mineru_settings, runtime_info
 from qwen_asr_app.pdf_jobs import PDFJobs
 from qwen_asr_app.pdf_ai import _mineru_progress
-from qwen_asr_app.course_file_routes import CourseFileAPI
+from qwen_asr_app.course_file_routes import CourseFileAPI, backup_previous_conversion, needs_mineru_upgrade
 from qwen_asr_app.course_file_conversion import ENGINE
+from qwen_asr_app.course_file_conversion import _copy_file_retry
 from qwen_asr_app.course_files import digest_file
+from qwen_asr_app.shared_files import legacy_output_key
 
 
 class SettingsTests(unittest.TestCase):
-    def test_progress_stays_within_current_window_until_packaging(self):
+    def test_legacy_output_key_handles_renamed_course_sources(self):
+        self.assertEqual(legacy_output_key('光电子学-第一章半导体中光子-电子的互作用(AI).pdf'),
+                         legacy_output_key('光电子学-第一章半导体中光子-电子的互作用(2026lpl).pdf'))
+        self.assertEqual(legacy_output_key('通信原理 C-第一章(AI).pdf'), legacy_output_key('通信原理-第一章.pdf'))
+        self.assertNotEqual(legacy_output_key('AIGC-讲义(AI).pdf'), legacy_output_key('讲义.pdf'))
+
+    def test_external_legacy_result_is_upgradeable_and_backup_is_recoverable(self):
+        self.assertTrue(needs_mineru_upgrade({'status': 'completed', 'external': True}))
+        self.assertTrue(needs_mineru_upgrade({'status': 'completed', 'engine': 'mineru-hybrid-ocr-v1'}))
+        self.assertTrue(needs_mineru_upgrade({'status': 'stale', 'engine': 'mineru-hybrid-ocr-v1'}))
+        self.assertFalse(needs_mineru_upgrade({'status': 'completed', 'engine': ENGINE}))
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / '旧版(AI).pdf'; source.write_bytes(b'old-result')
+            with patch('qwen_asr_app.course_file_routes.PRIVATE_ROOT', root / 'private'):
+                backup = backup_previous_conversion(source, '测试课程', {'id': 'abc', 'name': '课件.pdf',
+                    'conversion': {'engine': 'mineru-hybrid-ocr-v1'}})
+            self.assertEqual(backup.read_bytes(), b'old-result')
+            self.assertTrue((backup.parent / 'metadata.json').is_file())
+
+    def test_pdf_copy_retries_file_provider_deadlock(self):
+        with tempfile.TemporaryDirectory() as raw:
+            source, destination = Path(raw) / 'source.pdf', Path(raw) / 'copy.pdf'
+            source.write_bytes(b'pdf')
+            calls = {'count': 0}
+            def copy(src, dst):
+                calls['count'] += 1
+                if calls['count'] == 1:
+                    raise OSError(11, 'Resource deadlock avoided')
+                Path(dst).write_bytes(Path(src).read_bytes())
+            with patch('qwen_asr_app.course_file_conversion.shutil.copyfile', side_effect=copy):
+                _copy_file_retry(source, destination)
+            self.assertEqual(destination.read_bytes(), b'pdf')
+            self.assertEqual(calls['count'], 2)
+
+    def test_progress_reports_current_window_without_fabricating_total(self):
         first = 'Hybrid processing window 1/2: pages 1-1/2\nOCR-rec Predict: 100%'
-        self.assertLess(_mineru_progress(first)[1], 50)
+        self.assertIsNone(_mineru_progress(first)[1])
         second = first + '\nHybrid processing window 2/2: pages 2-2/2\n'
-        self.assertIsNone(_mineru_progress(second))
+        self.assertNotIn('100%', _mineru_progress(second)[0])
         finished = _mineru_progress(second + 'OCR-rec Predict: 100%')
-        self.assertLessEqual(finished[1], 74)
+        self.assertIsNone(finished[1])
         self.assertIn('第 2–2 页', finished[0])
+
+    def test_progress_keeps_actual_phase_counts_and_resets_between_stages(self):
+        text = ('Hybrid processing window 1/2: pages 1-8/10\n'
+                '\x1b[32m[worker] OCR-det Predict: 50%|xx| 12/24 [00:03<00:03, 4it/s]\x1b[0m')
+        label, total = _mineru_progress(text)
+        self.assertIsNone(total)
+        for part in ('文字区域检测', '50%', '12/24', '第 1–8 页/10', '已用 00:03'):
+            self.assertIn(part, label)
+        self.assertNotIn('约处理到', label)
+        label, _ = _mineru_progress(text + '\nQWENASR_STAGE pdf.text_fill\n')
+        self.assertIn('回填原文', label)
+        self.assertNotIn('50%', label)
+
+    def test_node_and_local_progress_parsers_match(self):
+        root = Path(__file__).resolve().parents[1]
+        self.assertEqual((root/'qwen_asr_app/mineru_progress.py').read_bytes(),
+                         (root/'ai-infer-node/client/mineru_progress.py').read_bytes())
 
     def test_all_tiers_round_trip_and_invalid_values_preserve_saved_file(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -58,7 +112,7 @@ class SettingsTests(unittest.TestCase):
 
 
 class JobSettingsTests(unittest.IsolatedAsyncioTestCase):
-    async def test_queued_job_keeps_profile_and_retry_uses_latest_profile(self):
+    async def test_queued_job_and_retry_keep_frozen_profile(self):
         with tempfile.TemporaryDirectory() as raw:
             source = Path(raw) / 'sample.pdf'; source.write_bytes(b'%PDF-test')
             jobs = PDFJobs(asyncio.Lock())
@@ -83,7 +137,7 @@ class JobSettingsTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(jobs, 'save'), patch.object(jobs, 'schedule'), \
                  patch('qwen_asr_app.pdf_jobs.mineru_settings.read', return_value=new):
                 updated = jobs.action(job['id'], 'retry')
-            self.assertEqual(updated['mineru_settings'], new)
+            self.assertEqual(updated['mineru_settings'], old)
 
     async def test_course_result_reuses_same_parameters_but_reparses_changed_profile(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -92,13 +146,14 @@ class JobSettingsTests(unittest.IsolatedAsyncioTestCase):
             old = normalize_mineru_settings({'tier': 'basic'})
             new = normalize_mineru_settings({'tier': 'advanced'})
             item = {'id': 'file', 'conversion': {'status': 'completed', 'engine': ENGINE,
-                    'sha256': digest_file(output), 'mineru_settings': old}}
+                    'sha256': digest_file(output), 'output_sha256': digest_file(output), 'source_sha256': digest_file(source),
+                    'runtime_fingerprint': 'verified-local-fixture', 'mineru_settings': old}}
             api = CourseFileAPI.__new__(CourseFileAPI)
             api.lock = asyncio.Lock(); api.tasks = {}; api.controls = {}; api.store = Mock()
             api.store.file.side_effect = lambda category, ident, *variant: (item, output if variant else source)
             api.store.get.return_value = (item, Path(raw))
             api.run_conversion = AsyncMock()
-            with patch('qwen_asr_app.course_file_routes.mineru_settings.read', return_value=old):
+            with patch('qwen_asr_app.course_file_routes.mineru_settings.read', return_value=old), patch('qwen_asr_app.inference_providers.runtime_fingerprint', return_value='verified-local-fixture'):
                 reused = await api.start_conversion('course', 'file')
             self.assertTrue(reused['reused']); api.run_conversion.assert_not_awaited()
             with patch('qwen_asr_app.course_file_routes.mineru_settings.read', return_value=new):

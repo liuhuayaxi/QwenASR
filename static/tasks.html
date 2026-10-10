@@ -4,20 +4,21 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#f5f7f5"><title>任务中心 · QwenASR</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
-  <script src="/static/js/theme.js?v=20261002-theme-2"></script>
+  <script src="/static/js/theme.js?v=20261010-routing-progress"></script>
   <link rel="stylesheet" href="/static/ui.css?v=20261002-theme-2">
-  <link rel="stylesheet" href="/static/tasks.css?v=20261002-theme-2">
+  <link rel="stylesheet" href="/static/tasks.css?v=20261010-task-history-1">
 </head>
 <body class="tasks-page">
     <header class="app-header">
       <div class="app-header-inner">
         <a class="app-brand" href="/" aria-label="QwenASR 本地学习工作台">
           <span class="app-brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
-          <span><b>QwenASR</b><small>本地学习工作台</small></span>
+          <span><b>QwenASR</b></span>
         </a>
         <nav class="app-nav" aria-label="主导航">
           <a href="/">录音工作台</a>
           <a href="/library">录音库</a>
+          <a href="/notes">笔记管理</a>
           <a href="/course/">课程回放</a>
           <a href="/course-files">课程资料库</a>
           <a href="/tasks" aria-current="page">任务中心</a>
@@ -36,15 +37,15 @@
         <button data-status="completed">已完成 <span data-count="completed">0</span></button>
         <button data-status="cancelled">已取消 <span data-count="cancelled">0</span></button>
       </nav>
-      <div class="sidebar-note"><b>进度自动保存</b><p>关闭页面后，任务会在后台继续。</p><p>MinerU 逐个识别文件。暂停后保留已完成文件，继续时重新识别未完成文件。</p><a href="/?settings=ai">AI 模型与提示词设置 ↗</a></div>
+
     </aside>
     <main class="task-content">
-      <header class="page-heading"><div><p class="eyebrow">TASK CENTER</p><h1>任务中心</h1><p>录音 AI 处理与 MinerU 文件识别，在这里统一管理。</p></div><button id="newPdf" class="ui-button primary">＋ 新建 PDF 识别</button></header>
+      <header class="page-heading"><div><p class="eyebrow">TASK CENTER</p><h1>任务中心</h1></div><button id="newPdf" class="ui-button primary">＋ 新建 PDF 识别</button></header>
       <section class="task-stats" aria-label="任务概览">
-        <button data-summary="active"><span>进行中</span><b data-count="active">0</b><small>运行、排队与自动重试</small></button>
-        <button data-summary="attention"><span>待处理</span><b data-count="attention">0</b><small>待启动、失败与中断</small></button>
-        <button data-summary="paused"><span>已暂停</span><b data-count="paused">0</b><small>保留进度，随时继续</small></button>
-        <button data-summary="completed"><span>已完成</span><b data-count="completed">0</b><small>查看笔记与识别结果</small></button>
+        <button data-summary="active"><span>进行中</span><b data-count="active">0</b></button>
+        <button data-summary="attention"><span>待处理</span><b data-count="attention">0</b></button>
+        <button data-summary="paused"><span>已暂停</span><b data-count="paused">0</b></button>
+        <button data-summary="completed"><span>已完成</span><b data-count="completed">0</b></button>
       </section>
       <section class="task-section" aria-labelledby="listTitle">
         <div class="task-toolbar"><h2 id="listTitle">全部任务</h2><div class="task-filters">
@@ -53,7 +54,7 @@
           <label class="sr-only" for="categoryFilter">课程</label><select id="categoryFilter" class="ui-field"><option value="">全部课程</option></select>
           <button id="refreshTasks" class="ui-button">刷新</button>
         </div></div>
-        <div class="task-bulk"><label><input id="selectAll" type="checkbox"> 全选当前列表</label><span id="selectionCount">未选择任务</span><div><button data-bulk="continue" class="ui-button" disabled>继续</button><button data-bulk="pause" class="ui-button" disabled>暂停</button><button data-bulk="retry" class="ui-button" disabled>重试</button><button data-bulk="cancel" class="ui-button danger" disabled>取消</button></div></div>
+        <div class="task-bulk"><label><input id="selectAll" type="checkbox"> 全选当前列表</label><span id="selectionCount">未选择任务</span><div><button id="retryFailed" class="ui-button primary" type="button">一键重试失败任务</button><button data-bulk="continue" class="ui-button" disabled>继续</button><button data-bulk="pause" class="ui-button" disabled>暂停</button><button data-bulk="retry" class="ui-button" disabled>重试</button><button data-bulk="cancel" class="ui-button danger" disabled>取消</button><button id="clearCompleted" class="ui-button" type="button">一键清理已完成</button><button id="restoreCompleted" class="ui-button" type="button" hidden>恢复刚清理的任务</button></div></div>
         <p id="loadError" class="task-notice error" role="alert" hidden></p>
         <p id="sourceWarning" class="task-notice" role="status" hidden></p>
         <p id="actionResult" class="task-notice" role="status" hidden></p>
@@ -64,10 +65,10 @@
   </div>
   <dialog id="pdfDialog" class="ui-dialog" aria-labelledby="pdfDialogTitle">
     <form id="pdfForm"><div class="dialog-header"><h2 id="pdfDialogTitle">新建 PDF 识别任务</h2><button id="closePdf" class="ui-button" type="button" aria-label="关闭">✕</button></div>
-      <div class="dialog-body"><p>选择本机 PDF，使用 MinerU 识别正文、表格与公式，生成 AI 友好版本。 <a href="/?settings=mineru" target="_blank" rel="noopener">设置识别质量与参数 ↗</a></p><button id="choosePdf" class="ui-button" type="button">从 Finder 选择 PDF</button><label class="field-label" for="pdfPaths">文件绝对路径（每行一个，最多 20 个）</label><textarea id="pdfPaths" class="ui-field" rows="5" placeholder="/Users/你的用户名/Desktop/讲义.pdf" required></textarea><p class="muted">课程目录内的原件会自动归入对应课程任务，结果放入“AI友好型”。其他本地 PDF 会在原文件旁生成“(AI).pdf”；已存在的同名结果不会被覆盖。</p><p id="pdfError" class="task-notice error" role="alert" hidden></p></div>
+      <div class="dialog-body"><button id="choosePdf" class="ui-button" type="button">从 Finder 选择 PDF</button><label class="field-label" for="pdfPaths">文件绝对路径（每行一个，最多 20 个）</label><textarea id="pdfPaths" class="ui-field" rows="5" placeholder="/Users/你的用户名/Desktop/讲义.pdf" required></textarea><p id="pdfError" class="task-notice error" role="alert" hidden></p></div>
       <div class="dialog-footer"><button id="submitPdf" class="ui-button primary">加入识别队列</button></div></form>
   </dialog>
   <div id="toast" class="task-toast" role="status" hidden></div>
-  <script type="module" src="/static/js/tasks.js?v=20260923-upgrade-1"></script>
+  <script type="module" src="/static/js/tasks.js?v=20261010-task-history-1"></script>
 </body>
 </html>

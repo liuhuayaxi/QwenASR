@@ -33,6 +33,6 @@ QwenASR 对已绑定旧 issuer 且保存了匹配 discovery 的国内授权，�
 
 ## QwenASR 当前范围
 
-课程资料库继续按实时 `note_update` schema 生成文档附件参数，并保持预览后上传的流程。自动上传的本地上限为 20 MB，尚未放宽至服务端的 50 MB；文本格式仍受服务端 5 MB 限制。本次真实验证覆盖连接与工具发现，附件写入仅用模拟接口验证，不代表真实上传或后台文档解析已经验收。
+课程资料库继续按实时 `note_update` schema 生成文档附件参数，并保持预览后上传的流程。录音库推送也会按实时 `note_create` / `note_update` schema 自动附带当前 AAC 录音；预览会显示文件名、大小和 SHA-256，推送前再次校验文件未变化。自动上传的本地上限为 20 MB，尚未放宽至服务端的 50 MB；录音按服务端 25 MB 单文件限制校验，超过限制会在预览阶段提示。音频附件只保存并可播放，不会由 QwenASR 自动触发 IdeaShell 转写；需要在 IdeaShell App 内手动发起转写。文本格式仍受服务端 5 MB 限制。本次真实验证覆盖连接与工具发现，附件写入仅用模拟接口验证，不代表真实上传或后台文档解析已经验收。
 
 来源：新端点 `https://mcp.ideashell.cn/mcp` 和旧端点的实时 `tools/list`；公开技能说明 https://github.com/RoundRedDot/ideashell-skill 。

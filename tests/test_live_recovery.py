@@ -42,6 +42,38 @@ def store_for(record):
 
 
 class LivePauseTests(unittest.IsolatedAsyncioTestCase):
+    async def test_resumed_local_recording_uses_saved_windows_for_new_audio(self):
+        from qwen_asr_app.inference_providers import DEFAULTS
+        with tempfile.TemporaryDirectory() as directory:
+            record = live_record(Path(directory))
+            record.metadata['inference_settings'] = {'asr_provider': 'local'}
+            manager = SimpleNamespace(load=AsyncMock(), transcribe=AsyncMock(return_value=('Windows 转写', 'Chinese', .1)))
+            session = TranscriptionSession(SimpleNamespace(send_json=AsyncMock()), manager, store_for(record))
+            session.recording, session.recovered = record, True
+            selected = {**DEFAULTS, 'asr_provider': 'remote_only'}
+            with patch('qwen_asr_app.inference_providers.inference_settings.for_task', return_value=selected), \
+                 patch('qwen_asr_app.live_session.PRIVATE_ROOT', Path(directory)/'private'):
+                await session.start_or_resume()
+                manager.load.assert_not_awaited()
+                samples = np.ones(16000, dtype=np.float32)*.2
+                record.append_audio(samples)
+                session.chunks, session.sample_count = [samples], len(samples)
+                await session.detach_and_process('silence')
+                await session.drain()
+                self.assertEqual(manager.transcribe.await_args.kwargs['inference_config']['asr_provider'], 'remote_only')
+                self.assertTrue(Path(manager.transcribe.await_args.kwargs['operation_dir'], 'request.json').is_file())
+                manager.load.assert_not_awaited()
+
+    async def test_remote_only_model_failure_does_not_load_local(self):
+        from qwen_asr_app.inference_providers import DEFAULTS
+        from qwen_asr_app.model_runtime import ModelManager
+        manager = ModelManager(Path('/unused'))
+        manager._transcribe_local = AsyncMock(side_effect=AssertionError('local inference'))
+        with patch('qwen_asr_app.inference_providers.RemoteASRProvider.transcribe', new=AsyncMock(side_effect=RuntimeError('offline'))):
+            with self.assertRaisesRegex(RuntimeError, 'offline'):
+                await manager.transcribe(np.zeros(16000), None, '', inference_config={**DEFAULTS, 'asr_provider': 'remote_only'}, operation_dir='/unused')
+        manager._transcribe_local.assert_not_awaited()
+
     async def test_pause_ack_does_not_wait_for_ai_and_resume_keeps_pending_work(self):
         with tempfile.TemporaryDirectory() as directory:
             record = live_record(Path(directory))

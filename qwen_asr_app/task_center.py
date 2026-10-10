@@ -2,6 +2,7 @@
 from pathlib import Path
 from urllib.parse import urlencode
 from datetime import datetime
+import json
 
 from fastapi import APIRouter, Body, HTTPException, Request
 from fastapi.responses import FileResponse
@@ -10,27 +11,107 @@ from .shared_library import discover_courses
 from .course_tasks import course_tasks, course_action
 from .library_layout import shared
 from .pdf_ai import validate_pdf_sources, find_mineru_binary
+from .remote_operations import receipt
+from .durable import atomic_json
+from .paths import PRIVATE_ROOT
 
 ACTIVE = {"running", "queued", "waiting_retry", "stopping"}
 ATTENTION = {"failed", "interrupted", "pending", "stale", "completed_with_errors"}
 
 
-def actions_for(status):
+def inference_provenance(inference, operation=None):
+    """Publish provenance fields without exposing private receipt contents."""
+    inference = inference if isinstance(inference, dict) else {}
+    operation = operation if isinstance(operation, dict) else {}
+    return {
+        "actual_provider": inference.get("actual_provider") or inference.get("provider"),
+        "fallback_reason": inference.get("fallback_reason", ""),
+        "remote_job_id": inference.get("job_id") or operation.get("job_id"),
+        "remote_operation_state": operation.get("state") or inference.get("state"),
+        "remote_operation_key": operation.get("key") or inference.get("operation_key"),
+    }
+
+
+def actions_for(status, remote=False):
+    if status == "completed":
+        return []
+    if remote and status not in ACTIVE:
+        return ['continue', 'retry', 'download', 'new_recognition', 'new_local', 'cancel']
     if status == "stopping":
         return []
     if status in ACTIVE:
         return ["pause", "cancel"]
-    if status == "completed":
-        return []
     return ["continue", "retry"] + ([] if status == "cancelled" else ["cancel"])
+
+
+def display_status(task):
+    """A Mac poller waiting in the remote queue is not executing inference."""
+    if task['status'] == 'running' and task.get('remote_operation_state') == 'queued':
+        return 'queued'
+    if task['status'] == 'running' and task.get('configured_provider') in {'remote_only', 'remote_preferred'}:
+        unfinished = [f for f in task.get('files', []) if f.get('status') != 'completed']
+        if unfinished and all(f.get('remote_operation_state') == 'queued' for f in unfinished):
+            return 'queued'
+    return task['status']
+
+
+def history_generation(task):
+    """An archived completion must not hide a later run of the same asset."""
+    return json.dumps([task.get('id'), task.get('run_identity') or task.get('updated_at'), task.get('remote_operation_key'),
+                       task.get('remote_job_id')], ensure_ascii=False, separators=(',', ':'))
+
+
+class TaskHistory:
+    """Archive feed entries only; task owners, files and receipts stay intact."""
+    def __init__(self, path=None):
+        self.path = Path(path) if path else PRIVATE_ROOT / 'tasks' / 'completed-history.json'
+
+    def read(self):
+        try:
+            data = json.loads(self.path.read_text(encoding='utf-8'))
+        except FileNotFoundError:
+            return {'entries': {}, 'last_cleared': {}}
+        if not isinstance(data, dict) or any(not isinstance(data.get(k), dict) for k in ('entries', 'last_cleared')):
+            raise ValueError('已清理任务记录无法读取，请保留该文件并恢复备份')
+        return data
+
+    def visible(self, tasks):
+        data = self.read()
+        return [task for task in tasks if task['status'] != 'completed'
+                or data['entries'].get(task['id']) != history_generation(task)], bool(data['last_cleared'])
+
+    def clear(self, tasks, requested=None):
+        data = self.read()
+        wanted = None if requested is None else {item['id']: item['generation'] for item in requested}
+        cleared = {task['id']: history_generation(task) for task in tasks if task['status'] == 'completed'
+                   and (wanted is None or wanted.get(task['id']) == history_generation(task))
+                   and data['entries'].get(task['id']) != history_generation(task)}
+        if cleared:
+            data['entries'].update(cleared)
+            data['last_cleared'] = cleared
+            atomic_json(self.path, data)
+        return len(cleared)
+
+    def restore(self):
+        data = self.read()
+        restored = 0
+        for ident, generation in data['last_cleared'].items():
+            if data['entries'].get(ident) == generation:
+                del data['entries'][ident]
+                restored += 1
+        data['last_cleared'] = {}
+        if restored or self.path.exists():
+            atomic_json(self.path, data)
+        return restored
 
 
 def task_center_router(ai_tasks, ai_action, courses, pdfs, uploads=None):
     router = APIRouter(prefix="/api/tasks")
+    history = TaskHistory()
 
-    def snapshot():
+    def snapshot(include_archived=False):
         discover_courses(courses.store.settings)
-        tasks = course_tasks()
+        tasks = [dict(task) for task in course_tasks()]
         warnings = []
         for task in ai_tasks(include_history=True):
             tasks.append({**task, "family": "ai", "title": task["recording_title"],
@@ -52,43 +133,78 @@ def task_center_router(ai_tasks, ai_action, courses, pdfs, uploads=None):
                     status = "interrupted"
                 if status == "error":
                     status = "failed"
+                remote = state.get('inference_settings', {}).get('mineru_provider', 'local') != 'local'
+                operation = state.get('operation') or {}
+                saved = receipt(operation.get('receipt_path')) if remote and operation else {}
+                saved = saved or state.get('remote_operation', {})
                 tasks.append({"id": f"course_pdf:{item['id']}", "type": "course_pdf", "family": "mineru",
                     "label": "课程资料识别", "title": item["name"], "category": category,
                     "source": "课程资料库", "asset_id": item["id"], "status": status,
                     "stage": "上次识别中断，可继续" if status == "interrupted" else state.get("stage", ""),
                     "progress": state.get("progress", 0), "error": state.get("error", "") or (state.get("stage", "") if status == "failed" else ""),
-                    "updated_at": state.get("updated_at", ""), "actions": actions_for(status),
+                    "created_at": state.get("created_at", ""),
+                    "updated_at": state.get("updated_at", ""), "actions": actions_for(status, remote),
                     "warnings": state.get("warnings", []),
+                    "inference": state.get('inference', {}),
+                    **inference_provenance(state.get('inference'), saved),
+                    "configured_provider": state.get('inference_settings', {}).get('mineru_provider', 'local'),
+                    "mineru_settings": state.get('mineru_settings', {}),
                     "result_url": "/course-files?" + urlencode({"category": category, "asset": item["id"]}),
                     "download_url": f"/api/course-files/{item['id']}/download?" + urlencode({"category": category, "variant": "pdf"}) if status == "completed" else ""})
-        for job in pdfs.jobs.values():
+        for job in list(pdfs.jobs.values()):
+            files = []
+            remote = job.get('inference_settings', {}).get('mineru_provider', 'local') != 'local'
+            for index, item in enumerate(job['files']):
+                saved = receipt(pdfs.receipt_path(job, index, item)) if remote else {}
+                saved = saved or item.get('remote_operation', {})
+                # Only these public fields reach the API; the durable receipt
+                # remains private and is read afresh after restart/recovery.
+                files.append({**item, **inference_provenance(item.get('inference'), saved),
+                    'remote_operation': {k: saved[k] for k in ('job_id', 'state') if k in saved},
+                    'download_url': f"/api/tasks/pdf/{job['id']}/files/{index}" if item['status'] == 'completed' else ''})
             tasks.append({"id": f"pdf:{job['id']}", "type": "pdf", "family": "mineru",
                 "job_id": job["id"], "title": job["files"][0]["source_name"] + (f" 等 {len(job['files'])} 个文件" if len(job["files"]) > 1 else ""),
+                "configured_provider": job.get('inference_settings', {}).get('mineru_provider', 'local'),
+                "mineru_settings": job.get('mineru_settings', {}),
                 "label": "本地 PDF 识别", "category": "", "source": "本地 PDF 工具",
                 "status": job["status"], "stage": job.get("stage", ""), "progress": job.get("progress", 0),
+                "created_at": job['created_at'],
                 "updated_at": job.get("updated_at") or job.get("finished_at") or job["created_at"],
-                "actions": actions_for(job["status"]), "files": [
-                    {**item, "download_url": f"/api/tasks/pdf/{job['id']}/files/{index}" if item["status"] == "completed" else ""}
-                    for index, item in enumerate(job["files"])],
+                "actions": actions_for(job["status"], remote), "files": files,
+                **(inference_provenance(files[0].get('inference'), files[0]['remote_operation']) if len(files) == 1 else {}),
+                **({'remote_operation_key': files[0]['remote_operation_key']} if len(files) == 1 else {}),
                 "completed": sum(item["status"] == "completed" for item in job["files"]), "total": len(job["files"])})
 
         if uploads:
-            for job in uploads.jobs.values():
+            for job in list(uploads.jobs.values()):
                 tasks.append({**uploads.snapshot(job), "id": "upload:" + job["id"], "job_id": job["id"],
                     "type": "upload", "family": "asr", "label": "上传录音转写", "source": "录音工作台",
-                    "actions": actions_for(job["status"]),
+                    'inference': job.get('inference', {}),
+                    **inference_provenance(job.get('inference'), uploads.remote_receipt(job)),
+                    'configured_provider': job['config'].get('inference_settings', {}).get('asr_provider', 'unknown'),
+                    "actions": actions_for(job["status"], job['config'].get('inference_settings', {}).get('asr_provider', 'local') != 'local'),
                     "result_url": "/library?" + urlencode({"recording": job["recording_id"]}) if job["recording_id"] else "/library"})
 
-        def timestamp(task):
-            value = task.get("updated_at", "")
+        def timestamp(task, field='updated_at'):
+            value = task.get(field) or task.get('updated_at', '')
             try:
                 return float(value) if isinstance(value, (int, float)) else datetime.fromisoformat(value).timestamp()
             except (ValueError, TypeError):
                 return 0
 
+        for task in tasks:
+            task['status'] = display_status(task)
+            if task['status'] == 'completed':
+                task['actions'] = []
+            task['history_generation'] = history_generation(task)
+        if include_archived:
+            can_restore = False
+        else:
+            tasks, can_restore = history.visible(tasks)
         order = {"running": 0, "stopping": 1, "queued": 2, "waiting_retry": 3}
-        tasks.sort(key=lambda task: (order.get(task["status"], 4 if task["status"] in ATTENTION else 5), -timestamp(task)))
-        return {"tasks": tasks, "warnings": warnings, "counts": {
+        tasks.sort(key=lambda task: (order.get(task["status"], 4 if task["status"] in ATTENTION else 5),
+                                    timestamp(task, 'created_at') if task['status'] == 'queued' else -timestamp(task), task['id']))
+        return {"tasks": tasks, "warnings": warnings, "history": {'can_restore': can_restore}, "counts": {
             "all": len(tasks), "active": sum(t["status"] in ACTIVE for t in tasks),
             "attention": sum(t["status"] in ATTENTION for t in tasks),
             "paused": sum(t["status"] == "paused" for t in tasks),
@@ -109,6 +225,8 @@ def task_center_router(ai_tasks, ai_action, courses, pdfs, uploads=None):
         action = payload.get("action")
         if action not in task["actions"]:
             raise HTTPException(409, "任务状态已改变，当前不能执行这项操作")
+        if action in {'new_local', 'new_recognition'} and payload.get('acknowledge_duplicate') is not True:
+            raise HTTPException(409, '旧远端任务可能仍在执行；请确认重复计算风险后新建任务')
         try:
             if task["type"] == "course_queue":
                 return await course_action(action)
@@ -131,6 +249,29 @@ def task_center_router(ai_tasks, ai_action, courses, pdfs, uploads=None):
         guard(request)
         return await perform(payload, snapshot()["tasks"])
 
+    @router.post('/clear-completed')
+    async def clear_completed(request: Request, payload: dict = Body(default={})):
+        guard(request)
+        items = payload.get('items')
+        if items is not None and (not isinstance(items, list) or len(items) > 10000 or any(
+                not isinstance(item, dict) or not isinstance(item.get('id'), str)
+                or not isinstance(item.get('generation'), str) for item in items)):
+            raise HTTPException(400, '已完成任务列表格式无效')
+        try:
+            cleared = history.clear(snapshot(include_archived=True)['tasks'], items)
+            return {'cleared': cleared, **snapshot()}
+        except (OSError, ValueError) as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @router.post('/restore-completed')
+    async def restore_completed(request: Request):
+        guard(request)
+        try:
+            restored = history.restore()
+            return {'restored': restored, **snapshot()}
+        except (OSError, ValueError) as exc:
+            raise HTTPException(400, str(exc)) from exc
+
     @router.post("/pdf")
     async def create_pdf(request: Request, payload: dict = Body(...)):
         guard(request)
@@ -138,7 +279,8 @@ def task_center_router(ai_tasks, ai_action, courses, pdfs, uploads=None):
         if not isinstance(paths, list) or not 1 <= len(paths) <= 20 or any(not isinstance(path, str) for path in paths):
             raise HTTPException(400, "请选择 1–20 个 PDF 文件")
         try:
-            if not find_mineru_binary():
+            from .inference_providers import inference_settings
+            if inference_settings.for_task('mineru')['mineru_provider'] == 'local' and not find_mineru_binary():
                 raise ValueError("未找到 MinerU，请先安装并下载模型")
             discover_courses(courses.store.settings)
             root = courses.store.settings.storage_root.resolve()
@@ -193,6 +335,40 @@ def task_center_router(ai_tasks, ai_action, courses, pdfs, uploads=None):
             except HTTPException as exc:
                 results.append({"id": ident, "ok": False, "error": str(exc.detail)})
         return {"results": results, "accepted": sum(item["ok"] for item in results), "requested": len(results)}
+
+    @router.post("/retry-failed")
+    async def retry_failed(request: Request):
+        """Queue every currently visible failed/pending AI task in one click.
+
+        The snapshot is taken once, then each operation is revalidated by
+        ``perform`` so a task that finished while this request was running is
+        reported rather than submitted a duplicate run.
+        """
+        guard(request)
+        candidates = []
+        for task in snapshot()["tasks"]:
+            if task.get("status") not in ATTENTION:
+                continue
+            action = "retry" if "retry" in (task.get("actions") or []) else (
+                "continue" if "continue" in (task.get("actions") or []) else ""
+            )
+            if action:
+                candidates.append((task, action))
+        if len(candidates) > 200:
+            raise HTTPException(400, "失败任务超过 200 项，请按课程或类型分批重试")
+        results = []
+        for task, action in candidates:
+            try:
+                await perform({"id": task["id"], "action": action}, snapshot()["tasks"])
+                results.append({"id": task["id"], "ok": True, "action": action})
+            except HTTPException as exc:
+                results.append({"id": task["id"], "ok": False, "action": action, "error": str(exc.detail)})
+        return {
+            "requested": len(results),
+            "accepted": sum(bool(item["ok"]) for item in results),
+            "failed": sum(not bool(item["ok"]) for item in results),
+            "results": results,
+        }
 
     @router.get("/pdf/{job_id}/files/{index}")
     async def download(job_id: str, index: int):

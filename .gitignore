@@ -18,3 +18,15 @@ app-settings.json
 *.log
 
 tmp/
+
+# Remote inference node runtime state (credentials stay outside the checkout).
+ai-infer-node/config.toml
+ai-infer-node/private/
+ai-infer-node/data/
+ai-infer-node/models/
+ai-infer-node/venvs/
+ai-infer-node/bootstrap/
+ai-infer-node/*-cache/
+ai-infer-node/mineru-home/
+ai-infer-node/cuda-toolkit/
+ai-infer-node/benchmark-result/

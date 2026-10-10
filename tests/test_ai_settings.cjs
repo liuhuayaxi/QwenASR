@@ -49,8 +49,8 @@ async function main() {
   }
   const migration=environment({},silicon);
   await migration.ctx.restoreApiSettings();
-  assert.equal(migration.requests.at(-1).method,'PUT');
-  assert.equal(migration.requests.at(-1).body.settings.detailed_summary_prompt,'保留公式');
+  assert.equal(migration.requests.length,1); // Empty disk does not migrate browser cache.
+  assert.ok(migration.notices.length);
   const failed=environment(silicon,null,false);
   await failed.ctx.saveApiSettings();
   assert.equal(failed.requests.length,0); // Uninitialized defaults cannot overwrite the disk.

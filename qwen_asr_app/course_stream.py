@@ -14,6 +14,7 @@ from .lazy import lazy_module
 from fastapi import APIRouter, HTTPException, Request
 
 from .course_identity import match_record, supplement
+from .ai_preferences import ai_preferences
 from .durable import atomic_bytes, atomic_json
 from .batch_ai import segment_ai_complete
 from .batch_pipeline import SegmentCorrectionPipeline
@@ -323,6 +324,15 @@ class CourseStreamManager:
 
     async def create(self, data):
         config = data.get("config") or {}
+        try:
+            required = ["sentence"]
+            if config.get("ai_correction"):
+                required.append("correction")
+            if config.get("summary_enabled") or config.get("generate_summary", True):
+                required.append("summary")
+            config = ai_preferences.task_config(config, required_modes=tuple(required))
+        except (OSError, ValueError) as exc:
+            raise HTTPException(409, str(exc)) from exc
         config["asr_params"] = normalize_asr_params(config.get("asr_params"), DEFAULT_ASR_PARAMS["max_tokens"])
         key = str(data.get("key", ""))
         try:

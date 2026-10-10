@@ -6,7 +6,7 @@ from urllib.parse import urlsplit, urlunsplit
 from .paths import PRIVATE_ROOT
 from .durable import atomic_json
 
-PROVIDER_MODES = ('sentence', 'review', 'summary', 'correction', 'global')
+PROVIDER_MODES = ('sentence', 'review', 'summary', 'correction', 'global', 'chat')
 
 
 def endpoint_identity(value):

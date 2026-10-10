@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import hashlib
+import errno
 import json
 import re
 import shutil
+import time
 import uuid
 from pathlib import Path
 
@@ -18,9 +20,29 @@ KINDS = ("课件", "讲义", "作业", "参考资料", "其他")
 MAX_BYTES = 200 * 1024 * 1024
 
 
+_RETRYABLE_FILE_ERRNOS = {11, getattr(errno, "EDEADLK", 35), getattr(errno, "EAGAIN", 11)}
+
+
+def _retryable_file_operation(operation, path):
+    """Retry macOS cloud/file-provider transient EDEADLK reads."""
+    last = None
+    for attempt in range(6):
+        try:
+            return operation()
+        except OSError as exc:
+            last = exc
+            if exc.errno not in _RETRYABLE_FILE_ERRNOS or attempt == 5:
+                raise
+            time.sleep(min(4.0, 0.35 * (2 ** attempt)))
+    raise last
+
+
 def digest_file(path):
-    with Path(path).open("rb") as source:
-        return hashlib.file_digest(source, "sha256").hexdigest()
+    path = Path(path)
+    def digest():
+        with path.open("rb") as source:
+            return hashlib.file_digest(source, "sha256").hexdigest()
+    return _retryable_file_operation(digest, path)
 
 
 class CourseFiles:
