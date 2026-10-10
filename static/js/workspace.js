@@ -28,13 +28,15 @@ async function load() {
     const result = await Promise.all(['/api/library','/api/tasks'].map(async url=>{const response=await fetch(url,{cache:'no-store',signal:AbortSignal.timeout(15000)});if(!response.ok)throw new Error('课程状态暂时无法读取');return response.json();}));
     records=result[0].records || [];tasks=result[1].tasks || [];
     categories=[...new Set([...(result[0].categories || []),...records.map(record=>record.category),...(category ? [category] : [])].filter(Boolean))];
-    if (!category) category=categories[0] || '未分类';
+    let lastCourse = '';
+    try { lastCourse = localStorage.getItem('qwen-asr-last-course-v1') || ''; } catch { /* storage is optional */ }
+    if (!category) category = categories.includes(lastCourse) ? lastCourse : records.find(record => categories.includes(record.category))?.category || categories[0] || '未分类';
     $('workspaceCourse').innerHTML=categories.map(name=>`<option ${name===category?'selected':''}>${esc(name)}</option>`).join('');
     render();$('workspaceError').hidden=true;
   } catch (error) {$('workspaceError').hidden=false;$('workspaceError').textContent=error.message+'，稍后自动重试。';}
   finally {loading=false;clearTimeout(timer);if(!document.hidden)timer=setTimeout(load,5000);}
 }
-$('workspaceCourse').addEventListener('change',()=>{category=$('workspaceCourse').value;history.replaceState(null,'','/workspace?'+query({}));render();tab('overview');});
+$('workspaceCourse').addEventListener('change',()=>{category=$('workspaceCourse').value;try { localStorage.setItem('qwen-asr-last-course-v1',category); } catch { /* storage is optional */ }history.replaceState(null,'','/workspace?'+query({}));render();tab('overview');});
 document.addEventListener('click',event=>{const button=event.target.closest('button');if(!button)return;if(button.dataset.tab)tab(button.dataset.tab);if(button.dataset.recording)tab('notes',button.dataset.recording);if(button.dataset.chat){tab('review');$('workspaceReview').hidden=true;$('workspaceFrame').hidden=false;$('workspaceFrame').src='/?'+query({embedded:'1',chat:button.dataset.chat});}if(button.hasAttribute('data-external-review')){$('workspaceReview').hidden=true;$('workspaceFrame').hidden=false;$('workspaceFrame').src='/notes?'+query({embedded:'1'});}if(button.hasAttribute('data-timeline'))timeline();if(button.dataset.close)$(button.dataset.close).close();});
 $('workspaceTasks').addEventListener('click',timeline);
 $('newClass').addEventListener('click',()=>$('newClassDialog').showModal());
