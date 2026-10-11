@@ -2,7 +2,7 @@ import {escapeHtml as esc, recordingId, activeStatuses, attentionStatuses} from 
 const $ = id => document.getElementById(id);
 const params = new URLSearchParams(location.search);
 let category = params.get('category') || '', records = [], tasks = [], categories = [], timer, loading = false, recordsLoaded = false, tasksLoaded = false;
-const routes = {records:'/library', notes:'/library', materials:'/course-files', review:'/notes'};
+const routes = {records:'/library', notes:'/library', materials:'/course-files', review:'/course-files'};
 const query = values => new URLSearchParams({category, ...values}).toString();
 const hasNote = record => Boolean(record.ai_note_summary?.summary || record.has_ai_summary);
 const taskLabels = {running:'进行中', queued:'排队中', waiting_retry:'等待重试', stopping:'正在停止', paused:'已暂停', failed:'失败', error:'失败', interrupted:'已中断', pending:'待处理', stale:'原件已更新', completed_with_errors:'部分失败', completed:'已完成', cancelled:'已取消'};
@@ -113,7 +113,7 @@ document.addEventListener('click', event => {
   }
   if (button.hasAttribute('data-external-review')) {
     tab('review'); $('workspaceReview').hidden = true; $('workspaceFrame').hidden = false;
-    $('workspaceFrame').src = '/notes?' + query({embedded:'1'});
+    $('workspaceFrame').src = '/course-files?' + query({embedded:'1'});
   }
   if (button.hasAttribute('data-timeline')) timeline();
   if (button.dataset.close) $(button.dataset.close).close();

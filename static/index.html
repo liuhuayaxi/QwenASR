@@ -27,9 +27,8 @@
           <a href="/workspace">课程工作区</a>
           <a href="/" id="workbenchNav" aria-current="page">录音工作台</a>
           <a href="/library" id="libraryTab">课堂记录</a>
-          <a href="/notes">复习资料</a>
           <a href="/course/" id="courseSyncLink">课程回放</a>
-          <a href="/course-files">课程资料库</a>
+          <a href="/course-files">PDF 资料库</a>
           <a href="/tasks">任务中心</a>
         </nav>
         <div class="app-header-tools"><button class="theme-toggle" type="button" data-theme-toggle aria-pressed="false" aria-label="切换深色模式" title="切换深色模式"><span data-theme-icon aria-hidden="true">☾</span><span data-theme-label>深色</span></button><a class="header-settings" data-open-settings href="/?settings=ai"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3" fill="var(--paper)"/><circle cx="15" cy="17" r="3" fill="var(--paper)"/></svg><span>设置</span></a></div>
@@ -699,6 +698,7 @@
     <dialog aria-label="推送到 IdeaShell" id="pushDialog" class="push-dialog">
       <div class="settings-dialog-header"><div><b>推送到 IdeaShell</b><small id="pushTarget"></small></div><button id="closePushDialog" class="ghost-button" type="button">取消</button></div>
       <div class="push-options"><label for="pushContentMode">选择推送内容</label><select id="pushContentMode" class="field-select"><option value="combined">总结＋精修原文（默认）</option><option value="summary">仅 课后复习笔记</option><option value="transcript">仅精修原文（含时间戳）</option></select><p id="pushPreviewStatus" role="status"></p></div>
+      <div class="push-options"><label for="pushDestination">目标笔记</label><select id="pushDestination" class="field-select"><option value="update">更新已关联的笔记</option><option value="new">新建一篇笔记</option></select></div>
       <div id="pushPreview" class="push-preview markdown-body"></div>
       <div class="push-footer"><span>下方按钮会推送当前预览的内容，并自动附带录音文件</span><button id="confirmPush" class="mini-button primary-mini-button" type="button" disabled>推送此内容</button></div>
     </dialog>
@@ -719,6 +719,6 @@
     </dialog>
 
     <div id="toast" class="toast" role="status"></div>
-    <script src="/static/app.js?v=20261011-ui-final" type="module"></script>
+    <script src="/static/app.js?v=20261011-final-new-note" type="module"></script>
   </body>
 </html>

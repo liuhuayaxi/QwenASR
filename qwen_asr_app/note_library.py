@@ -8,6 +8,7 @@ the same lessons.
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import os
 import shutil
@@ -153,6 +154,24 @@ class NoteLibrary:
                 names.append(category)
         return names or ["未分类"]
 
+    def reclassify(self, category: str, target: str) -> bool:
+        """Keep catalog course labels aligned without moving review PDFs."""
+        if category == target:
+            return False
+        previous = copy.deepcopy(self.state)
+        changed = False
+        for note in self.state.get("notes", []):
+            if isinstance(note, dict) and note.get("category") == category:
+                note["category"] = target
+                changed = True
+        if changed:
+            try:
+                self._save()
+            except BaseException:
+                self.state = previous
+                raise
+        return changed
+
     def lessons(self, category: str = "") -> list[dict[str, Any]]:
         values = []
         for record in self.recordings.list_records():
@@ -241,8 +260,8 @@ class NoteLibrary:
         return {"prompt": prompt, "course": category or "未分类", "lessons": lessons}
 
 
-def note_library_router(settings: Any, recordings: Any) -> APIRouter:
-    library = NoteLibrary(settings, recordings)
+def note_library_router(settings: Any, recordings: Any, *, library: NoteLibrary | None = None) -> APIRouter:
+    library = library if library is not None else NoteLibrary(settings, recordings)
     router = APIRouter()
 
     @router.get("/api/notes")

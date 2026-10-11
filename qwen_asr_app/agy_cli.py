@@ -9,6 +9,7 @@ QwenASR checkout while it is being used as an AI provider.
 from __future__ import annotations
 
 import json
+import asyncio
 import os
 import shutil
 import subprocess
@@ -89,7 +90,7 @@ def _error_kind(message: str) -> tuple[str, bool]:
     value = message.lower()
     if "location is not supported" in value or "user location" in value:
         return "provider_region", False
-    if any(marker in value for marker in ("unauthenticated", "authentication", "oauth", "login", "permission denied")):
+    if any(marker in value for marker in ("unauthenticated", "authentication", "oauth", "login", "not logged in", "permission denied")):
         return "provider_auth", False
     if any(marker in value for marker in ("resource exhausted", "rate limit", "too many requests", "429")):
         return "rate_limit", True
@@ -129,13 +130,26 @@ def _decode_output(stdout: str, stderr: str) -> str:
     return response
 
 
-def run_sync(instructions: str, payload: dict[str, Any], provider: dict[str, Any]) -> str:
-    prompt = (
+def subprocess_environment() -> dict[str, str]:
+    env = os.environ.copy()
+    env["NO_COLOR"] = "1"
+    entries = [str(Path.home() / ".local" / "bin"), str(Path.home() / ".cargo" / "bin")]
+    entries.extend(env.get("PATH", "").split(os.pathsep))
+    env["PATH"] = os.pathsep.join(dict.fromkeys(entry for entry in entries if entry))
+    return env
+
+
+def compose_prompt(instructions: str, payload: dict[str, Any]) -> str:
+    return (
         "你正在作为 QwenASR 的本地 AI 整理提供商工作。\n"
         "系统要求只处理下面标记为 INPUT 的数据，不调用工具、不修改文件、不执行命令。\n"
         f"SYSTEM INSTRUCTIONS:\n{instructions.strip()}\n\n"
         f"INPUT (JSON):\n{json.dumps(payload, ensure_ascii=False)}"
     )
+
+
+def _request_arguments(instructions: str, payload: dict[str, Any], provider: dict[str, Any]):
+    prompt = compose_prompt(instructions, payload)
     if len(prompt) > MAX_PROMPT_CHARS:
         raise AIRequestError(
             f"发送给 AGY CLI 的整理片段过长（{len(prompt)} 字符），程序未发送请求",
@@ -165,8 +179,11 @@ def run_sync(instructions: str, payload: dict[str, Any], provider: dict[str, Any
     # separate --effort flag for those variants. The high variant accepts it.
     if selected_model.endswith("-high"):
         command[command.index("--mode"):command.index("--mode")] = ["--effort", selected_effort]
-    env = os.environ.copy()
-    env["NO_COLOR"] = "1"
+    return command, message, working, subprocess_environment(), timeout
+
+
+def run_sync(instructions: str, payload: dict[str, Any], provider: dict[str, Any]) -> str:
+    command, message, working, env, timeout = _request_arguments(instructions, payload, provider)
     try:
         completed = subprocess.run(
             command,
@@ -190,9 +207,34 @@ def run_sync(instructions: str, payload: dict[str, Any], provider: dict[str, Any
 
 
 async def request_text(instructions: str, payload: dict[str, Any], provider: dict[str, Any]) -> str:
-    import asyncio
-
-    return await asyncio.to_thread(run_sync, instructions, payload, provider)
+    # Own the child in the task. Cancelling to_thread(subprocess.run) leaves
+    # AGY alive, so a timed-out connection test previously continued making
+    # requests for up to the provider's 30-minute generation timeout.
+    command, message, working, env, timeout = _request_arguments(instructions, payload, provider)
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *command, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE, cwd=str(working), env=env,
+            limit=4 * 1024 * 1024,
+        )
+    except OSError as exc:
+        raise AIRequestError(f"启动 AGY CLI 失败：{exc}", kind="agy_cli_unavailable", retriable=False) from exc
+    try:
+        stdout, stderr = await asyncio.wait_for(process.communicate(message.encode("utf-8")), timeout=timeout)
+    except (asyncio.CancelledError, asyncio.TimeoutError) as exc:
+        if process.returncode is None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+        await process.wait()
+        if isinstance(exc, asyncio.CancelledError):
+            raise
+        raise AIRequestError(
+            f"AGY CLI 超过 {timeout} 秒仍未完成，请稍后重试",
+            kind="network_read_timeout", retriable=True,
+        ) from exc
+    return _decode_output(stdout.decode("utf-8", errors="replace"), stderr.decode("utf-8", errors="replace"))
 
 
 def status(provider: dict[str, Any]) -> dict[str, Any]:

@@ -12,8 +12,8 @@ const record = {id:'smoke-class',title:'合成课堂第 3 讲',category:'合成�
  segments:[{id:1,start:0,end:60,raw:'合成原文：菲涅耳公式与相位差。',corrected:'合成校对内容：菲涅耳公式与相位差。'}],ai_reviews:[],ai_summaries:[],
  ai_note_summary:{summary:'# 合成课堂笔记\n\n菲涅耳公式与相位差。',abstract:'合成摘要'},downloads:{audio:'/fake.aac',transcript:'/fake.txt',raw_transcript:'/fake.txt',corrected_transcript:'/fake.txt',bundle:'/fake.zip',ai_summary:'/fake.md'},inference:{provider:'remote',job_id:'fake-job'}};
 const baseTask = {id:'summary:smoke-class',recording_id:record.id,recording_title:record.title,title:record.title,category:record.category,type:'summary',family:'ai',label:'课后复习笔记',status:'interrupted',stage:'笔记生成中断',actions:['continue','retry'],result_url:'/library?recording=smoke-class',inference:{provider:'remote'}};
-let tasks,uploaded,activeSession,requests=[];
-const pages={'/':'index.html','/library':'index.html','/tasks':'tasks.html','/notes':'notes.html','/workspace':'workspace.html','/course-files':'course-files.html','/course/':'smartclass.html'};
+let tasks,uploaded,reviewUploaded,activeSession,requests=[];
+const pages={'/':'index.html','/library':'index.html','/tasks':'tasks.html','/notes':'course-files.html','/workspace':'workspace.html','/course-files':'course-files.html','/course/':'smartclass.html'};
 const server=http.createServer((req,res)=>{
  const url=new URL(req.url,'http://localhost');
  const file=pages[url.pathname] ? path.join(root,'static',pages[url.pathname]) : path.join(root,url.pathname);
@@ -36,7 +36,7 @@ async function fixtures(route) {
  else if(p==='/api/ai/settings')data={settings:{function_providers:{}},has_api_key:false};
  else if(p==='/api/ai/classroom-chat/settings')data={provider:{transport:'api',model:'fake-model',base_url:'http://synthetic.invalid',context_window:131072,max_output_tokens:1000},context:{},system_prompt:'合成',include_context:true,include_terminology:true,include_summary:true,include_history:true,include_partial:false};
  else if(p==='/api/ai/classroom-chat/models')data={models:[]};
- else if(p==='/api/ideashell/status')data={status:'disconnected',connected:false};
+ else if(p==='/api/ideashell/status')data={status:'connected',connected:true};
  else if(p==='/api/library/events'){await route.fulfill({status:200,contentType:'text/event-stream',body:': offline\n\n'});return;}
  else if(p===`/api/recordings/${record.id}`)data={session:record};
  else if(p.endsWith('/summary-status'))data={job:{running:false,status:'completed'},session:record};
@@ -45,7 +45,10 @@ async function fixtures(route) {
  else if(p==='/api/upload-jobs/synthetic-upload/events'){await route.fulfill({status:200,contentType:'application/x-ndjson',body:JSON.stringify({type:'complete',progress:100,stage:'完成',session:record})+'\n'});return;}
  else if(p==='/api/course-files')data={category:record.category,categories:[record.category],files:uploaded?[{id:'synthetic-file',name:'合成讲义.txt',kind:'lecture',size:20,created_at:'2026-10-10',conversion:{status:'none'},sync:[]}]:[],directory:'/synthetic',capabilities:{office:false,mineru:false}};
  else if(p==='/api/course-files/upload'){uploaded=true;data={duplicate:false};}
- else if(p==='/api/notes')data={category:record.category,categories:[record.category],lessons:[],notes:[],prompt_template:'合成',storage_root:'/synthetic'};
+ else if(p==='/api/notes')data={category:record.category,categories:[record.category],lessons:[{id:record.id,title:record.title,date:'2026-10-10'}],notes:[{id:'review-old',title:'已有复习 PDF',filename:'review-old.pdf',created_at:'2026-10-10',exists:true,source_lessons:[{title:record.title,date:'2026-10-10'}],download_url:'/api/notes/review-old/download'},...(reviewUploaded ? [{id:'review-new',title:'新复习 PDF',filename:'new.pdf',created_at:'2026-10-11',exists:true,download_url:'/api/notes/review-new/download'}] : [])],prompt_template:'合成 {{course}} {{lessons}}',storage_root:'/synthetic'};
+ else if(p==='/api/notes/upload'){reviewUploaded=true;data={note:{title:'新复习 PDF'}};}
+ else if(p.endsWith('/ideashell/preview'))data={content:'# 合成课堂完整归档\n\n前半课堂与后半课堂。',mode:'combined',note_count:1,characters:30,digest:'single-note-digest',split:true,audio_parts:[{name:'上半段.aac',bytes:100,sha256:'first-hash'},{name:'下半段.aac',bytes:101,sha256:'second-hash'}]};
+ else if(p.endsWith('/ideashell/push')){assert.deepEqual(request.postDataJSON().audio_sha256s,['first-hash','second-hash']);data={parts:2,note_count:1,audio_attached:true,note_ids:['synthetic-one-note'],session:record};}
  else if(p==='/api/mineru/settings')data={settings:{tier:'standard',engine:'pipeline'},defaults:{}};
  await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(data)});
 }
@@ -56,7 +59,7 @@ async function fixtures(route) {
  const results=[];
  async function scenario(name,run) {
   tasks=[{...baseTask},{...baseTask,id:'refinement:smoke-class',type:'refinement',label:'转写校对',status:'running',stage:'正在校对',actions:['pause']},{...baseTask,id:'summary:old',recording_id:'old',title:'已完成合成课堂',status:'completed',actions:[]}];
-  uploaded=false;activeSession=null;requests=[];
+  uploaded=false;reviewUploaded=false;activeSession=null;requests=[];
   const context=await browser.newContext({permissions:['microphone'],viewport:{width:1440,height:1000}});
   const errors=[];
   await context.route('**/*',async route=>{const url=new URL(route.request().url());if(url.origin!==origin){await route.abort();return;}if(url.pathname.startsWith('/api/') || url.pathname.startsWith('/course/api/'))await fixtures(route);else await route.continue();});
@@ -113,7 +116,35 @@ async function fixtures(route) {
   await scenario('外部复习资料导入默认折叠',async(page,context,origin)=>{
     await page.goto(origin+'/notes');
     assert.equal(await page.locator('.external-import').getAttribute('open'),null);
-    await page.locator('.external-import > summary').click();await page.locator('#noteFile').waitFor();
+    await page.locator('.external-import > summary').click();await page.locator('#review-noteFile').waitFor();
+  });
+  await scenario('课程资料与已有复习 PDF 同页检索与上传',async(page,context,origin)=>{
+    await page.goto(origin+'/course-files');
+    await page.locator('[data-review-id="review-old"]').waitFor();
+    assert.match(await page.locator('[data-review-id="review-old"]').innerText(),/来源课次/);
+    assert.equal(await page.locator('.app-nav a[href="/course-files"]').count(),1);
+    await page.locator('#search').fill('已有复习');assert.equal(await page.locator('#files article').count(),1);
+    await page.locator('#search').fill('');await page.locator('#kindFilter').selectOption('复习资料');
+    assert.equal(await page.locator('#files article').count(),1);
+    await page.locator('#uploadKind').selectOption('复习资料');
+    await page.locator('#filesInput').setInputFiles({name:'new.pdf',mimeType:'application/pdf',buffer:Buffer.from('%PDF-synthetic')});
+    await page.locator('[data-review-id="review-new"]').waitFor();
+    assert.ok(requests.some(request=>request.path==='/api/notes/upload'));
+    await page.setViewportSize({width:390,height:844});
+    assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth <= innerWidth));
+    await page.screenshot({path:path.join(output,'merged-materials-mobile.png'),fullPage:true});
+  });
+  await scenario('录音拆为两个附件并推送同一篇笔记',async(page,context,origin)=>{
+    await page.goto(origin+'/library?recording='+record.id);
+    await page.locator('#noteDialog[open]').waitFor();
+    await page.locator('#pushNoteSummary').click();
+    await page.locator('#pushDialog[open]').waitFor();
+    await page.waitForFunction(()=>document.getElementById('pushPreviewStatus').textContent.includes('1 篇笔记'));
+    assert.match(await page.locator('#pushPreviewStatus').innerText(),/上下半段录音保存到同一篇笔记/);
+    assert.ok(!(await page.locator('#pushPreviewStatus').innerText()).includes('条笔记'));
+    await page.locator('#confirmPush').click();
+    await page.waitForFunction(()=>!document.getElementById('pushDialog').open);
+    assert.ok(requests.some(request=>request.path.endsWith('/ideashell/push')));
   });
   await scenario('课程内笔记与任务抽屉',async(page,context,origin)=>{await page.goto(origin+'/workspace?category='+encodeURIComponent(record.category));await page.locator('[data-recording="smoke-class"]').waitFor();await page.screenshot({path:path.join(output,'workspace.png'),fullPage:true});await page.locator('[data-recording="smoke-class"]').click();await page.frameLocator('#workspaceFrame').locator('#noteDialog[open]').waitFor();await page.locator('#workspaceTasks').click();await page.locator('#timelineDialog[open]').waitFor();await page.frameLocator('#timelineFrame').locator('.task-card').first().waitFor();});
  } finally {fs.writeFileSync(path.join(output,'smoke-results.json'),JSON.stringify({synthetic:true,results},null,2));await browser.close();await new Promise(resolve=>server.close(resolve));}

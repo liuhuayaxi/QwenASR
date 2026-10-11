@@ -1528,6 +1528,11 @@ async function ensureIdeashellConnected(serverUrl = currentIdeashellServer()) {
 let pushRecord = null;
 let pushPreviewData = null;
 let previewRequest = 0;
+function renderPushTarget() {
+  if (!pushRecord) return;
+  $("#pushTarget").textContent = `${pushRecord.title || "未命名录音"} · ${$("#pushDestination").value === "new" ? "创建一条新笔记" : "更新已关联的远端笔记"}`;
+}
+$("#pushDestination").addEventListener("change", renderPushTarget);
 async function readIdeashellResponse(response, fallback) {
   const text = await response.text();
   try { return JSON.parse(text); } catch (_) {
@@ -1552,16 +1557,12 @@ async function refreshPushPreview() {
     if (request !== previewRequest || record !== pushRecord) return;
     if (!response.ok) throw new Error(data.detail || "无法生成预览");
     pushPreviewData = data;
-    if (data.split) {
-      $("#pushPreview").innerHTML = data.parts.map((part) => `<section class="ideashell-preview-part"><h3>${escapeHtml(part.title || `第${part.part_index}段`)}</h3>${renderMarkdown(part.content)}</section>`).join("");
-    } else {
-      $("#pushPreview").innerHTML = renderMarkdown(data.content);
-    }
-    const audioValues = data.split ? data.parts.map(part => part.audio).filter(Boolean) : (data.audio ? [data.audio] : []);
-    const audioHint = audioValues.length ? ` · 将分${audioValues.length}段上传录音（${audioValues.map(audio => `${(audio.bytes / 1024 / 1024).toFixed(1)} MB`).join(" + ")}）` : data.audio_error ? " · 录音附件不可用，仍可推送文字" : "";
+    $("#pushPreview").innerHTML = renderMarkdown(data.content);
+    const audioValues = data.audio_parts || (data.audio ? [data.audio] : []);
+    const audioHint = audioValues.length ? ` · 附带${audioValues.length}个录音文件（${audioValues.map(audio => `${(audio.bytes / 1024 / 1024).toFixed(1)} MB`).join(" + ")}）` : data.audio_error ? " · 录音附件不可用，仍可推送文字" : "";
     const characters = Number(data.characters || 0).toLocaleString();
-    $("#pushPreviewStatus").textContent = `${data.split ? `已拆分为 ${data.parts.length} 条笔记 · ` : ""}${characters} 字符${data.unrefined_blocks ? ` · ${data.unrefined_blocks} 个片段尚未精修，已在正文标注` : " · 内容已就绪"}${audioHint}`;
-    $("#confirmPush").textContent = data.split ? `推送 ${data.parts.length} 段内容` : "推送此内容";
+    $("#pushPreviewStatus").textContent = `1 篇笔记 · ${characters} 字符${data.unrefined_blocks ? ` · ${data.unrefined_blocks} 个片段尚未精修，已在正文标注` : " · 内容已就绪"}${audioHint}${data.split ? " · 上下半段录音保存到同一篇笔记" : ""}`;
+    $("#confirmPush").textContent = "推送到同一篇笔记";
     $("#confirmPush").disabled = false;
   } catch (error) { if (request === previewRequest) $("#pushPreviewStatus").textContent = error.message; }
 }
@@ -1569,7 +1570,8 @@ async function pushSummaryToIdeashell(record) {
   if (!requireCurrentBackend()) return;
   pushRecord = record;
   $("#pushContentMode").value = "combined";
-  $("#pushTarget").textContent = `${record.title || "未命名录音"} · ${record.ideashell_sync?.note_id ? "更新已关联的远端笔记" : "创建一条新笔记"}`;
+  $("#pushDestination").value = record.ideashell_sync?.note_id ? "update" : "new";
+  renderPushTarget();
   $("#pushDialog").showModal();
   await refreshPushPreview();
 }
@@ -1579,6 +1581,7 @@ async function confirmPush() {
   const button = $("#confirmPush");
   button.disabled = true; button.textContent = "推送中…";
   $("#pushContentMode").disabled = true;
+  $("#pushDestination").disabled = true;
   try {
     const serverUrl = ideashellServerForRecord(record);
     await ensureIdeashellConnected(serverUrl);
@@ -1586,9 +1589,10 @@ async function confirmPush() {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         server_url: serverUrl, content_mode: preview.mode,
+        create_new: $("#pushDestination").value === "new",
         preview_digest: preview.digest,
         audio_sha256: preview.audio?.sha256 || "",
-        split_parts: preview.split ? preview.parts.map(part => ({digest: part.digest, audio_sha256: part.audio?.sha256 || ""})) : [],
+        audio_sha256s: (preview.audio_parts || (preview.audio ? [preview.audio] : [])).map(audio => audio.sha256),
       }),
     });
     const payload = await readIdeashellResponse(response, "IdeaShell 推送接口返回异常");
@@ -1599,9 +1603,9 @@ async function confirmPush() {
     }
     $("#pushDialog").close();
     await loadLibrary();
-    toast(payload.parts > 1 ? `已拆分推送 ${payload.parts} 条 IdeaShell 笔记${payload.audio_attached ? "和录音" : "，录音附件未上传"}` : payload.audio_attached ? "正文和录音已推送到 IdeaShell（录音不会自动转写）" : "正文已推送到 IdeaShell，录音附件未上传", 5200);
+    toast(payload.audio_attached ? `1 篇笔记和 ${payload.parts} 个录音文件已推送到 IdeaShell（录音不会自动转写）` : "正文已推送到 1 篇 IdeaShell 笔记，录音附件未上传", 5200);
   } catch (error) { $("#pushPreviewStatus").textContent = error.message; }
-  finally { button.disabled = false; button.textContent = preview.split ? `推送 ${preview.parts.length} 段内容` : "推送此内容"; $("#pushContentMode").disabled = false; }
+  finally { button.disabled = false; button.textContent = "推送到同一篇笔记"; $("#pushContentMode").disabled = false; $("#pushDestination").disabled = false; }
 }
 
 async function pushLibrarySummary(record, card) {
@@ -2494,7 +2498,7 @@ async function testProvider(button) {
     const ai = mode === "sentence" ? provider : { [`${mode}_provider`]: provider };
     const response = await fetch("/api/ai/test", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode, config: { ai } }), signal: AbortSignal.timeout(50000),
+      body: JSON.stringify({ mode, config: { ai } }), signal: AbortSignal.timeout(provider.transport === "agy_cli" ? 190000 : 50000),
     });
     const result = await response.json();
     if (!response.ok) throw new Error(result.detail || "连接测试失败");

@@ -202,9 +202,12 @@ def build_question(record, doc, question, settings, live_session=None):
 
 
 def list_agy_models(provider):
-    from .agy_cli import executable, _error_kind
+    from .agy_cli import executable, subprocess_environment, _error_kind
+    from .paths import PRIVATE_ROOT
+    working = PRIVATE_ROOT / 'agy-cli'
+    working.mkdir(parents=True, exist_ok=True, mode=0o700)
     completed = subprocess.run([executable(provider), 'models'], capture_output=True, text=True,
-                               timeout=35, check=False)
+                               timeout=90, check=False, cwd=str(working), env=subprocess_environment())
     models = []
     for line in completed.stdout.splitlines():
         match = re.fullmatch(r'([a-zA-Z0-9][\w./:-]*)\t(.+)', line.strip())
@@ -213,7 +216,7 @@ def list_agy_models(provider):
     if not models:
         message = (completed.stderr or completed.stdout).strip()[-1000:]
         kind, retriable = _error_kind(message)
-        raise AIRequestError('无法读取 AGY 模型列表，请检查 AGY 登录状态', kind=kind, retriable=retriable)
+        raise AIRequestError(f'无法读取 AGY 模型列表：{message or "CLI 未返回模型"}', kind=kind, retriable=retriable)
     return models
 
 

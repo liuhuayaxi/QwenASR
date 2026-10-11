@@ -239,8 +239,16 @@ class IdeaShellConnection:
         stack = AsyncExitStack()
         try:
             auth = self._build_auth()
+            # A split recording sends two encoded AAC files in one note update
+            # (often 50–70 MB after base64 encoding). The httpx default timeout
+            # is short enough to turn a valid upload into an opaque anyio
+            # "unhandled errors in a TaskGroup" during stream shutdown.
             http_client = await stack.enter_async_context(
-                httpx2.AsyncClient(auth=auth, follow_redirects=True)
+                httpx2.AsyncClient(
+                    auth=auth,
+                    follow_redirects=True,
+                    timeout=httpx2.Timeout(300.0),
+                )
             )
             transport = streamable_http_client(self.server_url, http_client=http_client)
             streams = await stack.enter_async_context(transport)

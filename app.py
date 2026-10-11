@@ -20,7 +20,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 from fastapi import Request, Body, FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse, FileResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import JSONResponse, FileResponse, HTMLResponse, StreamingResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from qwen_asr_app.batch_pipeline import SegmentCorrectionPipeline
@@ -47,6 +47,10 @@ from qwen_asr_app.ai import (
     context_window_for,
     generate_recording_title,
     output_limit_for,
+    provider_for_mode,
+    provider_transport,
+    uses_agy_gemini,
+    agy_rewrite_source_budget,
     polish_and_translate,
     polish_timestamped_segments,
     polish_timestamped_segments_resilient,
@@ -56,7 +60,7 @@ from qwen_asr_app.ai import (
 from qwen_asr_app.note_content import compose_push, compose_push_part, summary_from_archive, transcript_blocks
 from qwen_asr_app.live_session import TranscriptionSession
 from qwen_asr_app.ideashell_sync import ideashell_manager
-from qwen_asr_app.ideashell_attachments import MAX_AUDIO_BYTES, audio_attachment_arguments, audio_file_metadata
+from qwen_asr_app.ideashell_attachments import MAX_AUDIO_BYTES, audio_attachment_arguments_many, audio_file_metadata
 from qwen_asr_app.model_runtime import ModelManager
 from qwen_asr_app.request_security import websocket_origin_allowed, http_request_allowed
 from qwen_asr_app.pdf_ai import find_mineru_binary
@@ -400,9 +404,14 @@ async def test_provider(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
     except (OSError, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     try:
-        return await asyncio.wait_for(test_ai_connection(config, mode), timeout=45)
+        selected_provider = provider_for_mode(config.get("ai", {}), required_mode)
+        test_timeout = 45
+        if provider_transport(selected_provider) == "agy_cli":
+            from qwen_asr_app.agy_cli import timeout_seconds
+            test_timeout = min(180, timeout_seconds(selected_provider))
+        return await asyncio.wait_for(test_ai_connection(config, mode), timeout=test_timeout)
     except asyncio.TimeoutError as exc:
-        raise HTTPException(status_code=504, detail="45 秒内未完成测试，请检查网络、服务地址或模型响应速度") from exc
+        raise HTTPException(status_code=504, detail=f"{test_timeout} 秒内未完成测试，请检查网络、服务地址或模型响应速度") from exc
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -799,7 +808,8 @@ async def _run_refinement_job_unlocked(record: RecordingRecord, config: dict[str
         return
     context_window = context_window_for(config, "correction")
     output_budget = output_limit_for(config, "correction", 32_768)
-    token_budget = max(
+    long_context = uses_agy_gemini(config, "correction")
+    token_budget = agy_rewrite_source_budget(config, "correction") if long_context else max(
         128,
         min(
             2_400,
@@ -818,7 +828,7 @@ async def _run_refinement_job_unlocked(record: RecordingRecord, config: dict[str
         if current and (
             position != previous_position + 1
             or current_tokens + cost > token_budget
-            or len(current) >= 10
+            or (not long_context and len(current) >= 10)
         ):
             groups.append(current)
             current, current_tokens = [], 0
@@ -1394,9 +1404,15 @@ def change_library_category(category: str, name: str | None = None) -> dict[str,
         raise HTTPException(409, "资料或录音仍在处理，请完成或暂停相关任务后再修改分类")
     # Do not yield between this check and the moves: background work must not
     # acquire a category path halfway through changing it.
+    review_changed = False
+    previous_review_state = copy.deepcopy(review_library.state)
     try:
+        review_changed = review_library.reclassify(category, "未分类" if name is None else name)
         result = change_category(app_settings, recording_store, category, name)
     except (ValueError, OSError, RuntimeError) as exc:
+        if review_changed:
+            review_library.state = previous_review_state
+            review_library._save()
         raise HTTPException(400, str(exc)) from exc
     for record in records:
         course_stream_manager.jobs.pop(record.id, None)
@@ -1873,7 +1889,28 @@ def ideashell_note_content(payload: dict[str, Any]) -> str:
     value = nested_string(payload, {"content", "body", "markdown", "text"})
     if not value:
         raise RuntimeError("IdeaShell 笔记没有可拉取的 Markdown 正文")
+    # Current MCP brief responses contain only title/summary. Full responses
+    # expose the current body as Memo 1, followed by retained older memos.
+    # Pull only the primary body, never the older half-note or attachment text.
+    primary = re.search(r"^\*\*Memo 1:[^\n]*\*\*\s*\n(?:summary:[^\n]*\n)?", value, re.M)
+    if primary and "\n## Memos\n" in value:
+        value = value[primary.end():]
+        boundary = re.search(r"^(?:\*\*Memo \d+:[^\n]*\*\*|## (?:Audios|Links|Images|Documents))\s*$", value, re.M)
+        if boundary:
+            value = value[:boundary.start()]
+        value = value.strip()
+        if not value:
+            raise RuntimeError("IdeaShell 笔记主正文为空，本地笔记未被覆盖")
     return value
+
+
+def ideashell_error_text(exc: BaseException) -> str:
+    """Expose the useful leaf error from MCP/AnyIO ExceptionGroups."""
+    if isinstance(exc, BaseExceptionGroup):
+        children = [ideashell_error_text(item) for item in exc.exceptions]
+        children = [item for item in children if item]
+        return "; ".join(dict.fromkeys(children)) or str(exc)
+    return str(exc).strip() or exc.__class__.__name__
 
 
 async def ideashell_recording_audio_parts(record: RecordingRecord) -> list[dict[str, Any]]:
@@ -2091,20 +2128,9 @@ async def preview_ideashell_push(session_id: str, payload: dict[str, Any] = Body
         except (ValueError, OSError) as exc:
             audio_parts = []
             audio_error = str(exc)
-        if len(audio_parts) == 2:
-            midpoint = max(1.0, float(record.duration) / 2.0)
-            archives = [
-                compose_push_part(record, mode, 0, midpoint, 1),
-                compose_push_part(record, mode, midpoint, float(record.duration), 2),
-            ]
-            for archive, audio in zip(archives, audio_parts):
-                archive["audio"] = ideashell_audio_preview(audio)
-            return {
-                "split": True, "mode": mode, "parts": archives,
-                "characters": sum(item["characters"] for item in archives),
-                "digest": hashlib.sha256("".join(item["digest"] for item in archives).encode()).hexdigest(),
-            }
         archive = compose_push(record, mode)
+        archive.update(note_count=1, split=len(audio_parts) > 1,
+                       audio_parts=[ideashell_audio_preview(audio) for audio in audio_parts])
         if audio_parts:
             archive["audio"] = ideashell_audio_preview(audio_parts[0])
         if audio_error:
@@ -2131,13 +2157,15 @@ async def push_recording_summary_to_ideashell(
         except (ValueError, OSError) as exc:
             audio_parts = []
             audio_error = str(exc)
-        if len(audio_parts) == 2:
+        archive = compose_push(record, mode)
+        legacy_preview = payload.get("split_parts") or []
+        if len(audio_parts) == 2 and legacy_preview:
             midpoint = max(1.0, float(record.duration) / 2.0)
             archives = [
                 compose_push_part(record, mode, 0, midpoint, 1),
                 compose_push_part(record, mode, midpoint, float(record.duration), 2),
             ]
-            preview_parts = payload.get("split_parts") or []
+            preview_parts = legacy_preview
             if len(preview_parts) != 2 or any(
                 str(preview_parts[index].get("digest") or "") != archives[index]["digest"]
                 or str(preview_parts[index].get("audio_sha256") or "") != audio_parts[index]["sha256"]
@@ -2145,9 +2173,13 @@ async def push_recording_summary_to_ideashell(
             ):
                 raise ValueError("内容或录音已更新，请重新预览后推送")
         else:
-            archives = [compose_push(record, mode)]
-            if payload.get("preview_digest") and payload["preview_digest"] != archives[0]["digest"]:
+            if payload.get("preview_digest") and payload["preview_digest"] != archive["digest"]:
                 raise ValueError("内容已更新，请重新预览后推送")
+            preview_hashes = payload.get("audio_sha256s")
+            if preview_hashes is not None and preview_hashes != [audio["sha256"] for audio in audio_parts]:
+                raise ValueError("录音文件已更新，请重新预览后推送")
+            if len(audio_parts) > 1 and preview_hashes is None:
+                raise ValueError("请先预览两个录音附件后再推送")
             preview_audio_sha256 = str(payload.get("audio_sha256") or "").strip()
             if preview_audio_sha256 and audio_parts and preview_audio_sha256 != audio_parts[0]["sha256"]:
                 raise ValueError("录音文件已更新，请重新预览后推送")
@@ -2156,6 +2188,7 @@ async def push_recording_summary_to_ideashell(
         previous_ids = [str(value) for value in (sync.get("note_ids") or []) if value]
         if not previous_ids and sync.get("note_id"):
             previous_ids = [str(sync["note_id"])]
+        create_new = payload.get("create_new") is True
         server_url = sync.get("server_url") if previous_ids else payload.get("server_url")
         connection = ideashell_manager.connection(
             str(server_url or payload.get("server_url") or "")
@@ -2165,32 +2198,41 @@ async def push_recording_summary_to_ideashell(
         )
         schemas = await connection.list_tools()
         note_ids: list[str] = []
-        for index, archive in enumerate(archives):
-            note_id = previous_ids[index] if index < len(previous_ids) else ""
-            title = archive.get("title") or str(record.metadata.get("title") or "未命名录音")
-            excerpt = str(summary.get("abstract") or "").strip() if isinstance(summary, dict) else ""
-            excerpt = excerpt[:100] or record._compact_summary(archive["content"], 180)
-            arguments = {"title": title, "content": archive["content"], "summary": excerpt}
-            audio = audio_parts[index] if index < len(audio_parts) else None
-            if audio:
-                arguments.update(audio_attachment_arguments(
-                    schemas.get("note_update" if note_id else "note_create", {}),
-                    audio["name"], audio["data"],
-                ))
-            if note_id:
-                arguments["note_id"] = note_id
-                result = await connection.call_tool("note_update", arguments)
-            else:
-                arguments.update({"tag": "QwenASR", "folder_id": folder_id})
-                result = await connection.call_tool("note_create", arguments)
-                note_id = ideashell_note_id(result)
-                if not note_id:
-                    raise RuntimeError("IdeaShell 未返回笔记编号，请先在 IdeaShell 确认创建结果，避免重复推送")
-            await connection.call_tool("note_move", {"note_ids": [note_id], "folder_id": folder_id})
-            note_ids.append(note_id)
-            sync.update({"note_ids": note_ids, "note_id": note_ids[0], "status": "partial"})
-            record.metadata["ideashell_sync"] = sync
-            record.save_metadata()
+        # Split audio is an attachment concern: keep one archive note and add
+        # both halves to that same note instead of creating two notes.
+        note_id = previous_ids[0] if previous_ids and not create_new else ""
+        if note_id and "folder_notes" in schemas:
+            visible = await connection.call_tool("folder_notes", {"folder_id": folder_id})
+            # note_detail/note_update can still access trashed notes. A
+            # successful update alone therefore does not prove a usable sync.
+            if note_id not in json.dumps(visible, ensure_ascii=False):
+                raise ValueError("已关联的笔记不在课程文件夹中，可能已删除或移走。请在推送预览中选择“新建一篇笔记”后重试")
+        title = str(record.metadata.get("title") or "未命名录音")
+        excerpt = str(summary.get("abstract") or "").strip() if isinstance(summary, dict) else ""
+        excerpt = excerpt[:100] or record._compact_summary(archive["content"], 180)
+        schema = schemas.get("note_update" if note_id else "note_create", {})
+        max_title = schema.get("properties", {}).get("title", {}).get("maxLength", 30)
+        arguments = {"title": title[:int(max_title)], "content": archive["content"], "summary": excerpt}
+        if audio_parts:
+            arguments.update(audio_attachment_arguments_many(schema, audio_parts))
+        if note_id:
+            arguments["note_id"] = note_id
+            result = await connection.call_tool("note_update", arguments)
+        else:
+            arguments.update({"tag": "QwenASR", "folder_id": folder_id})
+            result = await connection.call_tool("note_create", arguments)
+            note_id = ideashell_note_id(result)
+            if not note_id:
+                raise RuntimeError("IdeaShell 未返回笔记编号，请先在 IdeaShell 确认创建结果，避免重复推送")
+        note_ids.append(note_id)
+        old_ids = list(dict.fromkeys([*(sync.get("legacy_note_ids") or []), *(previous_ids if create_new else previous_ids[1:])]))
+        sync.update({"note_ids": note_ids, "note_id": note_ids[0], "status": "partial",
+                     "server_url": connection.server_url, "legacy_note_ids": old_ids})
+        record.metadata["ideashell_sync"] = sync
+        record.save_metadata()
+        # Persist the created/updated note before moving it. A failed move
+        # must not lose the note id and cause a duplicate on the next push.
+        await connection.call_tool("note_move", {"note_ids": [note_id], "folder_id": folder_id})
         sync.update(
             {
                 "note_id": note_ids[0],
@@ -2201,9 +2243,9 @@ async def push_recording_summary_to_ideashell(
                 "folder_id": folder_id,
                 "folder_name": str(record.metadata.get("category") or "未分类"),
                 "content_mode": mode,
-                "content_digest": [item["digest"] for item in archives] if len(archives) > 1 else archives[0]["digest"],
+                "content_digest": archive["digest"],
                 "audio_pushed_at": local_now(),
-                "split_parts": len(archives),
+                "split_parts": max(1, len(audio_parts)),
             }
         )
         if audio_parts:
@@ -2214,6 +2256,8 @@ async def push_recording_summary_to_ideashell(
             })
         if audio_error:
             sync["audio_error"] = audio_error
+        else:
+            sync.pop("audio_error", None)
         record.metadata["ideashell_sync"] = sync
         record.save_metadata()
         return {
@@ -2221,7 +2265,8 @@ async def push_recording_summary_to_ideashell(
             "direction": "push",
             "note_id": note_ids[0],
             "note_ids": note_ids,
-            "parts": len(archives),
+            "parts": max(1, len(audio_parts)),
+            "note_count": 1,
             "audio_attached": bool(audio_parts),
             "audio": [ideashell_audio_preview(item) for item in audio_parts] if len(audio_parts) > 1 else (ideashell_audio_preview(audio_parts[0]) if audio_parts else None),
             "audio_error": audio_error,
@@ -2231,8 +2276,9 @@ async def push_recording_summary_to_ideashell(
         print(f"IdeaShell 推送失败 recording={session_id}: {exc}", flush=True)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        print(f"IdeaShell 推送异常 recording={session_id}: {exc}", flush=True)
-        raise HTTPException(status_code=502, detail=f"IdeaShell 推送失败：{exc}") from exc
+        detail = ideashell_error_text(exc)
+        print(f"IdeaShell 推送异常 recording={session_id}: {detail}", flush=True)
+        raise HTTPException(status_code=502, detail=f"IdeaShell 推送失败：{detail}") from exc
 
 
 @app.post("/api/recordings/{session_id}/ideashell/pull")
@@ -2252,7 +2298,7 @@ async def pull_recording_summary_from_ideashell(
         connection = ideashell_manager.connection(
             str(sync.get("server_url") or payload.get("server_url") or "")
         )
-        result = await connection.call_tool("note_detail", {"note_id": note_id, "scope": "brief"})
+        result = await connection.call_tool("note_detail", {"note_id": note_id, "scope": "full"})
         markdown = ideashell_note_content(result)
         summary = record.update_note_summary(summary_from_archive(markdown, sync), source="ideashell_pull")
         sync.update(
@@ -3057,9 +3103,10 @@ app.include_router(task_center_router(compact_ai_tasks, ai_task_action, course_f
 
 
 from qwen_asr_app.note_routes import note_router
-from qwen_asr_app.note_library import note_library_router
+from qwen_asr_app.note_library import NoteLibrary, note_library_router
 app.include_router(note_router(recording_store, recording_operation))
-app.include_router(note_library_router(app_settings, recording_store))
+review_library = NoteLibrary(app_settings, recording_store)
+app.include_router(note_library_router(app_settings, recording_store, library=review_library))
 
 # The course replay UI and API share this process and port.  Its internal
 # routes remain unchanged, so the old course service can still be tested in
@@ -3089,8 +3136,9 @@ async def course_files_page() -> FileResponse:
 
 
 @app.get("/notes")
-async def notes_page() -> FileResponse:
-    return FileResponse(ROOT / "static" / "notes.html", headers={"Cache-Control": "no-store"})
+async def notes_page(request: Request) -> RedirectResponse:
+    query = request.url.query
+    return RedirectResponse("/course-files" + ("?" + query if query else ""), status_code=307)
 
 
 @app.get("/")

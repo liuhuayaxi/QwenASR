@@ -12,7 +12,7 @@ import httpx
 from tests import isolation  # noqa: F401  # Must precede application imports.
 
 import app
-from qwen_asr_app.ideashell_attachments import audio_attachment_arguments, audio_file_metadata
+from qwen_asr_app.ideashell_attachments import audio_attachment_arguments, audio_attachment_arguments_many, audio_file_metadata
 from qwen_asr_app.note_content import compose_push, compose_push_part
 from qwen_asr_app.storage import RecordingRecord
 
@@ -47,8 +47,90 @@ class IdeaShellAudioAttachmentTests(unittest.TestCase):
         self.assertEqual(metadata["data"], b"abc")
         self.assertEqual(len(metadata["sha256"]), 64)
 
+    def test_object_schema_never_silently_drops_the_second_attachment(self):
+        schema = {"properties": {"audios": AUDIO_SCHEMA["properties"]["audios"]["items"]}}
+        with self.assertRaises(ValueError):
+            audio_attachment_arguments_many(schema, [{"name": "a.aac", "data": b"a"}, {"name": "b.aac", "data": b"b"}])
+
+    def test_mcp_task_group_reports_its_underlying_timeout(self):
+        error = ExceptionGroup('unhandled errors in a TaskGroup', [ExceptionGroup('nested', [httpx.ReadTimeout('上传超时')])])
+        self.assertEqual(app.ideashell_error_text(error), '上传超时')
+
+    def test_pull_extracts_primary_memo_without_retained_split_body(self):
+        content = '# 主归档\n\n## AI 总结\n\n完整总结\n\n## 精修录音原文（含时间戳）\n\n完整原文'
+        payload = {'text': '# 笔记\nsummary: 短摘要\n\n## Memos\n**Memo 1: 当前归档**\nsummary: 短摘要\n' + content + '\n\n**Memo 2: 旧上半段**\nsummary: 旧摘要\n旧正文'}
+        self.assertEqual(app.ideashell_note_content(payload), content)
+
 
 class IdeaShellPushAudioTests(unittest.IsolatedAsyncioTestCase):
+    async def test_invisible_old_link_requires_explicit_fresh_note(self):
+        with tempfile.TemporaryDirectory() as raw:
+            record = RecordingRecord(Path(raw), {
+                'id': 'trashed-link', 'title': '完整课堂', 'category': '测试课程',
+                'status': 'completed', 'sample_count': 96_000,
+                'ai_note_summary': {'summary': '完整总结'},
+                'ideashell_sync': {'note_id': 'a' * 32, 'note_ids': ['a' * 32]},
+            })
+            record.segments = [{'id': 1, 'start': 0, 'end': 6, 'raw': '完整原文'}]
+            audios = [{'name': '上半段.aac', 'data': b'a', 'bytes': 1, 'sha256': '1' * 64},
+                      {'name': '下半段.aac', 'data': b'b', 'bytes': 1, 'sha256': '2' * 64}]
+            async def remote(name, arguments):
+                return {'text': 'No notes in this folder.'} if name == 'folder_notes' else {'note_id': 'c' * 32}
+            connection = SimpleNamespace(server_url='https://mcp.ideashell.cn/mcp',
+                list_tools=AsyncMock(return_value={'note_create': AUDIO_SCHEMA, 'note_update': AUDIO_SCHEMA, 'folder_notes': {}}),
+                call_tool=AsyncMock(side_effect=remote))
+            body = {'preview_digest': compose_push(record)['digest'], 'audio_sha256s': [a['sha256'] for a in audios]}
+            with patch.object(app.recording_store, 'find', return_value=record), \
+                 patch.object(app, 'ideashell_recording_audio_parts', new=AsyncMock(return_value=audios)), \
+                 patch.object(app.ideashell_manager, 'connection', return_value=connection), \
+                 patch.object(app, 'ensure_ideashell_course_folder', new=AsyncMock(return_value='b' * 32)):
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app.app), base_url='http://test') as client:
+                    rejected = await client.post(f'/api/recordings/{record.id}/ideashell/push', json=body)
+                    self.assertEqual(rejected.status_code, 400)
+                    fresh = await client.post(f'/api/recordings/{record.id}/ideashell/push', json={**body, 'create_new': True})
+            self.assertEqual(fresh.status_code, 200, fresh.text)
+            names = [call.args[0] for call in connection.call_tool.await_args_list]
+            self.assertNotIn('note_update', names)
+            self.assertEqual(names.count('note_create'), 1)
+            self.assertEqual(record.metadata['ideashell_sync']['note_ids'], ['c' * 32])
+            self.assertEqual(record.metadata['ideashell_sync']['legacy_note_ids'], ['a' * 32])
+    async def test_split_preview_contains_one_full_note_and_updates_first_legacy_note(self):
+        with tempfile.TemporaryDirectory() as raw:
+            record = RecordingRecord(Path(raw), {
+                'id': 'legacy-split', 'title': '原完整课堂', 'category': '测试课程',
+                'kind': 'upload', 'status': 'completed', 'sample_count': 96_000,
+                'ai_note_summary': {'summary': '完整总结'},
+                'ideashell_sync': {'note_id': 'a' * 32, 'note_ids': ['a' * 32, 'c' * 32]},
+            })
+            record.segments = [{'id': 1, 'start': 0, 'end': 3, 'raw': '前半课堂'},
+                               {'id': 2, 'start': 3, 'end': 6, 'raw': '后半课堂'}]
+            audios = [{'name': '上半段.aac', 'data': b'a', 'bytes': 1, 'sha256': '1' * 64},
+                      {'name': '下半段.aac', 'data': b'b', 'bytes': 1, 'sha256': '2' * 64}]
+            connection = SimpleNamespace(server_url='https://mcp.ideashell.cn/mcp',
+                list_tools=AsyncMock(return_value={'note_update': AUDIO_SCHEMA}), call_tool=AsyncMock(return_value={}))
+            with patch.object(app.recording_store, 'find', return_value=record), \
+                 patch.object(app, 'ideashell_recording_audio_parts', new=AsyncMock(return_value=audios)), \
+                 patch.object(app.ideashell_manager, 'connection', return_value=connection), \
+                 patch.object(app, 'ensure_ideashell_course_folder', new=AsyncMock(return_value='b' * 32)):
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app.app), base_url='http://test') as client:
+                    preview = (await client.post(f'/api/recordings/{record.id}/ideashell/preview', json={})).json()
+                    self.assertEqual(preview['note_count'], 1)
+                    self.assertIn('前半课堂', preview['content'])
+                    self.assertIn('后半课堂', preview['content'])
+                    self.assertEqual(preview['content'].count('完整总结'), 1)
+                    hashes = [audio['sha256'] for audio in preview['audio_parts']]
+                    stale = await client.post(f'/api/recordings/{record.id}/ideashell/push', json={'preview_digest':preview['digest'], 'audio_sha256s': hashes[::-1]})
+                    self.assertEqual(stale.status_code, 400)
+                    connection.call_tool.assert_not_awaited()
+                    response = await client.post(f'/api/recordings/{record.id}/ideashell/push', json={'preview_digest': preview['digest'], 'audio_sha256s': hashes})
+            self.assertEqual(response.status_code, 200, response.text)
+            updates = [call.args for call in connection.call_tool.await_args_list if call.args[0] == 'note_update']
+            self.assertEqual(len(updates), 1)
+            self.assertEqual(updates[0][1]['note_id'], 'a' * 32)
+            self.assertEqual(updates[0][1]['content'], preview['content'])
+            self.assertEqual(len(updates[0][1]['audios']), 2)
+            self.assertEqual(record.metadata['ideashell_sync']['note_ids'], ['a' * 32])
+            self.assertEqual(record.metadata['ideashell_sync']['legacy_note_ids'], ['c' * 32])
     async def test_push_attaches_audio_by_default(self):
         with tempfile.TemporaryDirectory() as raw:
             folder = Path(raw)
@@ -91,7 +173,7 @@ class IdeaShellPushAudioTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(base64.b64decode(arguments["audios"][0]["data"]), b"audio-bytes")
             self.assertTrue(response.json()["audio_attached"])
 
-    async def test_oversized_audio_push_creates_two_notes_with_two_attachments(self):
+    async def test_oversized_audio_push_keeps_one_note_with_two_attachments(self):
         with tempfile.TemporaryDirectory() as raw:
             folder = Path(raw)
             record = RecordingRecord(folder, {
@@ -109,9 +191,8 @@ class IdeaShellPushAudioTests(unittest.IsolatedAsyncioTestCase):
                 {"name": "课堂分段（第1段）.aac", "data": b"first", "bytes": 5, "sha256": "1" * 64},
                 {"name": "课堂分段（第2段）.aac", "data": b"second", "bytes": 6, "sha256": "2" * 64},
             ]
-            note_ids = iter(["a" * 32, "c" * 32])
             async def call_tool(name, arguments):
-                if name == "note_create": return {"note_id": next(note_ids)}
+                if name == "note_create": return {"note_id": "a" * 32}
                 return {}
             connection = SimpleNamespace(
                 server_url="https://mcp.ideashell.cn/mcp",
@@ -133,11 +214,13 @@ class IdeaShellPushAudioTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status_code, 200, response.text)
             payload = response.json()
             self.assertEqual(payload["parts"], 2)
-            self.assertEqual(len(payload["note_ids"]), 2)
+            self.assertEqual(payload["note_ids"], ["a" * 32])
             creates = [call.args for call in connection.call_tool.await_args_list if call.args[0] == "note_create"]
-            self.assertEqual(len(creates), 2)
-            self.assertEqual(base64.b64decode(creates[0][1]["audios"][0]["data"]), b"first")
-            self.assertEqual(base64.b64decode(creates[1][1]["audios"][0]["data"]), b"second")
+            self.assertEqual(len(creates), 1)
+            self.assertEqual(
+                [base64.b64decode(item["data"]) for item in creates[0][1]["audios"]],
+                [b"first", b"second"],
+            )
 
     async def test_text_push_survives_missing_audio(self):
         with tempfile.TemporaryDirectory() as raw:

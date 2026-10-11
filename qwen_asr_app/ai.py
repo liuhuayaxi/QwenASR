@@ -476,6 +476,20 @@ def context_window_for(config: dict[str, Any], mode: str = "sentence") -> int:
     return normalize_context_window(provider.get("context_window", DEFAULT_CONTEXT_WINDOW))
 
 
+def uses_agy_gemini(config: dict[str, Any], mode: str) -> bool:
+    ai = config.get("ai") if isinstance(config.get("ai"), dict) else {}
+    provider = provider_for_mode(ai, mode)
+    model = str(provider.get("cli_model") or provider.get("model") or "").lower()
+    return provider_transport(provider) == "agy_cli" and model.startswith("gemini-")
+
+
+def agy_rewrite_source_budget(config: dict[str, Any], mode: str) -> int:
+    # Whole-transcript correction emits nearly as much text as it consumes.
+    # AGY has no --max-output-tokens flag; don't borrow the API-only 8k output
+    # setting, and don't treat a long input window as unlimited output either.
+    return max(128, min(24_000, (context_window_for(config, mode) - 8_000) // 2))
+
+
 def concurrency_for(config: dict[str, Any], mode: str) -> int:
     provider = provider_for_mode(config.get("ai", {}), mode)
     try:

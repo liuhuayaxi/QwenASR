@@ -1,8 +1,9 @@
+import { initReviewMaterials } from './review-materials.js?v=20261011-materials-merged';
 import { IDEASHELL_SERVERS as servers } from './ideashell-config.js?v=20261007';
 
 const $ = (id) => document.getElementById(id);
 const storageKey = 'qwen-asr-ideashell-settings-v1';
-const state = {category: new URLSearchParams(location.search).get('category') || '未分类', files: [], categories: [], selected: null, preview: null, sharedFolder: false, fileAction: null, replacing: null, uploading: false, syncing: false, managing: false, categoryAction: null, epoch: 0, modalEpoch: 0};
+const state = {category: new URLSearchParams(location.search).get('category') || '未分类', files: [], reviewNotes: [], categories: [], selected: null, preview: null, sharedFolder: false, fileAction: null, replacing: null, uploading: false, syncing: false, managing: false, categoryAction: null, epoch: 0, modalEpoch: 0};
 let pollTimer, connectionTimer, toastTimer, previewTimer;
 let previewEpoch = 0, matchesEpoch = 0;
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c]));
@@ -41,6 +42,15 @@ function updateCategoryControls() {
     $(id).title = fixed ? '“未分类”是默认分类，不能重命名或删除' : working ? '请等待当前操作完成' : '';
   }
 }
+const review = initReviewMaterials(data => {
+  state.reviewNotes = data.notes || [];
+  state.categories = [...new Set([...state.categories, ...(data.categories || [])])];
+  renderCourses(); renderFiles();
+}, load);
+function reviewCard(item) {
+  const sources = (item.source_lessons || []).map(source => `${source.title}（${source.date}）`).join('、');
+  return `<article class="file-card" data-review-id="${esc(item.id)}"><div class="file-icon">PDF</div><div class="file-main"><h3 class="file-title">${esc(item.title || item.filename)}</h3><div class="file-meta"><span class="badge">复习资料</span><span>${esc(String(item.created_at || '').slice(0,10))}</span><span>${esc(item.filename)}</span></div><p class="file-status${item.exists ? '' : ' error'}">${item.exists ? 'PDF 已保存' : '文件已不存在'}${sources ? ` · 来源课次：${esc(sources)}` : ''}</p><div class="actions">${item.exists ? `<a class="ui-button" href="${esc(item.download_url)}" download>下载 PDF</a>` : ''}<button class="ui-button danger" data-delete-review="${esc(item.id)}" type="button">移到废纸篓</button></div></div></article>`;
+}
 function renderFiles() {
   const legacyFiles = state.files.filter(file => file.needs_mineru_upgrade);
   const upgradeButton = $('upgradeLegacy');
@@ -49,9 +59,11 @@ function renderFiles() {
   upgradeButton.title = legacyFiles.length ? `按当前 MinerU 4 设置依次重新识别 ${legacyFiles.length} 个旧版结果` : '';
   const filter = $('search').value.trim().toLocaleLowerCase();
   const files = state.files.filter(file => file.name.toLocaleLowerCase().includes(filter) && (!$('kindFilter').value || file.kind === $('kindFilter').value));
-  $('fileCount').textContent = state.files.length;
-  if (!files.length) {
-    $('files').innerHTML = `<div class="empty"><b>${state.files.length ? '没有符合筛选条件的文件' : '这门课的资料，从第一份文件开始'}</b>${state.files.length ? '试试其他文件名或类型。' : '添加课件、讲义或作业，再按需转换、复制与同步。'}</div>`;
+  const reviews = state.reviewNotes.filter(item => `${item.title || ''} ${item.filename || ''}`.toLocaleLowerCase().includes(filter) && (!$('kindFilter').value || $('kindFilter').value === '复习资料'));
+  const total = state.files.length + state.reviewNotes.length;
+  $('fileCount').textContent = total;
+  if (!files.length && !reviews.length) {
+    $('files').innerHTML = `<div class="empty"><b>${total ? '没有符合筛选条件的文件' : '这门课的资料，从第一份文件开始'}</b>${total ? '试试其他文件名或类型。' : '添加课件、讲义或作业，再按需转换、复制与同步。'}</div>`;
     return;
   }
   $('files').innerHTML = files.map(file => {
@@ -70,7 +82,7 @@ function renderFiles() {
     const pdf = `/api/course-files/${file.id}/download?${query({category: state.category, variant: 'pdf'})}`;
     const fileControls = state.sharedFolder ? `<button class="ui-button" data-action="rename">重命名</button><button class="ui-button" data-action="replace">替换原件</button><button class="ui-button danger" data-action="delete">移到废纸篓</button>` : '';
     return `<article class="file-card" data-id="${esc(file.id)}"><div class="file-icon">${esc(file.name.split('.').at(-1).slice(0,6).toUpperCase())}</div><div class="file-main"><h3 class="file-title">${esc(file.name)}</h3><div class="file-meta"><span class="badge">${esc(file.kind)}</span><span>${size(file.size)}</span>${file.relative_path && file.relative_path !== file.name ? `<span>${esc(file.relative_path)}</span>` : ''}<span>${esc(file.created_at.slice(0,10))}</span><span>${esc(syncText)}</span></div><p class="file-status ${failed || pending ? 'error' : ''}">${esc(ready ? `PDF 已就绪 · ${conversion.pages ? `${conversion.pages} 页` : '已关联文件夹版本'} · ${needsMineru ? '旧版识别结果，可升级为 MinerU 4' : conversion.external ? '与本机 AI 友好型文件同步' : `识别完成${tier ? ` · ${tier}档` : ''}${settingsChanged ? ' · 参数已更新，可重新识别' : ''}`}` : `${conversion.stage || '原件已保存，可生成 AI 友好 PDF'}${working && conversion.progress != null ? ` · ${conversion.progress || 0}%` : ''}`)}${(conversion.warnings || []).map(w => `<br>${esc(w)}`).join('')}</p><div class="actions">${taskLink && conversion.status && conversion.status !== 'none' ? `<a class="ui-button" href="/tasks">查看识别任务</a>` : ''}<button class="ui-button" data-action="convert" ${working || (ready && !needsMineru && !settingsChanged) ? 'disabled' : ''}>${needsMineru ? '升级识别版本' : settingsChanged ? '按新参数重新识别' : ready ? '✓ PDF 已就绪' : working ? '正在转换 PDF…' : failed ? '重新转换 PDF' : '生成 AI 友好 PDF'}</button><a class="ui-button" href="${esc(original)}" download>下载原件</a><button class="ui-button" data-action="copy-original">复制原件</button>${ready ? `<a class="ui-button" href="${esc(pdf)}" download>下载 PDF</a><button class="ui-button" data-action="copy-pdf">复制 PDF</button>` : ''}${fileControls}<button class="ui-button sync-action" data-action="sync">匹配笔记并上传 ↗</button></div></div></article>`;
-  }).join('');
+  }).join('') + reviews.map(reviewCard).join('');
 }
 async function load() {
   const epoch = ++state.epoch;
@@ -83,11 +95,13 @@ async function load() {
       state.category = data.category;
       history.replaceState(null, '', `/course-files?${query({category: state.category})}`);
     }
-    $('courseTitle').textContent = state.category;
+    $('courseTitle').textContent = state.category + ' · PDF 资料库';
     $('courseMeta').textContent = state.sharedFolder ? '与本机课程文件夹实时同步，原件在外层，AI 友好型文件单独保存。' : '原件与 PDF 成对保存，和课堂笔记建立关联。';
     $('directory').textContent = `保存位置：${data.directory}`;
     $('capabilities').textContent = `Word / PPT / Excel 转 PDF：${data.capabilities.office ? '已具备转换工具' : '需安装 LibreOffice'} · MinerU 识别：${data.capabilities.mineru ? '可用' : '需配置 MinerU'}`;
     notice('loadError', ''); renderCourses(); renderFiles();
+    await review.load(state.category);
+    if (epoch !== state.epoch) return;
     const asset = new URLSearchParams(location.search).get('asset');
     if (asset && !state.revealedAsset) {
       const card = [...$('files').querySelectorAll('[data-id]')].find(node => node.dataset.id === asset);
@@ -160,7 +174,7 @@ $('categoryForm').addEventListener('submit', async event => {
     const data = await api(`/api/library/categories/${action}`, {category, ...(action === 'rename' ? {name} : {})});
     state.category = data.category;
     state.categories = data.categories;
-    state.files = [];
+    state.files = []; state.reviewNotes = [];
     state.selected = null;
     invalidatePreview();
     $('search').value = ''; $('kindFilter').value = '';
@@ -210,7 +224,8 @@ async function upload(files) {
       try {
         if (file.size > 200 * 1024 ** 2) throw new Error('超过 200 MB');
         const body = new FormData(); body.append('category', category); body.append('kind', kind); body.append('file', file);
-        const result = await api('/api/course-files/upload', body);
+        if (kind === '复习资料') { body.append('title', file.name.replace(/\.pdf$/i, '')); body.append('source_ids', JSON.stringify([...review.selected])); }
+        const result = await api(kind === '复习资料' ? '/api/notes/upload' : '/api/course-files/upload', body);
         result.duplicate ? duplicates++ : saved++;
       } catch (error) { errors.push(`${file.name}：${error.message}`); }
     }
@@ -219,6 +234,15 @@ async function upload(files) {
   } finally { state.uploading = false; $('addFiles').disabled = false; updateCategoryControls(); }
 }
 $('files').addEventListener('click', event => {
+  const reviewButton = event.target.closest('[data-delete-review]');
+  if (reviewButton) {
+    if (!window.confirm('将这份复习资料移到废纸篓？')) return;
+    busy(reviewButton, async () => {
+      await api(`/api/notes/${encodeURIComponent(reviewButton.dataset.deleteReview)}/delete`, {});
+      toast('复习资料已移入废纸篓'); await load();
+    });
+    return;
+  }
   const button = event.target.closest('button[data-action]'); if (!button) return;
   const file = state.files.find(f => f.id === button.closest('[data-id]').dataset.id); if (!file) return;
   const action = button.dataset.action;

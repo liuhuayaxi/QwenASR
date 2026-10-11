@@ -15,7 +15,7 @@ import numpy as np
 
 import app
 from qwen_asr_app.ai import extract_chat_text, extract_output_text, request_ai_text, test_ai_connection
-from qwen_asr_app.batch_ai import build_note_summary, global_rewrite_events
+from qwen_asr_app.batch_ai import build_note_summary, global_rewrite_events, note_summary_chunks
 from qwen_asr_app.batch_pipeline import SegmentCorrectionPipeline
 from qwen_asr_app.note_content import compose_push, summary_from_archive, transcript_blocks
 from qwen_asr_app.storage import RecordingRecord, RecordingStore
@@ -160,6 +160,40 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('详细推导1', result['summary'])
             self.assertIn(f'详细推导{len(calls)}', result['summary'])
             for i in range(5): self.assertIn(f'第{i}节', ''.join(c[0] for c in calls))
+
+    def test_agy_gemini_uses_long_context_before_chunking(self):
+        blocks = ["[来源 S1] [00:00:00–01:00:00]\n" + "长课堂内容。" * 6_000]
+        config = {'ai': {'summary_provider': {
+            'transport': 'agy_cli', 'cli_model': 'gemini-3.8-flash-high',
+            'context_window': 128_000, 'max_output_tokens': 16_384,
+        }}}
+        chunks = note_summary_chunks(blocks, config)
+        self.assertEqual(len(chunks), 1)
+
+    def test_agy_gemini_still_splits_when_saved_context_is_exceeded(self):
+        blocks = ['完整课堂原文。' * 2_000 for _ in range(3)]
+        config = {'ai': {'summary_provider': {
+            'transport': 'agy_cli', 'cli_model': 'gemini-3.8-flash-high',
+            'context_window': 32_768, 'max_output_tokens': 4096,
+        }}}
+        chunks = note_summary_chunks(blocks, config)
+        self.assertGreater(len(chunks), 1)
+        self.assertEqual(''.join(chunks).replace('\n', ''), ''.join(blocks))
+
+    async def test_agy_gemini_refinement_keeps_a_normal_lecture_in_one_group(self):
+        with tempfile.TemporaryDirectory() as raw:
+            record = record_at(Path(raw))
+            record.segments = [{'id': i + 1, 'start': i * 60, 'end': (i + 1) * 60,
+                                'raw': '课堂原文内容。' * 25} for i in range(60)]
+            async def refine(segments, *args, **kwargs):
+                return [{'segment_ids': [s['id']], 'corrected': s['raw']} for s in segments]
+            with patch.object(app, 'polish_timestamped_segments_resilient', new=AsyncMock(side_effect=refine)) as call:
+                await app._run_refinement_job_unlocked(record, {'ai': {'correction_provider': {
+                    'transport': 'agy_cli', 'cli_model': 'gemini-3.8-flash-high',
+                    'context_window': 256_000, 'max_output_tokens': 8_000,
+                }}})
+            call.assert_awaited_once()
+            self.assertEqual(len(call.await_args.args[0]), 60)
 
     async def test_provider_test_uses_selected_credentials_and_reports_real_reply(self):
         requests = []

@@ -12,6 +12,12 @@
 .side-bottom a { display: block; margin-top: 12px; text-decoration: none; }
 .dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--green); margin-right: 7px; }
 .course-content { min-width: 0; padding: 0 0 20px; }
+.review-tools { margin-top: 20px; }
+.review-tools > details > summary { padding: 14px 16px; border: 1px solid var(--line); border-radius: var(--radius-sm); color: var(--green-dark); background: var(--card); cursor: pointer; }
+.review-tools > details { margin-top: 12px; }
+.review-tools .external-import[open] .notes-grid { margin-top: 16px; }
+.review-tools .upload-panel { margin-bottom: 16px; }
+.review-tools .path-card { margin-top: 12px; }
 .category-actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; flex-shrink: 0; max-width: 100%; }
 .category-actions .ui-button.danger:hover:not(:disabled), .category-dialog .ui-button.danger:hover:not(:disabled) { color: var(--danger); background: var(--danger-hover); border-color: var(--coral); }
 .category-dialog { max-width: 520px; }

@@ -13,6 +13,8 @@ from .ai import (
     context_window_for,
     concurrency_for,
     output_limit_for,
+    uses_agy_gemini,
+    agy_rewrite_source_budget,
     polish_and_translate,
     retry_transient_ai,
     summarize_note_abstract,
@@ -91,7 +93,11 @@ async def global_rewrite_events(
 ) -> AsyncIterator[dict[str, Any]]:
     """Run a context-safe global pass and persist each recoverable part."""
     context_window = context_window_for(config, "global")
-    chunks = chunk_text_blocks(_source_blocks(record), context_window, max_source_tokens=3500)
+    long_context = uses_agy_gemini(config, "global")
+    chunks = chunk_text_blocks(
+        _source_blocks(record), context_window,
+        max_source_tokens=agy_rewrite_source_budget(config, "global") if long_context else 3500,
+    )
     detected_language = next(
         (
             str(item.get("language") or "")
@@ -199,15 +205,28 @@ def note_summary_chunks(blocks: list[str], config: dict[str, Any]) -> list[str]:
         return []
     window = context_window_for(config, "summary")
     output_reserve = output_limit_for(config, "summary", 32_768)
-    # Detailed notes are normally shorter than their source.  Allow a single
-    # coherent request when the source is up to ~1.5x the reserved output, while
-    # still splitting very large lectures before they can be truncated.
-    source_output_budget = max(512, int((output_reserve - 512) * 1.5))
+    # API-compatible providers need a conservative source/output balance.
+    # AGY Gemini exposes a substantially larger context window, so let the
+    # actual request-size check below use that window instead of forcing every
+    # long lecture through an arbitrary ~1.5x-output slice.
+    if uses_agy_gemini(config, "summary"):
+        source_output_budget = max(512, window - output_reserve - 2_000)
+    else:
+        source_output_budget = max(512, int((output_reserve - 512) * 1.5))
 
     def request_size(text: str, *, full: bool) -> int:
         options = {**config, "_full_note": full, "_detailed_chunk": not full}
         payload = json.dumps({"previous_cumulative_summary": None, "new_transcript": text}, ensure_ascii=False)
         return estimate_tokens(summary_instructions(options)) + estimate_tokens(payload) + output_reserve + 320
+
+    def fits_cli_input(text: str, *, full: bool) -> bool:
+        if not uses_agy_gemini(config, "summary"):
+            return True
+        from .agy_cli import MAX_PROMPT_CHARS, compose_prompt
+        options = {**config, "_full_note": full, "_detailed_chunk": not full}
+        return len(compose_prompt(summary_instructions(options), {
+            "previous_cumulative_summary": None, "new_transcript": text,
+        })) <= MAX_PROMPT_CHARS
 
     # Match the actual request serialization rather than counting only raw text.
     # Full-context input remains preferred, but do not choose it when a
@@ -219,7 +238,7 @@ def note_summary_chunks(blocks: list[str], config: dict[str, Any]) -> list[str]:
         forced_chunk_budget = 0
     if forced_chunk_budget > 0:
         source_output_budget = min(source_output_budget, max(512, forced_chunk_budget))
-    if not forced_chunk_budget and estimate_tokens(full_text) <= source_output_budget and request_size(full_text, full=True) <= window:
+    if not forced_chunk_budget and estimate_tokens(full_text) <= source_output_budget and request_size(full_text, full=True) <= window and fits_cli_input(full_text, full=True):
         return [full_text]
     overhead = request_size("", full=False) + 64
     if overhead + 128 >= window:
@@ -228,7 +247,7 @@ def note_summary_chunks(blocks: list[str], config: dict[str, Any]) -> list[str]:
     while True:
         chunks = chunk_text_blocks(blocks, window, max_source_tokens=budget,
                                    fixed_overhead=overhead, use_full_window=True)
-        if all(request_size(chunk, full=False) <= window for chunk in chunks):
+        if all(request_size(chunk, full=False) <= window and fits_cli_input(chunk, full=False) for chunk in chunks):
             return chunks
         if budget <= 128:
             raise ValueError("总结内容在 JSON 编码后超过上下文窗口，请调整窗口设置")

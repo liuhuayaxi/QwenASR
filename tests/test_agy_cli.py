@@ -4,10 +4,12 @@ from tests import isolation  # noqa: F401
 
 import json
 import subprocess
+import asyncio
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, AsyncMock, Mock
+from types import SimpleNamespace
 
-from qwen_asr_app.agy_cli import _decode_output, executable, run_sync
+from qwen_asr_app.agy_cli import _decode_output, executable, run_sync, request_text
 from qwen_asr_app.ai import AIRequestError
 
 
@@ -40,6 +42,7 @@ class AGYCLITests(unittest.TestCase):
         self.assertIn("--input-format", command)
         payload = json.loads(run.call_args.kwargs["input"])
         self.assertEqual(payload["event"], "user")
+        self.assertIn(".local/bin", run.call_args.kwargs["env"]["PATH"])
 
     def test_high_flash_uses_selected_effort(self):
         completed = subprocess.CompletedProcess([], 0, json.dumps({
@@ -57,4 +60,22 @@ class AGYCLITests(unittest.TestCase):
             _decode_output('', 'FAILED_PRECONDITION: User location is not supported')
         self.assertEqual(caught.exception.kind, "provider_region")
         self.assertFalse(caught.exception.retriable)
+
+
+class AGYCancellationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cancelled_request_reaps_its_cli_child(self):
+        entered = asyncio.Event()
+        async def communicate(*args):
+            entered.set()
+            await asyncio.Event().wait()
+        process = SimpleNamespace(returncode=None, communicate=communicate,
+                                  kill=Mock(), wait=AsyncMock())
+        with patch('qwen_asr_app.agy_cli.asyncio.create_subprocess_exec', new=AsyncMock(return_value=process)):
+            task = asyncio.create_task(request_text('测试', {}, {'cli_model': 'gemini-3.8-flash-high'}))
+            await entered.wait()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        process.kill.assert_called_once()
+        process.wait.assert_awaited_once()
 

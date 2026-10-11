@@ -40,6 +40,12 @@ def _resolve(schema: dict[str, Any], value: Any) -> dict[str, Any]:
 def audio_attachment_arguments(
     schema: dict[str, Any], filename: str, data: bytes
 ) -> dict[str, Any]:
+    return audio_attachment_arguments_many(schema, [{"name": filename, "data": data}])
+
+
+def audio_attachment_arguments_many(
+    schema: dict[str, Any], attachments: list[dict[str, Any]]
+) -> dict[str, Any]:
     """Return the audio argument accepted by a live note tool schema.
 
     The server has changed attachment support over time, so inspect the schema
@@ -54,8 +60,12 @@ def audio_attachment_arguments(
             continue
         item_schema: dict[str, Any]
         if definition.get("type") == "array":
+            if len(attachments) > int(definition.get("maxItems") or 5):
+                continue
             item_schema = _resolve(schema, definition.get("items"))
         elif definition.get("type") == "object":
+            if len(attachments) > 1:
+                continue
             item_schema = definition
         else:
             continue
@@ -82,14 +92,21 @@ def audio_attachment_arguments(
         )
         if not name_key or not data_key:
             continue
-        item = {name_key: filename, data_key: base64.b64encode(data).decode("ascii")}
-        for key in ("mime_type", "mimeType", "content_type"):
-            if key in item_properties:
-                item[key] = mimetypes.guess_type(filename)[0] or "application/octet-stream"
-        required = set(item_schema.get("required") or [])
-        if not required.issubset(item):
-            continue
-        return {field: [item] if definition.get("type") == "array" else item}
+        items = []
+        for attachment in attachments:
+            filename = str(attachment.get("name") or "录音.aac")
+            data = attachment.get("data") or b""
+            item = {name_key: filename, data_key: base64.b64encode(data).decode("ascii")}
+            for key in ("mime_type", "mimeType", "content_type"):
+                if key in item_properties:
+                    item[key] = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+            required = set(item_schema.get("required") or [])
+            if not required.issubset(item):
+                items = []
+                break
+            items.append(item)
+        if items:
+            return {field: items if definition.get("type") == "array" else items[0]}
     raise ValueError("当前闪念贝壳接口未提供可用的录音附件参数，请重新连接后重试")
 
 
