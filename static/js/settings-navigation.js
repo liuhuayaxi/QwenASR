@@ -29,7 +29,6 @@ export function createSettingsNavigation() {
       if (current) button.setAttribute("aria-current", "page"); else button.removeAttribute("aria-current");
     });
     $("#settingsPageTitle").textContent = pages[page][0];
-    $("#settingsPageDescription").textContent = pages[page][1];
     if (changed) content.scrollTop = 0;
     syncActions();
   }

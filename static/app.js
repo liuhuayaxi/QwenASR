@@ -10,9 +10,9 @@ import { IDEASHELL_SERVERS, normalizeIdeashellServer } from "./js/ideashell-conf
 import { createMineruSettings } from "./js/mineru-settings.js?v=20261010-routing-progress";
 import { createInferenceSettings } from "./js/inference-settings.js?v=20261010-routing-progress";
 import { createClassroomChat } from "./js/classroom-chat.js?v=20261010-chat-5";
-import { createSettingsNavigation } from "./js/settings-navigation.js?v=20261011-20261010-settings-2";
+import { createSettingsNavigation } from "./js/settings-navigation.js?v=20261011-ui-final";
 
-import { createContinuation, recognitionText } from "./js/workbench/continuation.js?v=20261011";
+import { createContinuation, recognitionText } from "./js/workbench/continuation.js?v=20261011-ui-final";
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -280,7 +280,7 @@ function updateButtons() {
   els.recordName.disabled = Boolean(state.activeSession) || busy;
   els.recordCategory.disabled = Boolean(state.activeSession) || busy;
   els.newRecordCategory.disabled = Boolean(state.activeSession) || busy;
-  if (!state.uploading) els.uploadButton.innerHTML = "<span>↑</span> 上传录音一键转写";
+  if (!state.uploading) els.uploadButton.innerHTML = "<span>↑</span> 上传录音";
 }
 
 function parseJsonSettings(input, label, showMessage = true) {
@@ -535,7 +535,7 @@ async function restoreApiSettings() {
     apiSettingsReady = true;
   } catch (_) {
     apiSettingsReady = false;
-    toast('本机 AI 配置暂时无法读取，请恢复服务后刷新；不会用默认值覆盖已保存配置', 6000);
+    toast('AI 配置读取失败，请刷新重试', 6000);
   }
 }
 
@@ -1545,9 +1545,16 @@ async function refreshPushPreview() {
     if (request !== previewRequest || record !== pushRecord) return;
     if (!response.ok) throw new Error(data.detail || "无法生成预览");
     pushPreviewData = data;
-    $("#pushPreview").innerHTML = renderMarkdown(data.content);
-    const audioHint = data.audio ? ` · 将同时上传录音 ${data.audio.name}（${(data.audio.bytes / 1024 / 1024).toFixed(1)} MB）` : "";
-    $("#pushPreviewStatus").textContent = `${data.characters.toLocaleString()} 字符${data.unrefined_blocks ? ` · ${data.unrefined_blocks} 个片段尚未精修，已在正文标注` : " · 内容已就绪"}${audioHint}`;
+    if (data.split) {
+      $("#pushPreview").innerHTML = data.parts.map((part) => `<section class="ideashell-preview-part"><h3>${escapeHtml(part.title || `第${part.part_index}段`)}</h3>${renderMarkdown(part.content)}</section>`).join("");
+    } else {
+      $("#pushPreview").innerHTML = renderMarkdown(data.content);
+    }
+    const audioValues = data.split ? data.parts.map(part => part.audio).filter(Boolean) : (data.audio ? [data.audio] : []);
+    const audioHint = audioValues.length ? ` · 将分${audioValues.length}段上传录音（${audioValues.map(audio => `${(audio.bytes / 1024 / 1024).toFixed(1)} MB`).join(" + ")}）` : data.audio_error ? " · 录音附件不可用，仍可推送文字" : "";
+    const characters = Number(data.characters || 0).toLocaleString();
+    $("#pushPreviewStatus").textContent = `${data.split ? `已拆分为 ${data.parts.length} 条笔记 · ` : ""}${characters} 字符${data.unrefined_blocks ? ` · ${data.unrefined_blocks} 个片段尚未精修，已在正文标注` : " · 内容已就绪"}${audioHint}`;
+    $("#confirmPush").textContent = data.split ? `推送 ${data.parts.length} 段内容` : "推送此内容";
     $("#confirmPush").disabled = false;
   } catch (error) { if (request === previewRequest) $("#pushPreviewStatus").textContent = error.message; }
 }
@@ -1570,7 +1577,12 @@ async function confirmPush() {
     await ensureIdeashellConnected(serverUrl);
     const response = await fetch(`/api/recordings/${encodeURIComponent(record.id)}/ideashell/push`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ server_url: serverUrl, content_mode: preview.mode, preview_digest: preview.digest, audio_sha256: preview.audio?.sha256 || "" }),
+      body: JSON.stringify({
+        server_url: serverUrl, content_mode: preview.mode,
+        preview_digest: preview.digest,
+        audio_sha256: preview.audio?.sha256 || "",
+        split_parts: preview.split ? preview.parts.map(part => ({digest: part.digest, audio_sha256: part.audio?.sha256 || ""})) : [],
+      }),
     });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.detail || "IdeaShell 推送失败");
@@ -1580,9 +1592,9 @@ async function confirmPush() {
     }
     $("#pushDialog").close();
     await loadLibrary();
-    toast("正文和录音已推送到 IdeaShell（录音不会自动转写）", 5200);
+    toast(payload.parts > 1 ? `已拆分推送 ${payload.parts} 条 IdeaShell 笔记${payload.audio_attached ? "和录音" : "，录音附件未上传"}` : payload.audio_attached ? "正文和录音已推送到 IdeaShell（录音不会自动转写）" : "正文已推送到 IdeaShell，录音附件未上传", 5200);
   } catch (error) { $("#pushPreviewStatus").textContent = error.message; }
-  finally { button.disabled = false; button.textContent = "推送此内容"; $("#pushContentMode").disabled = false; }
+  finally { button.disabled = false; button.textContent = preview.split ? `推送 ${preview.parts.length} 段内容` : "推送此内容"; $("#pushContentMode").disabled = false; }
 }
 
 async function pushLibrarySummary(record, card) {
@@ -2204,6 +2216,7 @@ els.saveCourseProfile.addEventListener("click", saveCourseProfile);
 els.terminology.addEventListener("input", renderTerminologyStats);
 els.terminology.addEventListener("change", () => sendLiveConfigUpdate("课程术语库已更新"));
 els.openSettingsDialog.addEventListener("click", () => openAdvancedSettings());
+document.querySelector("[data-open-settings]")?.addEventListener("click", event => { event.preventDefault(); openAdvancedSettings(); });
 els.closeSettingsDialog.addEventListener("click", () => els.settingsDialog.close());
 els.settingsDialog.addEventListener("click", (event) => {
   if (event.target === els.settingsDialog) els.settingsDialog.close();

@@ -82,6 +82,50 @@ def compose_push(record: Any, mode: str = "combined") -> dict[str, Any]:
             "digest": hashlib.sha256(markdown.encode()).hexdigest(), "characters": len(markdown)}
 
 
+def compose_push_part(
+    record: Any,
+    mode: str,
+    start_seconds: float,
+    end_seconds: float,
+    part_index: int,
+    part_count: int = 2,
+) -> dict[str, Any]:
+    """Compose one time-windowed note for a split IdeaShell recording."""
+    if mode not in {"combined", "summary", "transcript"}:
+        raise ValueError("推送内容必须选择总结＋精修原文、仅总结或仅精修原文")
+    summary = str((record.metadata.get("ai_note_summary") or {}).get("summary") or "").strip()
+    blocks = [block for block in transcript_blocks(record)
+              if float(block["end"]) > float(start_seconds)
+              and float(block["start"]) < float(end_seconds)]
+    missing = sum(not block["refined"] for block in blocks)
+    transcript = "\n\n".join(
+        f"### {clock(block['start'])}–{clock(block['end'])}"
+        + (" · 未精修" if not block["refined"] else "") + f"\n\n{block['text']}"
+        for block in blocks
+    )
+    if mode != "transcript" and not summary:
+        raise ValueError("请先生成并保存 AI 总结，或选择仅推送精修原文")
+    if mode != "summary" and not transcript:
+        raise ValueError("这一段没有可以推送的转写内容")
+    title = str(record.metadata.get("title") or "未命名录音")
+    label = "上半段" if part_index == 1 else "下半段"
+    body = [f"# {title}（{label}）", f"课程：{record.metadata.get('category') or '未分类'}  \n"
+            f"日期：{record.metadata.get('started_at') or '未知'}  \n时长：{clock(max(0, end_seconds - start_seconds))}"]
+    if mode != "transcript":
+        body.extend(["## AI 总结", summary])
+    if mode != "summary":
+        body.extend(["---", f"## 精修录音原文（{label}，含时间戳）"])
+        if missing:
+            body.append(f"> {missing} 个片段尚未完成精修，已标注“未精修”并保留原始识别内容。")
+        body.append(transcript)
+    markdown = "\n\n".join(body).strip() + "\n"
+    return {"content": markdown, "mode": mode, "part_index": part_index,
+            "part_count": part_count, "title": f"{title}（{label}）",
+            "unrefined_blocks": missing if mode != "summary" else 0,
+            "digest": hashlib.sha256(markdown.encode()).hexdigest(),
+            "characters": len(markdown)}
+
+
 def summary_from_archive(markdown: str, sync: dict[str, Any]) -> str:
     if not sync.get("content_mode"):
         return markdown  # Legacy summary-only notes have no wrapper.

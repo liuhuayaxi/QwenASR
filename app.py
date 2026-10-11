@@ -25,7 +25,9 @@ from fastapi.staticfiles import StaticFiles
 from qwen_asr_app.batch_pipeline import SegmentCorrectionPipeline
 from qwen_asr_app.ai_secrets import ai_secret_store
 from qwen_asr_app.ai_preferences import ai_preferences
-from qwen_asr_app.audio import decode_audio_file, vad_split_ranges
+from qwen_asr_app.audio import (convert_audio_to_aac, decode_audio_file,
+                                 split_audio_to_aac, split_audio_to_aac_lossless,
+                                 vad_split_ranges)
 from qwen_asr_app.batch_ai import (
     build_note_summary,
     correct_batch_segment,
@@ -50,10 +52,10 @@ from qwen_asr_app.ai import (
     summarize_transcript,
     test_ai_connection,
 )
-from qwen_asr_app.note_content import compose_push, summary_from_archive, transcript_blocks
+from qwen_asr_app.note_content import compose_push, compose_push_part, summary_from_archive, transcript_blocks
 from qwen_asr_app.live_session import TranscriptionSession
 from qwen_asr_app.ideashell_sync import ideashell_manager
-from qwen_asr_app.ideashell_attachments import audio_attachment_arguments, audio_file_metadata
+from qwen_asr_app.ideashell_attachments import MAX_AUDIO_BYTES, audio_attachment_arguments, audio_file_metadata
 from qwen_asr_app.model_runtime import ModelManager
 from qwen_asr_app.request_security import websocket_origin_allowed, http_request_allowed
 from qwen_asr_app.pdf_ai import find_mineru_binary
@@ -1873,19 +1875,112 @@ def ideashell_note_content(payload: dict[str, Any]) -> str:
     return value
 
 
-async def ideashell_recording_audio(record: RecordingRecord) -> dict[str, Any]:
-    """Return validated audio metadata and bytes for the default attachment."""
+async def ideashell_recording_audio_parts(record: RecordingRecord) -> list[dict[str, Any]]:
+    """Return one or two IdeaShell-safe audio attachments.
+
+    A normal recording stays one attachment. An oversized recording is split
+    at the actual decoded midpoint and each half is encoded at 32 kbps mono
+    AAC. If either half is still too large, the pair is re-encoded at 24, 16,
+    then 12 kbps. The archive audio is never replaced.
+    """
     try:
         path = await asyncio.to_thread(record.ensure_aac)
     except (FileNotFoundError, OSError) as exc:
         raise ValueError(f"这条录音没有可用的音频文件：{exc}") from exc
     title = safe_component(str(record.metadata.get("title") or "课堂录音"), "课堂录音")
-    return await asyncio.to_thread(audio_file_metadata, Path(path), filename=f"{title}.aac")
+    source = Path(path)
+    try:
+        metadata = await asyncio.to_thread(audio_file_metadata, source, filename=f"{title}.aac")
+        metadata["part_index"] = 1
+        metadata["part_count"] = 1
+        return [metadata]
+    except ValueError as exc:
+        if "超过闪念贝壳单个录音附件" not in str(exc):
+            raise
+
+    source_stat = source.stat()
+    stamp = record.directory / ".ideashell-audio-parts.json"
+    destinations = [record.directory / ".ideashell-audio-part-1.aac",
+                    record.directory / ".ideashell-audio-part-2.aac"]
+    cached_bitrate = 0
+    cached_encoding = ""
+    try:
+        cache_info = json.loads(stamp.read_text(encoding="utf-8"))
+        if (cache_info.get("source_size") == source_stat.st_size
+                and cache_info.get("source_mtime_ns") == source_stat.st_mtime_ns
+                and all(path.exists() for path in destinations)):
+            cached_bitrate = int(cache_info.get("bit_rate") or 0)
+            cached_encoding = str(cache_info.get("encoding") or "")
+    except (OSError, ValueError, TypeError):
+        cached_bitrate = 0
+    last_error: Exception | None = None
+    # First attempt a packet-level copy. This preserves AAC quality exactly.
+    if cached_encoding == "copy" and all(path.exists() for path in destinations):
+        try:
+            return [
+                {**await asyncio.to_thread(audio_file_metadata, path, filename=f"{title}（第{index}段）.aac"),
+                 "compressed": False, "source_bytes": source_stat.st_size,
+                 "encoding": "copy", "part_index": index, "part_count": 2}
+                for index, path in enumerate(destinations, start=1)
+            ]
+        except ValueError:
+            pass
+    try:
+        await asyncio.to_thread(split_audio_to_aac_lossless, source, destinations)
+        copied = [
+            {**await asyncio.to_thread(audio_file_metadata, path, filename=f"{title}（第{index}段）.aac"),
+             "compressed": False, "source_bytes": source_stat.st_size,
+             "encoding": "copy", "part_index": index, "part_count": 2}
+            for index, path in enumerate(destinations, start=1)
+        ]
+        if all(item["bytes"] <= MAX_AUDIO_BYTES for item in copied):
+            stamp.write_text(json.dumps({
+                "source_size": source_stat.st_size,
+                "source_mtime_ns": source_stat.st_mtime_ns,
+                "encoding": "copy",
+            }, ensure_ascii=False), encoding="utf-8")
+            return copied
+    except (ValueError, OSError):
+        pass
+
+    bitrates = [cached_bitrate] if cached_bitrate in {32_000, 24_000, 16_000, 12_000} else []
+    bitrates.extend(rate for rate in (32_000, 24_000, 16_000, 12_000) if rate not in bitrates)
+    parts: list[dict[str, Any]] | None = None
+    for bitrate in bitrates:
+        if bitrate != cached_bitrate or not all(path.exists() for path in destinations):
+            await asyncio.to_thread(split_audio_to_aac, source, destinations, bit_rate=bitrate)
+            stamp.write_text(json.dumps({
+                "source_size": source_stat.st_size,
+                "source_mtime_ns": source_stat.st_mtime_ns,
+                "bit_rate": bitrate,
+                "encoding": "aac_reencode",
+            }, ensure_ascii=False), encoding="utf-8")
+        try:
+            candidate = []
+            for index, path in enumerate(destinations, start=1):
+                item = await asyncio.to_thread(audio_file_metadata, path, filename=f"{title}（第{index}段）.aac")
+                item.update({"compressed": True, "source_bytes": source_stat.st_size,
+                             "bit_rate": bitrate, "part_index": index, "part_count": 2})
+                candidate.append(item)
+            parts = candidate
+            break
+        except ValueError as exc:
+            last_error = exc
+            continue
+    if parts is None:
+        raise ValueError(f"录音拆分后仍无法满足闪念贝壳附件限制：{last_error}")
+    return parts
+
+
+async def ideashell_recording_audio(record: RecordingRecord) -> dict[str, Any]:
+    """Compatibility helper returning the first attachment."""
+    return (await ideashell_recording_audio_parts(record))[0]
 
 
 def ideashell_audio_preview(metadata: dict[str, Any]) -> dict[str, Any]:
     """Strip raw bytes before returning attachment information to the browser."""
-    return {key: metadata[key] for key in ("name", "bytes", "sha256")}
+    keys = ("name", "bytes", "sha256", "compressed", "source_bytes", "bit_rate")
+    return {key: metadata[key] for key in keys if key in metadata}
 
 
 def ideashell_folders(payload: Any) -> list[dict[str, str]]:
@@ -1988,9 +2083,31 @@ async def preview_ideashell_push(session_id: str, payload: dict[str, Any] = Body
     if record is None:
         raise HTTPException(status_code=404, detail="没有找到这条录音")
     try:
-        archive = compose_push(record, str(payload.get("content_mode") or "combined"))
-        audio = await ideashell_recording_audio(record)
-        archive["audio"] = ideashell_audio_preview(audio)
+        mode = str(payload.get("content_mode") or "combined")
+        try:
+            audio_parts = await ideashell_recording_audio_parts(record)
+            audio_error = ""
+        except (ValueError, OSError) as exc:
+            audio_parts = []
+            audio_error = str(exc)
+        if len(audio_parts) == 2:
+            midpoint = max(1.0, float(record.duration) / 2.0)
+            archives = [
+                compose_push_part(record, mode, 0, midpoint, 1),
+                compose_push_part(record, mode, midpoint, float(record.duration), 2),
+            ]
+            for archive, audio in zip(archives, audio_parts):
+                archive["audio"] = ideashell_audio_preview(audio)
+            return {
+                "split": True, "mode": mode, "parts": archives,
+                "characters": sum(item["characters"] for item in archives),
+                "digest": hashlib.sha256("".join(item["digest"] for item in archives).encode()).hexdigest(),
+            }
+        archive = compose_push(record, mode)
+        if audio_parts:
+            archive["audio"] = ideashell_audio_preview(audio_parts[0])
+        if audio_error:
+            archive["audio_error"] = audio_error
         return archive
     except (ValueError, OSError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2006,84 +2123,107 @@ async def push_recording_summary_to_ideashell(
         raise HTTPException(status_code=404, detail="没有找到这条录音")
     summary = record.metadata.get("ai_note_summary")
     try:
-        archive = compose_push(record, str(payload.get("content_mode") or "combined"))
-        markdown = archive["content"]
-        if payload.get("preview_digest") and payload["preview_digest"] != archive["digest"]:
-            raise ValueError("内容已更新，请重新预览后推送")
-        audio = await ideashell_recording_audio(record)
-        preview_audio_sha256 = str(payload.get("audio_sha256") or "").strip()
-        if preview_audio_sha256 and preview_audio_sha256 != audio["sha256"]:
-            raise ValueError("录音文件已更新，请重新预览后推送")
+        mode = str(payload.get("content_mode") or "combined")
+        try:
+            audio_parts = await ideashell_recording_audio_parts(record)
+            audio_error = ""
+        except (ValueError, OSError) as exc:
+            audio_parts = []
+            audio_error = str(exc)
+        if len(audio_parts) == 2:
+            midpoint = max(1.0, float(record.duration) / 2.0)
+            archives = [
+                compose_push_part(record, mode, 0, midpoint, 1),
+                compose_push_part(record, mode, midpoint, float(record.duration), 2),
+            ]
+            preview_parts = payload.get("split_parts") or []
+            if len(preview_parts) != 2 or any(
+                str(preview_parts[index].get("digest") or "") != archives[index]["digest"]
+                or str(preview_parts[index].get("audio_sha256") or "") != audio_parts[index]["sha256"]
+                for index in range(2)
+            ):
+                raise ValueError("内容或录音已更新，请重新预览后推送")
+        else:
+            archives = [compose_push(record, mode)]
+            if payload.get("preview_digest") and payload["preview_digest"] != archives[0]["digest"]:
+                raise ValueError("内容已更新，请重新预览后推送")
+            preview_audio_sha256 = str(payload.get("audio_sha256") or "").strip()
+            if preview_audio_sha256 and audio_parts and preview_audio_sha256 != audio_parts[0]["sha256"]:
+                raise ValueError("录音文件已更新，请重新预览后推送")
         sync = record.metadata.get("ideashell_sync")
         sync = dict(sync) if isinstance(sync, dict) else {}
-        note_id = str(sync.get("note_id") or "")
-        server_url = sync.get("server_url") if note_id else payload.get("server_url")
+        previous_ids = [str(value) for value in (sync.get("note_ids") or []) if value]
+        if not previous_ids and sync.get("note_id"):
+            previous_ids = [str(sync["note_id"])]
+        server_url = sync.get("server_url") if previous_ids else payload.get("server_url")
         connection = ideashell_manager.connection(
             str(server_url or payload.get("server_url") or "")
         )
-        title = str(record.metadata.get("title") or "未命名录音")
-        excerpt = str(summary.get("abstract") or "").strip() if isinstance(summary, dict) else ""
-        excerpt = excerpt[:100] or record._compact_summary(markdown, 180)
         folder_id = await ensure_ideashell_course_folder(
             connection, str(record.metadata.get("category") or "未分类")
         )
         schemas = await connection.list_tools()
-        audio_args = audio_attachment_arguments(
-            schemas.get("note_update" if note_id else "note_create", {}),
-            audio["name"],
-            audio["data"],
-        )
-        if note_id:
-            update_arguments = {
-                "note_id": note_id,
-                "title": title,
-                "content": markdown,
-                "summary": excerpt,
-            }
-            update_arguments.update(audio_args)
-            result = await connection.call_tool(
-                "note_update", update_arguments,
-            )
-            await connection.call_tool(
-                "note_move", {"note_ids": [note_id], "folder_id": folder_id}
-            )
-        else:
-            create_arguments = {
-                "title": title,
-                "content": markdown,
-                "summary": excerpt,
-                "tag": "QwenASR",
-                "folder_id": folder_id,
-            }
-            create_arguments.update(audio_args)
-            result = await connection.call_tool("note_create", create_arguments)
-            note_id = ideashell_note_id(result)
-            if not note_id:
-                raise RuntimeError("IdeaShell 未返回笔记编号，请先在 IdeaShell 确认创建结果，避免重复推送")
+        note_ids: list[str] = []
+        for index, archive in enumerate(archives):
+            note_id = previous_ids[index] if index < len(previous_ids) else ""
+            title = archive.get("title") or str(record.metadata.get("title") or "未命名录音")
+            excerpt = str(summary.get("abstract") or "").strip() if isinstance(summary, dict) else ""
+            excerpt = excerpt[:100] or record._compact_summary(archive["content"], 180)
+            arguments = {"title": title, "content": archive["content"], "summary": excerpt}
+            audio = audio_parts[index] if index < len(audio_parts) else None
+            if audio:
+                arguments.update(audio_attachment_arguments(
+                    schemas.get("note_update" if note_id else "note_create", {}),
+                    audio["name"], audio["data"],
+                ))
+            if note_id:
+                arguments["note_id"] = note_id
+                result = await connection.call_tool("note_update", arguments)
+            else:
+                arguments.update({"tag": "QwenASR", "folder_id": folder_id})
+                result = await connection.call_tool("note_create", arguments)
+                note_id = ideashell_note_id(result)
+                if not note_id:
+                    raise RuntimeError("IdeaShell 未返回笔记编号，请先在 IdeaShell 确认创建结果，避免重复推送")
+            await connection.call_tool("note_move", {"note_ids": [note_id], "folder_id": folder_id})
+            note_ids.append(note_id)
+            sync.update({"note_ids": note_ids, "note_id": note_ids[0], "status": "partial"})
+            record.metadata["ideashell_sync"] = sync
+            record.save_metadata()
         sync.update(
             {
-                "note_id": note_id,
+                "note_id": note_ids[0],
+                "note_ids": note_ids,
                 "server_url": connection.server_url,
                 "last_pushed_at": local_now(),
                 "status": "synced",
                 "folder_id": folder_id,
                 "folder_name": str(record.metadata.get("category") or "未分类"),
-                "content_mode": archive["mode"],
-                "content_digest": archive["digest"],
-                "audio_filename": audio["name"],
-                "audio_sha256": audio["sha256"],
-                "audio_bytes": audio["bytes"],
+                "content_mode": mode,
+                "content_digest": [item["digest"] for item in archives] if len(archives) > 1 else archives[0]["digest"],
                 "audio_pushed_at": local_now(),
+                "split_parts": len(archives),
             }
         )
+        if audio_parts:
+            sync.update({
+                "audio_filename": [item["name"] for item in audio_parts] if len(audio_parts) > 1 else audio_parts[0]["name"],
+                "audio_sha256": [item["sha256"] for item in audio_parts] if len(audio_parts) > 1 else audio_parts[0]["sha256"],
+                "audio_bytes": [item["bytes"] for item in audio_parts] if len(audio_parts) > 1 else audio_parts[0]["bytes"],
+            })
+        if audio_error:
+            sync["audio_error"] = audio_error
         record.metadata["ideashell_sync"] = sync
         record.save_metadata()
         return {
             "synced": True,
             "direction": "push",
-            "note_id": note_id,
-            "audio_attached": True,
-            "audio": ideashell_audio_preview(audio),
+            "note_id": note_ids[0],
+            "note_ids": note_ids,
+            "parts": len(archives),
+            "audio_attached": bool(audio_parts),
+            "audio": [ideashell_audio_preview(item) for item in audio_parts] if len(audio_parts) > 1 else (ideashell_audio_preview(audio_parts[0]) if audio_parts else None),
+            "audio_error": audio_error,
             "session": record.public(include_segments=False),
         }
     except (ValueError, RuntimeError, ImportError, ModuleNotFoundError, OSError) as exc:

@@ -57,7 +57,7 @@ export function createContinuation({root = document, openRecord, toast, fetcher 
       const actions = related.flatMap(task => (task.actions || []).filter(action => ['continue','retry'].includes(action)).slice(0,1).map(action =>
         `<button class="secondary-button" data-task="${escapeHtml(task.id)}" data-action="${action}" ${busy ? 'disabled' : ''}>${action === 'retry' ? '重试' : '继续'}${escapeHtml(task.label || '处理')}</button>`));
       return `<article class="continuation-card"><b>${escapeHtml(record.title || '未命名课堂')}</b><ul>${recordStages(record,related).map(text => `<li>${escapeHtml(text)}</li>`).join('')}</ul><div class="continuation-actions"><button class="secondary-button" data-recording="${escapeHtml(record.id)}">阅读原文 / 打开课堂笔记</button>${actions.join('')}</div></article>`;
-    }).join('') + (!items.length ? '<p>录音、上传或课程回放入库后，可在这里阅读原文和继续处理。</p>' : '');
+    }).join('') + (!items.length ? '<p>暂无待处理内容。</p>' : '');
   }
   async function refresh() {
     if (loading || busy) return;
