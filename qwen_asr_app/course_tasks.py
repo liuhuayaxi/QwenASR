@@ -12,7 +12,11 @@ def course_tasks():
         imports = json.loads((root / 'imports.json').read_text()) if (root / 'imports.json').exists() else {}
     except (OSError, ValueError):
         return []
-    items = queue.get('items', [])
+    all_items = queue.get('items', [])
+    # Completed replay imports belong in the course library, not in the
+    # actionable task feed. Keep the queue file intact for replay recovery,
+    # but expose only unfinished course groups to the task center.
+    items = [item for item in all_items if item.get('state') != 'completed']
     if not items:
         return []
     # The queue reuses one feed ID. Distinguish later selections/completions so
@@ -20,21 +24,42 @@ def course_tasks():
     run_identity = hashlib.sha256(json.dumps({'items': items, 'imports': {
         item['group']['id']: imports.get(item['group']['id'], {}) for item in items
     }}, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
-    remaining = sum(item.get('state') != 'completed' for item in items)
+    remaining = len(items)
     states = {item.get('state') for item in items}
     status = 'completed' if not remaining else 'paused' if queue.get('paused') else 'running' if 'running' in states else 'queued' if 'queued' in states else 'interrupted'
-    details = []
+    course_items = []
     for item in items:
         ident = item['group']['id']
         entry = imports.get(ident, {})
-        phases = ' · '.join(f"{phase['label']} {phase.get('percent', 0):.0f}%" for phase in entry.get('phases', {}).values())
-        details.append(item['group'].get('title', ident) + '：' + (phases or entry.get('message') or item.get('state', '')))
+        phase_data = []
+        for key, phase in (entry.get('phases') or {}).items():
+            if not isinstance(phase, dict):
+                continue
+            phase_data.append({
+                'key': key, 'label': phase.get('label', key),
+                'percent': round(float(phase.get('percent', 0) or 0), 1),
+                'detail': phase.get('detail') or '',
+                'state': phase.get('state') or 'pending',
+            })
+        course_items.append({
+            'id': ident,
+            'title': item['group'].get('title', ident),
+            'course': item['group'].get('course_name') or '',
+            'start': item['group'].get('start') or '',
+            'stop': item['group'].get('stop') or '',
+            'state': item.get('state', 'queued'),
+            'progress': round(float(entry.get('progress', 0) or 0), 1),
+            'message': entry.get('message') or '',
+            'phases': phase_data,
+        })
+    details = [item['title'] + '：' + (item['message'] or item['state']) for item in course_items]
+    overall = round(sum(item['progress'] for item in course_items) / max(1, len(course_items)), 1)
     return [{'id': 'course_queue', 'type': 'course_queue', 'family': 'asr', 'label': '课程回放队列',
              'title': f'课程回放 · {len(items)} 堂课', 'category': '', 'source': '课程回放', 'status': status,
              'run_identity': run_identity,
-             'completed': len(items) - remaining, 'total': len(items), 'stage': '按已保存的选课队列处理',
+             'completed': 0, 'total': len(items), 'progress': overall, 'stage': '按未完成课次处理',
              'actions': ['pause'] if status in {'running', 'queued'} else ['continue'] if remaining else [],
-             'warnings': details, 'result_url': '/course/'}]
+             'warnings': details, 'course_items': course_items, 'result_url': '/course/'}]
 
 
 async def course_action(action):

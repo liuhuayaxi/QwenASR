@@ -29,14 +29,14 @@ function dateParts(record) {
 function recordRow(record, chat = false) {
   const date = dateParts(record);
   const duration = record.duration > 0 ? `${Math.max(1, Math.round(record.duration / 60))} 分钟` : '';
-  const detail = [date.full, duration, hasNote(record) ? '笔记已就绪' : record.status === 'completed' ? '转写已完成' : '处理中'].filter(Boolean).join(' · ');
+  const detail = [category ? '' : record.category, date.full, duration, hasNote(record) ? '笔记已就绪' : record.status === 'completed' ? '转写已完成' : '处理中'].filter(Boolean).join(' · ');
   return `<button class="workspace-record" ${chat ? 'data-chat' : 'data-recording'}="${esc(record.id)}" aria-label="${chat ? '提问' : '打开课堂记录'}：${esc(record.title || '未命名课堂')}"><span class="workspace-record-date" aria-hidden="true"><strong>${esc(date.day)}</strong><span>${esc(date.month)}</span></span><span class="workspace-record-body"><span class="workspace-record-title">${esc(record.title || '未命名课堂')}</span><span class="workspace-record-meta">${esc(detail)}</span></span><span class="workspace-record-arrow" aria-hidden="true">${chat ? '提问 →' : '↗'}</span></button>`;
 }
 function render() {
-  $('workspaceTitle').textContent = category || '我的课程';
-  const lessons = records.filter(record => record.category === category).sort((a,b) => String(b.recorded_at || b.started_at || '').localeCompare(String(a.recorded_at || a.started_at || '')));
+  $('workspaceTitle').textContent = category || '全部课程';
+  const lessons = records.filter(record => !category || record.category === category).sort((a,b) => String(b.recorded_at || b.started_at || '').localeCompare(String(a.recorded_at || a.started_at || '')));
   const ids = new Set(lessons.map(record => record.id));
-  const related = tasks.filter(task => task.category === category || ids.has(recordingId(task)));
+  const related = tasks.filter(task => !category || task.category === category || ids.has(recordingId(task)));
   const pending = related.filter(task => activeStatuses.has(task.status) || attentionStatuses.has(task.status));
   $('workspaceMeta').textContent = `${lessons.length} 堂课堂 · ${lessons.filter(hasNote).length} 份笔记${tasksLoaded ? ` · ${pending.length} 项待处理` : ''}`;
   replace('workspaceRecent', lessons.slice(0,5).map(record => recordRow(record)).join('') || '<p class="workspace-empty">暂无课堂记录</p>');
@@ -53,6 +53,7 @@ function tab(name, recording) {
   $('workspaceOverview').hidden = name !== 'overview';
   $('workspaceReview').hidden = name !== 'review';
   $('workspaceFrame').hidden = name === 'overview' || name === 'review';
+  $('workspaceFrame').dataset.view = name;
   document.querySelectorAll('#workspaceTabs [data-tab]').forEach(button => {
     if (button.dataset.tab === name) button.setAttribute('aria-current','page');
     else button.removeAttribute('aria-current');
@@ -76,11 +77,7 @@ async function load() {
       records = result[0].value.records || [];
       recordsLoaded = true;
       categories = [...new Set([...(result[0].value.categories || []), ...records.map(record => record.category), ...(category ? [category] : [])].filter(Boolean))];
-      let lastCourse = '';
-      try { lastCourse = localStorage.getItem('qwen-asr-last-course-v1') || ''; } catch { /* optional preference */ }
-      if (!category) category = categories.includes(lastCourse) ? lastCourse : records.find(record => categories.includes(record.category))?.category || categories[0] || '未分类';
-      if (!categories.length) categories = [category];
-      replace('workspaceCourse', categories.map(name => `<option value="${esc(name)}" ${name===category ? 'selected' : ''}>${esc(name)}</option>`).join(''));
+      replace('workspaceCourse', [`<option value="" ${!category ? 'selected' : ''}>全部课程</option>`, ...categories.map(name => `<option value="${esc(name)}" ${name===category ? 'selected' : ''}>${esc(name)}</option>`)].join(''));
       $('workspaceCourse').disabled = false;
     }
     if (result[1].status === 'fulfilled') { tasks = result[1].value.tasks || []; tasksLoaded = true; }

@@ -1528,6 +1528,13 @@ async function ensureIdeashellConnected(serverUrl = currentIdeashellServer()) {
 let pushRecord = null;
 let pushPreviewData = null;
 let previewRequest = 0;
+async function readIdeashellResponse(response, fallback) {
+  const text = await response.text();
+  try { return JSON.parse(text); } catch (_) {
+    const detail = text.replace(/\s+/g, ' ').trim().slice(0, 240);
+    throw new Error(`${fallback}（HTTP ${response.status}：${detail || '后台没有返回 JSON'}）`);
+  }
+}
 async function refreshPushPreview() {
   const request = ++previewRequest;
   const record = pushRecord;
@@ -1541,7 +1548,7 @@ async function refreshPushPreview() {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ content_mode: $("#pushContentMode").value }),
     });
-    const data = await response.json();
+    const data = await readIdeashellResponse(response, "无法生成 IdeaShell 预览");
     if (request !== previewRequest || record !== pushRecord) return;
     if (!response.ok) throw new Error(data.detail || "无法生成预览");
     pushPreviewData = data;
@@ -1584,7 +1591,7 @@ async function confirmPush() {
         split_parts: preview.split ? preview.parts.map(part => ({digest: part.digest, audio_sha256: part.audio?.sha256 || ""})) : [],
       }),
     });
-    const payload = await response.json();
+    const payload = await readIdeashellResponse(response, "IdeaShell 推送接口返回异常");
     if (!response.ok) throw new Error(payload.detail || "IdeaShell 推送失败");
     if (state.noteSession?.id === record.id) {
       state.noteSession = { ...state.noteSession, ...payload.session };

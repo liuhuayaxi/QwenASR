@@ -57,6 +57,19 @@ function operationLabel(inference = {}, receipt = {}, mode) {
     (inference.job_id || receipt.job_id) ? `Job ID：${inference.job_id || receipt.job_id}` : '',
     receipt.state ? `操作阶段：${receipt.state}` : ''].filter(Boolean).join(' · ');
 }
+function courseQueueDetails(task) {
+  const items = task.course_items || [];
+  if (!items.length) return '';
+  return `<details class="task-details course-queue-details" open><summary>未完成课次（${items.length}）</summary><div class="course-queue-items">${items.map(item => {
+    const phases = (item.phases || []).map(phase => {
+      const percent = Math.max(0, Math.min(100, Number(phase.percent) || 0));
+      const phaseState = phase.state === 'completed' ? 'completed' : phase.state === 'running' ? 'running' : 'pending';
+      return `<div class="course-phase" data-state="${esc(phaseState)}"><div class="course-phase-head"><span>${esc(phase.label)}</span><b>${percent.toFixed(percent % 1 ? 1 : 0)}%</b></div><progress max="100" value="${percent}"></progress><small>${esc(phase.detail || (phase.state === 'completed' ? '已完成' : '等待处理'))}</small></div>`;
+    }).join('');
+    const window = item.start && item.stop ? ` · ${item.start}–${item.stop}` : '';
+    return `<article class="course-queue-item"><div class="course-queue-item-head"><b>${esc(item.title)}</b><span>${esc(item.state === 'running' ? '进行中' : item.state === 'paused' ? '已暂停' : '排队中')}</span></div><p>${esc(item.course || '')}${esc(window)}</p><div class="course-phases">${phases || `<small>${esc(item.message || '等待课程回放处理')}</small>`}</div></article>`;
+  }).join('')}</div></details>`;
+}
 function card(task) {
   const done = task.status === 'completed';
   const actions = done ? [] : (task.actions || []);
@@ -81,6 +94,7 @@ function card(task) {
     task.range_end ? `片段范围：${Math.floor(task.range_start / 60)}–${Math.ceil(task.range_end / 60)} 分钟` : '',
     task.attempts > 1 ? `历史尝试 ${task.attempts} 次` : '', ...(task.warnings || [])].filter(Boolean);
   const files = (task.files || []).map(file => `<li class="task-file"><div><b>${esc(file.source_name)}</b><span>${esc(labels[file.status] || file.status)}${file.status === 'running' && file.progress != null ? ` · ${Math.round(file.progress || 0)}%` : ''}</span></div><p>${esc(file.error || file.stage)}</p><p>${esc(operationLabel(file.inference, file.remote_operation, task.configured_provider))}</p><p>${esc(file.output_path || file.source_path)}</p>${file.download_url ? `<a href="${esc(file.download_url)}" download>下载 AI 友好 PDF</a>` : ''}</li>`).join('');
+  const courseDetails = task.type === 'course_queue' ? courseQueueDetails(task) : '';
   return `<article class="task-card" data-id="${esc(task.id)}" data-status="${esc(task.status)}"><div class="task-card-top">
     ${done ? '' : `<input class="task-select" type="checkbox" aria-label="选择 ${esc(task.label)}：${esc(task.title)}" ${state.selected.has(task.id) ? 'checked' : ''} ${state.busy ? 'disabled' : ''}>`}
     <div class="task-main"><div class="task-title"><h3>${esc(task.title)}</h3><span class="task-status">${esc(labels[task.status] || task.status)}</span></div>
@@ -90,7 +104,7 @@ function card(task) {
     ${error ? `<div class="task-error">${esc(error)}</div>` : ''}
     ${actions.length || task.result_url || task.download_url ? `<div class="task-actions">${actions.map(action => `<button data-action="${action}" class="ui-button ${action === 'cancel' ? 'danger' : action === 'continue' ? 'primary' : ''}" ${state.busy ? 'disabled' : ''}>${actionLabels[action]}</button>`).join('')}
     ${task.result_url ? `<a href="${esc(task.result_url)}" class="${resultClass}">${task.type === 'course_queue' ? '打开课程回放' : task.family === 'ai' || task.type === 'upload' ? '查看笔记' : '查看课程文件'}</a>` : ''}${task.download_url ? `<a href="${esc(task.download_url)}" class="${resultClass}" download>下载 AI 友好 PDF</a>` : ''}</div>` : ''}
-    ${files || details.length ? `<details class="task-details"><summary>${files ? `文件明细（${task.files.length}）` : '任务详情'}</summary>${details.map(text => `<p>${esc(text)}</p>`).join('')}${files ? `<ul>${files}</ul>` : ''}</details>` : ''}
+    ${courseDetails || files || details.length ? `${courseDetails || `<details class="task-details"><summary>${files ? `文件明细（${task.files.length}）` : '任务详情'}</summary>${details.map(text => `<p>${esc(text)}</p>`).join('')}${files ? `<ul>${files}</ul>` : ''}</details>`}` : ''}
     </div></div></article>`;
 }
 function selectionControls() {
