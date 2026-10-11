@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 from .durable import atomic_json
-from .library_layout import AI_FILES, INDEX, RECORDINGS, shared
+from .library_layout import AI_FILES, INDEX, NOTE_LIBRARY_MARKER, RECORDINGS, shared
 from .storage import default_course_profile, safe_component, local_now
 
 
@@ -18,6 +18,10 @@ def discover_courses(settings):
     changed = False
     for folder in sorted(settings.storage_root.iterdir()):
         if not folder.is_dir() or folder.is_symlink() or folder.name.startswith('.'):
+            continue
+        # The generated-note catalog lives under the same Desktop materials
+        # root but is not a course and must never become a course category.
+        if (folder / NOTE_LIBRARY_MARKER).is_file():
             continue
         name = folder.name
         if safe_component(name, '') != name:

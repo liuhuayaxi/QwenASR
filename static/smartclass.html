@@ -6,29 +6,32 @@
   <meta name="theme-color" content="#f5f7f5">
   <title>课程回放 · QwenASR</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
-  <script src="/static/js/theme.js?v=20261002-theme-2"></script>
-  <link rel="stylesheet" href="/static/smartclass.css?v=20261008-pipeline-1">
-  <link rel="stylesheet" href="/static/ui.css?v=20261002-theme-2">
-</head>
+  <script src="/static/js/theme.js?v=20261011-ui-final"></script>
+  <link rel="stylesheet" href="/static/smartclass.css?v=20261011-ui-final">
+  <link rel="stylesheet" href="/static/ui.css?v=20261011-ui-final">
+<script>if (new URLSearchParams(location.search).get("embedded") === "1") document.addEventListener("DOMContentLoaded", () => document.body.classList.add("workspace-embedded"));</script>
+<link rel="stylesheet" href="/static/workspace.css?v=20261011-ui-final"></head>
 <body class="replay-page">
     <header class="app-header">
       <div class="app-header-inner">
         <a class="app-brand" href="/" aria-label="QwenASR 本地学习工作台">
           <span class="app-brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
-          <span><b>QwenASR</b><small>本地学习工作台</small></span>
+          <span><b>QwenASR</b></span>
         </a>
         <nav class="app-nav" aria-label="主导航">
+          <a href="/workspace">课程工作区</a>
           <a href="/">录音工作台</a>
-          <a href="/library">录音库</a>
+          <a href="/library">课堂记录</a>
+          <a href="/notes">复习资料</a>
           <a href="/course/" aria-current="page">课程回放</a>
           <a href="/course-files">课程资料库</a>
           <a href="/tasks">任务中心</a>
         </nav>
-        <div class="app-header-tools"><button class="theme-toggle" type="button" data-theme-toggle aria-pressed="false" aria-label="切换深色模式" title="切换深色模式"><span data-theme-icon aria-hidden="true">☾</span><span data-theme-label>深色</span></button><span class="app-local">本地工作空间</span></div>
+        <div class="app-header-tools"><button class="theme-toggle" type="button" data-theme-toggle aria-pressed="false" aria-label="切换深色模式" title="切换深色模式"><span data-theme-icon aria-hidden="true">☾</span><span data-theme-label>深色</span></button><a class="header-settings" data-open-settings href="/?settings=ai"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3" fill="var(--paper)"/><circle cx="15" cy="17" r="3" fill="var(--paper)"/></svg><span>设置</span></a></div>
       </div>
     </header>
   <main class="replay-main">
-    <header class="page-heading"><div><span class="eyebrow">COURSE REPLAY</span><h1>课程回放</h1><p>选择课程与课次，将课堂回放整理成文字和笔记。</p></div></header>
+    <header class="page-heading"><div><span class="eyebrow">COURSE REPLAY</span><h1>课程回放</h1></div></header>
     <p id="notice" role="alert"></p>
     <div class="replay-grid">
       <div class="replay-setup">
@@ -40,7 +43,7 @@
         <label>学号 / 工号<input id="username" name="username" autocomplete="username" required class="ui-field"></label>
         <label>统一认证密码<input id="password" name="password" type="password" autocomplete="current-password" required class="ui-field"></label></div>
         <label class="save"><input id="save" type="checkbox" checked>保存在本机，用于以后自动登录</label>
-        <p class="muted">凭证仅保存到当前系统用户可读的 ~/.qwenasr/smartclass/，通过 HTTPS 发送到南邮统一认证服务器。</p>
+
         <button id="connect" type="submit" class="ui-button primary">保存并测试自动登录</button>
         <button id="reconnect" class="ui-button secondary" type="button" hidden>使用已保存账号登录</button>
         </form>
@@ -49,7 +52,7 @@
 
 <section class="card">
         <h2>选择课程与课次</h2>
-        <p class="muted">只获取你勾选的回放。同一天、同一课程的两节相邻回放会合成一份笔记。下载、转写和笔记会流水线处理，运行期间可以切换课程、继续添加课次。</p>
+
         <label>本学期课程<select id="courses" class="ui-field"><option value="">登录后选择课程…</option></select></label>
         <button id="refresh" class="ui-button secondary" type="button">刷新课程</button>
         <button id="loadLessons" class="ui-button secondary" type="button">查看 / 刷新回放</button><div id="lessons" aria-live="polite"></div>
@@ -57,16 +60,16 @@
         <details>
         <summary>笔记设置</summary>
         <label class="save"><input id="generateSummary" type="checkbox" checked>转写后生成 AI 课堂笔记</label>
-        <label class="save"><input id="aiCorrection" type="checkbox" checked>边转写边 AI 精修</label>
+        <label class="save"><input id="aiCorrection" type="checkbox" checked>转写校对</label>
         <div class="fields">
         <label>AI 接口地址<input id="summaryBase" type="url" placeholder="https://api.siliconflow.cn/v1" class="ui-field"></label>
         <label>AI 笔记模型<input id="summaryModel" placeholder="模型名称" class="ui-field"></label></div>
         <div class="fields">
         <label>精修接口地址<input id="correctionBase" type="url" class="ui-field"></label>
-        <label>AI 精修模型<input id="correctionModel" placeholder="默认使用笔记模型" class="ui-field"></label></div>
-        <p class="muted">设置自动保存到本机文件，清空浏览器不会丢失。AI 密钥共用工作台的本机密钥库；首次使用会采用工作台已保存的模型配置。</p>
+        <label>转写校对模型<input id="correctionModel" placeholder="默认使用笔记模型" class="ui-field"></label></div>
+
         <button id="saveOptions" class="ui-button secondary" type="button">保存笔记设置</button>
-        <p id="optionsStatus" class="muted" role="status">已保存的配置会在下次打开时自动恢复。</p>
+        <p id="optionsStatus" class="muted" role="status"></p>
         </details>
         <button id="import" type="button" disabled class="ui-button primary">将选中课次加入队列</button>
         <button id="stop" class="ui-button secondary" type="button" hidden>暂停队列</button>
@@ -79,7 +82,6 @@
         </section>
 
     </div>
-    <div class="replay-workflow" aria-label="处理流程"><span class="step"><b>1</b>登录账号</span><span class="step"><b>2</b>选择课程回放</span><span class="step"><b>3</b>获取音频</span><span class="step"><b>4</b>转写与精修</span><span class="step"><b>5</b>生成笔记</span></div>
   </main>
   <script>
     // The course UI is mounted below /course while its API paths remain
@@ -92,6 +94,6 @@
       return nativeFetch(input, init);
     };
   </script>
-  <script src="/static/js/smartclass.js?v=20261008-pipeline-1"></script>
+  <script src="/static/js/smartclass.js?v=20261011-20261010-routing-progress"></script>
 </body>
 </html>

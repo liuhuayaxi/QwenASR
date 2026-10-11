@@ -36,7 +36,18 @@ from .terminology import ai_terminology_context
 logger = logging.getLogger(__name__)
 _api_semaphores: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 _api_clients: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
-TRANSIENT_AI_KINDS = {"rate_limit", "provider_busy"}
+TRANSIENT_AI_KINDS = {
+    "rate_limit", "provider_busy", "network_dns", "network_connect",
+    "network_connect_timeout", "network_read_timeout", "network_transport",
+}
+
+
+def provider_transport(provider: dict[str, Any]) -> str:
+    """Return the configured transport, keeping old API settings compatible."""
+    value = str(provider.get("transport") or provider.get("provider_type") or "api").strip().lower()
+    if value in {"agy", "agy-cli", "agy_cli", "antigravity", "antigravity-cli"}:
+        return "agy_cli"
+    return "api"
 
 
 class AIRequestError(RuntimeError):
@@ -196,6 +207,7 @@ def validate_completion(payload: Any) -> None:
 def _provider_kind(mode: str | bool) -> str:
     normalized_mode = "review" if mode is True else "sentence" if mode is False else str(mode)
     return {
+        "chat": "chat_provider",
         "review": "review_provider",
         "summary": "summary_provider",
         "global": "global_provider",
@@ -403,6 +415,13 @@ def provider_for_mode(ai: dict[str, Any], mode: str | bool = "sentence") -> dict
         return ai.get('api_key') if endpoint_identity(base_url or original) == endpoint_identity(original) else None
 
     normalized_mode = "review" if mode is True else "sentence" if mode is False else str(mode)
+    if normalized_mode == "chat":
+        # Classroom chat has its own saved provider and never borrows a
+        # transcription provider, endpoint, model or credential.
+        provider = ai.get("chat_provider")
+        if not isinstance(provider, dict):
+            raise ValueError("课堂问答模型尚未配置")
+        return dict(provider)
     if normalized_mode in {"global", "correction"}:
         key = f"{normalized_mode}_provider"
         provider = ai.get(key)
@@ -446,6 +465,8 @@ def provider_for_mode(ai: dict[str, Any], mode: str | bool = "sentence") -> dict
 
 def select_model(ai: dict[str, Any], mode: str | bool = "sentence") -> str:
     provider = provider_for_mode(ai, mode)
+    if provider_transport(provider) == "agy_cli":
+        return str(provider.get("cli_model") or provider.get("model") or "gemini-3.8-flash-medium")
     return str(provider.get("model") or os.getenv("AI_MODEL") or "gpt-5-mini")
 
 
@@ -495,6 +516,8 @@ def _extra_params(ai: dict[str, Any]) -> dict[str, Any]:
 
 def provider_credentials(config, mode):
     provider = provider_for_mode(config.get("ai", {}), mode)
+    if provider_transport(provider) == "agy_cli":
+        return "", ""
     base = str(provider.get("base_url") or os.getenv("AI_BASE_URL") or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1")
     identity = endpoint_identity(base)
     key = str(provider.get("api_key") or "")
@@ -519,9 +542,16 @@ async def request_ai_text(
     concurrency = concurrency_for(config, mode)
     loop = asyncio.get_running_loop()
     semaphores = _api_semaphores.setdefault(loop, {})
-    key = (mode, str(provider.get("base_url") or ""), str(provider.get("model") or ""), concurrency)
+    key = (mode, provider_transport(provider), str(provider.get("base_url") or ""),
+           str(provider.get("model") or provider.get("cli_model") or ""), concurrency)
     semaphore = semaphores.setdefault(key, asyncio.Semaphore(concurrency))
     base_url, credential = provider_credentials(config, mode)
+    if provider_transport(provider) == "agy_cli":
+        # AGY authenticates through its own local CLI session; there is no API
+        # endpoint or secret to put into the shared account gate.
+        async with semaphore:
+            return await _request_ai_text_unlimited(instructions=instructions, payload=payload,
+                config=config, mode=mode, max_output_tokens=max_output_tokens)
     async with semaphore, account_gate(base_url, credential):
         return await _request_ai_text_unlimited(instructions=instructions, payload=payload,
             config=config, mode=mode, max_output_tokens=max_output_tokens)
@@ -534,6 +564,10 @@ async def _request_ai_text_unlimited(
     """Call Responses/Chat and return the model's complete text output."""
     ai = config.get("ai") if isinstance(config.get("ai"), dict) else {}
     provider = provider_for_mode(ai, mode)
+    if provider_transport(provider) == "agy_cli":
+        from .agy_cli import request_text
+
+        return await request_text(instructions, payload, provider)
     base_url, api_key = provider_credentials(config, mode)
     model = select_model(ai, mode)
     context_window = context_window_for(config, mode)

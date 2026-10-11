@@ -153,7 +153,7 @@ function renderCourseState(s) {
   const activeImports = s.imports.filter(j => ['running', 'queued'].includes(j.state));
   if (!activeImports.length) {
     const empty = document.createElement('p'); empty.className = 'muted';
-    empty.textContent = '暂无正在运行的任务。已完成的笔记可在录音库查看。'; $('result').append(empty);
+    empty.textContent = '暂无运行任务'; $('result').append(empty);
   }
   for (const j of activeImports) {
     const box = document.createElement('div'); box.className = 'job';
@@ -183,6 +183,16 @@ function renderCourseState(s) {
       box.append(phases);
     }
     $('result').append(box);
+  }
+  const completedImports = (s.imports || []).filter(item => item.state === 'completed' && item.record_id).slice(-5).reverse();
+  if (completedImports.length) {
+    const heading = document.createElement('h3'); heading.textContent = '最近入库 · 课堂记录'; $('result').append(heading);
+    for (const item of completedImports) {
+      const link = document.createElement('a'); link.className = 'ui-button';
+      link.href = '/library?' + new URLSearchParams({recording: item.record_id});
+      link.textContent = `${item.title || '课堂记录'} · 阅读原文 / 打开课堂笔记`;
+      $('result').append(link);
+    }
   }
   if (s.lesson_course === $('courses').value) updateLessonStatuses(s.lesson_statuses || {});
   updateSelection();
@@ -245,7 +255,7 @@ async function saveOptions() {
     if (JSON.stringify(values) === JSON.stringify(selectedOptions())) {
       optionsDirty = false;
       if (window.courseStatus) window.courseStatus.options = {...window.courseStatus.options, ...values};
-      $('optionsStatus').textContent = '已保存到本机，清空浏览器不会丢失。';
+      $('optionsStatus').textContent = '已保存';
     }
   } catch (error) { $('optionsStatus').textContent = `尚未保存：${error.message}`; throw error; }
 }

@@ -44,6 +44,25 @@ class PreferencesTests(unittest.TestCase):
 
 
 class PreferencesRouteTests(unittest.IsolatedAsyncioTestCase):
+    def test_task_retry_config_is_rebuilt_from_saved_disk_settings(self):
+        import app
+        with tempfile.TemporaryDirectory() as raw:
+            preferences = AIPreferences(Path(raw) / 'settings.json')
+            secrets = AISecretStore(Path(raw) / 'keys.json')
+            providers = {
+                mode: {'base_url': 'https://api.siliconflow.cn/v1', 'model': 'saved-' + mode,
+                       'api_mode': 'chat_completions'}
+                for mode in ('sentence', 'review', 'summary', 'correction', 'global')
+            }
+            preferences.save({'history_chars': 1200, 'function_providers': providers}, secrets)
+            record = type('Record', (), {'metadata': {'course_settings': {'terminology': ['术语']}}})()
+            with patch.object(app, 'ai_preferences', preferences):
+                config = app._saved_ai_task_config(record, 'refinement')
+            self.assertEqual(config['ai']['correction_provider']['model'], 'saved-correction')
+            self.assertEqual(config['ai']['base_url'], 'https://api.siliconflow.cn/v1')
+            self.assertNotIn('api_key', json.dumps(config))
+            self.assertEqual(config['terminology'], ['术语'])
+
     async def test_settings_api_restores_disk_without_returning_credentials(self):
         import app
         with tempfile.TemporaryDirectory() as raw:
@@ -71,4 +90,6 @@ class PreferencesRouteTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(json.loads((Path(raw)/'options.json').read_text())['summary_provider']['model'], 'saved-model')
                 service.options['summary_provider']['model'] = 'course-specific-model'
                 await service.defaults()
-                self.assertEqual(service.options['summary_provider']['model'], 'course-specific-model')
+                # The durable AI settings are authoritative across restarts;
+                # stale course options cannot override them.
+                self.assertEqual(service.options['summary_provider']['model'], 'saved-model')

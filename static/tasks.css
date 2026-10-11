@@ -46,6 +46,7 @@
 .task-progress::-webkit-progress-value { background: var(--green); border-radius: 4px; }
 .task-progress::-moz-progress-bar { background: var(--green); border-radius: 4px; }
 .task-actions { display: flex; flex-wrap: wrap; gap: 7px; margin: 14px 0 0; }
+.task-result-link { color: var(--green-dark); font-size: var(--text-sm); text-underline-offset: 3px; margin-right: 10px; }
 .task-error, .task-notice { padding: 10px 12px; border-radius: var(--radius-sm); background: var(--warning-soft); color: var(--warning); font-size: var(--text-sm); overflow-wrap: anywhere; white-space: pre-wrap; }
 .task-error, .task-notice.error { color: var(--danger); background: var(--danger-soft); }
 .task-error { margin-top: 12px; }

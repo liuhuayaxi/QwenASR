@@ -24,6 +24,17 @@ from .library_layout import AI_FILES, INDEX, RECORDINGS
 from .storage import TRASH_ROOT, local_now, safe_component
 
 
+def legacy_output_key(filename):
+    """Normalize old AI output names for a unique source-file fallback match."""
+    stem = Path(filename).stem
+    stem = re.sub(r"\(AI\)$", "", stem, flags=re.IGNORECASE)
+    stem = re.sub(r"\([^)]*\)", "", stem)
+    # Old course names sometimes contained a standalone A/B/C marker. Keep
+    # letters embedded in real words (for example, AIGC) intact.
+    stem = re.sub(r"(?<![A-Za-z])[ABC](?![A-Za-z])", "", stem, flags=re.IGNORECASE)
+    return re.sub(r"[\W_]+", "", stem)
+
+
 class SharedCourseFiles:
     def __init__(self, settings):
         self.settings = settings
@@ -113,6 +124,11 @@ class SharedCourseFiles:
         ai_by_path = {path.relative_to(folder).as_posix(): path for path in pdfs}
         ai_by_inode = {tuple(self._stamp(path)[:2]): path for path in pdfs if path.exists()}
         claimed = {item.get("conversion", {}).get("relative_path") for item in items.values()}
+        unclaimed_by_key = {}
+        for path in pdfs:
+            relative = path.relative_to(folder).as_posix()
+            if relative not in claimed:
+                unclaimed_by_key.setdefault(legacy_output_key(path.name), []).append(path)
         for item in sorted(items.values(), key=lambda item: (Path(item.get("name", "")).suffix.lower() != '.pdf', item["id"])):
             item["missing"] = item["id"] not in seen
             if item["missing"]:
@@ -130,6 +146,12 @@ class SharedCourseFiles:
                 if relative not in claimed and relative in ai_by_path:
                     path = candidate
                     claimed.add(relative)
+            if path is None and not conversion.get("relative_path"):
+                matches = [candidate for candidate in unclaimed_by_key.get(legacy_output_key(item.get("name", "")), [])
+                           if candidate.relative_to(folder).as_posix() not in claimed]
+                if len(matches) == 1:
+                    path = matches[0]
+                    claimed.add(path.relative_to(folder).as_posix())
             if path is not None and path.exists():
                 stamp = self._stamp(path)
                 changed = conversion.get("stamp") != stamp

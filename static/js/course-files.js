@@ -42,6 +42,11 @@ function updateCategoryControls() {
   }
 }
 function renderFiles() {
+  const legacyFiles = state.files.filter(file => file.needs_mineru_upgrade);
+  const upgradeButton = $('upgradeLegacy');
+  upgradeButton.hidden = legacyFiles.length === 0;
+  upgradeButton.textContent = legacyFiles.length ? `升级旧版识别（${legacyFiles.length}）` : '升级旧版识别';
+  upgradeButton.title = legacyFiles.length ? `按当前 MinerU 4 设置依次重新识别 ${legacyFiles.length} 个旧版结果` : '';
   const filter = $('search').value.trim().toLocaleLowerCase();
   const files = state.files.filter(file => file.name.toLocaleLowerCase().includes(filter) && (!$('kindFilter').value || file.kind === $('kindFilter').value));
   $('fileCount').textContent = state.files.length;
@@ -51,19 +56,20 @@ function renderFiles() {
   }
   $('files').innerHTML = files.map(file => {
     const conversion = file.conversion || {};
-    const ready = conversion.status === 'completed';
+    const ready = ['completed', 'stale'].includes(conversion.status);
     const needsMineru = ready && file.needs_mineru_upgrade;
     const settingsChanged = ready && file.mineru_settings_changed;
     const tier = {flash: '极速', basic: '基础', standard: '标准', advanced: '高级'}[conversion.mineru_settings?.tier];
     const working = ['queued', 'running', 'stopping'].includes(conversion.status);
     const failed = ['error', 'interrupted', 'paused', 'cancelled'].includes(conversion.status);
+    const taskLink = !conversion.external || working || failed;
     const latest = (file.sync || []).at(-1);
     const pending = latest && ['sending', 'unknown'].includes(latest.status);
     const syncText = latest ? latest.status === 'synced' ? `已上传到 ${latest.title}` : '上次上传结果待核对，请先在闪念贝壳查看附件。' : '尚未上传到闪念贝壳';
     const original = `/api/course-files/${file.id}/download?${query({category: state.category, variant: 'original'})}`;
     const pdf = `/api/course-files/${file.id}/download?${query({category: state.category, variant: 'pdf'})}`;
     const fileControls = state.sharedFolder ? `<button class="ui-button" data-action="rename">重命名</button><button class="ui-button" data-action="replace">替换原件</button><button class="ui-button danger" data-action="delete">移到废纸篓</button>` : '';
-    return `<article class="file-card" data-id="${esc(file.id)}"><div class="file-icon">${esc(file.name.split('.').at(-1).slice(0,6).toUpperCase())}</div><div class="file-main"><h3 class="file-title">${esc(file.name)}</h3><div class="file-meta"><span class="badge">${esc(file.kind)}</span><span>${size(file.size)}</span>${file.relative_path && file.relative_path !== file.name ? `<span>${esc(file.relative_path)}</span>` : ''}<span>${esc(file.created_at.slice(0,10))}</span><span>${esc(syncText)}</span></div><p class="file-status ${failed || pending ? 'error' : ''}">${esc(ready ? `PDF 已就绪 · ${conversion.pages ? `${conversion.pages} 页` : '已关联文件夹版本'} · ${needsMineru ? '旧版识别结果，可升级为 MinerU 4' : conversion.external ? '与本机 AI 友好型文件同步' : `识别完成${tier ? ` · ${tier}档` : ''}${settingsChanged ? ' · 参数已更新，可重新识别' : ''}`}` : `${conversion.stage || '原件已保存，可生成 AI 友好 PDF'}${working ? ` · ${conversion.progress || 0}%` : ''}`)}${(conversion.warnings || []).map(w => `<br>${esc(w)}`).join('')}</p><div class="actions">${conversion.status && conversion.status !== 'none' ? `<a class="ui-button" href="/tasks">查看识别任务</a>` : ''}<button class="ui-button" data-action="convert" ${working || (ready && !needsMineru && !settingsChanged) ? 'disabled' : ''}>${needsMineru ? '升级识别版本' : settingsChanged ? '按新参数重新识别' : ready ? '✓ PDF 已就绪' : working ? '正在转换 PDF…' : failed ? '重新转换 PDF' : '生成 AI 友好 PDF'}</button><a class="ui-button" href="${esc(original)}" download>下载原件</a><button class="ui-button" data-action="copy-original">复制原件</button>${ready ? `<a class="ui-button" href="${esc(pdf)}" download>下载 PDF</a><button class="ui-button" data-action="copy-pdf">复制 PDF</button>` : ''}${fileControls}<button class="ui-button sync-action" data-action="sync">匹配笔记并上传 ↗</button></div></div></article>`;
+    return `<article class="file-card" data-id="${esc(file.id)}"><div class="file-icon">${esc(file.name.split('.').at(-1).slice(0,6).toUpperCase())}</div><div class="file-main"><h3 class="file-title">${esc(file.name)}</h3><div class="file-meta"><span class="badge">${esc(file.kind)}</span><span>${size(file.size)}</span>${file.relative_path && file.relative_path !== file.name ? `<span>${esc(file.relative_path)}</span>` : ''}<span>${esc(file.created_at.slice(0,10))}</span><span>${esc(syncText)}</span></div><p class="file-status ${failed || pending ? 'error' : ''}">${esc(ready ? `PDF 已就绪 · ${conversion.pages ? `${conversion.pages} 页` : '已关联文件夹版本'} · ${needsMineru ? '旧版识别结果，可升级为 MinerU 4' : conversion.external ? '与本机 AI 友好型文件同步' : `识别完成${tier ? ` · ${tier}档` : ''}${settingsChanged ? ' · 参数已更新，可重新识别' : ''}`}` : `${conversion.stage || '原件已保存，可生成 AI 友好 PDF'}${working && conversion.progress != null ? ` · ${conversion.progress || 0}%` : ''}`)}${(conversion.warnings || []).map(w => `<br>${esc(w)}`).join('')}</p><div class="actions">${taskLink && conversion.status && conversion.status !== 'none' ? `<a class="ui-button" href="/tasks">查看识别任务</a>` : ''}<button class="ui-button" data-action="convert" ${working || (ready && !needsMineru && !settingsChanged) ? 'disabled' : ''}>${needsMineru ? '升级识别版本' : settingsChanged ? '按新参数重新识别' : ready ? '✓ PDF 已就绪' : working ? '正在转换 PDF…' : failed ? '重新转换 PDF' : '生成 AI 友好 PDF'}</button><a class="ui-button" href="${esc(original)}" download>下载原件</a><button class="ui-button" data-action="copy-original">复制原件</button>${ready ? `<a class="ui-button" href="${esc(pdf)}" download>下载 PDF</a><button class="ui-button" data-action="copy-pdf">复制 PDF</button>` : ''}${fileControls}<button class="ui-button sync-action" data-action="sync">匹配笔记并上传 ↗</button></div></div></article>`;
   }).join('');
 }
 async function load() {
@@ -114,7 +120,7 @@ function openCategoryDialog(action) {
   $('categoryDialogTitle').textContent = deleting ? '删除分类' : '重命名分类';
   $('categoryDescription').textContent = deleting
     ? `删除“${state.category}”后，其中的课程资料和录音会移入“未分类”，文件和笔记内容都会保留。`
-    : `为“${state.category}”设置新名称，课程资料、录音库分类和本地课程配置会一起更新。`;
+    : `为“${state.category}”设置新名称，课程资料、课堂记录分类和本地课程配置会一起更新。`;
   $('categoryNameField').hidden = deleting;
   $('categoryName').disabled = deleting;
   $('categoryName').value = state.category;
@@ -179,6 +185,13 @@ $('categoryForm').addEventListener('submit', async event => {
 $('refresh').addEventListener('click', load);
 $('search').addEventListener('input', renderFiles);
 $('kindFilter').addEventListener('change', renderFiles);
+$('upgradeLegacy').addEventListener('click', event => busy(event.currentTarget, async () => {
+  const count = state.files.filter(file => file.needs_mineru_upgrade).length;
+  if (!count) return;
+  const result = await api('/api/course-files/upgrade-legacy', {category: state.category});
+  toast(`已加入 ${result.queued || 0} 个旧版结果的 MinerU 4 升级队列，原件保留，旧 PDF 会自动备份`);
+  await load();
+}));
 $('reveal').addEventListener('click', event => busy(event.currentTarget, () => api('/api/course-files/reveal', {category: state.category})));
 $('addFiles').addEventListener('click', () => $('filesInput').click());
 $('filesInput').addEventListener('change', async () => { await upload([...$('filesInput').files]); $('filesInput').value = ''; });

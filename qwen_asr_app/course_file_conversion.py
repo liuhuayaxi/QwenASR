@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import html
+import errno
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 from .pdf_ai import convert_pdf_to_ai, find_mineru_binary, _run_checked
@@ -19,6 +21,19 @@ IMAGES = {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".bmp"}
 SUPPORTED = OFFICE | TEXT | IMAGES | {".pdf"}
 ROOT = Path(__file__).resolve().parent.parent
 ENGINE = "mineru-4-v1"
+_RETRYABLE_FILE_ERRNOS = {11, getattr(errno, "EDEADLK", 35), getattr(errno, "EAGAIN", 11)}
+
+
+def _copy_file_retry(source: Path, destination: Path) -> None:
+    """Retry transient macOS File Provider ``Resource deadlock avoided`` reads."""
+    for attempt in range(6):
+        try:
+            shutil.copyfile(source, destination)
+            return
+        except OSError as exc:
+            if exc.errno not in _RETRYABLE_FILE_ERRNOS or attempt == 5:
+                raise
+            time.sleep(min(4.0, 0.35 * (2 ** attempt)))
 
 
 def office_binary():
@@ -29,12 +44,15 @@ def office_binary():
 
 
 def capabilities():
+    from .inference_providers import inference_settings
+    mode = inference_settings.for_task('mineru')['mineru_provider']
     return {"extensions": sorted(SUPPORTED), "office": bool(office_binary()),
-            "mineru": bool(find_mineru_binary()), "engine": ENGINE,
-            "ocr_note": "MinerU 识别正文、表格与 LaTeX 公式，原页保留供核对。"}
+            "mineru": mode != "local" or bool(find_mineru_binary()), "engine": ENGINE,
+            "native_office": mode != 'local', "office_rendering": bool(office_binary()),
+            "ocr_note": "PDF 原页保留；远程原生 Office 使用 Flash，转写 PDF 与原件版面分别标注。"}
 
 
-def _text_pdf(source, destination):
+def _text_pdf(source, destination, title=None):
     import pymupdf as fitz
 
     raw = source.read_bytes()
@@ -53,7 +71,7 @@ def _text_pdf(source, destination):
     # Bound long lines (including URLs / formulas) so they cannot overflow a page.
     import textwrap
     lines = [part for line in text.splitlines() for part in (textwrap.wrap(line.expandtabs(4), width=70, replace_whitespace=False, drop_whitespace=False) or [""])]
-    body = "<h1>" + html.escape(source.name) + "</h1>" + "".join(
+    body = "<h1>" + html.escape(title or source.name) + "</h1>" + "".join(
         "<p>" + html.escape(line) + "</p>" for line in lines
     )
     story = fitz.Story(html=body, user_css="body{font-size:11pt;line-height:1.5;}p{margin:0 0 5pt;overflow-wrap:break-word;}h1{font-size:18pt;}")
@@ -90,24 +108,61 @@ def _image_pdf(source, destination):
         doc.close()
 
 
-def convert(source, destination, progress=lambda stage, percent: None, stop=None, settings=None):
+def convert(source, destination, progress=lambda stage, percent: None, stop=None, settings=None, inference_config=None, receipt_path=None, local_guard=None):
     import pymupdf as fitz
 
     check_stopped(stop)
-    settings = normalize_mineru_settings(settings) if settings is not None else mineru_settings.read()
     source, destination = Path(source), Path(destination)
     suffix = source.suffix.lower()
     if suffix not in SUPPORTED:
         raise ValueError("暂不支持这种格式转换；仍可保存、复制和上传原件")
-    if not find_mineru_binary():
+    from .inference_providers import inference_settings
+    provider = inference_settings.for_task('mineru', inference_config)
+    if provider['mineru_provider'] == 'local':
+        settings = normalize_mineru_settings(settings) if settings is not None else mineru_settings.read()
+    if suffix in {'.docx', '.pptx', '.xlsx', '.odt', '.odp', '.ods', '.rtf', '.csv', '.tsv'} and provider['mineru_provider'] != 'local':
+        # Native Flash parsing is independent of optional Office page rendering.
+        from .inference_providers import RemoteMinerUProvider
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            from .remote_operations import accepted_result_guard
+            with accepted_result_guard(receipt_path), tempfile.TemporaryDirectory(prefix='.native-', dir=destination.parent) as raw:
+                work = Path(raw)
+                inference = RemoteMinerUProvider().parse(source, work/'result', provider, progress, stop, receipt_path)
+                markdown = next((work/'result').glob('*.md'))
+                rendered = work/'native-text.pdf'
+                _text_pdf(markdown, rendered, title=source.name)
+                with fitz.open(rendered) as document:
+                    pages = len(document)
+                    document.embfile_add('mineru-result.zip', (work/'result/result.zip').read_bytes())
+                    document.embfile_add('mineru-transcript.md', markdown.read_bytes())
+                    packaged = work/'native-packaged.pdf'
+                    document.save(packaged, deflate=True)
+                check_stopped(stop)
+                packaged.replace(destination)
+                return {'engine': ENGINE, 'pages': pages, 'source_pages': None, 'text_chars': len(markdown.read_text()),
+                    'warnings': ['Office 原件由 Windows 原生 Flash 解析；此 PDF 是转写排版，原件版面未渲染。图表估计内容需要核对原件。'],
+                    'mineru_settings': settings, 'inference': inference, 'representation': 'native-transcript',
+                    'visual_original_preserved': False}
+        except Exception as exc:
+            if provider['mineru_provider'] == 'remote_only' or not getattr(exc, 'proven_not_accepted', False):
+                raise
+            from .remote_operations import mark_local_fallback
+            mark_local_fallback(receipt_path)
+            import contextlib
+            with local_guard or contextlib.nullcontext():
+                result = convert(source, destination, progress, stop, settings, {**provider, 'mineru_provider': 'local'}, receipt_path)
+            result['inference'].update(fallback=True, fallback_reason=type(exc).__name__)
+            return result
+    if provider['mineru_provider'] == 'local' and not find_mineru_binary():
         raise ValueError("未找到 MinerU，请先配置工作台原有的 AI 友好 PDF 功能")
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".convert-", dir=destination.parent) as raw:
         work = Path(raw)
         base = work / (source.stem + ".pdf")
-        progress("正在准备 PDF 页面", 1)
+        progress("正在准备 PDF 页面", None)
         if suffix == ".pdf":
-            shutil.copyfile(source, base)
+            _copy_file_retry(source, base)
         elif suffix in TEXT:
             _text_pdf(source, base)
         elif suffix in IMAGES:
@@ -134,8 +189,10 @@ def convert(source, destination, progress=lambda stage, percent: None, stop=None
             source_pages = len(doc)
         finally:
             doc.close()
+        inference = {}
         result = convert_pdf_to_ai(base, builder_script=ROOT / "scripts" / "build_ai_friendly_pdf.py",
-            python_executable=Path(sys.executable), progress=progress, stop=stop, settings=settings)
+            python_executable=Path(sys.executable), progress=progress, stop=stop, settings=settings,
+            inference_metadata=inference, inference_config=provider, receipt_path=receipt_path, local_guard=local_guard)
         with fitz.open(result) as generated:
             pages = len(generated)
             page_texts = [page.get_text().strip() for page in generated]
@@ -143,8 +200,8 @@ def convert(source, destination, progress=lambda stage, percent: None, stop=None
             uncertain_pages = [index + 1 for index, text in enumerate(page_texts) if "\ufffd" in text]
         check_stopped(stop)
         result.replace(destination)
-    warnings = ["MinerU 已识别正文、表格与 LaTeX 公式；图示和有歧义的公式仍以原页为准。"]
+    warnings = ["MinerU 已生成转写；科学符号、表格单元格及图表估计值未逐项核验。原图为核对依据，图表估计值不能作为事实数据。"]
     if uncertain_pages:
         warnings.append("生成 PDF 的这些页含无法还原的字符（�），请对照原页核对：" + "、".join(map(str, uncertain_pages)))
     return {"engine": ENGINE, "pages": pages, "source_pages": source_pages,
-            "text_chars": total_chars, "warnings": warnings, "mineru_settings": settings}
+            "text_chars": total_chars, "warnings": warnings, "mineru_settings": settings, "inference": inference}

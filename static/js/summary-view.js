@@ -1,4 +1,4 @@
-import { renderMarkdown } from "./markdown-reader.js?v=20261007-math-1";
+import { renderMarkdown } from "./markdown-reader.js?v=20261011-20261007-math-1";
 
 export function createSummaryView({ els, escapeHtml, formatDuration }) {
   const cards = new Map();
@@ -34,7 +34,7 @@ export function createSummaryView({ els, escapeHtml, formatDuration }) {
     card.innerHTML = `<div class="summary-meta"><b>实时累计总结</b><span>截至 ${end}</span></div>
       ${item.summary ? `<div class="summary-text markdown-body">${renderMarkdown(item.summary)}</div>` : ""}
       ${points.length ? `<ul>${points.map((point) => `<li>${escapeHtml(point)}</li>`).join("")}</ul>` : ""}
-      ${item.ai_error ? `<p class="ai-error">实时总结未完成：${escapeHtml(item.ai_error)}</p>` : ""}`;
+      ${item.ai_error ? `<p class="ai-error">课堂实时提纲未完成：${escapeHtml(item.ai_error)}</p>` : ""}`;
     refreshEmpty();
     card.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }
@@ -45,7 +45,7 @@ export function createSummaryView({ els, escapeHtml, formatDuration }) {
   }
 
   function renderPending(message) {
-    els.summaryStatus.textContent = `正在生成实时总结 ${formatDuration(message.start)}–${formatDuration(message.end)}`;
+    els.summaryStatus.textContent = `正在生成课堂实时提纲 ${formatDuration(message.start)}–${formatDuration(message.end)}`;
     els.summaryStatus.classList.remove("hidden");
     renderItem({
       id: `${message.start}-${message.end}`,
@@ -61,7 +61,7 @@ export function createSummaryView({ els, escapeHtml, formatDuration }) {
   }
 
   function renderError(message) {
-    els.summaryStatus.textContent = `实时总结未完成：${message}`;
+    els.summaryStatus.textContent = `课堂实时提纲未完成：${message}`;
     els.summaryStatus.classList.remove("hidden");
   }
 

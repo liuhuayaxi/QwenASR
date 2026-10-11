@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import errno
 import json
 import re
 import shutil
@@ -12,6 +13,7 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
+from .remote_operations import saved_config, freeze, cancel, receipt, execution_lock, LocalComputeGuard, cancel_pending, recover_cancellation, download_result
 from threading import Event
 
 from fastapi import APIRouter, Body, File, Form, HTTPException, Request, UploadFile
@@ -20,13 +22,62 @@ from fastapi.responses import FileResponse
 from .course_files import CourseFiles, KINDS, MAX_BYTES, digest_file
 from .course_file_conversion import convert, capabilities, ENGINE
 from .mineru_settings import mineru_settings
-from .storage import local_now
+from .storage import local_now, safe_component
+from .paths import PRIVATE_ROOT
+from .durable import atomic_json
 from .library_layout import shared
 from .shared_library import discover_courses
 from .conversion_control import ConversionStopped, check_stopped, conversion_worker
 from .ideashell_sync import same_server
 
 NOTE_ID = re.compile(r"[a-f0-9]{32}")
+MAX_LEGACY_UPGRADES = 200
+_RETRYABLE_FILE_ERRNOS = {11, getattr(errno, "EDEADLK", 35), getattr(errno, "EAGAIN", 11)}
+
+
+def file_access_error(exc):
+    if isinstance(exc, OSError) and exc.errno in _RETRYABLE_FILE_ERRNOS:
+        return "原件当前仍是云盘占位文件或被文件提供器占用，请在 Finder 中将原件下载到本机后再升级识别"
+    return str(exc)
+
+
+def needs_mineru_upgrade(conversion):
+    """Return whether a completed result was produced by the pre-MinerU-4 flow.
+
+    Folder-supplied AI PDFs have ``external=True`` because they were discovered
+    while scanning the shared course folder. They are still eligible for an
+    upgrade when their engine is absent or is an older engine marker.
+    """
+    return (isinstance(conversion, dict)
+            and conversion.get("status") in {"completed", "stale"}
+            and conversion.get("engine") != ENGINE)
+
+
+def backup_previous_conversion(path, category, item):
+    """Keep a recoverable copy before replacing a legacy AI PDF."""
+    path = Path(path)
+    stamp = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8]
+    folder = PRIVATE_ROOT / "mineru-upgrade-backups" / stamp / safe_component(category, "未分类")
+    folder.mkdir(parents=True, exist_ok=True)
+    backup = folder / path.name
+    for attempt in range(6):
+        try:
+            shutil.copy2(path, backup)
+            break
+        except OSError as exc:
+            if exc.errno not in _RETRYABLE_FILE_ERRNOS or attempt == 5:
+                raise
+            time.sleep(min(4.0, 0.35 * (2 ** attempt)))
+    atomic_json(folder / "metadata.json", {
+        "source": str(path),
+        "backup": str(backup),
+        "category": str(category),
+        "asset_id": item.get("id", ""),
+        "asset_name": item.get("name", ""),
+        "engine": (item.get("conversion") or {}).get("engine"),
+        "created_at": local_now(),
+    })
+    return backup
 
 
 def already_synced(receipts, target):
@@ -165,7 +216,7 @@ class CourseFileAPI:
                 current_settings = mineru_settings.read()
                 for item in items:
                     state = item.get("conversion", {})
-                    item["needs_mineru_upgrade"] = state.get("status") == "completed" and state.get("engine") != ENGINE and not state.get("external")
+                    item["needs_mineru_upgrade"] = needs_mineru_upgrade(state)
                     item["mineru_settings_changed"] = (state.get("status") == "completed"
                         and state.get("engine") == ENGINE and not state.get("external")
                         and state.get("mineru_settings") != current_settings)
@@ -289,7 +340,16 @@ class CourseFileAPI:
                 _, path = store.file(payload.get("category"), asset_id, payload.get("variant", "original"))
                 if sys.platform != "darwin":
                     raise ValueError("复制文件到系统剪贴板目前仅支持 Mac；其他设备请下载文件")
-                script = 'on run argv\nset clipboard to (POSIX file (item 1 of argv) as alias)\nend run'
+                # A bare alias is not a valid clipboard item on macOS and
+                # raises -10006. Finder's clipboard accepts a list of file
+                # aliases and publishes the promised-file flavors that apps
+                # such as IdeaShell can paste.
+                script = ('on run argv\n'
+                          'set fileAlias to POSIX file (item 1 of argv) as alias\n'
+                          'tell application "Finder"\n'
+                          'set the clipboard to {fileAlias}\n'
+                          'end tell\n'
+                          'end run')
                 result = await asyncio.to_thread(subprocess.run, ["/usr/bin/osascript", "-e", script, str(path)],
                     capture_output=True, text=True, timeout=20)
                 if result.returncode:
@@ -316,6 +376,32 @@ class CourseFileAPI:
             self.guard(request)
             try:
                 return await self.start_conversion(payload.get("category"), asset_id)
+            except (ValueError, OSError) as exc:
+                raise HTTPException(400, str(exc)) from exc
+
+        @router.post("/upgrade-legacy")
+        async def upgrade_legacy(request: Request, payload: dict = Body(...)):
+            """Queue every legacy course result in the selected category."""
+            self.guard(request)
+            category = payload.get("category")
+            try:
+                if category not in store.settings.categories:
+                    raise ValueError("课程分类已变化，请刷新后重试")
+                candidates = [item for item in store.list(category)
+                              if needs_mineru_upgrade(item.get("conversion", {}))]
+                if len(candidates) > MAX_LEGACY_UPGRADES:
+                    raise ValueError(f"单次最多升级 {MAX_LEGACY_UPGRADES} 个旧版结果，请分课程处理")
+                queued, already_running = [], []
+                for item in candidates:
+                    result = await self.start_conversion(category, item["id"])
+                    state = (result.get("file") or {}).get("conversion", {})
+                    if state.get("status") in {"queued", "running", "stopping"}:
+                        queued.append(item["id"])
+                    else:
+                        already_running.append(item["id"])
+                return {"category": category, "queued": len(queued),
+                        "already_running": len(already_running),
+                        "total": len(candidates)}
             except (ValueError, OSError) as exc:
                 raise HTTPException(400, str(exc)) from exc
 
@@ -438,27 +524,51 @@ class CourseFileAPI:
         if origin and origin.rstrip("/") != str(request.base_url).rstrip("/"):
             raise HTTPException(403, "请从当前本机工作台页面操作")
 
-    async def start_conversion(self, category, asset_id, force=False):
+    async def start_conversion(self, category, asset_id, force=False, resume=False, new_attempt=False, provider_override=None):
         async with self.lock:
-            item, source = self.store.file(category, asset_id)
+            item, directory = self.store.get(category, asset_id)
+            previous = item.get('conversion', {})
             key = (category, asset_id)
             if key in self.tasks:
-                return {"file": item}
-            current_digest = await asyncio.to_thread(digest_file, source)
-            item, source = self.store.file(category, asset_id)
-            item["sha256"] = current_digest
-            previous = item.get("conversion", {})
-            settings = mineru_settings.read()
-            if (not force and previous.get("status") == "completed" and previous.get("engine") == ENGINE
-                    and previous.get("mineru_settings") == settings):
+                return {'file': item}
+            from .inference_providers import inference_settings, runtime_fingerprint
+            provider = saved_config(previous.get('inference_settings'), remote_reference=bool(previous.get('operation'))) if resume else inference_settings.for_task('mineru', provider_override)
+            if resume and previous.get('operation'):
+                source = Path(previous['operation']['blob_path'])
+                current_digest = previous['operation']['source_sha256']
+            else:
+                item, source = self.store.file(category, asset_id)
+                current_digest = await asyncio.to_thread(digest_file, source)
+                item['sha256'] = current_digest
+            legacy_upgrade = needs_mineru_upgrade(previous) or bool(previous.get('legacy_upgrade'))
+            settings = previous.get('mineru_settings') if resume else None
+            if settings is None:
+                settings = mineru_settings.read()
+            # A saved completed artifact can be read without any network probe.
+            current_runtime = await asyncio.to_thread(runtime_fingerprint, provider) if provider['mineru_provider'] == 'local' else None
+            same_provider = previous.get('inference_settings', {}).get('mineru_provider', 'local') == provider['mineru_provider']
+            if (not force and previous.get('status') == 'completed' and previous.get('engine') == ENGINE
+                    and previous.get('mineru_settings') == settings and same_provider
+                    and previous.get('source_sha256') == current_digest
+                    and current_runtime is not None and previous.get('runtime_fingerprint') == current_runtime):
                 try:
-                    _, existing = self.store.file(category, asset_id, "pdf")
+                    _, existing = self.store.file(category, asset_id, 'pdf')
                 except ValueError:
                     existing = None
-                if existing and digest_file(existing) == previous.get("sha256"):
-                    return {"file": item, "reused": True}
+                if existing and await asyncio.to_thread(digest_file, existing) == previous.get('output_sha256'):
+                    return {'file': item, 'reused': True}
+            operation = previous.get('operation') if resume else None
+            if provider['mineru_provider'] != 'local' and operation is None:
+                operation = freeze(source, provider, settings, parent_id=asset_id)
+            if not resume and previous:
+                item.setdefault('conversion_history', []).append(dict(previous))
+            operation_id = operation['operation_id'] if operation else ((previous.get('operation_id') or uuid.uuid4().hex) if resume else uuid.uuid4().hex)
             item["conversion"] = {**previous, "status": "queued", "stage": "等待 MinerU 识别",
                                   "mineru_settings": settings,
+                                  "legacy_upgrade": legacy_upgrade,
+                                  'source_sha256': current_digest, 'runtime_fingerprint': current_runtime,
+                                  'operation_id': operation_id, 'operation': operation,
+                                  "inference_settings": provider,
                                   "progress": 0, "error": "", "external": False,
                                   "created_at": previous.get("created_at") or local_now(), "updated_at": local_now()}
             self.store.save(category, item)
@@ -485,8 +595,27 @@ class CourseFileAPI:
             return {"file": item}
 
     async def conversion_action(self, category, asset_id, action):
-        if action in {"continue", "retry"}:
-            return await self.start_conversion(category, asset_id, force=True)
+        if action in {'continue', 'retry', 'download'}:
+            item, _ = self.store.get(category, asset_id)
+            state = item.get('conversion', {})
+            path = state.get('operation', {}).get('receipt_path') if state.get('operation') else None
+            saved = receipt(path)
+            if path and cancel_pending(path):
+                state['remote_operation'] = await recover_cancellation(path, saved_config(state.get('inference_settings'), remote_reference=True))
+                state.update(status='paused', stage='取消状态已对账；旧结果与收据保留')
+                self.store.save(category, item)
+                return {'file': item}
+            if action == 'download':
+                state['inference'] = await download_result(path, state['inference_settings'], 'mineru', Path(path).parent/'downloaded-output')
+                state.update(status='pending', stage='远程结果已下载；继续可进行本地打包')
+                self.store.save(category, item)
+                return {'file': item}
+            if saved.get('state') in {'failed', 'canceled'}:
+                raise ValueError('旧操作已终止；请明确新建识别，旧收据保留')
+            return await self.start_conversion(category, asset_id, force=True, resume=True)
+        if action in {'new_local', 'new_recognition'}:
+            return await self.start_conversion(category, asset_id, force=True,
+                provider_override={'mineru_provider': 'local'} if action == 'new_local' else None)
         if action not in {"pause", "cancel"}:
             raise ValueError("无效的任务操作")
         async with self.lock:
@@ -506,15 +635,20 @@ class CourseFileAPI:
                     self.tasks[key].cancel()
             else:
                 state.update(status=target, stage="已暂停，可重新识别" if action == "pause" else "已取消，原件保留")
-            state["updated_at"] = local_now()
+            if state.get('operation'):
+                cancel(state['operation']['receipt_path'])
+            state['updated_at'] = local_now()
             self.store.save(category, item)
             return {"file": item}
 
     async def run_conversion(self, category, asset_id, source, stop):
+        generation = None
         try:
             item, _ = self.store.get(category, asset_id)
             settings = item["conversion"].get("mineru_settings") or mineru_settings.read()
-            async with self.conversion_lock:
+            provider = saved_config(item['conversion'].get('inference_settings'), remote_reference=bool(item['conversion'].get('operation')))
+            generation = item['conversion']['operation_id']
+            async with execution_lock(self.conversion_lock, provider, 'mineru'):
                 check_stopped(stop)
                 loop = asyncio.get_running_loop()
 
@@ -523,29 +657,52 @@ class CourseFileAPI:
                         return
                     try:
                         item, _ = self.store.get(category, asset_id)
-                        if item["conversion"]["status"] not in {"queued", "running"}:
+                        if item['conversion'].get('operation_id') != generation or item['conversion']['status'] not in {'queued', 'running'}:
                             return
-                        percent = max(item["conversion"].get("progress", 0), min(99, percent))
+                        percent = None if percent is None else min(99, percent)
                         item["conversion"].update(status="running", stage=stage, progress=percent, updated_at=local_now())
                         self.store.save(category, item)
                     except (ValueError, OSError):
                         stop.set()
 
                 item, directory = self.store.get(category, asset_id)
-                source_digest = item["sha256"]
+                operation = item['conversion'].get('operation')
+                if operation:
+                    source = Path(operation['blob_path'])
+                source_digest = item['conversion']['source_sha256']
+                runtime_identity = item['conversion'].get('runtime_fingerprint')
+                operation_id = item['conversion'].get('operation_id') or uuid.uuid4().hex
                 if await asyncio.to_thread(digest_file, source) != source_digest:
                     raise ValueError("原件已改变，请重新识别")
                 output = (self.store.shared_store.output_path(category, item) if shared(self.store.settings)
                           else directory / "PDF" / (Path(item["name"]).stem + "(AI).pdf"))
-                update("正在准备 MinerU 识别", 1)
+                previous_state = dict(item.get("conversion", {}))
+                legacy_backup = None
+                if output.is_file() and (needs_mineru_upgrade(previous_state) or previous_state.get("legacy_upgrade")):
+                    legacy_backup = await asyncio.to_thread(backup_previous_conversion, output, category, item)
+                if operation:
+                    output = output.with_name(output.stem + '-' + generation[:12] + output.suffix)
+                update('正在准备 MinerU 识别', 1)
                 report = await conversion_worker(convert, source, output,
-                    lambda stage, percent: loop.call_soon_threadsafe(update, stage, percent), stop=stop, settings=settings)
+                    lambda stage, percent: loop.call_soon_threadsafe(update, stage, percent), stop=stop, settings=settings,
+                    inference_config=provider, receipt_path=PRIVATE_ROOT/'remote-operations'/operation_id/'receipt.json',
+                    local_guard=LocalComputeGuard(self.conversion_lock, loop) if provider['mineru_provider'] != 'local' else None)
+                if legacy_backup:
+                    report["legacy_output_backup"] = str(legacy_backup)
                 item, _ = self.store.get(category, asset_id)
+                if item['conversion'].get('operation_id') != generation:
+                    return
                 changed = digest_file(source) != source_digest
+                if provider['mineru_provider'] != 'local':
+                    runtime_identity = report.get('inference', {}).get('metrics', {}).get('runtime_fingerprint')
                 item["conversion"] = {"status": "stale" if changed else "completed",
                     "stage": "原件在识别时发生变化，请重新识别" if changed else "MinerU 识别完成",
                     "name": output.name, "progress": 100, "created_at": item["conversion"].get("created_at", local_now()),
+                    'source_sha256': source_digest, 'output_sha256': digest_file(output),
+                    'runtime_fingerprint': runtime_identity, 'operation_id': operation_id, 'operation': operation,
                     "sha256": digest_file(output), "updated_at": local_now(), **report}
+                if provider is not None:
+                    item['conversion']['inference_settings'] = provider
                 if shared(self.store.settings):
                     item['conversion'].update(relative_path=output.relative_to(directory).as_posix(),
                                               stamp=self.store.shared_store._stamp(output))
@@ -556,7 +713,9 @@ class CourseFileAPI:
             except (ValueError, OSError):
                 return
             stopped = isinstance(exc, (ConversionStopped, asyncio.CancelledError))
-            status = self.controls[(category, asset_id)]["action"] if stopped else "error"
-            stage = "已停止；继续时重新识别此文件" if stopped else str(exc)
-            item["conversion"].update(status=status, stage=stage, error="" if stopped else str(exc), updated_at=local_now())
+            if generation is not None and item['conversion'].get('operation_id') != generation:
+                return
+            status = self.controls[(category, asset_id)]['action'] if stopped else ('pending' if getattr(exc, 'fallback_unsafe', False) else 'error')
+            stage = "已停止；继续时重新识别此文件" if stopped else file_access_error(exc)
+            item["conversion"].update(status=status, stage=stage, error="" if stopped else file_access_error(exc), updated_at=local_now())
             self.store.save(category, item)

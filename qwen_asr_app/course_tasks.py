@@ -1,6 +1,7 @@
 """Read the course service's persisted queue without starting or logging into it."""
 import json
 import os
+import hashlib
 from .paths import PRIVATE_ROOT
 
 
@@ -14,6 +15,11 @@ def course_tasks():
     items = queue.get('items', [])
     if not items:
         return []
+    # The queue reuses one feed ID. Distinguish later selections/completions so
+    # clearing the last completed queue does not hide a future one.
+    run_identity = hashlib.sha256(json.dumps({'items': items, 'imports': {
+        item['group']['id']: imports.get(item['group']['id'], {}) for item in items
+    }}, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
     remaining = sum(item.get('state') != 'completed' for item in items)
     states = {item.get('state') for item in items}
     status = 'completed' if not remaining else 'paused' if queue.get('paused') else 'running' if 'running' in states else 'queued' if 'queued' in states else 'interrupted'
@@ -25,6 +31,7 @@ def course_tasks():
         details.append(item['group'].get('title', ident) + '：' + (phases or entry.get('message') or item.get('state', '')))
     return [{'id': 'course_queue', 'type': 'course_queue', 'family': 'asr', 'label': '课程回放队列',
              'title': f'课程回放 · {len(items)} 堂课', 'category': '', 'source': '课程回放', 'status': status,
+             'run_identity': run_identity,
              'completed': len(items) - remaining, 'total': len(items), 'stage': '按已保存的选课队列处理',
              'actions': ['pause'] if status in {'running', 'queued'} else ['continue'] if remaining else [],
              'warnings': details, 'result_url': '/course/'}]

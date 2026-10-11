@@ -4,6 +4,9 @@ import asyncio
 import json
 import wave
 from collections import deque
+from pathlib import Path
+from .paths import PRIVATE_ROOT
+from .remote_operations import saved_config, without_secrets
 from typing import Any
 
 from .lazy import lazy_module
@@ -65,6 +68,7 @@ class TranscriptionSession:
         self.segment_id = 1
         self.last_partial_at = 0
         self.partial_running = False
+        self.chat_previews: dict[int, dict[str, Any]] = {}
         self.tasks: set[asyncio.Task[Any]] = set()
         self.review_tasks: set[asyncio.Task[Any]] = set()
         self.periodic_tasks: dict[str, asyncio.Task[Any]] = {}
@@ -116,7 +120,10 @@ class TranscriptionSession:
 
     def update_config(self, values: dict[str, Any]) -> bool:
         """Apply settings now, or queue them until the current utterance ends."""
-        clean = {key: value for key, value in values.items() if key != "type"}
+        clean = {key: value for key, value in values.items() if key not in {'type', '_remote_operation_dir'}}
+        if 'inference_settings' in clean:
+            from .inference_providers import inference_settings
+            clean['inference_settings'] = inference_settings.for_task('asr')
         if self.speaking and self.chunks:
             self.pending_config.update(clean)
             return True
@@ -203,6 +210,13 @@ class TranscriptionSession:
             await self.detach_and_process("length", continue_speaking=True)
 
     async def run_partial(self, audio: np.ndarray, segment_id: int) -> None:
+        # Remote sessions intentionally skip rolling previews.  A preview is
+        # not a complete durable operation and must never accidentally invoke
+        # the Mac model when Windows is selected; the complete segment below
+        # is the authoritative Windows ASR path.
+        if self.config.get('inference_settings', {}).get('asr_provider', 'local') != 'local':
+            self.partial_running = False
+            return
         try:
             text, language, seconds = await self.model_manager.transcribe(
                 audio,
@@ -210,6 +224,7 @@ class TranscriptionSession:
                 asr_terminology_context(
                     str(self.config.get("context", "")), self.config.get("terminology")
                 ),
+                inference_config=self.config.get('inference_settings'),
                 priority=2,
                 is_current=lambda: segment_id == self.segment_id and self.speaking,
                 asr_params=asr_params_with_terminology(
@@ -217,6 +232,11 @@ class TranscriptionSession:
                 ),
             )
             if segment_id == self.segment_id and self.speaking and text:
+                end = self.recording.duration if self.recording else 0
+                self.chat_previews[segment_id] = {
+                    "id": segment_id, "text": text, "start": max(0, end - len(audio) / SAMPLE_RATE),
+                    "end": end, "source": "unfinalized_preview",
+                }
                 await self.send(
                     {
                         "type": "partial",
@@ -246,8 +266,23 @@ class TranscriptionSession:
         recording.metadata.setdefault("pending_segments", {})[str(current_id)] = {
             "id": current_id, "start": segment_start, "end": segment_end,
         }
-        recording.save_metadata()
         config_snapshot = json.loads(json.dumps(self.config))
+        entry = recording.metadata['pending_segments'][str(current_id)]
+        if config_snapshot.get('inference_settings', {}).get('asr_provider', 'local') != 'local':
+            from .inference_providers import prepare_audio
+            # Live utterances are bounded clips, not whole lectures. Match the
+            # duration-based local ceiling and the installed Windows API limit.
+            params = asr_params_with_terminology(config_snapshot.get('asr_params'), config_snapshot.get('terminology'))
+            params['max_tokens'] = min(int(params.get('max_tokens', 4096)), 2048,
+                                      max(192, int(len(audio) / SAMPLE_RATE * 10) + 128))
+            config_snapshot['asr_params'] = params
+            folder = PRIVATE_ROOT/'remote-operations'/'live'/recording.id/str(current_id)
+            config_snapshot['_remote_operation_dir'] = str(folder)
+            prepare_audio(folder, audio, config_snapshot.get('language'),
+                asr_terminology_context(str(config_snapshot.get('context', '')), config_snapshot.get('terminology')),
+                4096, config_snapshot['inference_settings'], config_snapshot.get('asr_params'))
+        entry['config_snapshot'] = without_secrets(config_snapshot)
+        recording.save_metadata()
         self.segment_id = recording.next_segment_id
         self.reset_audio(continue_speaking=continue_speaking)
         self.apply_pending_config()
@@ -294,17 +329,23 @@ class TranscriptionSession:
                 asr_terminology_context(
                     str(config.get("context", "")), config.get("terminology")
                 ),
+                inference_config=config.get('inference_settings'),
+                operation_dir=config.get('_remote_operation_dir'),
                 priority=0, metrics=metrics,
                 asr_params=asr_params_with_terminology(
                     config.get("asr_params"), config.get("terminology")
                 ),
             )
+            recording.metadata['inference'] = metrics
+            recording.metadata.setdefault('inference_attempts', []).append({'segment_id': segment_id, 'actual': metrics,
+                'config_snapshot': config.get('inference_settings')})
             recording.metadata["transcribed_until_sample"] = max(
                 int(recording.metadata.get("transcribed_until_sample", 0)), round(segment_end * SAMPLE_RATE))
             if not raw:
                 recording.metadata.setdefault("pending_segments", {}).pop(str(segment_id), None)
                 recording.save_metadata()
                 await self.send({"type": "discard", "id": segment_id})
+                self.chat_previews.pop(segment_id, None)
                 return
             segment: dict[str, Any] = {
                 "id": segment_id,
@@ -326,6 +367,7 @@ class TranscriptionSession:
                 }
             recording.metadata.setdefault("pending_segments", {}).pop(str(segment_id), None)
             recording.upsert_segment(segment)
+            self.chat_previews.pop(segment_id, None)
             await self.send({"type": "final", **segment})
             if config.get("ai_correction") or config.get("translation", "off") != "off":
                 try:
@@ -593,6 +635,12 @@ class TranscriptionSession:
                 "ai_system_prompt": str(ai_options.get("system_prompt") or DEFAULT_AI_SYSTEM_PROMPT),
             }
             recording.save_metadata()
+        from .inference_providers import inference_settings
+        # New audio follows today's saved choice, including resumed recordings.
+        # Already submitted segments retain their own immutable snapshots.
+        self.config['inference_settings'] = inference_settings.for_task('asr')
+        recording.metadata['inference_settings'] = self.config['inference_settings']
+        recording.save_metadata()
         self.recording = recording
         await self.recover_pending()
         self.accepting_audio = True
@@ -604,7 +652,8 @@ class TranscriptionSession:
                 "session": recording.public(),
             }
         )
-        self.track(self.model_manager.load())
+        if self.config['inference_settings']['asr_provider'] == 'local':
+            self.track(self.model_manager.load(force_local=True))
         if self.config.get("ai_correction"):
             self.schedule_periodic("review", recording, json.loads(json.dumps(self.config)))
         if self.config.get("summary_enabled"):
@@ -617,10 +666,10 @@ class TranscriptionSession:
         self.recovered = True
         record = self.recording
         path = record.working_audio_path
-        if not path.exists() or path.suffix.lower() != ".wav":
-            return
-        with wave.open(str(path), "rb") as audio:
-            frames = audio.getnframes()
+        frames = 0
+        if path.exists() and path.suffix.lower() == '.wav':
+            with wave.open(str(path), 'rb') as audio:
+                frames = audio.getnframes()
         record.metadata["sample_count"] = max(frames, int(record.metadata.get("sample_count", 0)))
         pending = record.metadata.setdefault("pending_segments", {})
         covered_end = max([float(s.get("end", 0)) for s in record.segments]
@@ -634,13 +683,27 @@ class TranscriptionSession:
             cursor = end
         record.save_metadata()
         for item in list(pending.values()):
-            def read_range(item=item):
-                with wave.open(str(path), "rb") as audio:
-                    audio.setpos(min(frames, round(item["start"] * SAMPLE_RATE)))
+            snapshot = item.get('config_snapshot') or {**self.config, 'inference_settings': saved_config()}
+            folder = snapshot.get('_remote_operation_dir')
+            def read_range(item=item, folder=folder):
+                if folder:
+                    import soundfile as sf
+                    canonical = Path(folder)/'audio.wav'
+                    if canonical.is_file():
+                        return sf.read(canonical, dtype='float32')[0]
+                    # Completed result recovery does not use samples; a missing
+                    # canonical input must never fall back to current audio.
+                    return np.empty(0, dtype=np.float32)
+                if not frames:
+                    return None
+                with wave.open(str(path), 'rb') as audio:
+                    audio.setpos(min(frames, round(item['start'] * SAMPLE_RATE)))
                     return np.frombuffer(audio.readframes(round((item["end"] - item["start"]) * SAMPLE_RATE)),
                                          dtype="<i2").astype(np.float32) / 32768.0
             samples = await asyncio.to_thread(read_range)
-            self.track(self.run_final(samples, int(item["id"]), json.loads(json.dumps(self.config)),
+            if samples is None:
+                continue
+            self.track(self.run_final(samples, int(item['id']), json.loads(json.dumps(snapshot)),
                                       "recovery", record, float(item["start"]), float(item["end"])))
 
     async def pause(self, send_status: bool = True) -> None:

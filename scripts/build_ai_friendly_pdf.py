@@ -55,6 +55,8 @@ def item_text(item: dict) -> str:
             or item.get("content")
         )
         marker = f"[VISUAL_ONLY: {kind}; inspect the original page image]"
+        if item.get('analysis_source') == 'model_generated_unverified':
+            marker += '\n[MODEL_IMAGE_ANALYSIS_UNVERIFIED: estimates are not source measurements]'
         return f"{marker}\n[CAPTION] {captions}" if captions else marker
 
     value = normalize(item.get("text") or item.get("content"))
@@ -73,7 +75,7 @@ def build_page_transcripts(content_list: list[dict], page_count: int) -> list[st
 
     transcripts = []
     for page_idx in range(page_count):
-        body = "\n\n".join(grouped.get(page_idx, []))
+        body = "\n\n".join(grouped.get(page_idx, [])) or '[NO_TEXT_EXTRACTED: page present; inspect original image]'
         transcripts.append(
             f"[[AI_TRANSCRIPT_PAGE:{page_idx + 1}]]\n"
             f"SOURCE_PDF_PAGE: {page_idx + 1}\n"
@@ -185,6 +187,8 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--title", required=True)
     parser.add_argument("--font", type=Path, default=DEFAULT_FONT)
+    parser.add_argument("--result-bundle", type=Path)
+    parser.add_argument("--middle-json", type=Path)
     args = parser.parse_args()
 
     if not args.font.is_file():
@@ -196,16 +200,22 @@ def main() -> None:
         raise TypeError("MinerU content list must be a JSON array")
 
     page_count = len(source)
-    observed_pages = {
-        item.get("page_idx")
-        for item in content_list
-        if isinstance(item.get("page_idx"), int)
-    }
+    indices = [item.get('page_idx') for item in content_list]
+    if any(not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < page_count for index in indices):
+        raise ValueError('Invalid or out-of-range content page index')
+    observed_pages = set(indices)
     expected_pages = set(range(page_count))
-    if observed_pages != expected_pages:
-        missing = sorted(expected_pages - observed_pages)
-        extra = sorted(observed_pages - expected_pages)
-        raise ValueError(f"Page mapping mismatch; missing={missing}, extra={extra}")
+    middle_path = args.middle_json or args.content_list.parent/'middle_json.json'
+    if middle_path.is_file():
+        middle = json.loads(middle_path.read_text(encoding='utf-8'))
+        pages = middle.get('pages', middle.get('pdf_info', []))
+        directory = [page.get('page_idx') for page in pages if isinstance(page, dict)]
+        if (middle.get('is_full_document') is False or len(directory) != page_count
+                or any(isinstance(i, bool) or not isinstance(i, int) for i in directory)
+                or set(directory) != expected_pages):
+            raise ValueError('Materialized Middle JSON page directory is incomplete or invalid')
+    elif observed_pages != expected_pages:
+        raise ValueError(f'Page mapping mismatch; missing={sorted(expected_pages-observed_pages)}, extra=[]; Middle JSON required for empty pages')
 
     transcripts = build_page_transcripts(content_list, page_count)
     stats = {
@@ -266,6 +276,10 @@ def main() -> None:
         ufilename="mineru-content-list.json",
         desc="MinerU page and bounding-box content map",
     )
+    if args.result_bundle:
+        output.embfile_add("mineru-result.zip", args.result_bundle.read_bytes(),
+                           filename="mineru-result.zip", ufilename="mineru-result.zip",
+                           desc="Complete MinerU result, image assets and provider metadata")
 
     metadata = source.metadata.copy()
     metadata.update(
@@ -292,7 +306,7 @@ def main() -> None:
                 "output_pages": page_count + 1,
                 "items": len(content_list),
                 "equations": stats["equation_count"],
-                "attachments": 3,
+                "attachments": 3 + int(bool(args.result_bundle)),
                 "hidden_font_size_min": min(used_sizes),
                 "hidden_font_size_max": max(used_sizes),
             },

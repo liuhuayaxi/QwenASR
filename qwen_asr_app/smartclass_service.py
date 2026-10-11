@@ -122,17 +122,15 @@ def complete_import_progress(entry):
 
 
 async def defaults():
-    if options.get("summary_provider"):
-        return
     saved = ai_preferences.read()
     providers = saved.get('function_providers', {})
     if providers.get('summary'):
         options['summary_provider'] = providers['summary']
-        options.setdefault('correction_provider', providers.get('correction') or providers['summary'])
-        options.setdefault('summary_system_prompt', saved.get('detailed_summary_prompt', ''))
-        options.setdefault('abstract_system_prompt', saved.get('abstract_prompt', ''))
-        options.setdefault('generate_summary', True)
-        options.setdefault('ai_correction', True)
+        options['correction_provider'] = providers.get('correction') or providers['summary']
+        options['summary_system_prompt'] = (providers.get('summary') or {}).get('system_prompt') or saved.get('detailed_summary_prompt', '')
+        options['abstract_system_prompt'] = saved.get('abstract_prompt', '')
+        options['generate_summary'] = True
+        options['ai_correction'] = True
         private_json(STATE_DIR / 'options.json', options)
         return
     async with httpx.AsyncClient(timeout=15, trust_env=False) as local:

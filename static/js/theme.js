@@ -19,7 +19,7 @@
 
   function setMetaThemeColor(theme) {
     const meta = document.querySelector('meta[name="theme-color"]');
-    if (meta) meta.content = theme === "dark" ? "#111815" : "#f5f7f5";
+    if (meta) meta.content = theme === "dark" ? "#0c0d0f" : "#f6f7f8";
   }
 
   function updateToggle(theme) {
