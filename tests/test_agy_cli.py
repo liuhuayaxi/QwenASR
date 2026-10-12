@@ -79,6 +79,17 @@ class AGYCLITests(unittest.TestCase):
         self.assertEqual(caught.exception.kind, 'network_transport')
         self.assertTrue(caught.exception.retriable)
 
+    def test_ambiguous_auth_timeout_is_retried_but_explicit_login_failure_is_not(self):
+        for message, kind, retriable in (
+            ('authentication failed or timed out', 'network_connect_timeout', True),
+            ('not logged in', 'provider_auth', False),
+        ):
+            output = json.dumps({'event': 'result', 'result': {'status': 'FAILED', 'error': message}})
+            with self.subTest(message=message), self.assertRaises(AIRequestError) as caught:
+                _decode_output(output, '')
+            self.assertEqual(caught.exception.kind, kind)
+            self.assertEqual(caught.exception.retriable, retriable)
+
 
 class AGYCancellationTests(unittest.IsolatedAsyncioTestCase):
     async def test_cancelled_request_reaps_its_cli_child(self):

@@ -1049,6 +1049,12 @@ async def polish_timestamped_segments(
         "不得拆分单个 id、跳过内容、添加来源外信息或自行生成时间戳。"
         "只返回 JSON：{\"blocks\":[{\"segment_ids\":[1,2],\"corrected\":\"精修文本\"}]}。"
     )
+    if config.get("_preserve_segment_boundaries"):
+        instructions += (
+            "\n本批需要逐段回写真实时间戳：每个 blocks 元素的 segment_ids 只能含一个输入 id，"
+            "不得合并或拆分 id。可以结合整批上下文校正跨段术语和断句，"
+            "但每段只输出属于该输入 id 的内容，避免把整批正文重复填到多个段落。"
+        )
     glossary = ai_terminology_context(
         config.get("terminology"),
         context_window=context_window_for(config, mode),
@@ -1093,6 +1099,8 @@ async def polish_timestamped_segments(
         corrected = str(raw_block.get("corrected") or "").strip()
         if not ids or not corrected or any(value not in positions for value in ids):
             raise AIRequestError("AI 返回了空文本或不存在的段落编号，原文已保留", kind="invalid_segment_mapping")
+        if config.get("_preserve_segment_boundaries") and len(ids) != 1:
+            raise AIRequestError("批量精修合并了需要分别回写的段落，正在拆批重试", kind="invalid_segment_mapping")
         block_positions = [positions[value] for value in ids]
         if block_positions != list(range(block_positions[0], block_positions[-1] + 1)) or block_positions[0] <= last_position:
             raise AIRequestError("AI 改变了段落顺序或合并了不相邻段落，原文已保留", kind="invalid_segment_mapping")

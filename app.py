@@ -488,6 +488,11 @@ def _update_ai_job(record: RecordingRecord, kind: str, **values: Any) -> None:
 
 def _task_error_kind(error: str) -> str:
     value = str(error or "").lower()
+    if "agy cli" in value:
+        from qwen_asr_app.agy_cli import _error_kind as agy_error_kind
+        kind, _ = agy_error_kind(value)
+        if kind != "agy_cli_error":
+            return kind
     if any(marker in value for marker in ("nodename nor servname", "name resolution", "dns ")):
         return "network_dns"
     if "达到长度上限" in value or "被截断" in value or "finish_reason" in value:

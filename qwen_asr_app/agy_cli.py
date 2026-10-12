@@ -90,6 +90,11 @@ def _error_kind(message: str) -> tuple[str, bool]:
     value = message.lower()
     if "location is not supported" in value or "user location" in value:
         return "provider_region", False
+    # This CLI message covers a timed-out eligibility/auth handshake. It is
+    # ambiguous, unlike an explicit revoked grant or login requirement, so
+    # permit bounded transport retries before asking the user to sign in.
+    if "authentication failed or timed out" in value:
+        return "network_connect_timeout", True
     if any(marker in value for marker in ("unauthenticated", "authentication", "oauth", "login", "not logged in", "permission denied")):
         return "provider_auth", False
     if any(marker in value for marker in ("resource exhausted", "rate limit", "too many requests", "429")):

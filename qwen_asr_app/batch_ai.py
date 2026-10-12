@@ -16,6 +16,7 @@ from .ai import (
     uses_agy_gemini,
     agy_rewrite_source_budget,
     polish_and_translate,
+    polish_timestamped_segments_resilient,
     retry_transient_ai,
     summarize_note_abstract,
     summarize_transcript,
@@ -76,6 +77,55 @@ async def correct_batch_segment(
     segment["ai_pending"] = False
     record.upsert_segment(segment)
     return segment
+
+
+async def correct_batch_segments(
+    record: RecordingRecord,
+    segments: list[dict[str, Any]],
+    config: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Refine a continuous source batch in one request, keeping exact timestamps."""
+    ai_config = json.loads(json.dumps(config))
+    ai_config["_preserve_segment_boundaries"] = True
+    ai_config["_batch_segment_mode"] = True
+    first_id = int(segments[0]["id"])
+    previous = [str(item.get("corrected") or item.get("raw") or "")
+                for item in record.segments if int(item.get("id", 0)) < first_id]
+    try:
+        history_chars = max(0, int((ai_config.get("ai") or {}).get("history_chars", 2000)))
+    except (ValueError, TypeError):
+        history_chars = 2000
+    ai_config["_transcript_context"] = "\n".join(previous)[-history_chars:] if history_chars else ""
+    corrected = {}
+    error = None
+    try:
+        blocks = await retry_transient_ai(lambda: polish_timestamped_segments_resilient(
+            segments, str(segments[0].get("language") or ""), ai_config, mode="correction",
+        ))
+        expected = [int(segment["id"]) for segment in segments]
+        actual = [int(block["segment_ids"][0]) for block in blocks
+                  if len(block.get("segment_ids", [])) == 1 and str(block.get("corrected") or "").strip()]
+        if actual != expected or len(blocks) != len(expected):
+            raise AIRequestError("批量精修的段落编号不完整，原文已保留", kind="invalid_segment_mapping")
+        corrected = {int(block["segment_ids"][0]): str(block["corrected"]).strip() for block in blocks}
+    except Exception as exc:
+        error = str(exc)
+    source_by_id = {int(segment["id"]): segment for segment in segments}
+    updated = []
+    for current in record.segments:
+        ident = int(current.get("id", 0))
+        if ident not in source_by_id:
+            continue
+        current.update(source_by_id[ident], ai_pending=False)
+        if error is not None:
+            current["ai_error"] = error
+        else:
+            current["corrected"] = corrected[ident]
+            current.pop("ai_error", None)
+        updated.append(current)
+    record.metadata["updated_at"] = local_now()
+    record.save_all()
+    return updated
 
 
 def _source_blocks(record: RecordingRecord) -> list[str]:
