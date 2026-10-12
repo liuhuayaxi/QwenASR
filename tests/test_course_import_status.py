@@ -94,6 +94,7 @@ class StatusRoutesTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(service.app.state, 'recording_store', store, create=True), \
                     patch.object(service, 'course_rows', {key: course}), patch.object(service, 'group_rows', {}), \
                     patch.object(service, 'imports', {}), patch.object(service, 'queue_state', {'items': []}), \
+                    patch.object(service.client, 'ensure_login', return_value={'name': 'test'}), \
                     patch.object(service.client, 'videos', Mock(return_value=videos)) as read_videos:
                 response = await service.lessons(key)
                 group = response['groups'][0]

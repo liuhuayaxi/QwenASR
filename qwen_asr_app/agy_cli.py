@@ -96,9 +96,16 @@ def _error_kind(message: str) -> tuple[str, bool]:
         return "rate_limit", True
     if any(marker in value for marker in ("deadline exceeded", "timed out", "timeout")):
         return "network_read_timeout", True
-    if any(marker in value for marker in ("connection reset", "unexpected eof", "post \"http", ": eof", "eof")):
+    if any(marker in value for marker in (
+        "connection reset", "unexpected eof", "post \"http", ": eof", "eof",
+        "the stream was interrupted", "stream interrupted",
+        "network issue connecting to the server",
+    )):
         return "network_transport", True
-    if any(marker in value for marker in ("maximum output", "max tokens", "context length", "too many tokens", "truncated")):
+    if any(marker in value for marker in (
+        "maximum output", "max tokens", "output token", "output limit",
+        "context length", "too many tokens", "truncated", "cut off",
+    )):
         return "output_truncated", True
     return "agy_cli_error", False
 

@@ -10,7 +10,7 @@ async function environment(search, responseStatus = 200, capability = null) {
     if (!elements.has(id)) elements.set(id,{hidden:true,dataset:{},addEventListener(){}});
     return elements.get(id);
   };
-  const ctx = {URLSearchParams,location:{search,href:'http://localhost:8765/course/replay'+search,origin:'http://localhost:8765'},
+  const ctx = {URL,URLSearchParams,location:{search,href:'http://localhost:8765/course/replay'+search,origin:'http://localhost:8765'},
     document:{getElementById:element},window:{addEventListener(name,handler){if(name==='message')handlers.push(handler)},postMessage(message){messages.push(message)}},setTimeout:fn=>fn(),
     fetch:async url=>{requests.push(url);return {ok:responseStatus===200,status:responseStatus,json:async()=>responseStatus===200 ?
       {url:'https://njupt.smartclass.cn/PlayPages/Video.aspx?NewID='+'a'.repeat(32)+'&SegementID=101',seconds:0,source_title:'课堂回放'} : {detail:'请登录'}};}};
@@ -27,6 +27,11 @@ async function main() {
   const recording = await environment('?recording=lesson&seconds=60');
   assert.equal(recording.requests[0],'/api/recordings/lesson/replay-target?seconds=60');
   const invalid = await environment('?video=invalid');assert.equal(invalid.requests.length,0);
+  const portal = await environment('?portal='+encodeURIComponent('https://njupt.smartclass.cn/UserSpace/CourseList.aspx'),200,true);
+  assert.equal(portal.requests.length,0);
+  assert.equal(portal.messages.find(m=>m.type==='open').target.kind,'portal');
+  const wrongPortal = await environment('?portal='+encodeURIComponent('https://evil.test/'),200,true);
+  assert.equal(wrongPortal.messages.filter(m=>m.type==='open').length,0);
   const expired = await environment('?video='+'a'.repeat(32),401);
   assert.equal(expired.element('loginReplay').hidden,false);
   assert.equal(expired.element('retryReplay').hidden,false);

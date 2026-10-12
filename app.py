@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 import uuid
+from datetime import datetime
 from collections import deque
 from contextlib import asynccontextmanager
 from functools import wraps
@@ -43,6 +44,7 @@ from qwen_asr_app.context_budget import (
     estimate_tokens,
 )
 from qwen_asr_app.ai import (
+    concurrency_for,
     close_ai_clients,
     context_window_for,
     generate_recording_title,
@@ -448,7 +450,7 @@ async def cancel_summary(session_id: str) -> dict[str, Any]:
     # The recording tail may still be saving while the automatic summary is
     # queued.  Cancel only the AI intent, never the audio finalization.
     saved = record.metadata.get("summary_job") if record else None
-    if isinstance(saved, dict) and saved.get("status") in {"queued", "waiting_retry", "paused", "failed", "interrupted"}:
+    if isinstance(saved, dict) and saved.get("status") in {"queued", "waiting_retry", "paused", "failed", "interrupted", "completed_with_errors"}:
         saved.update(
             status="cancelled",
             cancel_requested=True,
@@ -540,6 +542,23 @@ def _deduplicated_live_summaries(record: RecordingRecord) -> tuple[list[dict[str
     return [by_end[key] for key in sorted(by_end)], attempts
 
 
+def _summary_abstract_pending(record: RecordingRecord) -> bool:
+    """Only resume an abstract when this generation saved its detailed note."""
+    note = record.metadata.get("ai_note_summary") or {}
+    job = record.metadata.get("summary_job") or {}
+    draft = record.metadata.get("ai_note_summary_draft") or {}
+    if not note.get("summary") or str(note.get("abstract") or "").strip():
+        return False
+    if job.get("resume_stage") == "abstract":
+        return True
+    if draft.get("phase") != "录音库短摘要":
+        return False
+    try:
+        return datetime.fromisoformat(note["updated_at"]) >= datetime.fromisoformat(job["started_at"])
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
 def compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any]]:
     tasks: list[dict[str, Any]] = []
     try:
@@ -565,9 +584,12 @@ def compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any]]:
             "category": str(record.metadata.get("category") or "未分类"),
         }
         summary = record.metadata.get("summary_job") or {}
-        if isinstance(summary, dict) and summary.get("status") in {"queued", "running", "waiting_retry", "paused", "failed", "interrupted"}:
+        if isinstance(summary, dict) and summary.get("status") in {"queued", "running", "waiting_retry", "paused", "failed", "interrupted", "completed_with_errors"}:
             draft = record.metadata.get("ai_note_summary_draft") or {}
             status = str(summary.get("status"))
+            abstract_pending = _summary_abstract_pending(record)
+            if abstract_pending and status in {"failed", "interrupted"}:
+                status = "completed_with_errors"
             tasks.append({
                 **base,
                 **ai_provider_snapshot("summary"),
@@ -579,7 +601,9 @@ def compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any]]:
                 "error_kind": _task_error_kind(str(summary.get("error") or "")),
                 "completed": len(draft.get("parts") or []),
                 "total": int(draft.get("total_parts") or 0),
-                "phase": str(draft.get("phase") or ""),
+                "phase": ("详细笔记已保存 · 短摘要待补齐" if abstract_pending and status == "completed_with_errors"
+                          else "录音库短摘要" if abstract_pending else str(draft.get("phase") or "")),
+                "resume_stage": "abstract" if abstract_pending else "",
                 "retry_in_seconds": int(summary.get("retry_in_seconds") or 0),
                 "auto_retry_count": int(summary.get("auto_retry_count") or 0),
                 "actions": (["pause", "cancel"] if status in {"queued", "running", "waiting_retry"} else ["continue", "retry", "cancel"]),
@@ -817,6 +841,11 @@ async def _run_refinement_job_unlocked(record: RecordingRecord, config: dict[str
             context_safe_source_budget(context_window, fixed_overhead=1_800),
         ),
     )
+    if long_context and config.get("_parallel_refinement"):
+        # Recovery can fan out independent source ranges. Keep each faithful
+        # rewrite small enough to finish promptly, with preceding raw text as
+        # reference; successful ranges remain durable if a sibling fails.
+        token_budget = min(token_budget, max(512, token_budget // concurrency_for(config, "correction")))
     groups: list[list[dict[str, Any]]] = []
     current: list[dict[str, Any]] = []
     current_tokens = 0
@@ -838,7 +867,10 @@ async def _run_refinement_job_unlocked(record: RecordingRecord, config: dict[str
     if current:
         groups.append(current)
     _update_ai_job(record, "refinement", total=len(groups), completed=0)
-    for index, group in enumerate(groups):
+    semaphore = asyncio.Semaphore(concurrency_for(config, "correction"))
+    completed = 0
+    async def process_group(index, group):
+        nonlocal completed
         first_position = positions[int(group[0]["id"])]
         history = "\n".join(
             str(item.get("corrected") or item.get("raw") or "")
@@ -847,12 +879,13 @@ async def _run_refinement_job_unlocked(record: RecordingRecord, config: dict[str
         group_config = json.loads(json.dumps(config))
         history_chars = int((group_config.get("ai") or {}).get("history_chars") or 4000)
         group_config["_transcript_context"] = history[-max(0, min(history_chars, 20_000)):]
-        mapped = await polish_timestamped_segments_resilient(
-            group,
-            str(group[0].get("language") or ""),
-            group_config,
-            mode="correction",
-        )
+        async with semaphore:
+            mapped = await polish_timestamped_segments_resilient(
+                group,
+                str(group[0].get("language") or ""),
+                group_config,
+                mode="correction",
+            )
         group_ids = {int(item["id"]) for item in group}
         reviews = [
             item for item in record.metadata.get("ai_reviews") or []
@@ -876,7 +909,15 @@ async def _run_refinement_job_unlocked(record: RecordingRecord, config: dict[str
                 segment.pop("ai_error", None)
                 segment["ai_pending"] = False
         record.save_all()
-        _update_ai_job(record, "refinement", completed=index + 1, total=len(groups))
+        completed += 1
+        _update_ai_job(record, "refinement", completed=completed, total=len(groups))
+    workers = [asyncio.create_task(process_group(index, group)) for index, group in enumerate(groups)]
+    try:
+        await asyncio.gather(*workers)
+    finally:
+        for worker in workers:
+            worker.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
 
 
 async def _run_refinement_job(record: RecordingRecord, config: dict[str, Any]) -> None:
@@ -969,7 +1010,7 @@ async def ai_task_action(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="没有找到这条录音")
     if record_id in running_batch_ids:
         raise HTTPException(409, "课程正在转写或补齐，请完成后再操作 AI 任务")
-    if kind not in AI_TASK_LABELS or action not in {"retry", "continue", "pause", "cancel"}:
+    if kind not in AI_TASK_LABELS or action not in {"retry", "regenerate", "continue", "pause", "cancel"}:
         raise HTTPException(status_code=400, detail="AI 任务操作无效")
     if action == "pause":
         if kind == "summary":
@@ -1071,21 +1112,55 @@ async def ai_task_action(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
         raise HTTPException(status_code=409, detail="请先结束当前录音，再重新精修尚未完成的段落")
     course = record.metadata.get("course_settings") or {}
     config.setdefault("terminology", course.get("terminology") or [])
-    if action == "retry":
+    if kind == "refinement":
+        config["_parallel_refinement"] = True
+    resume_abstract = kind == "summary" and action != "regenerate" and _summary_abstract_pending(record)
+    if action == "regenerate" and kind == "summary":
+        # Maintenance regeneration deliberately uses bounded detailed chunks;
+        # a single very long Gemini response can otherwise hit its output cap
+        # before the complete lecture note is returned.
+        config["_summary_force_chunk_tokens"] = 6000
+    if action == "regenerate":
+        # Batch maintenance keeps the saved Gemini High model but uses a
+        # bounded thinking level so one stale provider request cannot hold the
+        # whole repair batch indefinitely. This does not change daily settings.
+        ai = config.get("ai") if isinstance(config.get("ai"), dict) else {}
+        for provider in ai.values():
+            if isinstance(provider, dict) and str(provider.get("transport") or "").lower() == "agy_cli":
+                provider["cli_model"] = "gemini-3.8-flash-high"
+                provider["model"] = "gemini-3.8-flash-high"
+                provider["cli_effort"] = "high"
+                if kind == "refinement":
+                    provider["concurrency"] = max(4, int(provider.get("concurrency") or 0))
+    if action in {"retry", "regenerate"}:
         if kind == "summary":
-            record.metadata.pop("ai_note_summary_draft", None)
+            if not resume_abstract:
+                record.metadata.pop("ai_note_summary_draft", None)
         elif kind == "live_summary":
             record.metadata["ai_summaries"] = []
         else:
-            record.metadata["ai_reviews"] = [
-                item
-                for item in record.metadata.get("ai_reviews") or []
-                if not isinstance(item, dict) or not item.get("manual_refinement")
-            ]
+            if action == "regenerate":
+                # Maintenance regeneration must actually use the selected
+                # provider for every segment. Keep raw ASR text and discard
+                # only derived correction/global-review outputs.
+                record.metadata["ai_reviews"] = []
+                record.metadata.pop("ai_global_rewrite", None)
+                for segment in record.segments:
+                    segment.pop("corrected", None)
+                    segment.pop("translation", None)
+                    segment.pop("ai_error", None)
+                    segment["ai_pending"] = True
+            else:
+                record.metadata["ai_reviews"] = [
+                    item
+                    for item in record.metadata.get("ai_reviews") or []
+                    if not isinstance(item, dict) or not item.get("manual_refinement")
+                ]
         record.save_all()
     if kind == "summary":
         summary_payload = {
             "config": config,
+            "_resume_abstract": resume_abstract,
             "summary_system_prompt": config.get("_note_summary_system_prompt") or DEFAULT_NOTE_SUMMARY_PROMPT,
             "abstract_system_prompt": config.get("_note_abstract_system_prompt") or DEFAULT_NOTE_ABSTRACT_PROMPT,
         }
@@ -1595,10 +1670,12 @@ def start_summary_job(record: RecordingRecord, payload: dict[str, Any], *, autom
         if os.getenv("QWEN_ASR_TESTING") != "1":
             raise HTTPException(status_code=409, detail=str(exc)) from exc
     cancel_requested_tasks.discard(f"summary:{session_id}")
+    resume_abstract = bool(payload.get("_resume_abstract")) and _summary_abstract_pending(record)
     # Only progress is persisted; credentials remain in this task's memory.
     record.metadata["summary_job"] = {
         "status": "queued", "automatic": automatic, "started_at": local_now(), "error": "",
         "auto_retry_count": 0, "retry_in_seconds": 0, "pause_requested": False,
+        "resume_stage": "abstract" if resume_abstract else "",
     }
     record.save_metadata()
 
@@ -1615,10 +1692,16 @@ def start_summary_job(record: RecordingRecord, payload: dict[str, Any], *, autom
             while True:
                 try:
                     save_state("running", retry_in_seconds=0)
-                    await generate_library_summary(session_id, payload)
+                    result = await (generate_library_summary_abstract(session_id, payload) if resume_abstract
+                                    else generate_library_summary(session_id, payload))
+                    abstract_error = (result.get("summary") or {}).get("abstract_error")
+                    if abstract_error:
+                        save_state("completed_with_errors", str(abstract_error), resume_stage="abstract",
+                                   retry_in_seconds=0, auto_retry_count=automatic_attempt)
+                        return
                     save_state(
                         "completed", auto_retry_count=automatic_attempt,
-                        retry_in_seconds=0,
+                        retry_in_seconds=0, resume_stage="",
                     )
                     return
                 except asyncio.CancelledError:
@@ -1810,8 +1893,16 @@ async def generate_library_summary_abstract(
     config["_note_abstract_system_prompt"] = str(
         config.get("_note_abstract_system_prompt") or DEFAULT_NOTE_ABSTRACT_PROMPT
     ).strip()[:20_000]
+    completes_saved_job = _summary_abstract_pending(record)
     try:
         summary = await regenerate_note_abstract(record, config)
+        if completes_saved_job:
+            record.metadata.pop("ai_note_summary_draft", None)
+            record.metadata.setdefault("summary_job", {}).update(
+                status="completed", error="", error_kind="", resume_stage="",
+                retry_in_seconds=0, updated_at=local_now(),
+            )
+            record.save_metadata()
         return {"summary": summary, "session": record.public(include_segments=False)}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1911,6 +2002,33 @@ def ideashell_error_text(exc: BaseException) -> str:
         children = [item for item in children if item]
         return "; ".join(dict.fromkeys(children)) or str(exc)
     return str(exc).strip() or exc.__class__.__name__
+
+
+_IDEASHELL_DATE_PREFIX = re.compile(r"^\d{4}\s+")
+
+
+def ideashell_note_title(record: RecordingRecord, max_length: int = 30) -> str:
+    """Build a short, date-prefixed title that fits IdeaShell's schema."""
+    metadata = record.metadata
+    times = [
+        (metadata.get("course_time") or {}).get("start")
+        if isinstance(metadata.get("course_time"), dict) else None,
+        metadata.get("recorded_at"), metadata.get("started_at"),
+    ]
+    date_prefix = ""
+    for value in times:
+        if not isinstance(value, str) or not value.strip():
+            continue
+        try:
+            stamp = datetime.fromisoformat(value.strip().replace("/", "-"))
+        except ValueError:
+            continue
+        date_prefix = stamp.strftime("%m%d")
+        break
+    base = _IDEASHELL_DATE_PREFIX.sub("", str(metadata.get("title") or "未命名录音").strip()).strip()
+    title = f"{date_prefix} {base}" if date_prefix else base
+    limit = max(1, int(max_length or 30))
+    return title[:limit].strip() or "课堂"
 
 
 async def ideashell_recording_audio_parts(record: RecordingRecord) -> list[dict[str, Any]]:
@@ -2135,6 +2253,7 @@ async def preview_ideashell_push(session_id: str, payload: dict[str, Any] = Body
             archive["audio"] = ideashell_audio_preview(audio_parts[0])
         if audio_error:
             archive["audio_error"] = audio_error
+        archive["title"] = ideashell_note_title(record)
         return archive
     except (ValueError, OSError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2207,12 +2326,12 @@ async def push_recording_summary_to_ideashell(
             # successful update alone therefore does not prove a usable sync.
             if note_id not in json.dumps(visible, ensure_ascii=False):
                 raise ValueError("已关联的笔记不在课程文件夹中，可能已删除或移走。请在推送预览中选择“新建一篇笔记”后重试")
-        title = str(record.metadata.get("title") or "未命名录音")
         excerpt = str(summary.get("abstract") or "").strip() if isinstance(summary, dict) else ""
         excerpt = excerpt[:100] or record._compact_summary(archive["content"], 180)
         schema = schemas.get("note_update" if note_id else "note_create", {})
         max_title = schema.get("properties", {}).get("title", {}).get("maxLength", 30)
-        arguments = {"title": title[:int(max_title)], "content": archive["content"], "summary": excerpt}
+        title = ideashell_note_title(record, int(max_title or 30))
+        arguments = {"title": title, "content": archive["content"], "summary": excerpt}
         if audio_parts:
             arguments.update(audio_attachment_arguments_many(schema, audio_parts))
         if note_id:
@@ -2574,6 +2693,7 @@ async def batch_transcription_stream(
     warmup = None
     inference_task = None
     remote_recording_task = None
+    asr_owned = True
     model_manager.active_jobs += 1
     model_manager.cancel_unload()
     started_processing = time.monotonic()
@@ -2903,6 +3023,16 @@ async def batch_transcription_stream(
                     event = pipeline.events.get_nowait()
                     yield stream_event(event.pop("type"), progress=asr_percent, **event)
 
+        # Only the decode/recognition phase needs a local model lifetime lease.
+        # Cloud correction and global rewriting may take much longer than ASR.
+        if inference_task and not inference_task.done():
+            await asyncio.gather(inference_task, return_exceptions=True)
+        if warmup:
+            await asyncio.gather(warmup, return_exceptions=True)
+        model_manager.active_jobs = max(0, model_manager.active_jobs - 1)
+        asr_owned = False
+        model_manager.schedule_unload()
+
         if pipeline:
             finish_task = asyncio.create_task(pipeline.finish())
             try:
@@ -3004,8 +3134,9 @@ async def batch_transcription_stream(
             await asyncio.gather(inference_task, return_exceptions=True)
         if warmup:
             await asyncio.gather(warmup, return_exceptions=True)
-        model_manager.active_jobs = max(0, model_manager.active_jobs - 1)
-        model_manager.schedule_unload()
+        if asr_owned:
+            model_manager.active_jobs = max(0, model_manager.active_jobs - 1)
+            model_manager.schedule_unload()
         if record:
             running_batch_ids.discard(record.id)
         if temp_path is not None and not preserve_source:

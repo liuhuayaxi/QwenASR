@@ -1,7 +1,8 @@
 const $ = id => document.getElementById(id);
-let currentGroups = [], courseVersion = '', optionsLoaded = false;
+let currentGroups = [], courseVersion = '', catalogRevision = null, optionsLoaded = false;
 let busy = false, submitting = false, loadingCourse = '', loadSerial = 0, accountCollapsed = false;
 let replayLoginSubmitted = false;
+let sessionCheckInFlight = false, lastSessionCheck = 0;
 function notice(message = '', kind = 'error') { $('notice').textContent = message; $('notice').dataset.kind = kind; }
 function pendingReplayURL() {
   const value = new URLSearchParams(location.search).get('returnTo');
@@ -15,7 +16,8 @@ function pendingReplayURL() {
 }
 function continuePendingReplay(status) {
   const target = pendingReplayURL();
-  if (!target || !replayLoginSubmitted || !status.identity || !status.authenticated) return;
+  if (!target || !replayLoginSubmitted || !status.identity || !status.authenticated
+      || ['checking','error'].includes(status.session_check)) return;
   location.replace(target.href);
   return true;
 }
@@ -57,8 +59,7 @@ function updateLessonStatuses(statuses) {
     renderLessonStatus(row, currentGroups.find(group => group.id === row.dataset.group)?.import_status);
   }
 }
-function renderLessons() {
-  const chosen = new Set([...document.querySelectorAll('#lessons input:checked')].map(e => e.value));
+function renderLessons(chosen = new Set([...document.querySelectorAll('#lessons input:checked')].map(e => e.value))) {
   $('lessons').replaceChildren();
   for (const g of currentGroups) {
     const row = document.createElement('div'), choice = document.createElement('label');
@@ -71,9 +72,10 @@ function renderLessons() {
     checkbox.onchange = updateSelection;
     const text = document.createElement('div'), title = document.createElement('strong'), detail = document.createElement('small');
     title.textContent = g.course_name + ' · ' + g.date + ' ' + g.start.slice(11,16) + '–' + g.stop.slice(11,16);
+    const periods = g.periods.filter(Boolean);
     detail.textContent = g.videos.length === 2
-      ? `第 ${g.periods.join('、')} 节 · 合计约 ${Math.round(g.duration / 60)} 分钟 → 一份笔记`
-      : `第 ${g.periods[0]} 节 · 暂无相邻回放配对`;
+      ? `${periods.length === 2 ? '第 ' + periods.join('、') + ' 节' : '两节回放'} · 合计约 ${Math.round(g.duration / 60)} 分钟 → 一份笔记`
+      : `${periods[0] ? '第 ' + periods[0] + ' 节' : '单节回放'} · 暂无相邻回放配对`;
     const heading = document.createElement('div'), badge = document.createElement('span');
     heading.className = 'lesson-heading'; badge.className = 'lesson-badge';
     const importDetail = document.createElement('small'); importDetail.className = 'lesson-import-detail';
@@ -86,7 +88,7 @@ function renderLessons() {
       link.textContent = g.videos.length === 2 ? (index === 0 ? '上半节回放' : '下半节回放') : '课程回放';
       link.href = '/course/replay?' + new URLSearchParams({video:video.NewID});
       link.target = '_blank'; link.rel = 'noopener noreferrer';
-      link.title = `打开第 ${g.periods[index]} 节学校回放`;
+      link.title = g.periods[index] ? `打开第 ${g.periods[index]} 节学校回放` : '打开学校回放';
       replays.append(link);
     }
     row.append(replays); renderLessonStatus(row, g.import_status); $('lessons').append(row);
@@ -98,6 +100,7 @@ async function loadLessons() {
   const key = $('courses').value;
   if (!key) return;
   const serial = ++loadSerial;
+  const chosen = new Set([...document.querySelectorAll('#lessons input:checked')].map(e => e.value));
   loadingCourse = key;
   $('lessons').textContent = '正在获取回放列表…';
   updateSelection(); notice();
@@ -107,7 +110,7 @@ async function loadLessons() {
     if (serial !== loadSerial) return;
     if (!response.ok) throw Error(result.detail);
     currentGroups = result.groups;
-    renderLessons();
+    renderLessons(chosen);
   } catch (e) {
     if (serial === loadSerial) { currentGroups = []; $('lessons').textContent = e.message; }
   } finally {
@@ -121,22 +124,26 @@ function renderCourseState(s) {
   $('stop').hidden = s.state !== 'running';
   $('resumeQueue').hidden = busy || s.state === 'running' || !(s.queue?.remaining);
   $('resumeQueue').disabled = !s.identity;
-  const version = JSON.stringify([s.course_revision, s.courses.map(c => [c.key, c.VideoTotal])]);
+  const version = JSON.stringify(s.courses.map(c => [c.key, c.CourseName, c.TeacherName, c.ClassID, c.VideoTotal]));
   if (version !== courseVersion) {
     courseVersion = version;
     const selected = $('courses').value;
-    clearLessons();
+    const retained = s.courses.some(c => c.key === selected);
+    if (!retained) clearLessons();
     $('courses').replaceChildren(new Option('选择课程…', ''));
     for (const c of s.courses) {
       const duplicate = s.courses.filter(v => v.CourseName === c.CourseName && v.TeacherName === c.TeacherName).length > 1;
-      const label = c.CourseName + ' · ' + (c.TeacherName || '') + ' · ' + c.VideoTotal + ' 节'
+      const label = c.CourseName + ' · ' + (c.TeacherName || '暂无主讲') + ' · ' + c.VideoTotal + ' 节'
         + (duplicate ? ' · 教学班 ' + c.ClassID : '');
       $('courses').add(new Option(label, c.key));
     }
-    if (s.courses.some(c => c.key === selected)) {
+    if (retained) {
       $('courses').value = selected;
-      if (!busy) loadLessons();
     }
+  }
+  if (s.course_revision !== catalogRevision && !busy) {
+    catalogRevision = s.course_revision;
+    if ($('courses').value && !loadingCourse) loadLessons();
   }
   if (!optionsLoaded && s.options.summary_provider) {
     const p = s.options.summary_provider;
@@ -203,7 +210,7 @@ async function refresh() {
     const r = await fetch('/api/status' + (course ? '?course=' + encodeURIComponent(course) : '')), s = await r.json();
     if (continuePendingReplay(s)) return;
     $('state').textContent = s.message;
-    $('identity').textContent = s.identity?.name ? '已连接：' + s.identity.name + ' · ' + s.term + ' 学期' : '';
+    $('identity').textContent = s.identity?.name && s.authenticated ? '已连接：' + s.identity.name + ' · ' + s.term + ' 学期' : '';
     $('reconnect').hidden = !s.credentials_saved;
     $('connect').disabled = $('reconnect').disabled = ['connecting','syncing','running'].includes(s.state);
     if (s.identity && !accountCollapsed) {
@@ -212,10 +219,21 @@ async function refresh() {
     }
     if (s.state === 'error') $('accountDetails').open = true;
     if (new URLSearchParams(location.search).has('returnTo')) $('accountDetails').open = true;
-    $('accountLabel').textContent = s.identity?.name ? '账号已连接 · ' + s.identity.name : '统一身份认证';
+    $('accountLabel').textContent = s.identity?.name && s.authenticated ? '账号已连接 · ' + s.identity.name : '统一身份认证';
     window.courseStatus = s;
     renderCourseState(s);
   } catch { $('state').textContent = '本机课程同步服务尚未连接'; }
+}
+async function checkSession() {
+  if (sessionCheckInFlight || Date.now() - lastSessionCheck < 60000) return;
+  sessionCheckInFlight = true;
+  lastSessionCheck = Date.now();
+  try {
+    await post('/api/ensure-session', {replay_only:!!pendingReplayURL()});
+    replayLoginSubmitted = true;
+    await refresh();
+  } catch (error) { notice(error.message); }
+  finally { sessionCheckInFlight = false; }
 }
 $('login').addEventListener('submit', async e => {
   e.preventDefault(); notice();
@@ -299,6 +317,9 @@ async function scheduledRefresh() {
 }
 document.addEventListener('visibilitychange', () => {
   window.clearTimeout(refreshTimer);
+  if (!document.hidden) checkSession();
   scheduledRefresh();
 });
+window.addEventListener('pageshow', () => checkSession());
+checkSession();
 scheduledRefresh();

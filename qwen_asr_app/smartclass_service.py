@@ -20,7 +20,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.middleware.cors import CORSMiddleware
 
 from .smartclass import (STATE_DIR, SmartClassClient, SmartClassError, private_json,
-                        course_key, current_term, lesson_groups, extract_audio, connection_error)
+                        LoginRequired, course_key, current_term, lesson_groups, extract_audio, connection_error)
 from .course_download import stream_audio
 from .replay_bridge import replay_bridge_router
 from .course_import_status import lesson_import_statuses, recording_inventory, video_ids
@@ -31,6 +31,7 @@ status = {"state": "idle", "message": "请配置统一身份认证账号", "iden
 client = SmartClassClient()
 job = None
 catalog_job = None
+last_session_check = 0.0
 platform_lock = asyncio.Lock()
 download_slots = asyncio.Semaphore(2)
 queue_wakeup = asyncio.Event()
@@ -74,8 +75,16 @@ for item in imports.values():
                 phase.update(state="paused", detail="服务已重启，可继续已保存进度")
 
 
-def save_imports():
+_last_import_save = 0.0
+
+
+def save_imports(*, force=True):
+    global _last_import_save
+    now = time.monotonic()
+    if not force and now - _last_import_save < 2:
+        return
     private_json(STATE_DIR / "imports.json", imports)
+    _last_import_save = now
 
 
 PHASE_WEIGHTS = {"download": 25, "asr": 45, "correction": 15, "summary": 15}
@@ -274,16 +283,14 @@ async def import_statuses(groups):
 
 
 async def connect(username, password, save, replay_only=False):
-    if not replay_only:
-        course_rows.clear()
-        group_rows.clear()
-    status.update(state="connecting", message="正在通过南邮统一身份认证登录…", identity=None, authenticated=False)
+    status.update(state="connecting", message="正在通过南邮统一身份认证登录…", identity=None,
+                  authenticated=False, session_check="checking")
     try:
         async with platform_lock:
             identity = await asyncio.to_thread(client.login, username, password)
         if save:
             private_json(STATE_DIR / "credentials.json", {"username": username, "password": password})
-        status.update(state="connected" if replay_only else "syncing", identity=identity, authenticated=True,
+        status.update(state="connected" if replay_only else "syncing", identity=identity, authenticated=True, session_check="ready",
                       message="登录成功，可以返回回放" if replay_only else "登录成功，正在获取本学期课程…")
         if replay_only:
             return
@@ -297,7 +304,7 @@ async def connect(username, password, save, replay_only=False):
             stop_event.clear()
             await run_queue()
     except SmartClassError as exc:
-        status.update(state="error", message=str(exc))
+        status.update(state="error", message=str(exc), session_check="error")
     except httpx.HTTPError as exc:
         status.update(state="error", message=connection_error(exc, client.last_stage))
     except Exception:
@@ -336,8 +343,11 @@ def check_idle():
         raise HTTPException(409, "已有任务正在进行，请等待或停止当前任务")
 
 
-async def load_courses():
+async def load_courses(*, verify_session=False):
     async with platform_lock:
+        if verify_session:
+            status["identity"] = await asyncio.to_thread(client.ensure_login)
+            status["authenticated"] = True
         rows = await asyncio.to_thread(client.courses)
     course_rows.clear()
     group_rows.clear()
@@ -346,6 +356,45 @@ async def load_courses():
     status["course_revision"] = time.time_ns()
     if status.get("state") != "running":
         status.update(state="connected", message=f"本学期 {len(rows)} 条课程记录，选择课程查看回放")
+
+
+@app.post("/api/ensure-session")
+async def ensure_session(data: ReconnectOptions = ReconnectOptions()):
+    """Page entry checks authentication and refreshes discovery without resuming imports."""
+    global catalog_job, last_session_check
+    if ((catalog_job and not catalog_job.done()) or status.get("state") in {"connecting", "syncing"}
+            or (status.get("authenticated") and time.monotonic() - last_session_check < 10)):
+        return {"started": False}
+    last_session_check = time.monotonic()
+    async def check():
+        running = status.get("state") == "running"
+        status["session_check"] = "checking"
+        status["authenticated"] = False
+        if not running:
+            status.update(state="syncing", message="正在检查登录并更新课程…")
+        try:
+            if data.replay_only:
+                async with platform_lock:
+                    identity = await asyncio.to_thread(client.ensure_login)
+                status.update(identity=identity, authenticated=True)
+                if not running:
+                    status.update(state="connected", message="登录已确认，可以返回学校页面")
+            else:
+                await load_courses(verify_session=True)
+            status["session_check"] = "ready"
+        except (SmartClassError, httpx.HTTPError) as exc:
+            status["session_check"] = "error"
+            if isinstance(exc, LoginRequired):
+                status.update(authenticated=False, identity=None)
+            message = connection_error(exc, client.last_stage) if isinstance(exc, httpx.HTTPError) else str(exc)
+            if not running:
+                status.update(state="error", message=message)
+        except Exception:
+            status["session_check"] = "error"
+            if not running:
+                status.update(state="error", message="学校响应格式发生变化，需要检查适配")
+    catalog_job = asyncio.create_task(check())
+    return {"started": True}
 
 
 @app.post("/api/refresh")
@@ -361,7 +410,7 @@ async def refresh_courses():
         if status.get("state") != "running":
             status.update(state="syncing", message="正在刷新本学期课程…")
         try:
-            await load_courses()
+            await load_courses(verify_session=True)
         except Exception:
             if status.get("state") != "running":
                 status.update(state="error", message="刷新课程失败，请重新连接账号后重试")
@@ -375,8 +424,11 @@ async def lessons(course: str):
         raise HTTPException(404, "请先选择本学期课程")
     try:
         async with platform_lock:
+            status["identity"] = await asyncio.to_thread(client.ensure_login)
+            status["authenticated"] = True
             videos = await asyncio.to_thread(client.videos, course_rows[course])
         groups = lesson_groups(videos, course_rows[course])
+        course_rows[course]["VideoTotal"] = len(videos)
         group_rows.update({g["id"]: g for g in groups})
         states = await import_statuses(groups)
         return {"groups": [{**group, 'import_status': states[group['id']]} for group in groups]}
@@ -577,6 +629,8 @@ async def import_stream(local, group, config, entry):
                     "completed" if state["status"] == "completed" else ("running" if segment_count else "pending"),
                 )
             status["message"] = f"{group['title']}：{entry['message']}"
+            # The workbench task feed reads this checkpoint in another process.
+            save_imports(force=False)
             if state["status"] == "completed":
                 return state
             if state["status"] == "interrupted":
@@ -697,6 +751,7 @@ async def import_group(group: dict, run_options: dict | None = None):
                 update_import_phase(entry, "summary", summary_percent, summary_detail)
                 entry["message"] = summary_detail
                 status["message"] = f"{group['title']}：{summary_detail}"
+                save_imports(force=False)
                 await asyncio.sleep(3)
         generated = bool(options.get("generate_summary", True))
         complete_import_progress(entry)

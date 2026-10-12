@@ -25,7 +25,7 @@ window.addEventListener('message', event => {
   if (message.type === 'ready') {
     // A legacy userscript would open a second tab and leave this one behind.
     if (!message.sameTab) {
-      status('请将油猴跳转脚本更新到 1.1.0，更新后即可直接打开回放。', 'error');
+      status('请将油猴跳转脚本更新到 1.2.0，更新后即可直接打开回放。', 'error');
       $('bridgeInstall').hidden = false;
       return;
     }
@@ -51,27 +51,42 @@ window.addEventListener('message', event => {
 $('retryReplay').addEventListener('click', () => { finished = false; if (target) launch(); else initialize(); });
 
 async function initialize() {
+  const portal = query.get('portal');
   const recording = query.get('recording');
   const video = query.get('video');
   const seconds = Number(query.get('seconds') || 0);
-  if ((!recording && !video) || (video && !/^[a-f0-9]{32}$/i.test(video)) || !Number.isFinite(seconds) || seconds < 0 || seconds > 7200) {
+  if ((!recording && !video && !portal) || (video && !/^[a-f0-9]{32}$/i.test(video)) || !Number.isFinite(seconds) || seconds < 0 || seconds > 7200) {
     status('录音或时间无效，请从录音库重新跳转。', 'error'); return;
   }
   $('loginReplay').href = `/course/?returnTo=${encodeURIComponent(location.href)}`;
   if (video) { $('replayBack').href = '/course/'; $('replayBack').textContent = '‹ 返回课程回放'; }
   try {
-    const path = video ? `/course/api/replay-video-target?video=${encodeURIComponent(video)}`
-      : `/api/recordings/${encodeURIComponent(recording)}/replay-target?seconds=${seconds}`;
-    const response = await fetch(path, {cache:'no-store'});
-    const data = await response.json();
-    if (!response.ok) { $('loginReplay').hidden = response.status !== 401; $('retryReplay').hidden = false; }
-    if (!response.ok) throw new Error(data.detail || '没有找到对应回放');
-    target = data;
-    $('replayTitle').textContent = target.source_title || target.recording_title;
-    $('replayTime').textContent = video ? '从此节课的开头播放' : `录音 ${timeText(seconds)} → 此节回放 ${timeText(target.seconds)}`;
-    $('officialReplay').href = target.url;
-    $('officialReplay').hidden = false;
-    launch();
+    if (portal) {
+      const url = new URL(portal);
+      if (url.origin !== 'https://njupt.smartclass.cn' || url.username || url.password
+          || /(?:logout|signout|redirect|login)\.aspx$/i.test(url.pathname)
+          || [...url.searchParams.keys()].some(key => /^(?:ticket|token|password|authKey)$/i.test(key))) {
+        throw new Error('学校页面地址无效');
+      }
+      target = {kind:'portal', url:url.href};
+      $('replayTitle').textContent = 'Smart Class 自动登录';
+      $('replayBack').href = '/course/'; $('replayBack').textContent = '‹ 返回课程回放';
+      $('officialReplay').href = url.href; $('officialReplay').hidden = false;
+      launch();
+    } else {
+      const path = video ? `/course/api/replay-video-target?video=${encodeURIComponent(video)}`
+        : `/api/recordings/${encodeURIComponent(recording)}/replay-target?seconds=${seconds}`;
+      const response = await fetch(path, {cache:'no-store'});
+      const data = await response.json();
+      if (!response.ok) { $('loginReplay').hidden = response.status !== 401; $('retryReplay').hidden = false; }
+      if (!response.ok) throw new Error(data.detail || '没有找到对应回放');
+      target = data;
+      $('replayTitle').textContent = target.source_title || target.recording_title;
+      $('replayTime').textContent = video ? '从此节课的开头播放' : `录音 ${timeText(seconds)} → 此节回放 ${timeText(target.seconds)}`;
+      $('officialReplay').href = target.url;
+      $('officialReplay').hidden = false;
+      launch();
+    }
     for (let attempt = 0; attempt < 5 && !bridgeReady; attempt += 1) {
       window.postMessage({channel, type:'probe'}, location.origin);
       await new Promise(resolve => setTimeout(resolve, 300));

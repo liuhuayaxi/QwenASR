@@ -71,7 +71,7 @@ class AIPreferences:
     def clear(self):
         self.path.unlink(missing_ok=True)
 
-    def task_config(self, config=None, *, course=None, required_modes=()):
+    def task_config(self, config=None, *, course=None, required_modes=(), preserve_flags=()):
         """Replace all caller AI settings with the durable local configuration.
 
         Providers are deliberately never recovered from request data, browser
@@ -117,8 +117,15 @@ class AIPreferences:
         result['_ai_settings_source'] = 'local_saved'
         # These are global settings, not per-request overrides. Only task
         # controls (e.g. "generate a summary now") may enable an operation.
+        # Normal browser task actions use the durable global switches. Local
+        # server bridges (for example SmartClass course replay) may pass an
+        # explicit operation flag that was selected and persisted by that
+        # bridge; preserve only the named flags, never provider or credential
+        # fields.
+        preserved = set(preserve_flags)
         for key, default in (('ai_correction', False), ('summary_enabled', False), ('translation', 'off')):
-            result[key] = saved.get(key, default)
+            if key not in preserved or key not in result:
+                result[key] = saved.get(key, default)
         result['summary_interval_minutes'] = max(1, int(saved.get('summary_interval') or 10))
         if course is not None:
             result['terminology'] = copy.deepcopy(profile.get('terminology') or [])

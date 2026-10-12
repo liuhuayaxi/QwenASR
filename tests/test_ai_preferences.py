@@ -63,6 +63,22 @@ class PreferencesRouteTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn('api_key', json.dumps(config))
             self.assertEqual(config['terminology'], ['术语'])
 
+    def test_course_bridge_preserves_its_explicit_automatic_correction_flag(self):
+        with tempfile.TemporaryDirectory() as raw:
+            preferences = AIPreferences(Path(raw) / 'settings.json')
+            secrets = AISecretStore(Path(raw) / 'keys.json')
+            providers = {mode: {'base_url': 'https://api.siliconflow.cn/v1', 'model': 'saved-' + mode}
+                         for mode in ('sentence', 'review', 'summary', 'correction', 'global')}
+            preferences.save({'function_providers': providers}, secrets)
+            config = preferences.task_config(
+                {'ai_correction': True, 'summary_enabled': False, 'translation': 'off'},
+                required_modes=('sentence', 'correction', 'summary'),
+                preserve_flags=('ai_correction', 'summary_enabled', 'translation'),
+            )
+            self.assertTrue(config['ai_correction'])
+            self.assertFalse(config['summary_enabled'])
+            self.assertEqual(config['translation'], 'off')
+
     async def test_settings_api_restores_disk_without_returning_credentials(self):
         import app
         with tempfile.TemporaryDirectory() as raw:

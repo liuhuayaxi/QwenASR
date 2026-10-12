@@ -179,6 +179,7 @@ class ReplayAuthenticationTests(unittest.IsolatedAsyncioTestCase):
             client.login.return_value = {'UserID': 123}
             await service.connect('test', 'test-password', False, replay_only=True)
             self.assertTrue(service.status['authenticated'])
+            self.assertEqual(service.status['session_check'], 'ready')
             self.assertEqual(service.status['identity'], {'UserID': 123})
             load.assert_not_awaited()
             defaults.assert_not_awaited()

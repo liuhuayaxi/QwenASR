@@ -61,6 +61,24 @@ class AGYCLITests(unittest.TestCase):
         self.assertEqual(caught.exception.kind, "provider_region")
         self.assertFalse(caught.exception.retriable)
 
+    def test_interrupted_result_stream_can_be_retried(self):
+        output = json.dumps({'event': 'result', 'result': {
+            'status': 'FAILED', 'error': 'The stream was interrupted. Please continue the task you were working on.'}})
+        with self.assertRaises(AIRequestError) as caught:
+            _decode_output(output, '')
+        self.assertEqual(caught.exception.kind, 'network_transport')
+        self.assertTrue(caught.exception.retriable)
+
+    def test_provider_network_issue_can_be_retried(self):
+        output = json.dumps({'event': 'result', 'result': {
+            'status': 'FAILED',
+            'error': 'There was a network issue connecting to the server, please try again.',
+        }})
+        with self.assertRaises(AIRequestError) as caught:
+            _decode_output(output, '')
+        self.assertEqual(caught.exception.kind, 'network_transport')
+        self.assertTrue(caught.exception.retriable)
+
 
 class AGYCancellationTests(unittest.IsolatedAsyncioTestCase):
     async def test_cancelled_request_reaps_its_cli_child(self):

@@ -1,6 +1,7 @@
 from tests import isolation
 
 import asyncio
+import json
 import threading
 import unittest
 import tempfile
@@ -151,6 +152,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         async def run(*args):
             await release.wait()
         with patch.object(service, 'import_group', run), \
+                patch.object(service.client, 'ensure_login', return_value={'name': 'test'}), \
                 patch.object(service.client, 'courses', return_value=[]) as courses:
             await service.start_import(service.Selection(ids=['A']))
             runner = service.job
@@ -208,9 +210,30 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                         self.assertTrue(all(state['asr_seconds'] == 0 for state in states.values()))
                         release_asr.set()
                         await asyncio.gather(*tasks)
+                        service.save_imports.assert_any_call(force=False)
                     finally:
                         service.stop_event.set()
                         await asyncio.gather(*tasks, return_exceptions=True)
+
+
+class ProgressCheckpointTests(unittest.TestCase):
+    def test_progress_checkpoint_is_throttled_and_completion_forces_a_save(self):
+        with tempfile.TemporaryDirectory() as raw, \
+             patch.object(service, 'STATE_DIR', Path(raw)), \
+             patch.object(service, 'imports', {'synthetic': {'progress': 12.7}}), \
+             patch.object(service, '_last_import_save', 0), \
+             patch.object(service.time, 'monotonic', side_effect=[10, 11, 12, 12.1]):
+            service.save_imports(force=False)
+            checkpoint = Path(raw) / 'imports.json'
+            self.assertEqual(json.loads(checkpoint.read_text())['synthetic']['progress'], 12.7)
+            service.imports['synthetic']['progress'] = 48.8
+            service.save_imports(force=False)
+            self.assertEqual(json.loads(checkpoint.read_text())['synthetic']['progress'], 12.7)
+            service.save_imports(force=False)
+            self.assertEqual(json.loads(checkpoint.read_text())['synthetic']['progress'], 48.8)
+            service.imports['synthetic']['progress'] = 100
+            service.save_imports()
+            self.assertEqual(json.loads(checkpoint.read_text())['synthetic']['progress'], 100)
 
 
 if __name__ == '__main__':

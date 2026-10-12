@@ -58,7 +58,17 @@ def current_term(now: datetime | None = None) -> str:
 
 
 def course_key(course: dict) -> str:
+    if course.get("replay_catalog"):
+        return "replays:" + hashlib.sha256(json.dumps(
+            [course["CourseName"], course.get("TeacherName") or "", course["term"]],
+            ensure_ascii=False).encode()).hexdigest()[:20]
     return ":".join(str(course.get(k, "")) for k in ("CourseID", "ClassID", "TeacherID"))
+
+
+def term_dates(term: str) -> tuple[str, str]:
+    year, _, semester = term.split("-")
+    return ((f"{year}-08-01", f"{int(year) + 1}-01-31") if semester == "1"
+            else (f"{int(year) + 1}-02-01", f"{int(year) + 1}-07-31"))
 
 
 def parse_date(value: str) -> datetime:
@@ -84,6 +94,7 @@ def lesson_groups(videos: list[dict], course: dict) -> list[dict]:
             node1, node2 = str(last.get("NodeName", "")), str(row.get("NodeName", ""))
             adjacent = not (node1.isdigit() and node2.isdigit()) or int(node2) == int(node1) + 1
             joins = (previous["course_name"] == name and previous["teacher"] == teacher
+                     and last.get("ClassRoomName") == row.get("ClassRoomName")
                      and previous["date"] == start.date().isoformat() and 0 <= gap <= 10 * 60 and adjacent)
         if joins:
             previous["videos"].append(row)
@@ -332,6 +343,51 @@ class SmartClassClient:
         now = self.api("/Home/GettimeDif")
         self.time_offset = int(now) - time.time() * 1000
 
+    def ensure_login(self) -> dict:
+        """Check the actual portal session and restore saved credentials once."""
+        self.last_stage = "检查学校登录状态"
+        try:
+            self.user = portal_identity(self.request("GET", PORTAL + "/UserSpace/CourseCenter.aspx").text)
+        except LoginRequired:
+            self.user = {}
+            try:
+                saved = json.loads((self.state_dir / "credentials.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                saved = {}
+            if not saved.get("username") or not saved.get("password"):
+                raise LoginRequired("请先配置并保存本机南邮账号") from None
+            return self.login(saved["username"], saved["password"])
+        return {"name": self.user.get("Name", ""), "school_id": self.user.get("SchoolID")}
+
+    def my_videos(self, term: str, course: dict | None = None) -> list[dict]:
+        """Use the portal's '与我相关' feed, including teacherless replays."""
+        start, stop = term_dates(term)
+        rows, seen = [], set()
+        for page in range(1, 1001):
+            data = self.api("/WebApi/V1/video/GetMyVideoList", {
+                "PageSize": 50, "PageNumber": page, "StartDate": start, "EndDate": stop,
+                "Sort": "StartTime", "Order": 1, "IncludePublic": "false",
+                "TitleKey": course["CourseName"] if course else "",
+            })
+            if not isinstance(data, dict) or not isinstance(data.get("Data"), list):
+                raise SmartClassError("个人回放列表格式变化，无法继续同步")
+            fresh = 0
+            for row in data["Data"]:
+                if not row.get("NewID") or row["NewID"] in seen:
+                    continue
+                seen.add(row["NewID"])
+                fresh += 1
+                # Enforce the requested semester even if the platform ignores its date filter.
+                if start <= str(row.get("StartTime") or "")[:10] <= stop:
+                    if not course or (row.get("CourseName") == course["CourseName"]
+                                      and (row.get("Teachers") or "") == (course.get("TeacherName") or "")):
+                        rows.append(row)
+            if data["Data"] and not fresh:
+                raise SmartClassError("个人回放分页重复，已停止以免漏读")
+            if not data["Data"] or page * 50 >= int(data.get("TotalCount", page * 50)):
+                return rows
+        raise SmartClassError("个人回放分页超出预期")
+
     def courses(self, term: str | None = None) -> list[dict]:
         self.last_stage = "获取本学期课程"
         if not self.user:
@@ -340,9 +396,7 @@ class SmartClassClient:
         if self.user.get("UserType") != 2:
             raise SmartClassError("当前课程同步适配学生账号")
         term = term or current_term()
-        year, _, semester = term.split("-")
-        start_date = f"{year}-08-01" if semester == "1" else f"{int(year) + 1}-02-01"
-        stop_date = f"{int(year) + 1}-01-31" if semester == "1" else f"{int(year) + 1}-07-31"
+        start_date, stop_date = term_dates(term)
         courses, seen = [], set()
         for page in range(1, 1001):
             data = self.api("/WebApi/V1/video/GetCourseLists", {
@@ -358,18 +412,39 @@ class SmartClassClient:
             if not isinstance(data, dict) or not isinstance(data.get("Data"), list):
                 raise SmartClassError("课程列表格式变化，无法继续同步")
             rows = data["Data"]
+            fresh = 0
             for row in rows:
                 key = (row.get("CourseID"), row.get("ClassID"), row.get("TeacherID"))
                 if key not in seen:
                     seen.add(key)
-                    if f"({term})" in str(row.get("ClassName") or row.get("ClassNo") or ""):
-                        courses.append(row)
+                    fresh += 1
+                    courses.append(row)
+            if rows and not fresh:
+                raise SmartClassError("课程分页重复，已停止以免漏读")
             if not rows or page * 12 >= int(data.get("TotalCount", len(courses))):
+                discovered = {}
+                for video in self.my_videos(term):
+                    name, teacher = video.get("CourseName"), video.get("Teachers") or ""
+                    if not name:
+                        continue
+                    matches = [c for c in courses if c.get("CourseName") == name
+                               and (c.get("TeacherName") or "") == teacher]
+                    if matches:
+                        continue
+                    supplemental = discovered.setdefault((name, teacher), {
+                        "CourseName": name, "TeacherName": teacher, "VideoTotal": 0,
+                        "replay_catalog": True, "term": term,
+                    })
+                    supplemental["VideoTotal"] += 1
+                courses.extend(discovered.values())
                 return courses
         raise SmartClassError("课程分页超出预期，已停止")
 
     def videos(self, course: dict) -> list[dict]:
         self.last_stage = "获取课次回放"
+        if course.get("replay_catalog"):
+            self.prepare_api()
+            return self.my_videos(course["term"], course)
         rows, seen = [], set()
         for page in range(1, 1001):
             data = self.api("/WebApi/V1/video/GetCourseVideos", {

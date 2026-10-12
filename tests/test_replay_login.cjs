@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '../static/js/smartclass.js'), 'utf8')
-  .replace(/\nscheduledRefresh\(\);\s*$/, '\nglobalThis.testLogin = {continuePendingReplay, pendingReplayURL};');
+  .replace(/\ncheckSession\(\);\nscheduledRefresh\(\);\s*$/, '\nglobalThis.testLogin = {continuePendingReplay, pendingReplayURL, checkSession};');
 
 function environment(returnTo) {
   const elements = new Map(), requests = [], navigations = [];
@@ -11,7 +11,7 @@ function environment(returnTo) {
     if (!elements.has(id)) elements.set(id, {value:'',checked:false,dataset:{}, addEventListener(event, callback){this[event]=callback}});
     return elements.get(id);
   };
-  const context = {URL, URLSearchParams,
+  const context = {URL, URLSearchParams, Date,
     location:{origin:'http://127.0.0.1:8765',search:'?returnTo='+encodeURIComponent(returnTo),replace:url=>navigations.push(url)},
     document:{getElementById:element,addEventListener(){}}, window:{addEventListener(){}},
     async fetch(url, options) {
@@ -34,6 +34,12 @@ async function main() {
     assert.deepEqual(env.navigations,[target]);
   }
   const env=environment(target);
+  await env.context.testLogin.checkSession();
+  assert.equal(env.requests[0][0],'/api/ensure-session');
+  assert.equal(env.requests[0][1].replay_only,true);
+  assert.deepEqual(env.navigations,[target]);
+  env.navigations.length=0;
+  vm.runInContext('replayLoginSubmitted = false',env.context);
   env.context.testLogin.continuePendingReplay({identity:{name:'old'},authenticated:true,state:'running'});
   assert.equal(env.navigations.length,0);
   vm.runInContext('replayLoginSubmitted = true',env.context);

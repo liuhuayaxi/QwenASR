@@ -182,6 +182,7 @@ class CourseStreamJob:
         pipeline = None
         inference = None
         assembly = None
+        asr_owned = True
         self.model.active_jobs += 1
         self.model.cancel_unload()
         try:
@@ -267,7 +268,13 @@ class CourseStreamJob:
                 if pipeline:
                     while not pipeline.events.empty():
                         pipeline.events.get_nowait()
-            self.state["stage"] = "音频已到齐，等待剩余精修并合并归档"
+            # AI correction and AAC archival do not use the ASR model. Release
+            # this job's lease after the last inference, while keeping record
+            # ownership until every AI writer has finished.
+            self.model.active_jobs = max(0, self.model.active_jobs - 1)
+            asr_owned = False
+            self.model.schedule_unload()
+            self.state["stage"] = "语音识别已完成，等待剩余精修并合并归档"
             self.record.save_metadata()
             if pipeline:
                 await pipeline.finish()
@@ -299,8 +306,9 @@ class CourseStreamJob:
                 await asyncio.gather(inference, return_exceptions=True)
             if assembly and not assembly.done():
                 await asyncio.gather(assembly, return_exceptions=True)
-            self.model.active_jobs = max(0, self.model.active_jobs - 1)
-            self.model.schedule_unload()
+            if asr_owned:
+                self.model.active_jobs = max(0, self.model.active_jobs - 1)
+                self.model.schedule_unload()
             self.busy_ids.discard(self.record.id)
 
     async def stop(self, paused=False):
@@ -330,7 +338,13 @@ class CourseStreamManager:
                 required.append("correction")
             if config.get("summary_enabled") or config.get("generate_summary", True):
                 required.append("summary")
-            config = ai_preferences.task_config(config, required_modes=tuple(required))
+            # The SmartClass service owns these per-course operation switches.
+            # Keep its explicit automatic-correction choice while still
+            # rebuilding every provider and credential from saved settings.
+            config = ai_preferences.task_config(
+                config, required_modes=tuple(required),
+                preserve_flags=("ai_correction", "summary_enabled", "translation"),
+            )
         except (OSError, ValueError) as exc:
             raise HTTPException(409, str(exc)) from exc
         config["asr_params"] = normalize_asr_params(config.get("asr_params"), DEFAULT_ASR_PARAMS["max_tokens"])

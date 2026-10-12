@@ -161,8 +161,32 @@ async function main() {
   assert.equal(portal.state.segment,'102');assert.equal(portal.state.time,20);
   assert.equal(segment.tab.qwenasrReplayDirect,undefined);
 
-  const before=calls.length; portal=environment('https://njupt.smartclass.cn/Default.aspx',{},false);
-  await portal.api.attachPortal();assert.equal(calls.length,before);
+  // Manually opened tabs authenticate, then return to their original page.
+  const ordinaryURL='https://njupt.smartclass.cn/UserSpace/CourseList.aspx#page=2';
+  const ordinary=environment(ordinaryURL,{},false);
+  await ordinary.api.attachPortal();
+  assert.match(ordinary.navigations[0],/^http:\/\/127\.0\.0\.1:8765\/course\/replay\?portal=/);
+  const handoff=environment(ordinary.navigations[0],ordinary.tab);
+  await handoff.api.attachLocal();
+  assert.match(handoff.navigations[0],/SystemSpace\/Redirect.aspx\?ticket=/);
+  const logged=environment('https://njupt.smartclass.cn/Default.aspx',ordinary.tab,true);
+  await logged.api.attachPortal();
+  assert.deepEqual(logged.navigations,[ordinaryURL]);
+  assert.equal(ordinary.tab.qwenasrReplayDirect,undefined);
+  const before=calls.length;
+  await environment(ordinaryURL,{},true).api.attachPortal();
+  assert.equal(calls.length,before);
+  const retryTab=environment(ordinaryURL,{},false);
+  await retryTab.api.attachPortal();
+  await environment(retryTab.navigations[0],retryTab.tab).api.attachLocal();
+  const rejected=environment('https://njupt.smartclass.cn/Default.aspx',retryTab.tab,false);
+  await rejected.api.attachPortal();
+  assert.equal(rejected.navigations.length,0);
+  assert.equal(retryTab.tab.qwenasrReplayDirect,undefined);
+  for(const bad of ['https://evil.test/','https://njupt.smartclass.cn/SystemSpace/Redirect.aspx?ticket=x',
+      'https://njupt.smartclass.cn/Logout.aspx']) {
+    assert.throws(()=>ordinary.api.validateTarget({kind:'portal',url:bad}));
+  }
 
   // Source-page messages cannot create arbitrary jobs, and the old multi-tab request is ignored.
   const blocked=environment(localURL);await blocked.api.attachLocal();

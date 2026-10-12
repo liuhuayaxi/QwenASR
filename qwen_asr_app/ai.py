@@ -558,6 +558,11 @@ async def request_ai_text(
     semaphores = _api_semaphores.setdefault(loop, {})
     key = (mode, provider_transport(provider), str(provider.get("base_url") or ""),
            str(provider.get("model") or provider.get("cli_model") or ""), concurrency)
+    if provider_transport(provider) == "agy_cli":
+        # All AGY functions use the same local CLI account. Share its slots so
+        # six correction calls plus six summary calls cannot become twelve
+        # concurrent sessions behind a setting that says six.
+        key = ("agy_cli", concurrency)
     semaphore = semaphores.setdefault(key, asyncio.Semaphore(concurrency))
     base_url, credential = provider_credentials(config, mode)
     if provider_transport(provider) == "agy_cli":

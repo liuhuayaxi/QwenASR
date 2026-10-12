@@ -1,12 +1,13 @@
 import {groupTasks, attentionStatuses} from './workbench/continuation.js?v=20261011';
 import {aiTaskPayload} from './task-config.js?v=20260913-tasks-1';
+import {mergeLiveCourseProgress} from './course-progress.js?v=20261011-live-1';
 
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c]));
 const active = new Set(['running', 'queued', 'waiting_retry', 'stopping']);
 const attention = attentionStatuses;
 const labels = {running:'进行中', queued:'排队中', waiting_retry:'等待自动重试', stopping:'正在停止', paused:'已暂停', failed:'失败', error:'失败', interrupted:'已中断', pending:'待处理', stale:'原件已更新', completed_with_errors:'部分失败', completed:'已完成', cancelled:'已取消'};
-const actionLabels = {continue:'继续', retry:'重试', pause:'暂停', cancel:'取消', download:'仅恢复下载', new_recognition:'新建识别', new_local:'新建本地任务'};
+const actionLabels = {continue:'继续', retry:'重试', regenerate:'重新生成', pause:'暂停', cancel:'取消', download:'仅恢复下载', new_recognition:'新建识别', new_local:'新建本地任务'};
 const filterLabels = {daily:'需要继续', all:'全部任务', active:'进行中', attention:'待处理', paused:'已暂停', completed:'已完成', cancelled:'已取消'};
 const state = {tasks: [], counts: {}, history: {}, filter: 'daily', selected: new Set(), busy: false, loading: false, ready: false};
 let timer, toastTimer, lastPayload = '';
@@ -76,7 +77,7 @@ function card(task) {
   const resultClass = done ? 'task-result-link' : 'ui-button';
   const progress = task.status === 'completed' ? 100 : Object.hasOwn(task, 'progress') ? task.progress : (task.total ? Math.round((task.completed || 0) / task.total * 100) : null);
   const bounded = progress === null ? null : Math.max(0, Math.min(100, Number(progress) || 0));
-  const count = task.total ? `${task.completed || 0}/${task.total}${task.family === 'mineru' ? ' 个文件' : ' 段'}` : '';
+  const count = task.total ? `${task.completed || 0}/${task.total}${task.type === 'course_queue' ? ' 堂课' : task.family === 'mineru' ? ' 个文件' : ' 段'}` : '';
   const wait = task.status === 'waiting_retry' && task.retry_in_seconds ? ` · 约 ${task.retry_in_seconds} 秒后自动重试` : '';
   const stage = (task.stage || (task.status === 'pending' ? '等待手动开始处理' : labels[task.status])) + wait;
   const error = friendlyError(task);
@@ -150,7 +151,17 @@ async function load() {
   if (state.loading || state.busy) return;
   clearTimeout(timer); state.loading = true;
   try {
-    const data = await api('/api/tasks');
+    let data = await api('/api/tasks');
+    let courseWarning = '';
+    if ((data.tasks || []).some(task => task.type === 'course_queue')) {
+      try {
+        const response = await fetch('/course/api/status', {cache: 'no-store', signal: AbortSignal.timeout(5000)});
+        if (!response.ok) throw new Error('课程服务暂时不可用');
+        data = mergeLiveCourseProgress(data, await response.json());
+      } catch {
+        courseWarning = '课程回放实时进度暂时不可用，当前显示已保存的进度，正在自动重连。';
+      }
+    }
     state.tasks = data.tasks || []; state.counts = data.counts || {}; state.history = data.history || {}; state.ready = true;
     state.selected = new Set([...state.selected].filter(id => state.tasks.some(task => task.id === id)));
     const categories = [...new Set([...state.tasks.map(task => task.category), new URLSearchParams(location.search).get('category')].filter(Boolean))].sort((a,b) => a.localeCompare(b,'zh-CN'));
@@ -159,7 +170,7 @@ async function load() {
     if ([...$('categoryFilter').options].some(option => option.value === categoryValue)) $('categoryFilter').value = categoryValue;
     const signature = JSON.stringify(data);
     if (signature !== lastPayload) { render(); lastPayload = signature; }
-    notice('loadError', ''); notice('sourceWarning', (data.warnings || []).join('\n'));
+    notice('loadError', ''); notice('sourceWarning', [...(data.warnings || []), courseWarning].filter(Boolean).join('\n'));
     $('lastUpdated').textContent = `已同步 ${new Date().toLocaleTimeString('zh-CN')} · 每 3 秒自动更新`;
   } catch (error) {
     notice('loadError', `${error.message}。${state.ready ? '当前保留上次读取的任务。' : ''}`);

@@ -12,7 +12,7 @@ const record = {id:'smoke-class',title:'合成课堂第 3 讲',category:'合成�
  segments:[{id:1,start:0,end:60,raw:'合成原文：菲涅耳公式与相位差。',corrected:'合成校对内容：菲涅耳公式与相位差。'}],ai_reviews:[],ai_summaries:[],
  ai_note_summary:{summary:'# 合成课堂笔记\n\n菲涅耳公式与相位差。',abstract:'合成摘要'},downloads:{audio:'/fake.aac',transcript:'/fake.txt',raw_transcript:'/fake.txt',corrected_transcript:'/fake.txt',bundle:'/fake.zip',ai_summary:'/fake.md'},inference:{provider:'remote',job_id:'fake-job'}};
 const baseTask = {id:'summary:smoke-class',recording_id:record.id,recording_title:record.title,title:record.title,category:record.category,type:'summary',family:'ai',label:'课后复习笔记',status:'interrupted',stage:'笔记生成中断',actions:['continue','retry'],result_url:'/library?recording=smoke-class',inference:{provider:'remote'}};
-let tasks,uploaded,reviewUploaded,activeSession,requests=[];
+let tasks,uploaded,reviewUploaded,activeSession,liveCourse,optimizedReady,requests=[];
 const pages={'/':'index.html','/library':'index.html','/tasks':'tasks.html','/notes':'course-files.html','/workspace':'workspace.html','/course-files':'course-files.html','/course/':'smartclass.html'};
 const server=http.createServer((req,res)=>{
  const url=new URL(req.url,'http://localhost');
@@ -24,7 +24,7 @@ async function fixtures(route) {
  const request=route.request(),url=new URL(request.url()),p=url.pathname;
  requests.push({path:p,method:request.method(),body:request.postData()});
  let data={};
- if(p==='/course/api/status')data={state:'idle',message:'合成课程回放',identity:null,courses:[],options:{},imports:[{state:'completed',record_id:record.id,title:record.title}],queue:{remaining:0}};
+ if(p==='/course/api/status')data=liveCourse || {state:'idle',message:'合成课程回放',identity:null,courses:[],options:{},imports:[{state:'completed',record_id:record.id,title:record.title}],queue:{remaining:0}};
  else if(p==='/api/config')data={feature_version:'library-upgrade-v15-classroom-chat'};
  else if(p==='/api/health')data={status:'idle',detail:'合成服务就绪',model:'fake',device:'fake',asr_provider:'remote_only',local_model_loaded:false};
  else if(p==='/api/library')data={records:[record],categories:['未分类',record.category],category_profiles:{},storage_root:'/synthetic'};
@@ -43,7 +43,7 @@ async function fixtures(route) {
  else if(p.endsWith('/chat'))data={turns:[],conversation_id:'synthetic',context:{},session_id:record.id};
  else if(p==='/api/upload-jobs' && request.method()==='POST')data={job:{id:'synthetic-upload',recording_id:record.id},id:'synthetic-upload'};
  else if(p==='/api/upload-jobs/synthetic-upload/events'){await route.fulfill({status:200,contentType:'application/x-ndjson',body:JSON.stringify({type:'complete',progress:100,stage:'完成',session:record})+'\n'});return;}
- else if(p==='/api/course-files')data={category:record.category,categories:[record.category],files:uploaded?[{id:'synthetic-file',name:'合成讲义.txt',kind:'lecture',size:20,created_at:'2026-10-10',conversion:{status:'none'},sync:[]}]:[],directory:'/synthetic',capabilities:{office:false,mineru:false}};
+ else if(p==='/api/course-files')data={category:record.category,categories:[record.category],files:optimizedReady?[{id:'synthetic-ready',name:'合成讲义.pdf',kind:'lecture',size:20,created_at:'2026-10-10',conversion:{status:'completed',pages:2,mineru_settings:{tier:'advanced'}},sync:[]}]:uploaded?[{id:'synthetic-file',name:'合成讲义.txt',kind:'lecture',size:20,created_at:'2026-10-10',conversion:{status:'none'},sync:[]}]:[],directory:'/synthetic',capabilities:{office:false,mineru:false}};
  else if(p==='/api/course-files/upload'){uploaded=true;data={duplicate:false};}
  else if(p==='/api/notes')data={category:record.category,categories:[record.category],lessons:[{id:record.id,title:record.title,date:'2026-10-10'}],notes:[{id:'review-old',title:'已有复习 PDF',filename:'review-old.pdf',created_at:'2026-10-10',exists:true,source_lessons:[{title:record.title,date:'2026-10-10'}],download_url:'/api/notes/review-old/download'},...(reviewUploaded ? [{id:'review-new',title:'新复习 PDF',filename:'new.pdf',created_at:'2026-10-11',exists:true,download_url:'/api/notes/review-new/download'}] : [])],prompt_template:'合成 {{course}} {{lessons}}',storage_root:'/synthetic'};
  else if(p==='/api/notes/upload'){reviewUploaded=true;data={note:{title:'新复习 PDF'}};}
@@ -59,7 +59,7 @@ async function fixtures(route) {
  const results=[];
  async function scenario(name,run) {
   tasks=[{...baseTask},{...baseTask,id:'refinement:smoke-class',type:'refinement',label:'转写校对',status:'running',stage:'正在校对',actions:['pause']},{...baseTask,id:'summary:old',recording_id:'old',title:'已完成合成课堂',status:'completed',actions:[]}];
-  uploaded=false;reviewUploaded=false;activeSession=null;requests=[];
+  uploaded=false;reviewUploaded=false;activeSession=null;liveCourse=null;optimizedReady=false;requests=[];
   const context=await browser.newContext({permissions:['microphone'],viewport:{width:1440,height:1000}});
   const errors=[];
   await context.route('**/*',async route=>{const url=new URL(route.request().url());if(url.origin!==origin){await route.abort();return;}if(url.pathname.startsWith('/api/') || url.pathname.startsWith('/course/api/'))await fixtures(route);else await route.continue();});
@@ -70,6 +70,33 @@ async function fixtures(route) {
   finally {await context.close();}
  }
  try {
+  await scenario('课程任务使用实时进度并自动刷新，断线明确提示',async(page,context,origin)=>{
+    tasks=[{id:'course_queue',type:'course_queue',family:'asr',label:'课程回放队列',title:'课程回放 · 1 堂课',status:'running',progress:10.7,total:1,completed:0,actions:['pause'],course_items:[{id:'course-a',title:'合成课堂 A',state:'running',progress:10.7,phases:[{key:'asr',label:'本地语音转写',percent:12.7,state:'running'}]}]}];
+    liveCourse={queue:{paused:false,items:[{id:'course-a',title:'合成课堂 A',state:'running'}]},imports:[{id:'course-a',progress:62,phases:{download:{label:'获取回放音频',percent:100,state:'completed'},asr:{label:'本地语音转写',percent:48.8,detail:'45.9/94.0 分钟',state:'running'}}}]};
+    await page.goto(origin+'/tasks');
+    const phase=page.locator('.course-phase').filter({hasText:'本地语音转写'}).locator('progress');
+    await page.waitForFunction(()=>document.querySelector('.task-progress')?.value===62);
+    assert.equal(await phase.getAttribute('value'),'48.8');
+    assert.match(await page.locator('.task-stage').innerText(),/0\/1 堂课/);
+    liveCourse.imports[0].progress=65.3;liveCourse.imports[0].phases.asr.percent=55.1;
+    await page.waitForFunction(()=>document.querySelector('.task-progress')?.value===65.3);
+    assert.equal(await phase.getAttribute('value'),'55.1');
+    await page.route('**/course/api/status',route=>route.fulfill({status:503,contentType:'application/json',body:'{}'}));
+    await page.locator('#refreshTasks').click();await page.locator('#sourceWarning').filter({hasText:'实时进度暂时不可用'}).waitFor();
+    assert.equal(await page.locator('.task-card').count(),1);
+    await page.unroute('**/course/api/status');
+    liveCourse.queue.items[0].state='completed';
+    await page.locator('#refreshTasks').click();await page.waitForFunction(()=>document.querySelectorAll('.task-card').length===0);
+    assert.equal(await page.locator('#sourceWarning').isVisible(),false);
+  });
+  await scenario('优化后 PDF 文案与原件下载明确区分',async(page,context,origin)=>{
+    optimizedReady=true;await page.goto(origin+'/course-files');
+    const card=page.locator('[data-id="synthetic-ready"]');await card.waitFor();
+    assert.match(await card.locator('.file-status').innerText(),/^AI 优化后 PDF 已就绪/);
+    assert.equal(await card.locator('[data-action="convert"]').innerText(),'✓ AI 优化后 PDF 已就绪');
+    assert.match(await card.getByRole('link',{name:'下载 AI 优化后 PDF',exact:true}).getAttribute('href'),/variant=pdf/);
+    assert.match(await card.getByRole('link',{name:'下载原件',exact:true}).getAttribute('href'),/variant=original/);
+  });
   await scenario('首页与来源证据',async(page,context,origin)=>{await page.goto(origin);await page.locator('#continuationList [data-recording]').waitFor();await page.locator('.recognition-details summary').click();await page.waitForFunction(()=>document.getElementById('recognitionStatus').textContent.includes('识别来源'));assert.match(await page.locator('#recognitionStatus').innerText(),/来源：待确认/);assert.match(await page.locator('#recognitionStatus').innerText(),/仅远程，不自动回退/);await page.screenshot({path:path.join(output,'workbench.png'),fullPage:true});});
   await scenario('新建课堂来源入口',async(page,context,origin)=>{await page.goto(origin+'/workspace');await page.locator('#workspaceRecent [data-recording]').waitFor();assert.equal(await page.locator('#workspaceCourse').inputValue(),'');await page.locator('#newClass').click();await page.locator('#newClassDialog[open]').waitFor();assert.equal(await page.locator('#newClassDialog a').count(),3);});
   await scenario('课堂记录直接打开笔记',async(page,context,origin)=>{await page.goto(origin+'/library?recording='+record.id);await page.locator('#noteDialog[open]').waitFor();assert.match(await page.locator('#noteSummaryReader').innerText(),/菲涅耳公式/);});

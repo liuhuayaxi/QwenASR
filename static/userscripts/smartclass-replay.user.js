@@ -1,8 +1,10 @@
 // ==UserScript==
 // @name         QwenASR 南邮回放跳转
 // @namespace    qwenasr.local/smartclass-replay
-// @version      1.1.0
-// @description  从录音库打开南邮 Smart Class，检查浏览器登录并准确定位课堂时间。
+// @version      1.2.0
+// @description  自动登录南邮 Smart Class，并从录音库准确定位课堂回放。
+// @updateURL    http://127.0.0.1:8765/course/replay-script.user.js
+// @downloadURL  http://127.0.0.1:8765/course/replay-script.user.js
 // @match        http://127.0.0.1/course/replay*
 // @match        http://localhost/course/replay*
 // @match        https://njupt.smartclass.cn/*
@@ -18,7 +20,8 @@
   const PORTAL = 'https://njupt.smartclass.cn';
   const CHANNEL = 'qwenasr-userscript-v1';
   const TAB_KEY = 'qwenasrReplayDirect';
-  const VERSION = '1.1.0';
+  const VERSION = '1.2.0';
+  const LOCAL = 'http://127.0.0.1:8765';
   const MAX_NAVIGATIONS = 2;
   const page = unsafeWindow;
   const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -27,6 +30,7 @@
   const saveTab = data => new Promise(resolve => GM_saveTab(data, resolve));
 
   function validateTarget(input) {
+    if (input?.kind === 'portal') return {kind:'portal', url:portalURL(input.url)};
     const url = new URL(input?.url || '');
     if (url.origin !== PORTAL || url.username || url.password || url.pathname !== '/PlayPages/Video.aspx'
         || !/^[a-f0-9]{32}$/i.test(url.searchParams.get('NewID') || '')
@@ -38,6 +42,15 @@
     clean.searchParams.set('NewID', url.searchParams.get('NewID'));
     clean.searchParams.set('SegementID', url.searchParams.get('SegementID'));
     return {url:clean.href, seconds:input.seconds};
+  }
+  function portalURL(value) {
+    const url = new URL(value);
+    if (url.origin !== PORTAL || url.username || url.password
+        || /(?:logout|signout|redirect|login)\.aspx$/i.test(url.pathname)
+        || [...url.searchParams.keys()].some(key => /^(?:ticket|token|password|authKey)$/i.test(key))) {
+      throw new Error('学校页面地址无效');
+    }
+    return url.href;
   }
   function validTicket(value) {
     try {
@@ -269,7 +282,18 @@
 
   async function attachPortal() {
     currentJob = (await tabInfo())[TAB_KEY] || null;
-    if (!currentJob) return; // Ordinary school tabs are left untouched.
+    if (!currentJob) {
+      // The normal portal also exposes userInfo for anonymous visitors.
+      for (let attempt = 0; attempt < 30 && !Array.isArray(page.userInfo); attempt += 1) await wait(300);
+      if (!Array.isArray(page.userInfo) || page.userInfo[0]?.UserID || portalError()) return;
+      const destination = location.pathname.toLowerCase() === '/401.aspx'
+        ? PORTAL + '/UserSpace/CourseList.aspx' : portalURL(location.href);
+      currentJob = {id:crypto.randomUUID(), target:{kind:'portal', url:destination},
+        returnURL:LOCAL + '/course/replay?portal=' + encodeURIComponent(destination),
+        phase:'need_login', expires:Date.now()+180000, authAttempts:1, navigationAttempts:0};
+      await navigate(currentJob.returnURL);
+      return;
+    }
     const id = currentJob.id;
     let resume;
     try {
@@ -282,6 +306,11 @@
         updateJob(id,{phase:'need_login', authAttempts:1});
         // Briefly return to the invisible local endpoint for its same-origin login call.
         await navigate(returnURL);
+        return;
+      }
+      if (target.kind === 'portal') {
+        await clearJob();
+        if (location.href !== target.url) location.replace(target.url);
         return;
       }
       const current = new URL(location.href), destination = new URL(target.url);

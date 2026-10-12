@@ -33,6 +33,15 @@ AUDIO_SCHEMA = {
 
 
 class IdeaShellAudioAttachmentTests(unittest.TestCase):
+    def test_ideashell_title_has_course_date_and_respects_schema_limit(self):
+        record = type('Record', (), {'metadata': {
+            'title': '半导体光电器件应用与量子跃迁机制',
+            'course_time': {'start': '2026-09-02T08:00:00+08:00'},
+        }})()
+        self.assertEqual(app.ideashell_note_title(record, 30), '0902 半导体光电器件应用与量子跃迁机制')
+        record.metadata['title'] = '0902 半导体光电器件应用与量子跃迁机制'
+        self.assertEqual(app.ideashell_note_title(record, 30), '0902 半导体光电器件应用与量子跃迁机制')
+
     def test_schema_arguments_are_base64_encoded(self):
         result = audio_attachment_arguments(AUDIO_SCHEMA, "课堂.aac", b"abc")
         self.assertEqual(result["audios"][0], {"name": "课堂.aac", "data": base64.b64encode(b"abc").decode()})
