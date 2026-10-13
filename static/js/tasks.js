@@ -1,6 +1,8 @@
 import {groupTasks, attentionStatuses} from './workbench/continuation.js?v=20261011';
 import {aiTaskPayload} from './task-config.js?v=20260913-tasks-1';
 import {mergeLiveCourseProgress} from './course-progress.js?v=20261011-live-1';
+import {mineruEstimateLabel, legacyMineruProgress} from './mineru-progress-view.js?v=20261013-time-2';
+import {resourceStatus} from './resource-status.js?v=20261013-1';
 
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c]));
@@ -75,8 +77,12 @@ function card(task) {
   const done = task.status === 'completed';
   const actions = done ? [] : (task.actions || []);
   const resultClass = done ? 'task-result-link' : 'ui-button';
-  const progress = task.status === 'completed' ? 100 : Object.hasOwn(task, 'progress') ? task.progress : (task.total ? Math.round((task.completed || 0) / task.total * 100) : null);
+  const legacyProgress = legacyMineruProgress(task);
+  const progress = task.status === 'completed' ? 100 : legacyProgress !== null ? legacyProgress : Object.hasOwn(task, 'progress') ? task.progress : (task.total ? Math.round((task.completed || 0) / task.total * 100) : null);
   const bounded = progress === null ? null : Math.max(0, Math.min(100, Number(progress) || 0));
+  const estimate = task.family === 'mineru' ? task.progress_estimate : null;
+  const estimateLabel = mineruEstimateLabel(estimate, task.status) || (legacyProgress !== null ? '按已完成页段显示 · 整体耗时预估尚未就绪' : task.family === 'mineru' && task.status === 'running' ? '正在计算整体进度' : '');
+  const resource = resourceStatus(task);
   const count = task.total ? `${task.completed || 0}/${task.total}${task.type === 'course_queue' ? ' 堂课' : task.family === 'mineru' ? ' 个文件' : ' 段'}` : '';
   const wait = task.status === 'waiting_retry' && task.retry_in_seconds ? ` · 约 ${task.retry_in_seconds} 秒后自动重试` : '';
   const stage = (task.stage || (task.status === 'pending' ? '等待手动开始处理' : labels[task.status])) + wait;
@@ -89,9 +95,9 @@ function card(task) {
   const tier = inferMetrics.tier || task.mineru_settings?.tier;
   const recognition = task.family === 'mineru' ? [providerName,
     inferMetrics.mineru_version ? `MinerU ${inferMetrics.mineru_version}` : '',
-    tier ? `${tier === 'advanced' ? 'Advanced' : tier} 档位` : '', inference.fallback ? '已回退本机' : ''].filter(Boolean).join(' · ') : task.family === 'asr' ? [providerName || '来源未验证', inferMetrics.model || inference.model || '', inferMetrics.dtype || inference.dtype || '', inferMetrics.device || inference.device || '', inference.fallback ? '已回退本机' : '', inferMetrics.gpu_release_state === 'verified' ? '显存释放已验证' : '资源遥测未验证'].filter(Boolean).join(' · ') : '';
+    tier ? `${tier === 'advanced' ? 'Advanced' : tier} 档位` : '', inference.fallback ? '已回退本机' : ''].filter(Boolean).join(' · ') : task.family === 'asr' && task.type !== 'course_queue' ? [providerName, inferMetrics.model || inference.model || '', inferMetrics.dtype || inference.dtype || '', inferMetrics.device || inference.device || '', inference.fallback ? '已回退本机' : ''].filter(Boolean).join(' · ') : '';
   const aiProvider = task.configured_ai_model ? `AI 通道：${task.configured_ai_transport === 'agy_cli' ? 'AGY CLI' : 'OpenAI 兼容 API'} · ${task.configured_ai_model}${task.configured_ai_effort ? ` · ${task.configured_ai_effort} 思考` : ''}` : '';
-  const details = [operationLabel(inference, {job_id: task.remote_job_id, state: task.remote_operation_state}, mode), aiProvider, recognition ? `识别环境：${recognition}` : '', task.error && task.error !== error ? task.error : '',
+  const details = [operationLabel(inference, {job_id: task.remote_job_id, state: task.remote_operation_state}, mode), aiProvider, recognition ? `识别环境：${recognition}` : '', resource?.detail, task.error && task.error !== error ? task.error : '',
     task.range_end ? `片段范围：${Math.floor(task.range_start / 60)}–${Math.ceil(task.range_end / 60)} 分钟` : '',
     task.attempts > 1 ? `历史尝试 ${task.attempts} 次` : '', ...(task.warnings || [])].filter(Boolean);
   const files = (task.files || []).map(file => `<li class="task-file"><div><b>${esc(file.source_name)}</b><span>${esc(labels[file.status] || file.status)}${file.status === 'running' && file.progress != null ? ` · ${Math.round(file.progress || 0)}%` : ''}</span></div><p>${esc(file.error || file.stage)}</p><p>${esc(operationLabel(file.inference, file.remote_operation, task.configured_provider))}</p><p>${esc(file.output_path || file.source_path)}</p>${file.download_url ? `<a href="${esc(file.download_url)}" download>下载 AI 友好 PDF</a>` : ''}</li>`).join('');
@@ -99,9 +105,10 @@ function card(task) {
   return `<article class="task-card" data-id="${esc(task.id)}" data-status="${esc(task.status)}"><div class="task-card-top">
     ${done ? '' : `<input class="task-select" type="checkbox" aria-label="选择 ${esc(task.label)}：${esc(task.title)}" ${state.selected.has(task.id) ? 'checked' : ''} ${state.busy ? 'disabled' : ''}>`}
     <div class="task-main"><div class="task-title"><h3>${esc(task.title)}</h3><span class="task-status">${esc(labels[task.status] || task.status)}</span></div>
-    <div class="task-meta"><span class="task-type">${esc(task.label)}</span><span>${esc(task.category || task.source)}</span>${recognition ? `<span>${esc(recognition)}</span>` : ''}${dateLabel(task.updated_at) ? `<span>更新于 ${esc(dateLabel(task.updated_at))}</span>` : ''}</div>
-    <div class="task-stage"><span>${esc(stage)}</span><span>${esc(count)}${bounded !== null ? `${count ? ' · ' : ''}${bounded}%` : ''}</span></div>
-    ${bounded !== null || active.has(task.status) ? `<progress class="task-progress" max="100" ${bounded !== null ? `value="${bounded}"` : ''} aria-label="${esc(task.label)}进度"></progress>` : ''}
+    <div class="task-meta"><span class="task-type">${esc(task.label)}</span><span>${esc(task.category || task.source)}</span>${recognition ? `<span>${esc(recognition)}</span>` : ''}${resource ? `<span class="task-resource ${resource.tone === 'error' ? 'error' : ''}" title="${esc(resource.detail)}">${esc(resource.text)}</span>` : ''}${dateLabel(task.updated_at) ? `<span>更新于 ${esc(dateLabel(task.updated_at))}</span>` : ''}</div>
+    <div class="task-stage"><span>${esc(stage)}</span><span>${esc(count)}${bounded !== null ? `${count ? ' · ' : ''}${estimate?.estimated && !done ? '整体预估 ' : legacyProgress !== null ? '已完成页段 ' : ''}${bounded}%` : ''}</span></div>
+    ${bounded !== null ? `<progress class="task-progress" max="100" value="${bounded}" aria-label="${esc(task.label)}${estimate?.estimated && !done ? '整体预估' : legacyProgress !== null ? '已完成页段' : ''}进度"></progress>` : active.has(task.status) ? `<div class="task-progress-indeterminate" role="progressbar" aria-label="${esc(task.label)}进度待计算"></div>` : ''}
+    ${estimateLabel ? `<p class="task-estimate">${esc(estimateLabel)}</p>` : ''}
     ${error ? `<div class="task-error">${esc(error)}</div>` : ''}
     ${actions.length || task.result_url || task.download_url ? `<div class="task-actions">${actions.map(action => `<button data-action="${action}" class="ui-button ${action === 'cancel' ? 'danger' : action === 'continue' ? 'primary' : ''}" ${state.busy ? 'disabled' : ''}>${actionLabels[action]}</button>`).join('')}
     ${task.result_url ? `<a href="${esc(task.result_url)}" class="${resultClass}">${task.type === 'course_queue' ? '打开课程回放' : task.family === 'ai' || task.type === 'upload' ? '查看笔记' : '查看课程文件'}</a>` : ''}${task.download_url ? `<a href="${esc(task.download_url)}" class="${resultClass}" download>下载 AI 友好 PDF</a>` : ''}</div>` : ''}

@@ -15,6 +15,7 @@ from .durable import atomic_json
 from .paths import PRIVATE_ROOT, ROOT
 from .pdf_ai import convert_pdf_to_ai, find_mineru_binary, validate_pdf_sources
 from .mineru_settings import mineru_settings
+from .mineru_timing import MineruTiming, pdf_pages
 from .remote_operations import saved_config, freeze, cancel, receipt, execution_lock, LocalComputeGuard, cancel_pending, recover_cancellation, download_result
 
 ACTIVE = {"queued", "running", "stopping"}
@@ -173,14 +174,21 @@ class PDFJobs:
                         continue
                     check_stopped(stop)
                     item.update(status="running", progress=None, stage="准备 MinerU")
+                    timing = MineruTiming(settings=settings, config=provider,
+                        pages=await asyncio.to_thread(pdf_pages, Path(item['source_path'])),
+                        run_id=f"{job['id']}:{index}:{time.time_ns()}",
+                        resumed=bool(receipt(self.receipt_path(job, index, item)).get('job_id')))
 
-                    def update(stage, percent, item=item, index=index):
+                    def update(stage, percent, item=item, index=index, timing=timing):
                         if item["status"] != "running" or stop.is_set():
                             return
-                        item.update(stage=stage, progress=None if percent is None else min(99, percent))
+                        estimate = timing.observe(stage, percent)
+                        item.update(stage=stage, progress=estimate['percent'], progress_estimate=estimate)
                         job.update(stage=f"{index + 1}/{total} · {item['source_name']} · {stage}",
-                                   progress=None if any(f.get('progress') is None for f in job['files']) else round(sum(f['progress'] for f in job['files']) / total),
+                                   progress=None if any(f.get('progress') is None for f in job['files']) else min(99, round(sum(f['progress'] for f in job['files']) / total, 1)),
                                    updated_at=time.time())
+                        job['progress_estimate'] = {**estimate, 'percent': job['progress'],
+                            'scope': 'current_file' if total > 1 else 'document'}
                         self.save()
 
                     try:
@@ -206,7 +214,8 @@ class PDFJobs:
                             receipt_path=self.receipt_path(job, index, item),
                             progress=lambda stage, percent, callback=update: loop.call_soon_threadsafe(callback, stage, percent))
                         item.update(status="completed", stage="转换完成", progress=100,
-                                    output_path=str(output), output_name=output.name, error="", mineru_settings=dict(settings), inference=inference_metadata)
+                                    output_path=str(output), output_name=output.name, error="", mineru_settings=dict(settings),
+                                    progress_estimate=timing.finish(), inference=inference_metadata)
                     except ConversionStopped:
                         raise
                     except Exception as exc:

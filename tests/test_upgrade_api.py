@@ -55,12 +55,14 @@ class UpgradeAPITests(unittest.IsolatedAsyncioTestCase):
         output.write_bytes(b'%PDF-saved-result')
         self.pdfs.jobs['done'] = {'id': 'done', 'status': 'completed', 'created_at': 1,
             'updated_at': 2, 'files': [{'source_name': 'synthetic.pdf', 'source_path': str(self.root/'missing.pdf'),
+                       'inference': {'provider': 'remote', 'metrics': {'gpu_release_verified': True}},
                        'status': 'completed', 'output_path': str(output), 'progress': 100}]}
         with patch('qwen_asr_app.task_center.discover_courses'), patch('qwen_asr_app.task_center.course_tasks', return_value=[]):
             async with self.api() as client:
                 feed = (await client.get('/api/tasks')).json()
                 task = next(item for item in feed['tasks'] if item['id'] == 'pdf:done')
                 self.assertEqual(task['actions'], [])
+                self.assertTrue(task['inference']['metrics']['gpu_release_verified'])
                 cleared = await client.post('/api/tasks/clear-completed', headers=self.headers,
                     json={'items': [{'id': task['id'], 'generation': task['history_generation']}]})
                 self.assertEqual(cleared.status_code, 200, cleared.text)
@@ -92,6 +94,7 @@ class UpgradeAPITests(unittest.IsolatedAsyncioTestCase):
         self.courses.store.settings.categories = ['synthetic']
         running = {'id': 'b' * 32, 'name': 'running.pdf', 'conversion': {
             'status': 'running', 'updated_at': '2026-10-10T09:00:00+08:00',
+            'progress': 42.5, 'progress_estimate': {'estimated': True, 'percent': 42.5, 'remaining_seconds': 180},
             'remote_operation': {'state': 'running'},
             'inference_settings': {'mineru_provider': 'remote_only'}}}
         done = {'id': 'c' * 32, 'name': 'done.pdf', 'conversion': {
@@ -104,6 +107,8 @@ class UpgradeAPITests(unittest.IsolatedAsyncioTestCase):
             async with self.api() as client:
                 feed = (await client.get('/api/tasks')).json()
         self.assertEqual([t['title'] for t in feed['tasks']], ['running.pdf', 'queued.pdf', 'done.pdf'])
+        self.assertEqual(feed['tasks'][0]['progress_estimate']['remaining_seconds'], 180)
+        self.assertEqual(feed['tasks'][0]['progress'], 42.5)
         self.assertEqual(feed['tasks'][1]['status'], 'queued')
         self.assertEqual(feed['tasks'][1]['remote_operation_state'], 'queued')
         self.assertEqual(feed['tasks'][2]['actions'], [])

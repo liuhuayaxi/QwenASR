@@ -122,8 +122,8 @@ def _run_mineru(
                 check_stopped(stop)
                 time.sleep(0.75)
                 text = log_path.read_text(encoding="utf-8", errors="replace")
-                update = _mineru_progress(text)
-                if update and update != last_update:
+                update = _mineru_progress(text) or ('Mac · 加载 MinerU', None)
+                if update:
                     last_update = update
                     if progress:
                         progress(*update)
@@ -187,6 +187,7 @@ def convert_pdf_to_ai(
         # retains process-group cancellation and uses a single parse for exports.
         def compute_local():
             started = time.monotonic()
+            report('Mac · 准备页面与模型', None)
             mineru = find_mineru_binary()
             if mineru is None:
                 raise RuntimeError("未找到 MinerU 4。请先运行 scripts/install_mineru4.command")

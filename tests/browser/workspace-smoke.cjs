@@ -110,6 +110,41 @@ async function fixtures(route) {
   await scenario('新建课堂来源入口',async(page,context,origin)=>{await page.goto(origin+'/workspace');await page.locator('#workspaceRecent [data-recording]').waitFor();assert.equal(await page.locator('#workspaceCourse').inputValue(),'');await page.locator('#newClass').click();await page.locator('#newClassDialog[open]').waitFor();assert.equal(await page.locator('#newClassDialog a').count(),3);});
   await scenario('课堂记录直接打开笔记',async(page,context,origin)=>{await page.goto(origin+'/library?recording='+record.id);await page.locator('#noteDialog[open]').waitFor();assert.match(await page.locator('#noteSummaryReader').innerText(),/菲涅耳公式/);});
   await scenario('任务默认过滤分组与恢复',async(page,context,origin)=>{await page.goto(origin+'/tasks');await page.locator('.task-group').waitFor();assert.equal(await page.locator('.task-group').count(),1);assert.equal(await page.locator('.task-card').count(),2);await page.locator('[data-id="summary:smoke-class"] [data-action="continue"]').click();await page.getByText('任务已加入后台队列',{exact:true}).waitFor();assert.ok(requests.some(request=>request.path==='/api/tasks/action'));await page.locator('[data-status="completed"]').click();assert.equal(await page.locator('.task-card').count(),1);await page.goto(origin+'/tasks?category='+encodeURIComponent('空课程'));await page.locator('#lastUpdated').filter({hasText:'已同步'}).waitFor();assert.equal(await page.locator('.task-card').count(),0);});
+  await scenario('MinerU 两端稳定耗时进度、刷新与旧任务兼容',async(page,context,origin)=>{
+    const task={id:'mineru-remote',type:'course_pdf',family:'mineru',label:'课程资料识别',title:'合成讲义 · Windows',category:'合成课程',status:'running',
+      stage:'Windows · MinerU · 版面分析 · 阶段 100% · 第 33–36 页/90 · 窗口 9/23',progress:42.5,actions:['pause','cancel'],
+      progress_estimate:{estimated:true,percent:42.5,phase:'pages',elapsed_seconds:195,remaining_seconds:260,sample_count:3,observed_windows:7},configured_provider:'remote_only'};
+    tasks=[task,{...structuredClone(task),id:'mineru-local',title:'合成讲义 · Mac',configured_provider:'local',stage:'Mac · MinerU · 文字识别 · 阶段 50%',progress:21.4,
+      progress_estimate:{...task.progress_estimate,percent:21.4,sample_count:0,observed_windows:0}},
+      {...structuredClone(task),id:'mineru-legacy',title:'尚未启用耗时预估的旧任务',progress:null,progress_estimate:null},
+      {...structuredClone(task),id:'mineru-loading',title:'刚开始准备的任务',progress:null,progress_estimate:null,stage:'正在加载模型'}];
+    await page.goto(origin+'/tasks');
+    const card=page.locator('[data-id="mineru-remote"]');await card.waitFor();
+    assert.equal(await card.locator('progress').getAttribute('value'),'42.5');
+    assert.match(await card.innerText(),/整体预估 42.5%/);
+    assert.match(await card.innerText(),/预计剩余约 4 分 20 秒/);
+    assert.match(await page.locator('[data-id="mineru-local"]').innerText(),/初步估算/);
+    assert.equal(await page.locator('[data-id="mineru-legacy"] progress').getAttribute('value'),'35.6');
+    assert.match(await page.locator('[data-id="mineru-legacy"]').innerText(),/已完成页段/);
+    assert.equal(await page.locator('[data-id="mineru-loading"] .task-progress-indeterminate').evaluate(el=>getComputedStyle(el).animationName),'none');
+    await page.screenshot({path:path.join(output,'mineru-time-progress.png'),fullPage:true});
+    tasks[0]={...tasks[0],progress:62.1,progress_estimate:{...task.progress_estimate,percent:62.1,overrun:true,remaining_seconds:null}};
+    await page.reload();await card.waitFor();
+    assert.equal(await card.locator('progress').getAttribute('value'),'62.1');
+    assert.match(await card.innerText(),/超出预估耗时/);
+    assert.doesNotMatch(await card.innerText(),/预计剩余约/);
+    await page.setViewportSize({width:390,height:844});
+    assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+  });
+  await scenario('资源检查不把课程队列或旧版成功结果显示为未验证',async(page,context,origin)=>{
+    tasks=[{id:'course_queue',type:'course_queue',family:'asr',label:'课程队列',title:'合成课程队列',status:'paused',course_items:[],actions:['continue']},
+      {id:'remote-asr',type:'upload',family:'asr',label:'转写',title:'已确认释放的旧版节点任务',status:'completed',inference:{provider:'remote',metrics:{gpu_release_verified:true}}}];
+    await page.goto(origin+'/tasks');await page.locator('#lastUpdated').filter({hasText:'已同步'}).waitFor();
+    await page.locator('button[data-status="all"]').click();
+    assert.doesNotMatch(await page.locator('[data-id="course_queue"]').innerText(),/遥测|来源未验证|资源释放/);
+    assert.match(await page.locator('[data-id="remote-asr"]').innerText(),/显存释放已确认/);
+    await page.screenshot({path:path.join(output,'resource-status.png'),fullPage:true});
+  });
   await scenario('课程资料上传',async(page,context,origin)=>{await page.goto(origin+'/course-files');await page.locator('#filesInput').setInputFiles({name:'合成讲义.txt',mimeType:'text/plain',buffer:Buffer.from('合成课程资料')});await page.locator('#files [data-id="synthetic-file"]').waitFor();assert.ok(requests.some(request=>request.path==='/api/course-files/upload'));});
   await scenario('刷新恢复课程与未结束会话',async(page,context,origin)=>{activeSession={...record,status:'active',kind:'live'};await page.goto(origin);await page.waitForFunction(()=>document.getElementById('recordName').value==='合成课堂第 3 讲');await page.reload();await page.waitForFunction(()=>document.getElementById('recordCategory').value==='合成课程');assert.match(await page.locator('#sessionState').innerText(),/会话进行中/);});
   await scenario('上传完成直接打开笔记',async(page,context,origin)=>{await page.goto(origin);await page.locator('#uploadButton:not([disabled])').waitFor();await page.locator('#fileInput').setInputFiles({name:'synthetic.wav',mimeType:'audio/wav',buffer:Buffer.from('synthetic only')});await page.locator('#openCompletedNote:not(.hidden)').waitFor();await page.locator('#closeBatchDialog').click();await page.locator('#openCompletedNote').click();await page.locator('#noteDialog[open]').waitFor();});

@@ -30,9 +30,11 @@ test('task with unknown document progress stays indeterminate', () => {
   const ctx={labels:{running:'处理中'},state:{selected:new Set(),busy:false},active:new Set(['running']),
     esc:String,dateLabel:()=>'',friendlyError:()=>'',operationLabel:()=>'',actionLabels:{}};
   vm.createContext(ctx);
+  vm.runInContext(fs.readFileSync(path.join(base,'js/mineru-progress-view.js'),'utf8').replaceAll('export function','function'),ctx);
+  vm.runInContext(fs.readFileSync(path.join(base,'js/resource-status.js'),'utf8').replaceAll('export function','function'),ctx);
   vm.runInContext(source.slice(source.indexOf('function card('),source.indexOf('function selectionControls(')),ctx);
   const html=ctx.card({id:'fixture',status:'running',family:'mineru',progress:null,total:1,completed:0,files:[{status:'running',progress:null,stage:'OCR 12/24'}]});
-  assert.match(html, /<progress[^>]*>/);
+  assert.match(html, /role="progressbar"/);
   assert.doesNotMatch(html, /<progress[^>]*value=/);
   assert.doesNotMatch(html,/0%/);
   assert.match(html,/12\/24/);
@@ -43,6 +45,8 @@ test('completed task has result links and no action buttons even from stale API'
   const ctx={labels:{completed:'已完成'},state:{selected:new Set(),busy:false},active:new Set(),
     esc:String,dateLabel:()=>'',friendlyError:()=>'',operationLabel:()=>'',actionLabels:{retry:'重试'}};
   vm.createContext(ctx);
+  vm.runInContext(fs.readFileSync(path.join(base,'js/mineru-progress-view.js'),'utf8').replaceAll('export function','function'),ctx);
+  vm.runInContext(fs.readFileSync(path.join(base,'js/resource-status.js'),'utf8').replaceAll('export function','function'),ctx);
   vm.runInContext(source.slice(source.indexOf('function card('),source.indexOf('function selectionControls(')),ctx);
   const html=ctx.card({id:'fixture',status:'completed',family:'mineru',actions:['retry'],
     result_url:'/course-files',download_url:'/saved.pdf'});

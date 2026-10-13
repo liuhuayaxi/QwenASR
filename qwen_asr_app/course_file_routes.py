@@ -22,6 +22,7 @@ from fastapi.responses import FileResponse
 from .course_files import CourseFiles, KINDS, MAX_BYTES, digest_file
 from .course_file_conversion import convert, capabilities, ENGINE
 from .mineru_settings import mineru_settings
+from .mineru_timing import MineruTiming, pdf_pages
 from .storage import local_now, safe_component
 from .paths import PRIVATE_ROOT
 from .durable import atomic_json
@@ -569,7 +570,7 @@ class CourseFileAPI:
                                   'source_sha256': current_digest, 'runtime_fingerprint': current_runtime,
                                   'operation_id': operation_id, 'operation': operation,
                                   "inference_settings": provider,
-                                  "progress": 0, "error": "", "external": False,
+                                  "progress": 0, "progress_estimate": None, "error": "", "external": False,
                                   "created_at": previous.get("created_at") or local_now(), "updated_at": local_now()}
             self.store.save(category, item)
             stop = Event()
@@ -659,8 +660,9 @@ class CourseFileAPI:
                         item, _ = self.store.get(category, asset_id)
                         if item['conversion'].get('operation_id') != generation or item['conversion']['status'] not in {'queued', 'running'}:
                             return
-                        percent = None if percent is None else min(99, percent)
-                        item["conversion"].update(status="running", stage=stage, progress=percent, updated_at=local_now())
+                        estimate = timing.observe(stage, percent)
+                        item["conversion"].update(status="running", stage=stage, progress=estimate['percent'],
+                                                  progress_estimate=estimate, updated_at=local_now())
                         self.store.save(category, item)
                     except (ValueError, OSError):
                         stop.set()
@@ -669,6 +671,9 @@ class CourseFileAPI:
                 operation = item['conversion'].get('operation')
                 if operation:
                     source = Path(operation['blob_path'])
+                timing = MineruTiming(settings=settings, config=provider,
+                    pages=await asyncio.to_thread(pdf_pages, source), run_id=generation,
+                    resumed=bool(operation and receipt(operation['receipt_path']).get('job_id')))
                 source_digest = item['conversion']['source_sha256']
                 runtime_identity = item['conversion'].get('runtime_fingerprint')
                 operation_id = item['conversion'].get('operation_id') or uuid.uuid4().hex
@@ -693,6 +698,7 @@ class CourseFileAPI:
                 if item['conversion'].get('operation_id') != generation:
                     return
                 changed = digest_file(source) != source_digest
+                report['progress_estimate'] = timing.finish(learn=not changed)
                 if provider['mineru_provider'] != 'local':
                     runtime_identity = report.get('inference', {}).get('metrics', {}).get('runtime_fingerprint')
                 item["conversion"] = {"status": "stale" if changed else "completed",
