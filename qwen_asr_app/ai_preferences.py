@@ -71,7 +71,7 @@ class AIPreferences:
     def clear(self):
         self.path.unlink(missing_ok=True)
 
-    def task_config(self, config=None, *, course=None, required_modes=(), preserve_flags=()):
+    def task_config(self, config=None, *, course=None, required_modes=(), preserve_flags=(), operation=None):
         """Replace all caller AI settings with the durable local configuration.
 
         Providers are deliberately never recovered from request data, browser
@@ -79,20 +79,49 @@ class AIPreferences:
         resolved separately for the saved endpoint by AISecretStore.
         """
         result = copy.deepcopy(config if isinstance(config, dict) else {})
-        saved = self.read()
+        try:
+            saved = self.read()
+        except (OSError, ValueError) as exc:
+            if required_modes:
+                raise
+            # A damaged optional AI configuration must not disable capture/ASR.
+            saved = {}
+            result['_ai_config_warning'] = 'AI 配置无法读取，已关闭本次 AI 功能；录音仍可保存'
         providers = saved.get('function_providers', {})
-        if not isinstance(providers, dict) or not providers:
+        if not isinstance(providers, dict):
+            if required_modes:
+                raise ValueError('本机 AI 配置格式无效，请重新保存设置')
+            providers, saved = {}, {}
+            result['_ai_config_warning'] = 'AI 配置结构无效，已关闭本次 AI 功能'
+        if not providers:
             if os.getenv('QWEN_ASR_TESTING') == '1':
                 return copy.deepcopy(config if isinstance(config, dict) else {})
-            raise ValueError('本机 AI 配置格式无效，请重新保存设置')
+        preserved = set(preserve_flags)
+        for key, default in (('ai_correction', False), ('summary_enabled', False), ('translation', 'off')):
+            if key not in preserved or key not in result:
+                result[key] = saved.get(key, default)
+        required_modes = set(required_modes)
+        if operation == 'live':
+            if result.get('ai_correction'):
+                required_modes.update(('sentence', 'review'))
+            if result.get('translation', 'off') != 'off':
+                required_modes.add('sentence')
+            if result.get('summary_enabled'):
+                required_modes.add('review')
+        elif operation == 'segment' and (result.get('ai_correction') or result.get('translation', 'off') != 'off'):
+            required_modes.add('correction' if result.get('_batch_segment_mode') else 'sentence')
         ai = {}
         for mode in PROVIDER_MODES:
             raw = providers.get(mode, {})
             if not isinstance(raw, dict):
-                raise ValueError(f'本机 {mode} AI 配置格式无效')
+                if mode in required_modes:
+                    raise ValueError(f'本机 {mode} AI 配置格式无效')
+                raw = {}
             provider = {key: copy.deepcopy(value) for key, value in raw.items() if key in PROVIDER_FIELDS}
             if mode in required_modes:
                 transport = str(provider.get('transport') or 'api').strip().lower()
+                if transport not in {'api', 'agy_cli'}:
+                    raise ValueError(f'本机 {mode} AI 通道无效')
                 if transport == 'agy_cli':
                     if not str(provider.get('cli_model') or provider.get('model') or '').strip():
                         raise ValueError(f'本机尚未保存 {mode} 的 AGY CLI 模型，请在设置中保存后重试')
@@ -112,7 +141,10 @@ class AIPreferences:
         profile = course if isinstance(course, dict) else {}
         if profile.get('ai_system_prompt'):
             ai['system_prompt'] = profile['ai_system_prompt']
-        ai['history_chars'] = int(saved.get('history_chars', 2000))
+        try:
+            ai['history_chars'] = int(saved.get('history_chars', 2000))
+        except (TypeError, ValueError):
+            ai['history_chars'] = 2000
         result['ai'] = ai
         result['_ai_settings_source'] = 'local_saved'
         # These are global settings, not per-request overrides. Only task
@@ -122,16 +154,16 @@ class AIPreferences:
         # explicit operation flag that was selected and persisted by that
         # bridge; preserve only the named flags, never provider or credential
         # fields.
-        preserved = set(preserve_flags)
-        for key, default in (('ai_correction', False), ('summary_enabled', False), ('translation', 'off')):
-            if key not in preserved or key not in result:
-                result[key] = saved.get(key, default)
-        result['summary_interval_minutes'] = max(1, int(saved.get('summary_interval') or 10))
+        try:
+            result['summary_interval_minutes'] = max(1, int(saved.get('summary_interval') or 10))
+        except (TypeError, ValueError):
+            result['summary_interval_minutes'] = 10
         if course is not None:
             result['terminology'] = copy.deepcopy(profile.get('terminology') or [])
         for key in ('_note_summary_system_prompt', '_note_abstract_system_prompt', '_title_prompt'):
             result.pop(key, None)
-        result['_note_summary_system_prompt'] = (providers.get('summary') or {}).get('system_prompt') or saved.get('detailed_summary_prompt', '')
+        summary_provider = providers.get('summary')
+        result['_note_summary_system_prompt'] = (summary_provider.get('system_prompt') if isinstance(summary_provider, dict) else '') or saved.get('detailed_summary_prompt', '')
         result['_note_abstract_system_prompt'] = saved.get('abstract_prompt', '')
         result['_title_prompt'] = saved.get('title_prompt', '')
         return result

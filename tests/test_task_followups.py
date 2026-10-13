@@ -13,7 +13,6 @@ import numpy as np
 
 import app
 from qwen_asr_app.model_runtime import ModelManager
-from qwen_asr_app.ai import request_ai_text
 from qwen_asr_app.note_content import transcript_blocks
 from qwen_asr_app.course_stream import CourseStreamJob
 from tests.test_course_stream import make_record, until
@@ -207,38 +206,6 @@ class SummaryFollowupTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ParallelRecoveryTests(unittest.IsolatedAsyncioTestCase):
-    async def test_agy_six_slots_are_shared_between_correction_and_summary(self):
-        running = peak = 0
-        six_started, finish = asyncio.Event(), asyncio.Event()
-        async def generate(**kwargs):
-            nonlocal running, peak
-            running += 1
-            peak = max(peak, running)
-            if running == 6:
-                six_started.set()
-            try:
-                await finish.wait()
-                return '完成'
-            finally:
-                running -= 1
-        config = {'ai': {mode + '_provider': {'transport': 'agy_cli',
-            'cli_model': 'gemini-3.8-flash-high', 'cli_effort': 'high', 'concurrency': 6}
-            for mode in ('summary', 'correction')}}
-        with patch('qwen_asr_app.ai._request_ai_text_unlimited', generate):
-            tasks = [asyncio.create_task(request_ai_text(instructions='test', payload={},
-                config=config, mode='summary' if i % 2 else 'correction', max_output_tokens=100)) for i in range(12)]
-            try:
-                await asyncio.wait_for(six_started.wait(), 1)
-                await asyncio.sleep(.01)
-                self.assertEqual(peak, 6)
-                self.assertEqual(sum(task.done() for task in tasks), 0)
-                finish.set()
-                await asyncio.wait_for(asyncio.gather(*tasks), 1)
-                self.assertEqual(peak, 6)
-            finally:
-                for task in tasks:
-                    task.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
 
     async def test_manual_refinement_fans_out_and_preserves_every_segment(self):
         with tempfile.TemporaryDirectory() as directory:

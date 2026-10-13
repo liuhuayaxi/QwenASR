@@ -369,42 +369,68 @@ class TranscriptionSession:
             recording.upsert_segment(segment)
             self.chat_previews.pop(segment_id, None)
             await self.send({"type": "final", **segment})
-            if config.get("ai_correction") or config.get("translation", "off") != "off":
-                try:
-                    ai_config = json.loads(json.dumps(config))
-                    ai_options = ai_config.get("ai") if isinstance(ai_config.get("ai"), dict) else {}
-                    try:
-                        history_chars = int(ai_options.get("history_chars", 2000))
-                    except (TypeError, ValueError):
-                        history_chars = 2000
-                    history_chars = max(0, min(history_chars, 12_000))
-                    previous_parts: list[str] = []
-                    for saved in recording.segments:
-                        if int(saved.get("id", 0)) >= segment_id:
-                            continue
-                        saved_text = str(saved.get("corrected") or saved.get("raw") or "").strip()
-                        if saved_text:
-                            previous_parts.append(saved_text)
-                    if history_chars:
-                        ai_config["_transcript_context"] = "\n".join(previous_parts)[-history_chars:]
-                    enrichment = await retry_transient_ai(
-                        lambda: polish_and_translate(raw, language, ai_config)
-                    )
-                    segment.update(enrichment)
-                    segment["ai_pending"] = False
-                    recording.upsert_segment(segment)
-                    await self.send({"type": "ai_result", "id": segment_id, **enrichment})
-                except Exception as exc:
-                    segment["ai_pending"] = False
-                    segment["ai_error"] = str(exc)
-                    recording.upsert_segment(segment)
-                    await self.send({"type": "ai_error", "id": segment_id, "message": str(exc)})
-            if config.get("ai_correction"):
-                self.schedule_periodic("review", recording, config)
-            if config.get("summary_enabled"):
-                self.schedule_periodic("summary", recording, config)
+            # ASR durability is independent of optional AI enrichment. End-save
+            # drains ASR only, then suspends unfinished AI with retryable state.
+            self.track_review(self.enrich_final(segment, config, recording))
         except Exception as exc:
             await self.send({"type": "error", "id": segment_id, "message": f"转写失败：{exc}"})
+
+    async def enrich_final(self, segment, config, recording):
+        raw, language, segment_id = segment['raw'], segment['language'], segment['id']
+        if config.get("ai_correction") or config.get("translation", "off") != "off":
+            try:
+                ai_config = json.loads(json.dumps(config))
+                ai_options = ai_config.get("ai") if isinstance(ai_config.get("ai"), dict) else {}
+                try:
+                    history_chars = int(ai_options.get("history_chars", 2000))
+                except (TypeError, ValueError):
+                    history_chars = 2000
+                history_chars = max(0, min(history_chars, 12_000))
+                previous_parts: list[str] = []
+                for saved in recording.segments:
+                    if int(saved.get("id", 0)) >= segment_id:
+                        continue
+                    saved_text = str(saved.get("corrected") or saved.get("raw") or "").strip()
+                    if saved_text:
+                        previous_parts.append(saved_text)
+                if history_chars:
+                    ai_config["_transcript_context"] = "\n".join(previous_parts)[-history_chars:]
+                enrichment = await retry_transient_ai(
+                    lambda: polish_and_translate(raw, language, ai_config)
+                )
+                segment.update(enrichment)
+                segment["ai_pending"] = False
+                recording.upsert_segment(segment)
+                await self.send({"type": "ai_result", "id": segment_id, **enrichment})
+            except Exception as exc:
+                segment["ai_pending"] = False
+                segment["ai_error"] = str(exc)
+                recording.upsert_segment(segment)
+                await self.send({"type": "ai_error", "id": segment_id, "message": str(exc)})
+        if config.get("ai_correction"):
+            self.schedule_periodic("review", recording, config)
+        if config.get("summary_enabled"):
+            self.schedule_periodic("summary", recording, config)
+
+    async def suspend_ai_for_archive(self):
+        pending = [task for task in self.review_tasks if not task.done()]
+        kinds = ['refinement'] if (self.periodic_tasks.get('review') in pending or
+                    (self.recording and any(segment.get('ai_pending') for segment in self.recording.segments))) else []
+        if self.periodic_tasks.get('summary') in pending:
+            kinds.append('live_summary')
+        self.periodic_dirty = {'review': False, 'summary': False}
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        if self.recording is not None:
+            for segment in self.recording.segments:
+                if segment.get('ai_pending'):
+                    segment.update(ai_pending=False, ai_error='录音已归档；未完成校对可在任务中心继续')
+            for kind in kinds:
+                self.recording.metadata.setdefault('ai_jobs', {}).setdefault(kind, {}).update(
+                    status='paused', error='录音已归档；未完成 AI 处理可在任务中心继续', error_kind='paused')
+            self.recording.save_all()
 
     async def run_periodic_reviews(
         self, recording: RecordingRecord, config: dict[str, Any]
@@ -720,7 +746,7 @@ class TranscriptionSession:
             await self.send({"type": "paused", "processing": bool(self.tasks or self.review_tasks),
                              "session": self.recording.public() if self.recording else None})
 
-    async def drain(self) -> None:
+    async def drain(self, include_ai: bool = True) -> None:
         while self.tasks:
             pending = list(self.tasks)
             await asyncio.gather(*pending, return_exceptions=True)
@@ -728,20 +754,9 @@ class TranscriptionSession:
         # A five-minute review can be launched by the final sentence task above.
         # Wait for it before persisting/ending so the saved notes cannot miss a
         # review that has already been accepted by the AI service.
-        while self.review_tasks:
+        while include_ai and self.review_tasks:
             pending = list(self.review_tasks)
             await asyncio.gather(*pending, return_exceptions=True)
             self.review_tasks.difference_update(pending)
         if self.recording is not None:
             self.recording.save_all()
-
-    async def end(self) -> None:
-        await self.pause(send_status=False)
-        await self.drain()
-        record = self.recording or self.recording_store.active
-        if record is not None:
-            await asyncio.to_thread(record.complete)
-            if self.recording_store.active is record:
-                self.recording_store.active = None
-        await self.send({"type": "ended", "session": record.public() if record else None})
-        self.recording = None

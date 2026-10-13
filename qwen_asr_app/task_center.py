@@ -241,8 +241,12 @@ def task_center_router(ai_tasks, ai_action, courses, pdfs, uploads=None):
             raise HTTPException(400, str(exc)) from exc
 
     @router.get("")
-    async def listing():
-        return snapshot()
+    async def listing(request: Request, category: str = ''):
+        from .library_query import conditional
+        value = snapshot()
+        if category:
+            value['tasks'] = [task for task in value['tasks'] if task.get('category') == category]
+        return conditional(value, request)
 
     @router.post("/action")
     async def action(request: Request, payload: dict = Body(...)):

@@ -1,3 +1,4 @@
+import {cachedJson} from '../cached-json.js';
 import {aiTaskPayload} from '../task-config.js';
 
 export const activeStatuses = new Set(['running', 'queued', 'waiting_retry', 'stopping']);
@@ -63,23 +64,27 @@ export function createContinuation({root = document, openRecord, toast, fetcher 
     if (loading || busy) return;
     loading = true; clearTimeout(timer);
     try {
-      const results = await Promise.allSettled(['/api/library','/api/tasks'].map(async path => {
-        const response = await fetcher(path, {cache:'no-store',signal:AbortSignal.timeout(15000)});
-        if (!response.ok) throw new Error(`读取失败（${response.status}）`);
-        return response.json();
-      }));
+      const results = await Promise.allSettled(['/api/library?limit=20&include_settings=false','/api/tasks'].map(path => cachedJson(path, {signal:AbortSignal.timeout(15000)}, fetcher)));
       const problems = [];
       results.forEach((result,index) => {
         if (result.status === 'fulfilled') { if (index === 0) records = result.value.records || []; else { tasks = result.value.tasks || []; loaded = true; } }
         else problems.push(`${index === 0 ? '课堂记录' : '任务状态'}暂时无法读取`);
       });
+      const wanted = [...new Set([read(RECORD_KEY), ...tasks.filter(task => activeStatuses.has(task.status) || attentionStatuses.has(task.status)).map(recordingId)].filter(Boolean))]
+        .filter(id => !records.some(record => record.id === id)).slice(0, 100);
+      if (wanted.length) {
+        try {
+          const linked = await cachedJson('/api/library?' + new URLSearchParams({ids:wanted.join(','), include_settings:'false'}), {}, fetcher);
+          records = [...new Map([...records, ...(linked.records || [])].map(record => [record.id, record])).values()];
+        } catch { problems.push('关联课堂暂时无法读取'); }
+      }
       render();
       error.hidden = !problems.length;
       error.textContent = problems.length ? `${problems.join('；')}，显示上次状态。稍后自动重试。` : '';
       if (!loaded && problems.length) list.insertAdjacentHTML('afterbegin','<p>任务数量待确认</p>');
     } finally {
       loading = false;
-      if (!document.hidden) timer = setTimeout(refresh, 5000);
+      if (!document.hidden) timer = setTimeout(refresh, tasks.some(task => activeStatuses.has(task.status)) ? 15000 : 60000);
     }
   }
   list.addEventListener('click', async event => {

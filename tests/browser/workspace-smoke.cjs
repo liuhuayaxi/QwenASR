@@ -12,7 +12,7 @@ const record = {id:'smoke-class',title:'合成课堂第 3 讲',category:'合成�
  segments:[{id:1,start:0,end:60,raw:'合成原文：菲涅耳公式与相位差。',corrected:'合成校对内容：菲涅耳公式与相位差。'}],ai_reviews:[],ai_summaries:[],
  ai_note_summary:{summary:'# 合成课堂笔记\n\n菲涅耳公式与相位差。',abstract:'合成摘要'},downloads:{audio:'/fake.aac',transcript:'/fake.txt',raw_transcript:'/fake.txt',corrected_transcript:'/fake.txt',bundle:'/fake.zip',ai_summary:'/fake.md'},inference:{provider:'remote',job_id:'fake-job'}};
 const baseTask = {id:'summary:smoke-class',recording_id:record.id,recording_title:record.title,title:record.title,category:record.category,type:'summary',family:'ai',label:'课后复习笔记',status:'interrupted',stage:'笔记生成中断',actions:['continue','retry'],result_url:'/library?recording=smoke-class',inference:{provider:'remote'}};
-let tasks,uploaded,reviewUploaded,activeSession,liveCourse,optimizedReady,requests=[];
+let tasks,uploaded,reviewUploaded,activeSession,liveCourse,optimizedReady,syntheticRecords,unknownSync,linkedSync,requests=[];
 const pages={'/':'index.html','/library':'index.html','/tasks':'tasks.html','/notes':'course-files.html','/workspace':'workspace.html','/course-files':'course-files.html','/course/':'smartclass.html'};
 const server=http.createServer((req,res)=>{
  const url=new URL(req.url,'http://localhost');
@@ -22,12 +22,21 @@ const server=http.createServer((req,res)=>{
 });
 async function fixtures(route) {
  const request=route.request(),url=new URL(request.url()),p=url.pathname;
- requests.push({path:p,method:request.method(),body:request.postData()});
+ requests.push({path:p,query:url.search,method:request.method(),body:request.postData()});
  let data={};
  if(p==='/course/api/status')data=liveCourse || {state:'idle',message:'合成课程回放',identity:null,courses:[],options:{},imports:[{state:'completed',record_id:record.id,title:record.title}],queue:{remaining:0}};
  else if(p==='/api/config')data={feature_version:'library-upgrade-v15-classroom-chat'};
  else if(p==='/api/health')data={status:'idle',detail:'合成服务就绪',model:'fake',device:'fake',asr_provider:'remote_only',local_model_loaded:false};
- else if(p==='/api/library')data={records:[record],categories:['未分类',record.category],category_profiles:{},storage_root:'/synthetic'};
+ else if(p==='/api/library'){
+   let selected=(syntheticRecords || [record]).filter(item=>!url.searchParams.get('category') || item.category===url.searchParams.get('category'));
+   if(url.searchParams.get('ids'))selected=selected.filter(item=>url.searchParams.get('ids').split(',').includes(item.id));
+   const total=selected.length,offset=Number(url.searchParams.get('offset')||0),limit=Number(url.searchParams.get('limit')||100);
+   data={records:selected.slice(offset,offset+limit).map(item=>{
+       const {segments,ai_reviews,ai_summaries,ai_note_summary,...small}=item;
+       return {...small,has_note:true,ai_note_summary:{abstract:ai_note_summary.abstract}};
+     }),total,note_count:total,next_offset:offset+limit<total?offset+limit:null,
+     calendar:{'2026-10-10':{count:total,duration:60*total}},categories:['未分类',record.category,'第二课程'],category_profiles:{},storage_root:'/synthetic'};
+ }
  else if(p==='/api/session')data={active:!!activeSession,session:activeSession};
  else if(p==='/api/tasks')data={tasks,counts:{all:tasks.length,attention:1,active:1,completed:1},history:{},warnings:[]};
  else if(p==='/api/tasks/action'){const intent=request.postDataJSON();assert.equal(intent.use_saved_ai_settings,true);tasks=tasks.map(task=>task.id===intent.id?{...task,status:'queued',stage:'已加入队列'}:task);data={ok:true};}
@@ -47,19 +56,19 @@ async function fixtures(route) {
  else if(p==='/api/course-files/upload'){uploaded=true;data={duplicate:false};}
  else if(p==='/api/notes')data={category:record.category,categories:[record.category],lessons:[{id:record.id,title:record.title,date:'2026-10-10'}],notes:[{id:'review-old',title:'已有复习 PDF',filename:'review-old.pdf',created_at:'2026-10-10',exists:true,source_lessons:[{title:record.title,date:'2026-10-10'}],download_url:'/api/notes/review-old/download'},...(reviewUploaded ? [{id:'review-new',title:'新复习 PDF',filename:'new.pdf',created_at:'2026-10-11',exists:true,download_url:'/api/notes/review-new/download'}] : [])],prompt_template:'合成 {{course}} {{lessons}}',storage_root:'/synthetic'};
  else if(p==='/api/notes/upload'){reviewUploaded=true;data={note:{title:'新复习 PDF'}};}
- else if(p.endsWith('/ideashell/preview'))data={content:'# 合成课堂完整归档\n\n前半课堂与后半课堂。',mode:'combined',note_count:1,characters:30,digest:'single-note-digest',split:true,audio_parts:[{name:'上半段.aac',bytes:100,sha256:'first-hash'},{name:'下半段.aac',bytes:101,sha256:'second-hash'}]};
- else if(p.endsWith('/ideashell/push')){assert.deepEqual(request.postDataJSON().audio_sha256s,['first-hash','second-hash']);data={parts:2,note_count:1,audio_attached:true,note_ids:['synthetic-one-note'],session:record};}
+ else if(p.endsWith('/ideashell/preview'))data={sync:unknownSync ? {status:'unknown',create_operation:{status:'unknown'}} : linkedSync ? {status:'synced',note_id:'a'.repeat(32)} : {},content:'# 合成课堂完整归档\n\n前半课堂与后半课堂。',mode:'combined',note_count:1,characters:30,digest:'single-note-digest',split:true,audio_parts:[{name:'上半段.aac',bytes:100,sha256:'first-hash'},{name:'下半段.aac',bytes:101,sha256:'second-hash'}]};
+ else if(p.endsWith('/ideashell/push')){if(unknownSync){await route.fulfill({status:409,contentType:'application/json',body:JSON.stringify({detail:'结果未知，请先核对'})});return;}assert.deepEqual(request.postDataJSON().audio_sha256s,['first-hash','second-hash']);data={parts:2,note_count:1,audio_attached:true,note_ids:['synthetic-one-note'],session:record};}
  else if(p==='/api/mineru/settings')data={settings:{tier:'standard',engine:'pipeline'},defaults:{}};
  await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(data)});
 }
 (async()=>{
  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
  const origin=`http://127.0.0.1:${server.address().port}`;
- const browser=await chromium.launch({channel:'chrome',headless:true,args:['--use-fake-device-for-media-stream','--use-fake-ui-for-media-stream']});
+ const browser=await chromium.launch({...(process.env.QWEN_ASR_BROWSER_CHANNEL === 'chromium' ? {} : {channel:process.env.QWEN_ASR_BROWSER_CHANNEL || 'chrome'}),headless:true,args:['--use-fake-device-for-media-stream','--use-fake-ui-for-media-stream']});
  const results=[];
  async function scenario(name,run) {
   tasks=[{...baseTask},{...baseTask,id:'refinement:smoke-class',type:'refinement',label:'转写校对',status:'running',stage:'正在校对',actions:['pause']},{...baseTask,id:'summary:old',recording_id:'old',title:'已完成合成课堂',status:'completed',actions:[]}];
-  uploaded=false;reviewUploaded=false;activeSession=null;liveCourse=null;optimizedReady=false;requests=[];
+  uploaded=false;reviewUploaded=false;activeSession=null;liveCourse=null;optimizedReady=false;syntheticRecords=null;unknownSync=false;linkedSync=false;requests=[];
   const context=await browser.newContext({permissions:['microphone'],viewport:{width:1440,height:1000}});
   const errors=[];
   await context.route('**/*',async route=>{const url=new URL(route.request().url());if(url.origin!==origin){await route.abort();return;}if(url.pathname.startsWith('/api/') || url.pathname.startsWith('/course/api/'))await fixtures(route);else await route.continue();});
@@ -159,7 +168,10 @@ async function fixtures(route) {
     assert.ok(requests.some(request=>request.path==='/api/notes/upload'));
     await page.setViewportSize({width:390,height:844});
     assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth <= innerWidth));
-    await page.screenshot({path:path.join(output,'merged-materials-mobile.png'),fullPage:true});
+    assert.equal(await page.locator('.app-header').count(),1);
+    assert.equal(page.frames().length,1);
+    await page.screenshot({path:path.join(output,'merged-materials-mobile.png')});
+    await page.locator('.file-section').screenshot({path:path.join(output,'merged-materials-list-mobile.png')});
   });
   await scenario('录音拆为两个附件并推送同一篇笔记',async(page,context,origin)=>{
     await page.goto(origin+'/library?recording='+record.id);
@@ -172,6 +184,59 @@ async function fixtures(route) {
     await page.locator('#confirmPush').click();
     await page.waitForFunction(()=>!document.getElementById('pushDialog').open);
     assert.ok(requests.some(request=>request.path.endsWith('/ideashell/push')));
+  });
+  await scenario('摘要列表分页、课程筛选与笔记入口',async(page,context,origin)=>{
+    syntheticRecords=Array.from({length:45},(_,i)=>({...record,id:`page-${i}`,title:`合成分页课堂 ${i}`,category:i<42?record.category:'第二课程'}));
+    await page.goto(origin+'/library');
+    await page.waitForFunction(()=>document.querySelectorAll('.library-card').length===20);
+    assert.match(await page.locator('#libraryPageStatus').innerText(),/45 条录音/);
+    await page.locator('#libraryNext').click();
+    await page.locator('.library-card[data-id="page-20"]').waitFor();
+    await page.locator('#libraryNext').click();
+    await page.locator('.library-card[data-id="page-40"]').waitFor();
+    assert.equal(await page.locator('.library-card').count(),5);
+    await page.locator('#libraryCategory').selectOption('第二课程');
+    await page.waitForFunction(()=>document.querySelectorAll('.library-card').length===3);
+    assert.match(await page.locator('#libraryPageStatus').innerText(),/3 条录音/);
+    assert.ok(requests.some(request=>request.path==='/api/library' && new URLSearchParams(request.query).get('offset')==='20'));
+    assert.ok(requests.some(request=>request.path==='/api/library' && new URLSearchParams(request.query).get('category')==='第二课程'));
+    await page.goto(origin+'/library');
+    await page.locator('.library-card[data-id="page-0"]').waitFor();
+    assert.equal(await page.locator('.library-card[data-id="page-0"] .library-regenerate-abstract').count(),1);
+  });
+  await scenario('课程首页总数跨分页保持准确',async(page,context,origin)=>{
+    syntheticRecords=Array.from({length:45},(_,i)=>({...record,id:`course-${i}`,title:`合成课堂 ${i}`,category:i<42?record.category:'第二课程'}));
+    await page.goto(origin+'/workspace');
+    await page.waitForFunction(()=>document.getElementById('workspaceMeta').textContent.includes('45 堂课堂'));
+    await page.locator('#workspaceTabs [data-tab="review"]').click();
+    await page.locator('[data-more-records]').click();
+    await page.waitForFunction(()=>document.querySelectorAll('[data-chat]').length===40);
+    await page.locator('#workspaceCourse').selectOption('第二课程');
+    await page.waitForFunction(()=>document.getElementById('workspaceMeta').textContent.includes('3 堂课堂'));
+    assert.match(await page.locator('#workspaceMeta').innerText(),/3 份笔记/);
+  });
+  await scenario('未知同步结果默认核对，普通重试不会选择新建',async(page,context,origin)=>{
+    unknownSync=true;
+    await page.goto(origin+'/library?recording='+record.id);
+    await page.locator('#noteDialog[open]').waitFor();await page.locator('#pushNoteSummary').click();
+    await page.locator('#pushReconcile:not([hidden])').waitFor();
+    assert.equal(await page.locator('#pushDestination').inputValue(),'update');
+    await page.locator('#confirmPush').click();
+    await page.locator('#pushPreviewStatus').filter({hasText:'结果未知'}).waitFor();
+    const push=requests.filter(request=>request.path.endsWith('/ideashell/push')).at(-1);
+    assert.equal(JSON.parse(push.body).create_new,false);
+    assert.equal(await page.locator('#pushDestination').inputValue(),'update');
+  });
+  await scenario('服务端已确认关联时预览默认更新已有笔记',async(page,context,origin)=>{
+    linkedSync=true;
+    await page.goto(origin+'/library?recording='+record.id);
+    await page.locator('#noteDialog[open]').waitFor();await page.locator('#pushNoteSummary').click();
+    await page.waitForFunction(()=>document.getElementById('pushPreviewStatus').textContent.includes('1 篇笔记'));
+    assert.equal(await page.locator('#pushDestination').inputValue(),'update');
+    await page.locator('#confirmPush').click();
+    await page.waitForFunction(()=>!document.getElementById('pushDialog').open);
+    const push=requests.filter(request=>request.path.endsWith('/ideashell/push')).at(-1);
+    assert.equal(JSON.parse(push.body).create_new,false);
   });
   await scenario('课程内笔记与任务抽屉',async(page,context,origin)=>{await page.goto(origin+'/workspace?category='+encodeURIComponent(record.category));await page.locator('[data-recording="smoke-class"]').waitFor();await page.screenshot({path:path.join(output,'workspace.png'),fullPage:true});await page.locator('[data-recording="smoke-class"]').click();await page.frameLocator('#workspaceFrame').locator('#noteDialog[open]').waitFor();await page.locator('#workspaceTasks').click();await page.locator('#timelineDialog[open]').waitFor();await page.frameLocator('#timelineFrame').locator('.task-card').first().waitFor();});
  } finally {fs.writeFileSync(path.join(output,'smoke-results.json'),JSON.stringify({synthetic:true,results},null,2));await browser.close();await new Promise(resolve=>server.close(resolve));}

@@ -698,7 +698,8 @@
     <dialog aria-label="推送到 IdeaShell" id="pushDialog" class="push-dialog">
       <div class="settings-dialog-header"><div><b>推送到 IdeaShell</b><small id="pushTarget"></small></div><button id="closePushDialog" class="ghost-button" type="button">取消</button></div>
       <div class="push-options"><label for="pushContentMode">选择推送内容</label><select id="pushContentMode" class="field-select"><option value="combined">总结＋精修原文（默认）</option><option value="summary">仅 课后复习笔记</option><option value="transcript">仅精修原文（含时间戳）</option></select><p id="pushPreviewStatus" role="status"></p></div>
-      <div class="push-options"><label for="pushDestination">目标笔记</label><select id="pushDestination" class="field-select"><option value="update">更新已关联的笔记</option><option value="new">新建一篇笔记</option></select></div>
+      <div id="pushReconcile" class="push-options" hidden><p>上次新建结果未知。请先在 IdeaShell 查找笔记；填入 ID 后仅核对正文并关联。</p><input id="pushReconcileId" class="field-input" placeholder="IdeaShell 笔记 ID"><button id="pushReconcileButton" type="button" class="secondary-button">核对并关联</button></div>
+      <div class="push-options"><label for="pushDestination">目标笔记</label><select id="pushDestination" class="field-select"><option value="update">普通推送／核对上次结果</option><option value="new">明确新建另一篇</option></select></div>
       <div id="pushPreview" class="push-preview markdown-body"></div>
       <div class="push-footer"><span>下方按钮会推送当前预览的内容，并自动附带录音文件</span><button id="confirmPush" class="mini-button primary-mini-button" type="button" disabled>推送此内容</button></div>
     </dialog>

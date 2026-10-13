@@ -18,6 +18,7 @@ from .lazy import lazy_module
 
 from .paths import data_path
 from .durable import atomic_json
+from .settings_recovery import read_settings, save_settings
 from .library_layout import RECORDINGS, shared, recording_path, manifest_time
 from .audio import convert_audio_to_aac
 from .note_content import transcript_markdown, transcript_blocks
@@ -85,8 +86,8 @@ class AppSettings:
 
     def load(self) -> None:
         try:
-            payload = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            payload = read_settings(SETTINGS_PATH)
+        except FileNotFoundError:
             payload = {}
         self.library_layout = str(payload.get("library_layout") or "legacy")
         try:
@@ -208,12 +209,7 @@ class AppSettings:
         category_directory = self.storage_root / category
         category_directory.mkdir(parents=True, exist_ok=True)
         profile_path = category_directory / ".qwenasr-course.json"
-        profile_temp = category_directory / ".qwenasr-course.json.tmp"
-        profile_temp.write_text(
-            json.dumps({"category": category, **profile}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        profile_temp.replace(profile_path)
+        atomic_json(profile_path, {"category": category, **profile})
         self.save()
         return profile
 
@@ -370,6 +366,7 @@ class AppSettings:
 
     def save(self) -> None:
         payload = {
+            "schema_version": 1,
             "storage_root": str(self.storage_root),
             "categories": self.categories,
             "known_roots": self.known_roots,
@@ -377,9 +374,15 @@ class AppSettings:
             "category_profiles": self.category_profiles,
             "terminology_seed_version": self.terminology_seed_version,
         }
-        temp = SETTINGS_PATH.with_suffix(".json.tmp")
-        temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        temp.replace(SETTINGS_PATH)
+        try:
+            save_settings(SETTINGS_PATH, payload)
+        except (OSError, ValueError):
+            # A failed settings mutation must not switch the running process
+            # to a path that was never durably accepted.
+            for key, value in getattr(self, '_saved_state', {}).items():
+                setattr(self, key, copy.deepcopy(value))
+            raise
+        self._saved_state = {key: copy.deepcopy(getattr(self, key)) for key in payload if key != 'schema_version'}
 
     def public(self) -> dict[str, Any]:
         return {
@@ -969,6 +972,33 @@ class RecordingRecord:
             bundle.unlink(missing_ok=True)
             raise
 
+    def list_item(self) -> dict[str, Any]:
+        """Allowlist: new metadata fields cannot accidentally bloat list APIs."""
+        keys = ('id', 'title', 'category', 'status', 'kind', 'started_at', 'recorded_at',
+                'ended_at', 'updated_at', 'sample_count')
+        result = {key: self.metadata[key] for key in keys if key in self.metadata}
+        note = self.metadata.get('ai_note_summary') or {}
+        summary, source = self.library_summary()
+        result.update(duration=round(self.duration, 1), has_note=bool(note.get('summary')),
+                      has_ai_summary=bool(note.get('summary')), has_transcript=bool(self.segments),
+                      library_summary=summary[:240], summary_source=source,
+                      library_summary_error=self.library_summary_error()[:500],
+                      course_replay_sources=replay_sources(self),
+                      downloads={name.replace('-', '_'): f'/api/recordings/{self.id}/download/{name}'
+                                 for name in ('bundle', 'audio', 'transcript', 'raw-transcript', 'corrected-transcript', 'ai-summary', 'json')})
+        for name, fields in {
+            'ai_note_summary': ('abstract', 'abstract_error', 'title_error'),
+            'summary_job': ('status', 'error', 'resume_stage', 'updated_at'),
+            'finalization': ('status', 'error', 'updated_at'),
+            'batch_progress': ('stage', 'message', 'progress', 'percent'),
+            'ideashell_sync': ('status', 'note_id', 'note_ids', 'server_url', 'last_pushed_at'),
+        }.items():
+            value = self.metadata.get(name)
+            if isinstance(value, dict):
+                result[name] = {key: (str(value[key])[:500] if isinstance(value[key], str) else value[key])
+                                for key in fields if key in value}
+        return result
+
     def public(self, include_segments: bool = True) -> dict[str, Any]:
         library_summary, summary_source = self.library_summary()
         payload = {
@@ -1145,12 +1175,6 @@ class RecordingStore:
         self.paths[record.id] = record.directory
         return record
 
-    def complete_active(self) -> RecordingRecord | None:
-        record = self.active
-        if record is not None:
-            record.complete()
-            self.active = None
-        return record
 
     def find(self, session_id: str) -> RecordingRecord | None:
         if not re.fullmatch(r"[A-Za-z0-9_-]{6,80}", session_id):

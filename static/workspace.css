@@ -86,8 +86,8 @@
 
 /* Embedded views inherit the course shell instead of nesting another page shell. */
 body.workspace-embedded > .app-header { display: none; }
-.workspace-embedded .files-layout, .workspace-embedded .notes-layout { grid-template-columns: minmax(0, 1fr); width: calc(100% - 40px); margin: 20px auto; }
-.workspace-embedded .course-sidebar, .workspace-embedded .notes-sidebar { display: none; }
+.workspace-embedded .files-layout { grid-template-columns: minmax(0, 1fr); width: calc(100% - 40px); margin: 20px auto; }
+.workspace-embedded .course-sidebar { display: none; }
 .workspace-embedded.library-page .shell { width: 100%; padding: 0; }
 .workspace-embedded.library-page .transcript-panel { border: 0; border-radius: 0; box-shadow: none; padding: 0; }
 .workspace-embedded.library-page .library-view { padding: 24px; }
@@ -111,6 +111,6 @@ body.workspace-embedded > .app-header { display: none; }
   .workspace-record { padding: 20px 16px; gap: 12px; }
   .workspace-section-heading { padding: 18px 16px; }
   .workspace-side { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .workspace-embedded .files-layout, .workspace-embedded .notes-layout { width: calc(100% - 24px); }
+  .workspace-embedded .files-layout { width: calc(100% - 24px); }
 }
 @media (max-width: 480px) { .workspace-side { grid-template-columns: minmax(0, 1fr); } }

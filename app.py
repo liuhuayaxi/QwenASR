@@ -111,11 +111,8 @@ np = lazy_module("numpy")
 ROOT = Path(__file__).resolve().parent
 if not os.getenv("QWEN_ASR_DATA_DIR"):
     load_dotenv(ROOT / ".env")
-MODEL_PATH = Path(
-    os.getenv("QWEN_ASR_MODEL_PATH", ROOT / "models" / "Qwen3-ASR-1.7B-MLX-bf16")
-).expanduser()
-if not MODEL_PATH.is_absolute():
-    MODEL_PATH = (ROOT / MODEL_PATH).resolve()
+from qwen_asr_app.model_setup import model_path
+MODEL_PATH = model_path()
 model_manager = ModelManager(MODEL_PATH)
 
 
@@ -256,7 +253,7 @@ def _saved_ai_task_config(record: RecordingRecord, kind: str) -> dict[str, Any]:
     """
     required_mode = {"refinement": "correction", "live_summary": "review", "summary": "summary"}.get(kind, "correction")
     course = record.metadata.get("course_settings") or {}
-    config = ai_preferences.task_config({}, course=course, required_modes=("sentence", required_mode))
+    config = ai_preferences.task_config({}, course=course, required_modes=(required_mode,))
     if kind == "refinement":
         config.update(ai_correction=True, translation="off")
     elif kind == "live_summary":
@@ -1313,13 +1310,22 @@ async def public_config() -> dict[str, Any]:
 
 
 @app.get("/api/library")
-async def recording_library() -> dict[str, Any]:
+async def recording_library(request: Request = None, category: str = '', date: str = '',
+                            offset: int = 0, limit: int = 0, include_settings: bool = True, ids: str = ''):
+    from qwen_asr_app.library_query import listing, conditional
+    if offset < 0 or not 0 <= limit <= 100 or (date and not re.fullmatch(r'\d{4}-\d{2}-\d{2}', date)):
+        raise HTTPException(400, '分页或日期参数无效')
     discover_courses(app_settings)
     records = recording_store.list_records()
-    return {
-        **app_settings.public(),
-        "records": [record.public(include_segments=False) for record in records],
-    }
+    if ids:
+        wanted = ids.split(',')
+        if len(wanted) > 100 or any(not re.fullmatch(r'[A-Za-z0-9_-]{6,80}', value) for value in wanted):
+            raise HTTPException(400, '录音编号列表无效')
+        records = [record for record in records if record.id in set(wanted)]
+    payload = {**(app_settings.public() if include_settings else {'categories': app_settings.categories}),
+               **listing(records, category, date, offset, limit)}
+    # Legacy callers without pagination still get all records, as small DTOs.
+    return conditional(payload, request) if request is not None else payload
 
 
 @app.get("/api/library/events")
@@ -1573,7 +1579,7 @@ async def generate_title(session_id: str, payload: dict[str, Any] = Body(...)) -
     if not summary:
         raise HTTPException(status_code=400, detail="请先为这条录音生成详细 AI 总结")
     try:
-        config = ai_preferences.task_config(payload.get("config"), course=record.metadata.get("course_settings") or {}, required_modes=("sentence", "summary"))
+        config = ai_preferences.task_config(payload.get("config"), course=record.metadata.get("course_settings") or {}, required_modes=("summary",))
     except (OSError, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     settings = ai_preferences.read()
@@ -1615,7 +1621,7 @@ async def generate_library_summary(
     ):
         raise HTTPException(status_code=400, detail="录音还没有可用于生成详细 AI 总结的转写内容")
     try:
-        config = ai_preferences.task_config(payload.get("config"), course=record.metadata.get("course_settings") or {}, required_modes=("sentence", "summary"))
+        config = ai_preferences.task_config(payload.get("config"), course=record.metadata.get("course_settings") or {}, required_modes=("summary",))
     except (OSError, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     config["_note_summary_system_prompt"] = str(
@@ -1669,7 +1675,7 @@ def start_summary_job(record: RecordingRecord, payload: dict[str, Any], *, autom
         _remember_ai_keys(payload.get("config"))
         payload = {**payload, "config": ai_preferences.task_config(
             payload.get("config"), course=record.metadata.get("course_settings") or {},
-            required_modes=("sentence", "summary"),
+            required_modes=("summary",),
         )}
     except (OSError, ValueError) as exc:
         if os.getenv("QWEN_ASR_TESTING") != "1":
@@ -1794,17 +1800,6 @@ async def begin_recording_end(session: TranscriptionSession, summary_payload: di
     if record.id in finalization_tasks:
         await session.send({"type": "ending", "session": record.public()})
         return
-    try:
-        summary_payload = {
-            **summary_payload,
-            "config": ai_preferences.task_config(
-                summary_payload.get("config"),
-                course=record.metadata.get("course_settings") or {},
-                required_modes=("sentence", "summary"),
-            ),
-        }
-    except (OSError, ValueError) as exc:
-        raise ValueError(str(exc)) from exc
     session.recording = record
     session.accepting_audio = False
     record.metadata["finalization"] = {"status": "running", "started_at": local_now(), "error": ""}
@@ -1821,13 +1816,15 @@ async def begin_recording_end(session: TranscriptionSession, summary_payload: di
             if record.metadata.get("pending_segments") and not session.tasks:
                 session.recovered = False
             await session.recover_pending()
-            await session.drain()
-            # Manual live-summary retries are separate from session.drain().
-            # Finish their writes before the encoder thread saves the record.
+            await session.drain(include_ai=False)
+            await session.suspend_ai_for_archive()
+            # Suspend optional manual AI work before the archive writes.
             auxiliary = [task for key, task in background_ai_tasks.items()
                          if key.endswith(":" + record.id) and not task.done()]
             if auxiliary:
-                await asyncio.gather(*(asyncio.shield(task) for task in auxiliary), return_exceptions=True)
+                for task in auxiliary:
+                    task.cancel()
+                await asyncio.gather(*auxiliary, return_exceptions=True)
             if record.metadata.get("pending_segments"):
                 raise RuntimeError("部分录音尚未成功转写，音频已保留，请重试结束保存")
             completion = asyncio.create_task(asyncio.to_thread(record.complete))
@@ -1855,7 +1852,17 @@ async def begin_recording_end(session: TranscriptionSession, summary_payload: di
             if not summary_intent.get("cancel_requested"):
                 # No await after scheduling: release finalization ownership
                 # before the new summary task can enter its operation guard.
-                start_summary_job(record, summary_payload, automatic=True)
+                try:
+                    start_summary_job(record, summary_payload, automatic=True)
+                except Exception as exc:
+                    # Archival is already complete. Keep a retryable summary
+                    # receipt without changing the successful save outcome.
+                    record.metadata['summary_job'] = {
+                        'status': 'failed', 'automatic': True,
+                        'error': '录音已保存；总结未提交，请保存 AI 设置后重试：' + str(getattr(exc, 'detail', exc)),
+                        'error_kind': 'configuration', 'updated_at': local_now(),
+                    }
+                    record.save_metadata()
         except asyncio.CancelledError:
             record.metadata["finalization"].update(status="interrupted", error="服务已关闭，请继续结束保存")
             record.save_metadata()
@@ -1892,7 +1899,7 @@ async def generate_library_summary_abstract(
     if record is None:
         raise HTTPException(status_code=404, detail="没有找到这条录音")
     try:
-        config = ai_preferences.task_config(payload.get("config"), course=record.metadata.get("course_settings") or {}, required_modes=("sentence", "summary"))
+        config = ai_preferences.task_config(payload.get("config"), course=record.metadata.get("course_settings") or {}, required_modes=("summary",))
     except (OSError, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     config["_note_abstract_system_prompt"] = str(
@@ -2133,11 +2140,6 @@ async def ideashell_recording_audio_parts(record: RecordingRecord) -> list[dict[
     return parts
 
 
-async def ideashell_recording_audio(record: RecordingRecord) -> dict[str, Any]:
-    """Compatibility helper returning the first attachment."""
-    return (await ideashell_recording_audio_parts(record))[0]
-
-
 def ideashell_audio_preview(metadata: dict[str, Any]) -> dict[str, Any]:
     """Strip raw bytes before returning attachment information to the browser."""
     keys = ("name", "bytes", "sha256", "compressed", "source_bytes", "bit_rate")
@@ -2259,6 +2261,7 @@ async def preview_ideashell_push(session_id: str, payload: dict[str, Any] = Body
         if audio_error:
             archive["audio_error"] = audio_error
         archive["title"] = ideashell_note_title(record)
+        archive['sync'] = record.metadata.get('ideashell_sync') or {}
         return archive
     except (ValueError, OSError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2313,6 +2316,13 @@ async def push_recording_summary_to_ideashell(
         if not previous_ids and sync.get("note_id"):
             previous_ids = [str(sync["note_id"])]
         create_new = payload.get("create_new") is True
+        operation = sync.get('create_operation') or {}
+        if operation.get('status') in {'sending', 'unknown'} and not create_new:
+            operation['status'] = 'unknown'
+            sync.update(status='unknown', create_operation=operation)
+            record.metadata['ideashell_sync'] = sync
+            record.save_metadata()
+            raise HTTPException(409, '上次新建结果未知，普通重试不会再次新建。请在 IdeaShell 查找后填写笔记 ID 核对关联；确认需要另一篇时，单独选择“明确新建另一篇”。')
         server_url = sync.get("server_url") if previous_ids else payload.get("server_url")
         connection = ideashell_manager.connection(
             str(server_url or payload.get("server_url") or "")
@@ -2344,10 +2354,29 @@ async def push_recording_summary_to_ideashell(
             result = await connection.call_tool("note_update", arguments)
         else:
             arguments.update({"tag": "QwenASR", "folder_id": folder_id})
-            result = await connection.call_tool("note_create", arguments)
-            note_id = ideashell_note_id(result)
-            if not note_id:
-                raise RuntimeError("IdeaShell 未返回笔记编号，请先在 IdeaShell 确认创建结果，避免重复推送")
+            if operation:
+                sync.setdefault('create_history', []).append(dict(operation))
+            operation = {'version': 1, 'id': uuid.uuid4().hex, 'status': 'sending',
+                         'server_url': connection.server_url, 'folder_id': folder_id,
+                         'content_digest': archive['digest'],
+                         'reconcile_digest': hashlib.sha256(archive['content'].strip().encode()).hexdigest(),
+                         'audio_sha256s': [audio['sha256'] for audio in audio_parts],
+                         'title': title, 'started_at': local_now()}
+            sync.update(status='sending', create_operation=operation)
+            record.metadata['ideashell_sync'] = sync
+            # Durable intent must precede the possibly accepted remote request.
+            record.save_metadata()
+            try:
+                result = await connection.call_tool("note_create", arguments)
+                note_id = ideashell_note_id(result)
+                if not note_id:
+                    raise RuntimeError('IdeaShell 未返回笔记编号')
+            except BaseException:
+                operation.update(status='unknown', updated_at=local_now())
+                sync['status'] = 'unknown'
+                record.save_metadata()
+                raise
+            operation.update(status='confirmed', note_id=note_id, updated_at=local_now())
         note_ids.append(note_id)
         old_ids = list(dict.fromkeys([*(sync.get("legacy_note_ids") or []), *(previous_ids if create_new else previous_ids[1:])]))
         sync.update({"note_ids": note_ids, "note_id": note_ids[0], "status": "partial",
@@ -2396,6 +2425,8 @@ async def push_recording_summary_to_ideashell(
             "audio_error": audio_error,
             "session": record.public(include_segments=False),
         }
+    except HTTPException:
+        raise
     except (ValueError, RuntimeError, ImportError, ModuleNotFoundError, OSError) as exc:
         print(f"IdeaShell 推送失败 recording={session_id}: {exc}", flush=True)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2403,6 +2434,40 @@ async def push_recording_summary_to_ideashell(
         detail = ideashell_error_text(exc)
         print(f"IdeaShell 推送异常 recording={session_id}: {detail}", flush=True)
         raise HTTPException(status_code=502, detail=f"IdeaShell 推送失败：{detail}") from exc
+
+
+@app.post('/api/recordings/{session_id}/ideashell/reconcile')
+@recording_operation
+async def reconcile_ideashell_create(session_id: str, payload: dict[str, Any] = Body(...)):
+    record = recording_store.find(session_id)
+    if record is None:
+        raise HTTPException(404, '没有找到这条录音')
+    sync = copy.deepcopy(record.metadata.get('ideashell_sync') or {})
+    operation = sync.get('create_operation') or {}
+    if operation.get('status') not in {'sending', 'unknown'}:
+        raise HTTPException(409, '没有待核对的新建操作')
+    note_id = str(payload.get('note_id') or '').strip()
+    if not re.fullmatch(r'[a-f0-9]{32}', note_id):
+        raise HTTPException(400, '请填写 IdeaShell 中实际存在的笔记 ID')
+    try:
+        connection = ideashell_manager.connection(operation['server_url'])
+        result = await connection.call_tool('note_detail', {'note_id': note_id, 'scope': 'full'})
+        content = ideashell_note_content(result)
+    except (ValueError, RuntimeError, OSError) as exc:
+        raise HTTPException(502, '核对未完成，保留未知状态：' + str(exc)) from exc
+    if not content or hashlib.sha256(content.strip().encode()).hexdigest() != operation['reconcile_digest']:
+        raise HTTPException(409, '远端正文与发送时摘要不一致，保留未知状态；请人工核对，不会覆盖远端内容')
+    # The protocol has no reliable idempotent create/search guarantee. Only an
+    # explicitly selected ID with matching original content establishes a link.
+    operation.update(status='confirmed', note_id=note_id, reconciled_at=local_now())
+    previous_ids = sync.get('note_ids') or ([sync['note_id']] if sync.get('note_id') else [])
+    sync['legacy_note_ids'] = list(dict.fromkeys([*(sync.get('legacy_note_ids') or []),
+                                                 *(value for value in previous_ids if value != note_id)]))
+    sync.update(note_id=note_id, note_ids=[note_id], server_url=operation['server_url'],
+                folder_id=operation['folder_id'], status='partial', create_operation=operation)
+    record.metadata['ideashell_sync'] = sync
+    record.save_metadata()
+    return {'linked': True, 'session': record.public(include_segments=False)}
 
 
 @app.post("/api/recordings/{session_id}/ideashell/pull")
@@ -2518,8 +2583,7 @@ async def retry_segment_ai(
         course = record.metadata.get("course_settings") or {}
         try:
             config = ai_preferences.task_config(
-                config, course=course,
-                required_modes=("sentence", "correction") if bool(config.get("ai_correction")) else ("sentence",),
+                config, course=course, operation='segment',
             )
         except (OSError, ValueError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -3169,67 +3233,104 @@ async def transcribe_socket(websocket: WebSocket) -> None:
         return
     await websocket.accept()
     model_manager.client_connected()
-    active = recording_store.active
-    session = live_sessions.get(active.id) if active is not None else None
-    if session is None:
-        session = TranscriptionSession(websocket, model_manager, recording_store)
-        session.recording = active
-        if active is not None:
-            live_sessions[active.id] = session
-    session.ws = websocket
-    await session.send({"type": "ready", "model_status": model_manager.status})
+    from qwen_asr_app.live_ownership import control_lock
+    # Connecting is read-only. Ownership is acquired only by start/end, under
+    # one lock, after re-reading the active recording (including preopened tabs).
+    session = TranscriptionSession(websocket, model_manager, recording_store)
+    await websocket.send_json({"type": "ready", "model_status": model_manager.status})
     try:
         while True:
             message = await websocket.receive()
-            if session.ws is not websocket:
-                break
             if message.get("type") == "websocket.disconnect":
                 break
             if message.get("bytes") is not None:
-                await session.ingest(message["bytes"])
+                if getattr(session, 'writer', None) is websocket:
+                    await session.ingest(message["bytes"])
                 continue
             text = message.get("text")
             if not text:
                 continue
             payload = json.loads(text)
             kind = payload.get("type")
-            if kind == "config":
-                try:
-                    values = ai_preferences.task_config(
-                        payload,
-                        required_modes=("sentence", "correction") if payload.get("ai_correction") else ("sentence",),
-                    )
-                    payload = {**payload, **values}
-                    pending = session.update_config(payload)
-                except (OSError, ValueError) as exc:
-                    await session.send({"type": "config_error", "message": str(exc)})
-                    continue
-                await session.send({"type": "configured", "pending": pending})
-            elif kind == "start":
-                try:
-                    await session.start_or_resume()
-                    if session.recording is not None:
-                        live_sessions[session.recording.id] = session
-                except (ValueError, OSError) as exc:
-                    await session.send({"type": "start_error", "message": str(exc)})
-            elif kind in {"pause", "stop"}:
-                await session.pause()
-            elif kind == "end":
-                try:
-                    summary_payload = payload.get("summary_payload")
-                    if not isinstance(summary_payload, dict):
-                        summary_payload = {"config": session.config}
-                    await begin_recording_end(session, summary_payload)
-                except (ValueError, OSError) as exc:
-                    await session.send({"type": "end_error", "message": str(exc)})
-            elif kind == "ping":
-                await session.send({"type": "pong"})
+            if kind == "ping":
+                await websocket.send_json({"type": "pong"})
+                continue
+            async with control_lock():
+                active = recording_store.active
+                canonical = live_sessions.get(active.id) if active else None
+                if kind == "config":
+                    # Observer settings stay on the observer until it acquires
+                    # ownership; it cannot mutate the current writer's config.
+                    if getattr(session, 'writer', None) not in (None, websocket):
+                        session = TranscriptionSession(websocket, model_manager, recording_store)
+                    try:
+                        values = ai_preferences.task_config(payload, operation='live')
+                        pending = session.update_config({**payload, **values})
+                    except (OSError, ValueError) as exc:
+                        await websocket.send_json({"type": "config_error", "message": str(exc)})
+                        continue
+                    await websocket.send_json({"type": "configured", "pending": pending,
+                                               "warning": values.get('_ai_config_warning', '')})
+                elif kind in {"start", "end", "pause", "stop"}:
+                    writer = getattr(canonical, 'writer', None) if canonical else None
+                    takeover = kind == 'start' and payload.get('takeover') is True
+                    if writer is not None and writer is not websocket and not takeover:
+                        await websocket.send_json({"type": "start_error" if kind == 'start' else "end_error" if kind == 'end' else "control_error",
+                            "code": "writer_conflict", "message": "另一页面正在控制录音；如需接管，请明确选择接管录音"})
+                        continue
+                    if canonical and writer is not websocket:
+                        if (active.metadata.get('finalization') or {}).get('status') == 'running':
+                            await websocket.send_json({"type": "end_error", "message": "录音正在结束保存"})
+                            continue
+                        if writer is not None:
+                            canonical.writer = None  # Fence old packets before any await.
+                            await canonical.pause(send_status=False)
+                            try:
+                                await writer.send_json({"type": "ownership_lost", "message": "录音已由另一页面接管"})
+                            except (RuntimeError, OSError, WebSocketDisconnect):
+                                pass
+                        canonical.update_config(session.config)
+                        session = canonical
+                    try:
+                        session.ws = websocket
+                        session.writer = websocket
+                        session.recording = active
+                        if kind == 'start':
+                            session.update_config(ai_preferences.task_config(session.config, operation='live'))
+                            try:
+                                await session.start_or_resume()
+                            finally:
+                                if session.recording is not None:
+                                    live_sessions[session.recording.id] = session
+                        elif kind in {'pause', 'stop'}:
+                            await session.pause()
+                        else:
+                            summary_payload = payload.get('summary_payload')
+                            if not isinstance(summary_payload, dict):
+                                summary_payload = {'config': session.config}
+                            await begin_recording_end(session, summary_payload)
+                    except (ValueError, OSError) as exc:
+                        session.accepting_audio = False
+                        if kind == 'start':
+                            session.writer = None
+                        await websocket.send_json({"type": "start_error" if kind == 'start' else "end_error", "message": str(exc)})
     except WebSocketDisconnect:
         pass
     finally:
-        if session.ws is websocket and session.recording is not None:
-            await session.pause(send_status=False)
+        async with control_lock():
+            # An old connection's disconnect must never pause its successor.
+            if getattr(session, 'writer', None) is websocket:
+                session.writer = None
+                if session.recording is not None and session.recording.id not in finalization_tasks:
+                    await session.pause(send_status=False)
         model_manager.client_disconnected()
+
+
+@app.get("/static/notes.html")
+@app.get("/notes")
+async def notes_page(request: Request) -> RedirectResponse:
+    query = request.url.query
+    return RedirectResponse("/course-files" + ("?" + query if query else ""), status_code=307)
 
 
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
@@ -3269,12 +3370,6 @@ async def task_center_page():
 @app.get("/course-files")
 async def course_files_page() -> FileResponse:
     return FileResponse(ROOT / "static" / "course-files.html", headers={"Cache-Control": "no-store"})
-
-
-@app.get("/notes")
-async def notes_page(request: Request) -> RedirectResponse:
-    query = request.url.query
-    return RedirectResponse("/course-files" + ("?" + query if query else ""), status_code=307)
 
 
 @app.get("/")

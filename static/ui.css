@@ -266,7 +266,7 @@ body { letter-spacing: -.01em; }
 .page-heading { margin-bottom: 28px; }
 .page-heading h1 { font-size: clamp(24px, 2.3vw, 32px); letter-spacing: -.045em; }
 .page-heading p { max-width: 62ch; }
-.card, .panel, .path-card, .task-card, .dropzone, .course-sidebar, .notes-sidebar,
+.card, .panel, .path-card, .task-card, .dropzone, .course-sidebar,
 .settings-group, .replay-status, .replay-setup > .card { box-shadow: 0 1px 0 color-mix(in srgb, var(--ink) 4%, transparent); }
 .ui-button, .secondary-button, .end-button, .mini-button, .ghost-button { transition: transform .15s ease, background .15s ease, border-color .15s ease, color .15s ease; }
 .ui-button:hover:not(:disabled), .secondary-button:hover:not(:disabled), .mini-button:hover:not(:disabled), .ghost-button:hover:not(:disabled) { transform: translateY(-1px); }

@@ -84,6 +84,6 @@ Windows 实测 MinerU 4.0.10 + Torch 小模型 + vLLM，PDF/图片固定 Advance
 
 源码、冻结依赖、配置样例、部署/服务/Serve 脚本、真实验收脚本、报告与 evidence 均在 `ai-infer-node/`。Mac 主项目中已集成 Provider、UI、配置快照、任务来源、长音频和 PDF adapter。最终源码 ZIP 在 `/Users/liuhuayaxi/Documents/Codex/2026-10-09/qwenasr-final/`，附逐文件 SHA256 清单。包不含模型、venv、原始录音/课件、数据库、真实配置或凭据；不能用它覆盖现有私人配置和数据目录。
 
-当前工作区包含用户其他 AI 任务的修改，均保留，源码快照反映打包时整个项目状态；未执行 Git reset/clean、提交或推送。原始需求在 `ORIGINAL_REQUIREMENTS.md`，独立审查提示词在 `ASTRA_REVIEW_PROMPT.md`。
+当前工作区包含用户其他 AI 任务的修改，均保留，源码快照反映打包时整个项目状态；未执行 Git reset/clean、提交或推送。原始需求在 `ORIGINAL_REQUIREMENTS.md`；一次性独立审查提示词已在 2026-10-13 清理，当前回归入口见项目 README。
 
 源码/配置备份：`~/.qwenasr/backups/ai-infer-20261008-203532`、`~/.qwenasr/backups/direct-lan-ui-20261008-224837`、`~/.qwenasr/backups/native-tailnet-stability-20261009-002231`。Linux 配置和 Serve 修改前另有受保护备份。安全回滚先将两项 Provider 切回 local，再按 README 停服务/移除本端口配置；保留模型、任务历史、凭据和其他 Serve 端口。

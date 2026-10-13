@@ -4,7 +4,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const moduleUrl = source => `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`;
 const config = moduleUrl(fs.readFileSync(path.join(__dirname,'../static/js/task-config.js'),'utf8'));
-const implementation = fs.readFileSync(path.join(__dirname,'../static/js/workbench/continuation.js'),'utf8').replace("'../task-config.js'",JSON.stringify(config));
+const cached = moduleUrl(fs.readFileSync(path.join(__dirname,'../static/js/cached-json.js'),'utf8'));
+const implementation = fs.readFileSync(path.join(__dirname,'../static/js/workbench/continuation.js'),'utf8').replace("'../task-config.js'",JSON.stringify(config)).replace("'../cached-json.js'",JSON.stringify(cached));
 const modulePromise = import(moduleUrl(implementation));
 test('a remote policy does not claim an actual provider or remote connection',async()=>{
  const {recognitionText}=await modulePromise;

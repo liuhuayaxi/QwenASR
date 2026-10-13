@@ -8,7 +8,6 @@ cd "$SCRIPT_DIR"
 PORT="${QWEN_ASR_PORT:-8765}"
 URL="http://127.0.0.1:${PORT}"
 PYTHON="$SCRIPT_DIR/.venv/bin/python"
-MODEL_DIR="$SCRIPT_DIR/models/Qwen3-ASR-1.7B-MLX-bf16"
 SERVER_PID=""
 
 say_line() {
@@ -45,16 +44,12 @@ if [ ! -x "$PYTHON" ] || ! "$PYTHON" "$SCRIPT_DIR/scripts/check_environment.py" 
   if [ ! -x "$PYTHON" ]; then
     "$UV" venv --python 3.12 .venv
   fi
-  "$UV" pip install --python "$PYTHON" -r requirements.txt
+  REQUIREMENTS="$("$PYTHON" -m qwen_asr_app.model_setup requirements)"
+  "$UV" pip install --python "$PYTHON" -r "$REQUIREMENTS"
 fi
 
 
-if [ ! -f "$MODEL_DIR/model.safetensors" ]; then
-  say_line "首次运行：正在下载适配 Apple Silicon 的 Qwen3-ASR-1.7B BF16 模型（约 4GB）…"
-  mkdir -p "$MODEL_DIR"
-  HF_HUB_DOWNLOAD_TIMEOUT=120 HF_HUB_ETAG_TIMEOUT=60 "$SCRIPT_DIR/.venv/bin/hf" download \
-    mlx-community/Qwen3-ASR-1.7B-bf16 --local-dir "$MODEL_DIR" --max-workers 2
-fi
+"$PYTHON" -m qwen_asr_app.model_setup check
 
 say_line "正在启动本地服务；模型将在点击转写时按需加载…"
 "$PYTHON" -m qwen_asr_app.service_control start

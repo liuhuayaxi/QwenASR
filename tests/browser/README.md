@@ -9,8 +9,13 @@ PLAYWRIGHT_MODULE=/tmp/qwenasr-browser-tools/node_modules/playwright node tests/
 
 需要本机已安装 Google Chrome。`PLAYWRIGHT_MODULE` 只指定测试工具位置，不是应用依赖或账号配置。也可以在模块可解析的环境直接执行 `node tests/browser/workspace-smoke.cjs`。
 
-验收包含十二条路径：来源证据和首页、新建来源入口、课堂记录打开笔记、任务过滤分组和恢复、课程资料上传、刷新恢复课程与活动会话、上传完成打开笔记、模拟麦克风开始结束打开笔记、课程回放入库链接、课程内问答选择与笔记快捷入口、外部复习资料折叠、课程内笔记与任务抽屉。额外记录页面未捕获异常并检查恢复请求使用服务端保存设置。
+验收覆盖以下路径：来源证据和首页、新建来源入口、课堂记录打开笔记、任务过滤分组和恢复、课程资料上传、刷新恢复课程与活动会话、上传完成打开笔记、模拟麦克风开始结束打开笔记、课程回放入库链接、课程内问答选择与笔记快捷入口、外部复习资料折叠、课程内笔记与任务抽屉。额外记录页面未捕获异常并检查恢复请求使用服务端保存设置。
 
 结果在 `output/playwright/smoke-results.json`；截图在同目录。失败时写入失败截图并返回非零退出码。运行产物不提交 Git。
 
 这些检查验证交互、请求意图和刷新恢复，不证明真实音频识别、Windows 推理、学校下载、外部 AI 生成或 IdeaShell 同步已经成功。
+
+
+稳定性修复增加四条场景：摘要列表的服务端分页／课程筛选与笔记入口、跨页课程统计、IdeaShell 结果未知时默认核对，以及服务端已确认关联时默认更新已有笔记。所有列表夹具均去掉完整笔记正文，详情夹具保留正文。总计 20 条场景。
+
+CI 使用本目录的锁文件：`npm ci --ignore-scripts` 后执行 `npx playwright install --with-deps chromium`，再以 `QWEN_ASR_BROWSER_CHANNEL=chromium node workspace-smoke.cjs` 运行。本机可以继续复用 `PLAYWRIGHT_MODULE` 指定的独立工具，不必安装到正式环境。WebSocket 的服务端所有权和生产配置验证在 Python 的 `tests/test_review_capture.py` 中执行；这里的合成 WebSocket 只验证浏览器控制流程。

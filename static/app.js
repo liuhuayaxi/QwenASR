@@ -1,3 +1,4 @@
+import {cachedJson} from './js/cached-json.js';
 import { createBatchView } from "./js/batch-view.js?v=20261011-20260923";
 import { createLibraryTools } from "./js/library-tools.js?v=20261007-search-focus-1";
 import { createMarkdownReader, renderMarkdown } from "./js/markdown-reader.js?v=20261011-20261007-math-1";
@@ -405,10 +406,10 @@ function sessionConfig(requireName = false) {
     max_segment_seconds: Number(els.maxSegment.value),
     min_voiced_seconds: 0.55,
     asr_params: parseAsrParams(),
-    ai: readAiConfig([
+    ai: readAiConfig(state.uploading ? [
       ...(els.aiCorrection.checked || els.translation.value !== "off" ? (state.uploading ? ["correction", "global"] : ["sentence", "review"]) : []),
       ...(els.summaryEnabled.checked ? ["review"] : []),
-    ]),
+    ] : []),
   };
   const inference = inferenceSettingsPanel.current();
   if (inference) config.inference_settings = inference;
@@ -914,8 +915,8 @@ function renderLibraryCalendar(records) {
   state.libraryMonth = new Date(anchor.getFullYear(), anchor.getMonth(), 1);
   els.calendarMonthLabel.textContent = `${anchor.getFullYear()}年 ${anchor.getMonth() + 1}月`;
 
-  const byDate = new Map();
-  for (const record of records) {
+  const byDate = new Map(Object.entries(state.libraryCalendar || {}));
+  for (const record of state.libraryCalendar ? [] : records) {
     const key = localDateKey(record.started_at);
     if (!key) continue;
     const bucket = byDate.get(key) || { count: 0, duration: 0 };
@@ -956,7 +957,7 @@ function renderLibraryCalendar(records) {
     button.addEventListener("click", () => {
       state.selectedLibraryDate = key;
       state.libraryMonth = new Date(date.getFullYear(), date.getMonth(), 1);
-      renderLibrary();
+      state.libraryPage = 0; void loadLibrary();
     });
     els.calendarGrid.appendChild(button);
   }
@@ -1018,19 +1019,20 @@ function renderLibrary() {
     els.libraryList.innerHTML = `<div class="library-empty">${escapeHtml(scope)}</div>`;
     return;
   }
-  const pages = Math.max(1, Math.ceil(records.length / 20));
+  const total = state.libraryTotal ?? records.length;
+  const pages = Math.max(1, Math.ceil(total / 20));
   state.libraryPage = Math.max(0, Math.min(state.libraryPage, pages - 1));
-  $("#libraryPageStatus").textContent = `${records.length} 条录音 · 第 ${state.libraryPage + 1}/${pages} 页`;
+  $("#libraryPageStatus").textContent = `${total} 条录音 · 第 ${state.libraryPage + 1}/${pages} 页`;
   $("#libraryPrevious").disabled = !state.libraryPage;
   $("#libraryNext").disabled = state.libraryPage >= pages - 1;
-  for (const record of records.slice(state.libraryPage * 20, (state.libraryPage + 1) * 20)) {
+  for (const record of state.libraryTotal == null ? records.slice(state.libraryPage * 20, (state.libraryPage + 1) * 20) : records) {
     const card = document.createElement("article");
     card.className = "library-card";
     card.dataset.id = record.id;
     const when = record.started_at ? new Date(record.started_at).toLocaleString() : "";
     const statusClass = ["failed", "interrupted"].includes(record.status) ? " failed" : "";
     const canEdit = !["active", "processing"].includes(record.status);
-    const detailedSummary = String(record.ai_note_summary?.summary || "").trim();
+    const detailedSummary = record.has_note || String(record.ai_note_summary?.summary || "").trim();
     const summaryError = String(record.library_summary_error || record.ai_note_summary?.abstract_error || "").trim();
     const hasSummary = record.summary_source === "ai" && Boolean(record.library_summary);
     const summaryBusy = ["queued", "running"].includes(record.summary_job?.status);
@@ -1302,11 +1304,19 @@ async function generateLibraryTitle(record, card) {
   }
 }
 
+let libraryRequest = 0;
 async function loadLibrary() {
+  const request = ++libraryRequest;
   try {
-    const response = await fetch("/api/library", { cache: "no-store" });
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.detail || "无法读取课堂记录");
+    const query = new URLSearchParams({category: els.libraryCategory.value || '',
+      date: state.selectedLibraryDate || '', offset: String(state.libraryPage * 20), limit: '20'});
+    const payload = await cachedJson('/api/library?' + query);
+    if (request !== libraryRequest) return;
+    state.libraryTotal = payload.total;
+    state.libraryCalendar = payload.calendar;
+    if (payload.total && state.libraryPage * 20 >= payload.total) {
+      state.libraryPage = Math.floor((payload.total - 1) / 20); return loadLibrary();
+    }
     state.library = payload.records || [];
     continuation.setRecords(state.library);
     for (const record of state.library) {
@@ -1557,6 +1567,11 @@ async function refreshPushPreview() {
     if (request !== previewRequest || record !== pushRecord) return;
     if (!response.ok) throw new Error(data.detail || "无法生成预览");
     pushPreviewData = data;
+    pushRecord.ideashell_sync = data.sync || pushRecord.ideashell_sync;
+    const unknown = ["sending", "unknown"].includes(pushRecord.ideashell_sync?.create_operation?.status);
+    $("#pushReconcile").hidden = !unknown;
+    if (unknown || pushRecord.ideashell_sync?.note_id) $("#pushDestination").value = "update";
+    renderPushTarget();
     $("#pushPreview").innerHTML = renderMarkdown(data.content);
     const audioValues = data.audio_parts || (data.audio ? [data.audio] : []);
     const audioHint = audioValues.length ? ` · 附带${audioValues.length}个录音文件（${audioValues.map(audio => `${(audio.bytes / 1024 / 1024).toFixed(1)} MB`).join(" + ")}）` : data.audio_error ? " · 录音附件不可用，仍可推送文字" : "";
@@ -1575,10 +1590,29 @@ async function pushSummaryToIdeashell(record) {
   $("#pushDialog").showModal();
   await refreshPushPreview();
 }
+$("#pushReconcileButton").addEventListener("click", async () => {
+  if (!pushRecord) return;
+  const button = $("#pushReconcileButton"); button.disabled = true;
+  try {
+    const response = await fetch(`/api/recordings/${encodeURIComponent(pushRecord.id)}/ideashell/reconcile`, {
+      method: "POST", headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({note_id: $("#pushReconcileId").value.trim()}),
+    });
+    const result = await readIdeashellResponse(response, "核对失败");
+    if (!response.ok) throw new Error(result.detail || "核对失败");
+    pushRecord.ideashell_sync = result.session.ideashell_sync;
+    $("#pushDestination").value = "update";
+    await refreshPushPreview(); await loadLibrary();
+    toast("已核对并关联；远端内容未修改");
+  } catch (error) { $("#pushPreviewStatus").textContent = error.message; }
+  finally { button.disabled = false; }
+});
 async function confirmPush() {
   const record = pushRecord, preview = pushPreviewData;
   if (!record || !preview) return;
   const button = $("#confirmPush");
+  if (["sending", "unknown"].includes(record.ideashell_sync?.create_operation?.status) && $("#pushDestination").value === "new" &&
+      !window.confirm("上次可能已创建成功。此次明确新建另一篇，可能产生重复笔记，是否继续？")) return;
   button.disabled = true; button.textContent = "推送中…";
   $("#pushContentMode").disabled = true;
   $("#pushDestination").disabled = true;
@@ -1604,7 +1638,7 @@ async function confirmPush() {
     $("#pushDialog").close();
     await loadLibrary();
     toast(payload.audio_attached ? `1 篇笔记和 ${payload.parts} 个录音文件已推送到 IdeaShell（录音不会自动转写）` : "正文已推送到 1 篇 IdeaShell 笔记，录音附件未上传", 5200);
-  } catch (error) { $("#pushPreviewStatus").textContent = error.message; }
+  } catch (error) { await refreshPushPreview(); $("#pushPreviewStatus").textContent = error.message; }
   finally { button.disabled = false; button.textContent = "推送到同一篇笔记"; $("#pushContentMode").disabled = false; $("#pushDestination").disabled = false; }
 }
 
@@ -1884,7 +1918,7 @@ function connectFor(command, commandPayload = {}) {
     }, 30000);
     ws.onopen = () => {
       state.ws = ws;
-      ws.send(JSON.stringify(config));
+      if (command !== "end") ws.send(JSON.stringify(config));
       ws.send(JSON.stringify({ type: command, ...commandPayload }));
     };
     ws.onerror = () => {
@@ -1897,7 +1931,7 @@ function connectFor(command, commandPayload = {}) {
       if (!settled && ["config_error", "start_error", "end_error"].includes(message.type)) {
         settled = true;
         clearTimeout(timer);
-        reject(new Error(message.message || "无法开始录音"));
+        reject(Object.assign(new Error(message.message || "无法开始录音"), {code: message.code}));
         ws.close();
         return;
       }
@@ -1935,7 +1969,11 @@ async function startCapture() {
       audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
     });
     state.stream = stream;
-    await connectFor("start");
+    try { await connectFor("start"); }
+    catch (error) {
+      if (error.code !== "writer_conflict" || !window.confirm("另一页面正在录音。接管后该页面将停止收音，是否接管？")) throw error;
+      await connectFor("start", { takeover: true });
+    }
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
     state.audioContext = new AudioContextClass({ latencyHint: "interactive" });
     await state.audioContext.resume();
@@ -2074,6 +2112,17 @@ async function watchEndSession(sessionId) {
 
 function handleMessage(message) {
   switch (message.type) {
+    case "ownership_lost":
+      stopAudioNodes();
+      state.capturing = false;
+      state.pausing = false;
+      els.listeningLabel.textContent = "另一页面正在录音";
+      updateButtons();
+      toast(message.message);
+      break;
+    case "configured":
+      if (message.warning) toast(message.warning, 6000);
+      break;
     case "session_started":
       state.activeSession = message.session;
       els.recordName.value = message.session.title || els.recordName.value;
@@ -2201,25 +2250,25 @@ els.libraryTab.addEventListener("click", event => { event.preventDefault(); swit
 $("#workbenchNav").addEventListener("click", event => {event.preventDefault(); switchView("transcript");});
 window.addEventListener("popstate", () => switchView(location.pathname === "/library" ? "library" : "transcript"));
 $("#librarySettings").addEventListener("click", () => openAdvancedSettings());
-$("#libraryPrevious").addEventListener("click", () => {state.libraryPage--; renderLibrary();});
-$("#libraryNext").addEventListener("click", () => {state.libraryPage++; renderLibrary();});
-els.libraryCategory.addEventListener("change", renderLibrary);
+$("#libraryPrevious").addEventListener("click", () => {state.libraryPage--; void loadLibrary();});
+$("#libraryNext").addEventListener("click", () => {state.libraryPage++; void loadLibrary();});
+els.libraryCategory.addEventListener("change", () => { state.libraryPage = 0; void loadLibrary(); });
 els.refreshLibrary.addEventListener("click", loadLibrary);
 els.calendarPrevious.addEventListener("click", () => {
   const anchor = state.libraryMonth || new Date();
   state.libraryMonth = new Date(anchor.getFullYear(), anchor.getMonth() - 1, 1);
   state.selectedLibraryDate = null;
-  renderLibrary();
+  state.libraryPage = 0; void loadLibrary();
 });
 els.calendarNext.addEventListener("click", () => {
   const anchor = state.libraryMonth || new Date();
   state.libraryMonth = new Date(anchor.getFullYear(), anchor.getMonth() + 1, 1);
   state.selectedLibraryDate = null;
-  renderLibrary();
+  state.libraryPage = 0; void loadLibrary();
 });
 els.calendarClear.addEventListener("click", () => {
   state.selectedLibraryDate = null;
-  renderLibrary();
+  state.libraryPage = 0; void loadLibrary();
 });
 els.chooseStorageRoot?.addEventListener("click", chooseStorageRoot);
 els.saveStorageRoot.addEventListener("click", saveStorageRoot);
@@ -2429,7 +2478,7 @@ async function init() {
   if (query.get("category") && !state.activeSession) {
     const course = query.get("category");
     setRecordCategory(course); applyCategoryProfile(course);
-    els.libraryCategory.value = course; renderLibrary();
+    els.libraryCategory.value = course; await loadLibrary();
   }
   if (query.get("source") === "upload") els.fileInput.click();
   if (query.get("recording")) await openLibraryRecord(query.get("recording"));

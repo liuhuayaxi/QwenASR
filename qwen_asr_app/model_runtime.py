@@ -105,7 +105,7 @@ class ModelManager:
             started = time.monotonic()
             try:
                 if not self.model_path.exists():
-                    raise FileNotFoundError(f"模型目录不存在：{self.model_path}")
+                    raise FileNotFoundError(f"模型目录不存在：{self.model_path}；请运行 .venv/bin/python -m qwen_asr_app.model_setup prepare，或在设置中选择仅远程 ASR")
                 await self._worker_thread(self._start_worker_sync)
                 self.load_seconds = round(time.monotonic() - started, 1)
                 self.status = "ready"

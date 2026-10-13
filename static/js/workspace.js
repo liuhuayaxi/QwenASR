@@ -1,10 +1,12 @@
+import {cachedJson} from './cached-json.js';
 import {escapeHtml as esc, recordingId, activeStatuses, attentionStatuses} from './workbench/continuation.js?v=20261011-ui-final';
 const $ = id => document.getElementById(id);
 const params = new URLSearchParams(location.search);
 let category = params.get('category') || '', records = [], tasks = [], categories = [], timer, loading = false, recordsLoaded = false, tasksLoaded = false;
 const routes = {records:'/library', notes:'/library', materials:'/course-files', review:'/course-files'};
 const query = values => new URLSearchParams({category, ...values}).toString();
-const hasNote = record => Boolean(record.ai_note_summary?.summary || record.has_ai_summary);
+const hasNote = record => Boolean(record.has_note || record.ai_note_summary?.summary || record.has_ai_summary);
+let recordTotal = 0, noteTotal = 0, nextOffset = null;
 const taskLabels = {running:'进行中', queued:'排队中', waiting_retry:'等待重试', stopping:'正在停止', paused:'已暂停', failed:'失败', error:'失败', interrupted:'已中断', pending:'待处理', stale:'原件已更新', completed_with_errors:'部分失败', completed:'已完成', cancelled:'已取消'};
 // Avoid replacing focused controls on every poll when the rendered data is unchanged.
 const rendered = new Map();
@@ -38,13 +40,13 @@ function render() {
   const ids = new Set(lessons.map(record => record.id));
   const related = tasks.filter(task => !category || task.category === category || ids.has(recordingId(task)));
   const pending = related.filter(task => activeStatuses.has(task.status) || attentionStatuses.has(task.status));
-  $('workspaceMeta').textContent = `${lessons.length} 堂课堂 · ${lessons.filter(hasNote).length} 份笔记${tasksLoaded ? ` · ${pending.length} 项待处理` : ''}`;
+  $('workspaceMeta').textContent = `${recordTotal} 堂课堂 · ${noteTotal} 份笔记${tasksLoaded ? ` · ${pending.length} 项待处理` : ''}`;
   replace('workspaceRecent', lessons.slice(0,5).map(record => recordRow(record)).join('') || '<p class="workspace-empty">暂无课堂记录</p>');
   const shown = (pending.length ? pending : related.filter(task => task.status === 'completed')).slice(0, pending.length ? 4 : 3);
   $('workspaceTaskHeading').textContent = pending.length ? '待处理任务' : '最近任务';
   $('workspaceTaskCount').textContent = pending.length ? String(pending.length) : '';
   replace('workspaceTimeline', shown.map(task => `<article class="workspace-task"><b>${esc(task.title || task.label || '任务')}</b><p><span>${esc(task.label || '')}</span><span class="workspace-task-status" data-attention="${attentionStatuses.has(task.status)}">${esc(taskLabels[task.status] || task.stage || '处理中')}</span></p></article>`).join('') || `<p class="workspace-empty">${tasksLoaded ? '暂无任务' : '任务状态暂不可用'}</p>`);
-  replace('workspaceQuestions', lessons.map(record => recordRow(record,true)).join('') || '<p class="workspace-empty">暂无课堂记录</p>');
+  replace('workspaceQuestions', (lessons.map(record => recordRow(record,true)).join('') || '<p class="workspace-empty">暂无课堂记录</p>') + (nextOffset !== null ? '<button class="secondary-button" data-more-records>加载更多课堂</button>' : ''));
   $('microphoneSource').href = '/?' + query({});
   $('uploadSource').href = '/?' + query({source:'upload'});
 }
@@ -67,14 +69,18 @@ function timeline() {
 async function load() {
   if (loading) return;
   loading = true;
+  const requestedCategory = category;
   try {
-    const result = await Promise.allSettled(['/api/library','/api/tasks'].map(async url => {
-      const response = await fetch(url,{cache:'no-store',signal:AbortSignal.timeout(15000)});
-      if (!response.ok) throw new Error('读取失败');
-      return response.json();
-    }));
+    const result = await Promise.allSettled([
+      '/api/library?' + new URLSearchParams({category, limit:'20', include_settings:'false'}),
+      '/api/tasks?' + new URLSearchParams({category}),
+    ].map(url => cachedJson(url, {signal:AbortSignal.timeout(15000)})));
+    if (requestedCategory !== category) return;
     if (result[0].status === 'fulfilled') {
       records = result[0].value.records || [];
+      recordTotal = result[0].value.total ?? records.length;
+      noteTotal = result[0].value.note_count ?? records.filter(hasNote).length;
+      nextOffset = result[0].value.next_offset ?? null;
       recordsLoaded = true;
       categories = [...new Set([...(result[0].value.categories || []), ...records.map(record => record.category), ...(category ? [category] : [])].filter(Boolean))];
       replace('workspaceCourse', [`<option value="" ${!category ? 'selected' : ''}>全部课程</option>`, ...categories.map(name => `<option value="${esc(name)}" ${name===category ? 'selected' : ''}>${esc(name)}</option>`)].join(''));
@@ -93,18 +99,28 @@ async function load() {
   } finally {
     loading = false;
     clearTimeout(timer);
-    if (!document.hidden) timer = setTimeout(load,5000);
+    if (!document.hidden) timer = setTimeout(load, requestedCategory !== category ? 0 : tasks.some(task => activeStatuses.has(task.status)) ? 15000 : 60000);
   }
 }
 $('workspaceCourse').addEventListener('change', () => {
   category = $('workspaceCourse').value;
   try { localStorage.setItem('qwen-asr-last-course-v1',category); } catch { /* optional preference */ }
   history.replaceState(null,'','/workspace?' + query({}));
-  render(); tab('overview');
+  records = []; recordTotal = noteTotal = 0; nextOffset = null; render(); tab('overview'); void load();
 });
 document.addEventListener('click', event => {
   const button = event.target.closest('button');
   if (!button) return;
+  if (button.hasAttribute('data-more-records')) {
+    button.disabled = true;
+    const selected = category;
+    cachedJson('/api/library?' + new URLSearchParams({category, limit:'20', offset:String(nextOffset), include_settings:'false'}))
+      .then(data => {
+        if (selected !== category) return;
+        records = [...new Map([...records, ...(data.records || [])].map(record => [record.id, record])).values()];
+        nextOffset = data.next_offset ?? null; render();
+      }).catch(() => { button.disabled = false; });
+  }
   if (button.dataset.tab) tab(button.dataset.tab);
   if (button.dataset.recording) tab('notes',button.dataset.recording);
   if (button.dataset.chat) {
@@ -122,3 +138,10 @@ $('workspaceTasks').addEventListener('click',timeline);
 $('newClass').addEventListener('click', () => $('newClassDialog').showModal());
 document.addEventListener('visibilitychange', () => { if (!document.hidden) void load(); else clearTimeout(timer); });
 void load();
+
+const libraryEvents = new EventSource('/api/library/events');
+let libraryRefresh;
+libraryEvents.onmessage = () => {
+  clearTimeout(libraryRefresh);
+  libraryRefresh = setTimeout(() => { if (!document.hidden) void load(); }, 200);
+};

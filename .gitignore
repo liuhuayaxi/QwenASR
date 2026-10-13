@@ -35,3 +35,10 @@ ai-infer-node/docs/evidence/
 
 # Independent course-workspace preview data.
 .workspace-preview/
+
+# Settings recovery copies can contain private paths and course preferences.
+app-settings.json.last-good
+app-settings.json.recovery-*
+
+# Browser acceptance dependencies are installed independently from the app.
+tests/browser/node_modules/

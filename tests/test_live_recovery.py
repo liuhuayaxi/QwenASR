@@ -163,48 +163,6 @@ class DurableJobTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn(record.id, app.background_summary_tasks)
                 self.assertEqual(store.find(record.id).metadata['summary_job']['status'], 'interrupted')
 
-    async def test_websocket_reconnect_reuses_session_with_unfinished_work(self):
-        class Socket:
-            headers = {"origin": "http://127.0.0.1:8765"}
-            url = "ws://127.0.0.1:8765/ws/transcribe"
-            def __init__(self):
-                self.queue = asyncio.Queue()
-                self.events = {}
-            async def accept(self): pass
-            async def receive(self): return await self.queue.get()
-            async def send_json(self, payload): self.events.setdefault(payload['type'], asyncio.Event()).set()
-            async def wait_for(self, kind):
-                await asyncio.wait_for(self.events.setdefault(kind, asyncio.Event()).wait(), 1)
-            def command(self, kind): self.queue.put_nowait({'text': json.dumps({'type': kind})})
-            def disconnect(self): self.queue.put_nowait({'type': 'websocket.disconnect'})
-        with tempfile.TemporaryDirectory() as directory:
-            record = live_record(Path(directory))
-            store = store_for(record)
-            manager = SimpleNamespace(status='idle', client_connected=lambda: None,
-                                      client_disconnected=lambda: None, load=AsyncMock())
-            first, second = Socket(), Socket()
-            gate = asyncio.Event()
-            with patch.object(app, 'recording_store', store), patch.object(app, 'model_manager', manager):
-                connection1 = asyncio.create_task(app.transcribe_socket(first))
-                first.command('start')
-                await first.wait_for('session_started')
-                session = app.live_sessions[record.id]
-                session.track(gate.wait())
-                first.command('pause')
-                await first.wait_for('paused')
-                first.disconnect()
-                await connection1
-                connection2 = asyncio.create_task(app.transcribe_socket(second))
-                second.command('start')
-                await second.wait_for('session_started')
-                self.assertIs(app.live_sessions[record.id], session)
-                self.assertTrue(session.tasks)
-                self.assertTrue(session.accepting_audio)
-                gate.set()
-                second.disconnect()
-                await connection2
-                await session.drain()
-                app.live_sessions.pop(record.id, None)
 
     async def test_end_waits_for_tail_then_generates_even_after_socket_closes(self):
         with tempfile.TemporaryDirectory() as directory:

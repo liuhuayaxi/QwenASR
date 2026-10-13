@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import asyncio
+import hashlib
 import logging
 import os
 import re
@@ -15,7 +16,7 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 
 from .ai_secrets import ai_secret_store, endpoint_identity
-from .ai_limits import account_gate
+from .ai_limits import account_gate, agy_account_gate, agy_account_identity, shared_gate
 from .context_budget import (
     DEFAULT_CONTEXT_WINDOW,
     estimate_tokens,
@@ -34,7 +35,6 @@ from .terminology import ai_terminology_context
 
 
 logger = logging.getLogger(__name__)
-_api_semaphores: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 _api_clients: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 TRANSIENT_AI_KINDS = {
     "rate_limit", "provider_busy", "network_dns", "network_connect",
@@ -554,24 +554,16 @@ async def request_ai_text(
 ) -> str:
     provider = provider_for_mode(config.get("ai", {}), mode)
     concurrency = concurrency_for(config, mode)
-    loop = asyncio.get_running_loop()
-    semaphores = _api_semaphores.setdefault(loop, {})
-    key = (mode, provider_transport(provider), str(provider.get("base_url") or ""),
-           str(provider.get("model") or provider.get("cli_model") or ""), concurrency)
-    if provider_transport(provider) == "agy_cli":
-        # All AGY functions use the same local CLI account. Share its slots so
-        # six correction calls plus six summary calls cannot become twelve
-        # concurrent sessions behind a setting that says six.
-        key = ("agy_cli", concurrency)
-    semaphore = semaphores.setdefault(key, asyncio.Semaphore(concurrency))
     base_url, credential = provider_credentials(config, mode)
     if provider_transport(provider) == "agy_cli":
-        # AGY authenticates through its own local CLI session; there is no API
-        # endpoint or secret to put into the shared account gate.
-        async with semaphore:
-            return await _request_ai_text_unlimited(instructions=instructions, payload=payload,
-                config=config, mode=mode, max_output_tokens=max_output_tokens)
-    async with semaphore, account_gate(base_url, credential):
+        identity = agy_account_identity()
+        total = agy_account_gate()
+    else:
+        identity = (endpoint_identity(base_url), hashlib.sha256(credential.encode()).hexdigest())
+        total = account_gate(base_url, credential)
+    # Each function retains its own gate; changing a cap resizes the same pool.
+    function = shared_gate(('function', mode, *identity), concurrency)
+    async with function, total:
         return await _request_ai_text_unlimited(instructions=instructions, payload=payload,
             config=config, mode=mode, max_output_tokens=max_output_tokens)
 

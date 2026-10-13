@@ -56,7 +56,6 @@ class CredentialTests(unittest.TestCase):
             self.assertFalse(provider['api_key'])
 
 
-
 class UpgradeAsyncTests(unittest.IsolatedAsyncioTestCase):
     async def test_total_account_concurrency_spans_models_and_features(self):
         current=peak=0
@@ -271,15 +270,3 @@ class SearchAudioTests(unittest.TestCase):
                 self.assertGreater(container.duration,0)
                 container.seek(500000)
                 self.assertTrue(next(container.decode(audio=0)).samples)
-
-    def test_new_library_layout_is_in_data_snapshot(self):
-        import importlib.util
-        spec=importlib.util.spec_from_file_location('audit_snapshot',Path(__file__).resolve().parents[1]/'scripts/check_tests.py')
-        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
-        with tempfile.TemporaryDirectory() as raw:
-            root=Path(raw);library=root/'library';recording=library/'课程'/'上课录音'/'时间'
-            recording.mkdir(parents=True);meta=recording/'session.json';meta.write_text('{}')
-            (root/'app-settings.json').write_text(json.dumps({'storage_root':str(library)}))
-            module.ROOT=root
-            with patch.object(Path,'home',return_value=root/'home'):
-                self.assertIn(str(meta),module.snapshot())

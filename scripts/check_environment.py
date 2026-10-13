@@ -4,8 +4,10 @@ from pathlib import Path
 import sys
 
 root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(root))
+from qwen_asr_app.model_setup import requirements_path
 mismatches = []
-for line in (root / 'requirements.lock').read_text().splitlines():
+for line in requirements_path().read_text().splitlines():
     if not line or line.startswith('#'):
         continue
     name, expected = line.split('==', 1)
