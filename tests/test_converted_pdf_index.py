@@ -14,6 +14,15 @@ from qwen_asr_app.knowledge.task_adapter import IntelligenceTasks
 
 
 class ConvertedPDFIndexTests(unittest.TestCase):
+    def test_default_small_model_has_distinct_contract_from_large_model(self):
+        from qwen_asr_app.knowledge.settings import KnowledgeSettings, embedding_contract
+        small = embedding_contract(KnowledgeSettings.validate({}))
+        large = embedding_contract(KnowledgeSettings.validate({'model_id':'Qwen/Qwen3-Embedding-4B'}))
+        self.assertEqual(small['model_id'], 'Qwen/Qwen3-Embedding-0.6B')
+        self.assertEqual(small['dimension'], 1024)
+        self.assertEqual(large['dimension'], 2560)
+        self.assertNotEqual(small, large)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

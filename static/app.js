@@ -1364,6 +1364,7 @@ async function openLibraryRecord(sessionId, focus = null) {
     if (!response.ok) throw new Error(payload.detail || "无法读取录音笔记");
     state.noteSession = payload.session;
     renderNoteDialog(payload.session);
+    if (document.documentElement.classList.contains('note-reader-mode') && els.toast.parentElement !== els.noteDialog) els.noteDialog.append(els.toast);
     if (!els.noteDialog.open) els.noteDialog.showModal();
     if (focus) requestAnimationFrame(() => libraryTools.focusSearch(focus));
     return payload.session;
@@ -2602,9 +2603,25 @@ $("#toggleNoteFocus").addEventListener("click", () => {
   const focus = $("#noteColumns").classList.toggle("focus-reading");
   $("#toggleNoteFocus").textContent = focus ? "显示原文" : "展开阅读";
 });
+$("#toggleNoteMobilePane").addEventListener("click", () => {
+  if (!document.documentElement.classList.contains('note-reader-mode')) return;
+  noteReader.finish();
+  const columns = $("#noteColumns");
+  const transcript = columns.classList.toggle('mobile-transcript');
+  columns.classList.remove('focus-reading');
+  $("#toggleNoteFocus").textContent = '展开阅读';
+  $("#toggleNoteMobilePane").textContent = transcript ? '查看笔记' : '查看原文';
+  $("#toggleNoteMobilePane").setAttribute('aria-pressed', String(transcript));
+});
 $("#askNoteClass").addEventListener("click", async () => {
   const record = state.noteSession;
   if (!record || !await saveNoteSummary({quiet:true})) return;
+  if (document.documentElement.classList.contains('note-reader-mode') && window.parent !== window) {
+    // The course shell owns navigation; its close path flushes this reader
+    // before replacing the iframe with the existing classroom chat page.
+    window.parent.postMessage({type:'qwenasr:open-classroom-chat',recording:record.id},location.origin);
+    return;
+  }
   await closeNoteDialog();
   showSession(record, true);
   classroomIntelligence?.switchTab('chat');

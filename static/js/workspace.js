@@ -63,14 +63,22 @@ function tab(name, recording) {
   if (name !== 'overview' && name !== 'review') $('workspaceFrame').src = routes[name] + '?' + query({embedded:'1', ...(recording ? {recording} : {})});
 }
 let noteReturn = null;
+let noteReaderObserver = null;
+let noteChatTarget = null;
+function openClassroomChat(recording) {
+  tab('review'); $('workspaceReview').hidden = true; $('workspaceFrame').hidden = false;
+  $('workspaceFrame').src = '/?' + query({embedded:'1',chat:recording});
+}
 function openClassroomNote(recording, opener) {
   const dialog = $('workspaceNoteDialog'), frame = $('workspaceNoteFrame');
   noteReturn = {recording, opener, x:window.scrollX, y:window.scrollY};
+  noteChatTarget = null;
   const title = records.find(record => record.id === recording)?.title || '课堂笔记';
-  $('workspaceNoteTitle').textContent = title;
   frame.title = title;
-  frame.src = '/library?' + query({embedded:'1', recording});
+  $('workspaceNoteReturn').hidden = false;
+  frame.src = '/library?' + query({embedded:'1', note_reader:'1', recording});
   document.body.classList.add('workspace-note-open');
+  document.documentElement.classList.add('workspace-note-open');
   dialog.showModal();
 }
 function requestNoteClose() {
@@ -90,7 +98,14 @@ function requestNoteClose() {
 $('workspaceNoteFrame').addEventListener('load', () => {
   if (!$('workspaceNoteDialog').open) return;
   try {
-    $('workspaceNoteFrame').contentDocument?.getElementById('noteDialog')?.addEventListener('close', () => {
+    const reader = $('workspaceNoteFrame').contentDocument?.getElementById('noteDialog');
+    if (!reader) return;
+    const ready = () => { $('workspaceNoteReturn').hidden = reader.open; };
+    noteReaderObserver?.disconnect();
+    noteReaderObserver = new MutationObserver(ready);
+    noteReaderObserver.observe(reader, {attributes:true,attributeFilter:['open']});
+    ready();
+    reader.addEventListener('close', () => {
       if ($('workspaceNoteDialog').open) $('workspaceNoteDialog').close();
     }, {once:true});
   } catch { /* Keep the explicit return control available if loading fails. */ }
@@ -100,15 +115,33 @@ $('workspaceNoteDialog').addEventListener('cancel', event => {
   requestNoteClose();
 });
 $('workspaceNoteDialog').addEventListener('close', () => {
+  noteReaderObserver?.disconnect();
+  noteReaderObserver = null;
   document.body.classList.remove('workspace-note-open');
+  document.documentElement.classList.remove('workspace-note-open');
   $('workspaceNoteFrame').src = 'about:blank';
   const back = noteReturn;
+  const chat = noteChatTarget;
   noteReturn = null;
+  noteChatTarget = null;
   if (!back) return;
   // The workspace remains mounted; a poll may have replaced the original row.
   const opener = back.opener?.isConnected ? back.opener : [...document.querySelectorAll('#workspaceRecent [data-recording]')].find(button => button.dataset.recording === back.recording);
   opener?.focus({preventScroll:true});
   window.scrollTo(back.x, back.y);
+  // Removing the fullscreen document lock and the native dialog's focus
+  // restoration settle during layout; restore again after that layout.
+  if (!chat) requestAnimationFrame(() => {
+    if (!noteReturn && !$('workspaceNoteDialog').open) window.scrollTo(back.x, back.y);
+  });
+  if (chat) openClassroomChat(chat);
+});
+window.addEventListener('message', event => {
+  if (event.origin !== location.origin || event.source !== $('workspaceNoteFrame').contentWindow
+      || !$('workspaceNoteDialog').open || !noteReturn
+      || event.data?.type !== 'qwenasr:open-classroom-chat' || event.data.recording !== noteReturn.recording) return;
+  noteChatTarget = noteReturn.recording;
+  requestNoteClose();
 });
 function timeline() {
   $('timelineFrame').src = '/tasks?' + query({embedded:'1'});
@@ -172,8 +205,7 @@ document.addEventListener('click', event => {
   if (button.dataset.tab) tab(button.dataset.tab);
   if (button.dataset.recording) openClassroomNote(button.dataset.recording,button);
   if (button.dataset.chat) {
-    tab('review'); $('workspaceReview').hidden = true; $('workspaceFrame').hidden = false;
-    $('workspaceFrame').src = '/?' + query({embedded:'1',chat:button.dataset.chat});
+    openClassroomChat(button.dataset.chat);
   }
   if (button.hasAttribute('data-external-review')) {
     tab('review'); $('workspaceReview').hidden = true; $('workspaceFrame').hidden = false;

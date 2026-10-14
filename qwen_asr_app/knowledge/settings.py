@@ -15,7 +15,7 @@ MODELS = {
         'revision': '97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3', 'dimension': 1024},
 }
 QUERY_INSTRUCTION = 'Given a question about a Chinese university course, retrieve relevant passages that answer the question, including English terminology and mathematical definitions.'
-DEFAULTS = {'model_id': 'Qwen/Qwen3-Embedding-4B', 'device': 'mps',
+DEFAULTS = {'model_id': 'Qwen/Qwen3-Embedding-0.6B', 'device': 'mps',
             'model_root': str(Path(os.getenv('QWEN_ASR_KNOWLEDGE_MODEL_ROOT', ROOT / 'models' / 'knowledge'))),
             'batch_size': 2, 'max_length': 2048, 'idle_seconds': 30,
             'timeout_seconds': 180, 'reranker': 'none'}

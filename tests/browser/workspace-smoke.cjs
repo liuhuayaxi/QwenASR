@@ -354,19 +354,127 @@ async function fixtures(route) {
     assert.match(await reader.locator('#noteSummaryReader').innerText(),/菲涅耳公式/);
     assert.equal(page.url(),workspaceUrl);assert.equal(await page.locator('#workspaceFrame').isVisible(),false);
     await reader.locator('#toggleNoteSource').click();await reader.locator('#noteSummaryEditor').fill('# 全屏编辑保留\n\n刚才修改的课堂笔记。');
-    await page.getByRole('button',{name:'关闭并返回课程',exact:true}).click();await saveStarted;
+    await reader.locator('#closeNoteDialog').click();await saveStarted;
     assert.equal(await outer.isVisible(),true,'save must finish before destroying the reader');
     releaseSave();await outer.waitFor({state:'hidden'});
+    await page.waitForFunction(pos=>scrollX===pos.x && scrollY===pos.y,scroll);
     assert.equal(page.url(),workspaceUrl);assert.equal(await page.locator('#workspaceCourse').inputValue(),record.category);
     assert.deepEqual(await page.evaluate(()=>({x:scrollX,y:scrollY})),scroll);
     assert.equal(await row.evaluate(button=>document.activeElement===button),true);
     assert.equal(await page.locator('#workspaceTabs [aria-current="page"]').getAttribute('data-tab'),'overview');
     await row.click();await reader.locator('#noteDialog[open]').waitFor();
-    await page.getByRole('button',{name:'关闭并返回课程',exact:true}).focus();await page.keyboard.press('Escape');await outer.waitFor({state:'hidden'});
+    await outer.evaluate(dialog=>{dialog.setAttribute('tabindex','-1');dialog.focus();});await page.keyboard.press('Escape');await outer.waitFor({state:'hidden'});
     await page.setViewportSize({width:390,height:844});await row.click();await reader.locator('#noteDialog[open]').waitFor();
     const mobile=await outer.boundingBox();assert.equal(mobile.width,390);assert.equal(mobile.height,844);
     assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
     await reader.locator('#closeNoteDialog').click();await outer.waitFor({state:'hidden'});
+  });
+  await scenario('全屏笔记保存后进入本堂课问答，拒绝其他窗口的跳转消息',async(page,context,origin)=>{
+    let failSave=true;
+    await context.route('**/api/recordings/smoke-class/summary',async route=>{
+      if(failSave)return route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({detail:'合成保存失败'})});
+      const body=route.request().postDataJSON();
+      await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({summary:{summary:body.summary},session:{...record,ai_note_summary:{summary:body.summary}}})});
+    });
+    await page.goto(origin+'/workspace?category='+encodeURIComponent(record.category));
+    await page.locator('#workspaceRecent [data-recording="smoke-class"]').click();
+    const reader=page.frameLocator('#workspaceNoteFrame'),outer=page.locator('#workspaceNoteDialog[open]');
+    await reader.locator('#noteDialog[open]').waitFor();
+    await page.evaluate(()=>window.postMessage({type:'qwenasr:open-classroom-chat',recording:'smoke-class'},location.origin));
+    assert.equal(await outer.isVisible(),true,'parent window cannot impersonate the reader');
+    const frame=await (await page.locator('#workspaceNoteFrame').elementHandle()).contentFrame();
+    await frame.evaluate(()=>parent.postMessage({type:'qwenasr:open-classroom-chat',recording:'different-class'},location.origin));
+    assert.equal(await outer.isVisible(),true,'message must identify the currently open recording');
+    await reader.locator('#toggleNoteSource').click();await reader.locator('#noteSummaryEditor').fill('# 进入问答前需要保存\n\n人工笔记。');
+    await reader.locator('#askNoteClass').click();
+    await reader.locator('#noteSaveStatus').getByText('失败',{exact:false}).waitFor();
+    assert.equal(await outer.isVisible(),true);assert.equal(await page.locator('#workspaceFrame').isVisible(),false);
+    failSave=false;await reader.locator('#askNoteClass').click();await outer.waitFor({state:'hidden'});
+    assert.equal(await page.locator('#workspaceTabs [aria-current="page"]').getAttribute('data-tab'),'review');
+    const url=new URL(await page.locator('#workspaceFrame').getAttribute('src'),origin);
+    assert.equal(url.searchParams.get('chat'),'smoke-class');
+    await page.frameLocator('#workspaceFrame').locator('#classroomChat').waitFor();
+  });
+  await scenario('长课堂笔记仅一个标题，内容独立滚动且无外层裁切',async(page,context,origin)=>{
+    const fixturePath=process.env.QWEN_ASR_LONG_NOTE_FIXTURE || path.join(output,'real-long-note-fixture.json');
+    const real=fs.existsSync(fixturePath)?JSON.parse(fs.readFileSync(fixturePath,'utf8')).session:null;
+    const fallbackSummary=Array.from({length:90},(_,i)=>`## 第 ${i+1} 节\n\n较长的课堂笔记段落，用于检查实际内容滚动。${'公式含义、条件和结论。'.repeat(30)}\n`).join('\n');
+    const long={...record,...real,id:record.id,category:record.category,
+      title:(real?.title || '长课堂笔记滚动检查')+'（标题放大、换行与长课堂阅读布局验证）',
+      segments:real?.segments || Array.from({length:90},(_,i)=>({id:i+1,start:i*60,end:(i+1)*60,raw:'长段录音原文。'.repeat(40),corrected:'长段录音精修原文。'.repeat(40)})),
+      ai_note_summary:{...real?.ai_note_summary,summary:real?.ai_note_summary?.summary || fallbackSummary}};
+    await context.route('**/api/recordings/smoke-class',route=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({session:long})}));
+    await context.route('**/api/recordings/smoke-class/summary-status',route=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({job:{running:false,status:'completed'},session:long})}));
+    await page.setViewportSize({width:1440,height:900});await page.goto(origin+'/workspace?category='+encodeURIComponent(record.category));
+    await page.locator('#workspaceRecent [data-recording="smoke-class"]').click();
+    const frame=await (await page.locator('#workspaceNoteFrame').elementHandle()).contentFrame();
+    await frame.locator('#noteDialog[open]').waitFor();await page.locator('#workspaceNoteReturn').waitFor({state:'hidden'});
+    async function noOuterScroll() {
+      assert.equal(await page.locator('#workspaceNoteDialog h2').count(),0);
+      assert.equal(await page.locator('#workspaceNoteReturn').isVisible(),false);
+      assert.equal(await frame.locator('#noteDialogTitle:visible').count(),1);
+      const parent=await page.evaluate(()=>({height:innerHeight,range:document.scrollingElement.scrollHeight-document.scrollingElement.clientHeight,y:scrollY}));
+      assert.equal(parent.range,0);assert.equal(parent.y,0);
+      const layout=await frame.evaluate(()=>{
+        const range=el=>el.scrollHeight-el.clientHeight;
+        const d=document.getElementById('noteDialog'),c=document.getElementById('noteColumns'),r=document.querySelector('.reader-layout');
+        return {document:range(document.scrollingElement),body:range(document.body),dialog:range(d),columns:range(c),readerLayout:range(r),
+          headerBottom:d.querySelector('.note-dialog-header').getBoundingClientRect().bottom,columnsTop:c.getBoundingClientRect().top,
+          columnsBottom:c.getBoundingClientRect().bottom,viewport:innerHeight,
+          content:[...d.querySelectorAll('#noteSummaryReader,#noteSummaryEditor,#noteTranscript')].filter(el=>el.getClientRects().length).map(el=>({id:el.id,height:el.clientHeight,bottom:el.getBoundingClientRect().bottom,range:range(el)}))};
+      });
+      for(const name of ['document','body','dialog','columns','readerLayout'])assert.ok(layout[name]<=1,`${name} must not scroll: ${JSON.stringify(layout)}`);
+      assert.ok(Math.abs(layout.headerBottom-layout.columnsTop)<=1);
+      assert.ok(Math.abs(layout.columnsBottom-layout.viewport)<=1);
+      for(const content of layout.content){assert.ok(content.height>100,`${content.id} has usable remaining space`);assert.ok(content.bottom<=layout.viewport+1);assert.ok(content.range>0);}
+    }
+    async function wheelContent(id) {
+      const content=frame.locator('#'+id);
+      await content.evaluate(el=>el.scrollTop=0);await content.hover();await page.mouse.wheel(0,720);
+      await frame.waitForFunction(name=>document.getElementById(name).scrollTop>0,id);
+      await noOuterScroll();
+      await content.evaluate(el=>el.scrollTop=el.scrollHeight);
+      await content.hover();await page.mouse.wheel(0,720);await noOuterScroll();
+    }
+    await noOuterScroll();await wheelContent('noteSummaryReader');await wheelContent('noteTranscript');
+    const last=await frame.locator('#noteSummaryReader .markdown-block').last().boundingBox();
+    const readerBounds=await frame.locator('#noteSummaryReader').boundingBox();
+    assert.ok(last.y+last.height<=readerBounds.y+readerBounds.height+1,'last note block can be reached without clipping');
+    await frame.locator('#toggleNoteToc').click();await frame.locator('#noteToc:not(.hidden)').waitFor();await noOuterScroll();
+    await frame.locator('#toggleNoteFocus').click();assert.equal(await frame.locator('.note-transcript-pane').isVisible(),false);await noOuterScroll();
+    await frame.locator('#toggleNoteSource').click();assert.equal(await frame.locator('.reader-layout').isVisible(),false);await wheelContent('noteSummaryEditor');
+    await frame.locator('#toggleNoteSource').click();await frame.locator('#toggleNoteFocus').click();
+    // Increase text size so the title and controls wrap; remaining space follows
+    // their actual height, rather than a guessed 66 px header.
+    await frame.addStyleTag({content:'.note-reader-mode #noteDialogTitle{font-size:25px}.note-reader-mode .note-dialog-header small{font-size:18px}.note-reader-mode .mini-button{font-size:17px}'});
+    await noOuterScroll();await wheelContent('noteSummaryReader');
+    await page.screenshot({path:path.join(output,'note-reader-long-desktop.png')});
+    await page.setViewportSize({width:390,height:844});
+    await noOuterScroll();assert.equal(await frame.locator('.note-transcript-pane').isVisible(),false);
+    await wheelContent('noteSummaryReader');
+    await frame.locator('#toggleNoteMobilePane').click();assert.equal(await frame.locator('.note-summary-pane').isVisible(),false);assert.equal(await frame.locator('.note-transcript-pane').isVisible(),true);
+    await wheelContent('noteTranscript');await frame.locator('#noteTranscriptMode').selectOption('raw');await wheelContent('noteTranscript');
+    await frame.locator('#toggleNoteMobilePane').click();await frame.locator('#toggleNoteSource').click();await wheelContent('noteSummaryEditor');await frame.locator('#toggleNoteSource').click();
+    await page.screenshot({path:path.join(output,'note-reader-long-mobile.png')});
+    fs.writeFileSync(path.join(output,'note-reader-content-proof.json'),JSON.stringify({fixture_is_real:!!real,summary_characters:long.ai_note_summary.summary.length,segments:long.segments.length,transport:'offline fixture; no production writes',desktop_and_mobile_passed:true},null,2));
+    await frame.locator('#closeNoteDialog').click();await page.locator('#workspaceNoteDialog').waitFor({state:'hidden'});
+  });
+  await scenario('全屏笔记保存失败且草稿不可落盘时禁止关闭',async(page,context,origin)=>{
+    let failSave=true;
+    await context.addInitScript(()=>{
+      const original=Storage.prototype.setItem;
+      Storage.prototype.setItem=function(key,value){if(String(key).startsWith('qwen-asr-note-draft-v1:'))throw new Error('synthetic draft storage unavailable');return original.call(this,key,value);};
+    });
+    await context.route('**/api/recordings/smoke-class/summary',route=>{
+      const body=route.request().postDataJSON();
+      return route.fulfill({status:failSave?503:200,contentType:'application/json',body:JSON.stringify(failSave?{detail:'synthetic save unavailable'}:{summary:{summary:body.summary},session:{...record,ai_note_summary:{summary:body.summary}}})});
+    });
+    await page.goto(origin+'/workspace?category='+encodeURIComponent(record.category));await page.locator('#workspaceRecent [data-recording="smoke-class"]').click();
+    const reader=page.frameLocator('#workspaceNoteFrame'),outer=page.locator('#workspaceNoteDialog[open]');await reader.locator('#noteDialog[open]').waitFor();
+    await reader.locator('#toggleNoteSource').click();await reader.locator('#noteSummaryEditor').fill('# 未保存保护\n\n尚未成功保存的手动修改。');
+    await reader.locator('#closeNoteDialog').click();await reader.locator('#toast').filter({hasText:'保存失败，请保留页面'}).waitFor();
+    assert.equal(await outer.isVisible(),true);assert.equal(await reader.locator('#noteDialog').isVisible(),true);assert.match(await reader.locator('#noteSummaryEditor').inputValue(),/未保存保护/);
+    failSave=false;await reader.locator('#closeNoteDialog').click();await outer.waitFor({state:'hidden'});
   });
   await scenario('已保存课堂的速记增强会自动更新，原手记保留',async(page,context,origin)=>{
     let polls=0;

@@ -15,8 +15,16 @@
     <link rel="stylesheet" href="/static/custom-controls.css?v=20261014-selection-hover" />
     <link rel="stylesheet" href="/static/vendor/katex/katex.min.css" />
   <script src="/static/vendor/katex/katex.min.js" defer></script>
-<link rel="stylesheet" href="/static/workspace.css?v=20261011-ui-final" />
-<script>if (new URLSearchParams(location.search).get("embedded") === "1") document.addEventListener("DOMContentLoaded", () => document.body.classList.add("workspace-embedded"));</script>
+<link rel="stylesheet" href="/static/workspace.css?v=20261015-note-reader-3" />
+<script>
+  const readerParams = new URLSearchParams(location.search);
+  const fullNoteReader = location.pathname === '/library' && readerParams.get('note_reader') === '1';
+  if (fullNoteReader) document.documentElement.classList.add('note-reader-mode');
+  document.addEventListener('DOMContentLoaded', () => {
+    if (readerParams.get('embedded') === '1') document.body.classList.add('workspace-embedded');
+    if (fullNoteReader) document.body.classList.add('note-reader-mode');
+  });
+</script>
 </head>
   <body class="workbench-page">
     <header class="app-header">
@@ -783,7 +791,7 @@
           <b id="noteDialogTitle">查看笔记</b>
           <small id="noteDialogMeta"></small>
         </div>
-        <button id="closeNoteDialog" class="ghost-button" type="button">关闭</button>
+        <div class="note-header-actions"><button id="toggleNoteMobilePane" class="ghost-button note-mobile-pane-switch" type="button" aria-pressed="false">查看原文</button><button id="closeNoteDialog" class="ghost-button" type="button">关闭</button></div>
       </div>
       <div class="note-dialog-columns" id="noteColumns">
         <section class="note-transcript-pane">
@@ -865,6 +873,6 @@
     </dialog>
 
     <div id="toast" class="toast" role="status"></div>
-    <script src="/static/app.js?v=20261014-followups-1" type="module"></script>
+    <script src="/static/app.js?v=20261015-note-reader-3" type="module"></script>
   </body>
 </html>
