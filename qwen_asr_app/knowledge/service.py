@@ -39,6 +39,7 @@ class KnowledgeService:
 
         self.db_path = Path(db_path)
         self.store = KnowledgeStore(self.db_path)
+        self.store.exclude_legacy_course_file_variants()
         self.embedder = embedder
         self.last_retrieval_warning = ''
         self.last_vector_success = False
@@ -59,6 +60,7 @@ class KnowledgeService:
         if self.job_manager._active_job_id or self.job_manager._queue.qsize():
             raise ValueError('旧资料库的索引仍在处理，请完成或取消后再切换资料库位置')
         store=KnowledgeStore(root/'.knowledge.db')
+        store.exclude_legacy_course_file_variants()
         self.store=store
         self.db_path=store.db_path
         self.ingestor.store=store
@@ -352,9 +354,14 @@ class KnowledgeService:
     def _check_freshness_before_search(self, category: str) -> None:
         """Verify physical existence and stat freshness of source files.
         Tombstone deleted sources and hide outdated chunks of modified sources immediately."""
+        self.store.exclude_legacy_course_file_variants(category)
         active_sources = self.store.list_sources(category, active_only=True)
         for s in active_sources:
             if not self._parent_fresh(s):
+                lineage=json.loads(s.get('lineage') or '{}')
+                if lineage.get('parent_file_path') and not Path(lineage['parent_file_path']).exists():
+                    self.store.tombstone_source(s['source_id'])
+                    continue
                 self.store.mark_source_stale_and_hide_chunks(s['source_id'],'原件已更新，旧转换结果不可作为当前证据')
                 continue
             path_str = s.get("file_path")
@@ -388,6 +395,7 @@ class KnowledgeService:
     def status(self, category: str) -> dict[str, Any]:
         """Return knowledge status for category."""
         cid = self.course_id(category)
+        self._check_freshness_before_search(category)
         sources = self.store.list_sources(category, active_only=True)
         embedder = self._get_embedder()
         contract = embedder.contract if embedder and hasattr(embedder, "contract") else None
@@ -411,13 +419,25 @@ class KnowledgeService:
             current_vectors=row[0]
         recent_jobs = [j for j in self.job_manager.jobs(limit=10) if j.get("category") == category]
 
-        all_sources=self.store.list_sources(category, active_only=False)
-        sources_info=[{'id':r['source_id'],'source_id':r['source_id'],'name':r['title'],'title':r['title'],'kind':r['kind'],'origin':r['origin'],'status':('仅词法可用' if r.get('needs_vectors') and r['status']=='active' else '已就绪' if r['status']=='active' else '原件已更新，等待索引' if r['status']=='stale' else '已删除' if r['status']=='tombstoned' else '需要核对解析'),'error':r.get('error'),'revision':r.get('active_revision')} for r in all_sources]
+        all_sources = [r for r in self.store.list_sources(category, active_only=False) if r['status'] != 'excluded']
+        sources_info = []
+        for r in all_sources:
+            state = r['status']
+            label = {'active': '仅词法可用' if r.get('needs_vectors') else '已就绪',
+                     'waiting_conversion': '等待 MinerU 转换', 'tombstoned': '已删除',
+                     'stale': '等待重新转换' if r['source_type'] == 'course_file_pdf' else '原件已更新，等待索引'}
+            sources_info.append({'id': r['source_id'], 'source_id': r['source_id'], 'name': r['title'],
+                                 'title': r['title'], 'kind': r['kind'], 'origin': r['origin'],
+                                 'state': state, 'source_type': r['source_type'], 'status': label.get(state, '需要核对解析'),
+                                 'error': r.get('error'), 'revision': r.get('active_revision')})
         return {
             "category": category,
             "course_id": cid,
             "sources":sources_info,
             "warning":self.last_retrieval_warning,
+            "index_policy":"converted-pdf-only-v1",
+            "index_policy_label":"课程资料仅索引 MinerU 转换后 PDF；课堂转录、速记与术语继续参与检索",
+            "waiting_conversion_count":sum(r['source_type']=='course_file_pdf' and r['status'] in {'waiting_conversion','stale'} for r in all_sources),
             "vector_ready":bool(current_vectors) and not self.last_retrieval_warning,
             "current_model_vectors_count":current_vectors,
             "model_rebuild_required":chunk_count>current_vectors,

@@ -84,6 +84,16 @@
 .timeline-drawer::backdrop { background: var(--backdrop); }
 #timelineFrame { width: 100%; min-height: 0; flex: 1; border: 0; background: var(--paper); }
 
+/* Recent lessons reuse the library reader in a viewport-sized surface. */
+.workspace-note-open { overflow: hidden; }
+.workspace-note-dialog { position: fixed; inset: 0; width: 100vw; max-width: none; height: 100dvh; max-height: none; margin: 0; padding: 0; border: 0; border-radius: 0; background: var(--paper); color: var(--ink); overflow: hidden; }
+.workspace-note-dialog[open] { display: flex; flex-direction: column; }
+.workspace-note-dialog::backdrop { background: var(--paper); }
+.workspace-note-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 60px; padding: 10px 22px; border-bottom: 1px solid var(--line); background: var(--card); flex-shrink: 0; box-sizing: border-box; }
+.workspace-note-header h2 { margin: 0; min-width: 0; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-note-header button { flex-shrink: 0; }
+#workspaceNoteFrame { display: block; width: 100%; flex: 1; min-height: 0; border: 0; background: var(--paper); }
+
 /* Embedded views inherit the course shell instead of nesting another page shell. */
 body.workspace-embedded > .app-header { display: none; }
 .workspace-embedded .files-layout { grid-template-columns: minmax(0, 1fr); width: calc(100% - 40px); margin: 20px auto; }
@@ -100,6 +110,8 @@ body.workspace-embedded > .app-header { display: none; }
   #workspaceOverview { grid-template-columns: minmax(0, 1fr) 290px; gap: 18px; }
 }
 @media (max-width: 760px) {
+  .workspace-note-header { gap: 10px; padding-inline: 12px; }
+  .workspace-note-header button { padding-inline: 10px; }
   #workspaceFrame { height: max(680px, calc(100dvh - 240px)); min-height: calc(100dvh - 240px); }
   .course-workspace { width: calc(100% - 32px); margin-top: 26px; }
   #workspaceOverview { grid-template-columns: minmax(0, 1fr); }

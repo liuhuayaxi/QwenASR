@@ -137,6 +137,8 @@ class JobManager:
                                               message="任务已取消" if self._running else "服务停止，重启后继续")
                     else:
                         msg = f"完成: 检查 {stats.get('sources_checked', 0)} 个源，更新 {stats.get('sources_updated', 0)} 个，分块 {stats.get('chunks_indexed', 0)}"
+                        if stats.get('waiting_conversion'):
+                            msg += f"；{stats['waiting_conversion']} 份资料等待 MinerU 转换，不参与检索"
                         self.store.update_job(
                             job_id,
                             status="completed",

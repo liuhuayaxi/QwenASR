@@ -11,7 +11,7 @@
   <link rel="stylesheet" href="/static/ui.css?v=20261011-ui-final">
   <link rel="stylesheet" href="/static/custom-controls.css?v=20261014-selection-hover">
 <script>if (new URLSearchParams(location.search).get("embedded") === "1") document.addEventListener("DOMContentLoaded", () => document.body.classList.add("workspace-embedded"));</script>
-<link rel="stylesheet" href="/static/workspace.css?v=20261011-ui-final"></head>
+<link rel="stylesheet" href="/static/workspace.css?v=20261014-followups-1"></head>
 <body class="course-files-page">
     <header class="app-header">
       <div class="app-header-inner">
@@ -99,7 +99,7 @@
             <button id="knowledgeRebuildBtn" class="ui-button mini-button" type="button">重建当前课程索引</button>
           </div>
         </div>
-
+        <p id="knowledgeIndexPolicy" class="knowledge-search-status" role="status" hidden></p>
         <div id="knowledgeJobsBox" class="ongoing-jobs-box hidden" role="status">
           <span class="jobs-spinner" aria-hidden="true"></span>
           <span id="knowledgeJobsText">正在建立索引…</span>
@@ -157,7 +157,7 @@
   </dialog>
   <div id="toast" role="status" hidden></div>
   <script type="module" src="/static/js/knowledge-settings.js"></script>
-  <script type="module" src="/static/js/course-files.js?v=20261014-course-notes"></script>
-  <script type="module" src="/static/js/course-knowledge.js?v=20261014-knowledge-1"></script>
+  <script type="module" src="/static/js/course-files.js?v=20261014-followups-1"></script>
+  <script type="module" src="/static/js/course-knowledge.js?v=20261014-followups-1"></script>
 </body>
 </html>

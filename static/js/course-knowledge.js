@@ -72,6 +72,7 @@ export function initCourseKnowledge() {
     statusBadge: $("#knowledgeStatusBadge"),
     docCount: $("#knowledgeDocCount"),
     chunkCount: $("#knowledgeChunkCount"),
+    indexPolicy: $("#knowledgeIndexPolicy"),
     rebuildBtn: $("#knowledgeRebuildBtn"),
     jobsBox: $("#knowledgeJobsBox"),
     jobsText: $("#knowledgeJobsText"),
@@ -315,6 +316,12 @@ export function initCourseKnowledge() {
 
     const sourceCount = status.active_sources_count ?? status.source_count ?? status.documents;
     const chunkCount = status.active_chunks_count ?? status.chunk_count;
+    if (els.indexPolicy) {
+      const policy = status.index_policy_label || '';
+      const waiting = Number(status.waiting_conversion_count) || 0;
+      els.indexPolicy.textContent = [policy, waiting ? `${waiting} 份资料待完成 MinerU 转换，完成后自动增量收录` : ''].filter(Boolean).join(' · ');
+      els.indexPolicy.hidden = !els.indexPolicy.textContent;
+    }
 
     if (els.statusBadge) {
       const isReady = status.ready ?? ((chunkCount || 0) > 0);
@@ -413,14 +420,14 @@ export function initCourseKnowledge() {
     try {
       const data = await api("/api/knowledge/jobs");
       const jobs = data.jobs || [];
-      const runningJob = jobs.find(j => j.status === "running" || j.status === "pending");
+      const runningJob = jobs.find(j => ['running', 'queued', 'pending'].includes(j.status) && (!j.category || j.category === currentCategory));
 
       if (runningJob) {
-        activeJobId = runningJob.id;
+        activeJobId = runningJob.job_id || runningJob.id;
         if (els.jobsBox) {
           els.jobsBox.classList.remove("hidden");
           if (els.jobsText) {
-            els.jobsText.textContent = `正在建立索引: ${runningJob.category || "课程"} (进度 ${formatProgress(runningJob.progress)})`;
+            els.jobsText.textContent = `${runningJob.status === 'queued' ? '索引已排队' : '正在建立索引'}：${runningJob.category || "课程"} · 进度 ${formatProgress(runningJob.progress)}`;
           }
         }
         if (!jobPollInterval) {

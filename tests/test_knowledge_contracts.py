@@ -71,7 +71,7 @@ class KnowledgeContractTests(unittest.IsolatedAsyncioTestCase):
         with pymupdf.open() as doc:
             page=doc.new_page();page.insert_text((30,60),'NA=0.20');doc.save(pdf)
         self.files.assets['数学']['asset']['pdf']=pdf
-        self.files.assets['数学']['asset']['meta']['conversion']={'status':'completed'}
+        self.files.assets['数学']['asset']['meta']['conversion']={'status':'completed','engine':'mineru-4-v1'}
         self.k.sync_course('数学')
         source=next(s for s in self.k.store.list_sources('数学') if s['source_type']=='course_file_pdf')
         refs=self.k.source_context('数学',source['source_id'],1)
@@ -105,6 +105,7 @@ class KnowledgeContractTests(unittest.IsolatedAsyncioTestCase):
         path=self.document('# 第一章\n\n甲段包含数值孔径NA。\n\n# 第二章\n\n乙段包含功率40 mW。')
         self.k.sync_course('数学');first=model.count
         path.write_text(path.read_text()+'\n\n# 第三章\n\n丙段是新增内容。',encoding='utf-8')
+        self.files.convert_file('数学', 'asset')
         self.k.sync_course('数学')
         self.assertLess(model.count-first,first+1)
         self.assertGreater(model.count,first)

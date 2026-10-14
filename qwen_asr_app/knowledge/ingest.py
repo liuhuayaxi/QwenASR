@@ -169,11 +169,11 @@ class CourseIngestor:
         stats["sources_checked"] = len(all_sources)
 
         # Tombstone missing sources: check existing DB sources for category
-        existing_sources = self.store.list_sources(category, active_only=True)
-        discovered_ids = {s["source_id"] for s in all_sources}
+        existing_sources = self.store.list_sources(category, active_only=False)
+        discovered_ids = {s["source_id"] for s in all_sources} | getattr(self, '_course_file_ids', set())
 
         for ex in existing_sources:
-            if ex["source_id"] not in discovered_ids:
+            if ex["source_id"] not in discovered_ids and ex['status'] not in {'excluded','tombstoned'}:
                 self.store.tombstone_source(ex["source_id"])
                 stats["tombstoned"] += 1
 
@@ -192,139 +192,82 @@ class CourseIngestor:
                 stats["sources_updated"] += 1
                 stats["chunks_indexed"] += chunk_count
 
+        stats['waiting_conversion'] = sum(s['status'] in {'waiting_conversion', 'stale'} and s['source_type'] == 'course_file_pdf'
+                                          for s in self.store.list_sources(category, active_only=False))
         return stats
 
     def _discover_course_files(self, category: str, course_id: str) -> list[dict[str, Any]]:
-        specs: list[dict[str, Any]] = []
+        """One searchable source per material: its completed MinerU PDF, never the raw file."""
+        self.store.exclude_legacy_course_file_variants(category)
+        self._course_file_ids = set()
         if not self.course_files:
-            return specs
-
-        try:
-            items = self.course_files.list(category)
-        except Exception:
-            return specs
-
+            return []
+        items = self.course_files.list(category)
+        self._course_file_ids = {f"cf_{item['id']}_pdf" for item in items}
+        specs = []
         for item in items:
             asset_id = item["id"]
+            source_id = f"cf_{asset_id}_pdf"
             title = item.get("name", "未命名文件")
             kind = item.get("kind", "参考资料")
-            found_any = False
+            conversion = item.get("conversion") or {}
 
-            # Check original file
-            try:
-                _, orig_path = self.course_files.file(category, asset_id, variant="original")
-                if orig_path.is_file():
-                    found_any = True
-                    specs.append({
-                        "source_id": f"cf_{asset_id}_orig",
-                        "course_id": course_id,
-                        "category": category,
-                        "asset_id": asset_id,
-                        "lesson_id": None,
-                        "title": title,
-                        "kind": kind,
-                        "origin": "original",
-                        "source_type": "course_file_original",
-                        "file_path": str(orig_path.resolve()),
-                        "open_url": f"/api/knowledge/source/cf_{asset_id}_orig",
-                        "loader": lambda p=orig_path: self._load_file_content(p),
-                    })
-            except Exception:
-                pass
+            def waiting(message):
+                self.store.record_source_failure(
+                    source_id, course_id, category, title, kind, None, message,
+                    asset_id=asset_id, status="waiting_conversion", source_type="course_file_pdf",
+                )
 
-            # Check converted PDF
-            try:
-                conversion = item.get("conversion", {})
-                if conversion.get("status") == "completed":
-                    _, pdf_path = self.course_files.file(category, asset_id, variant="pdf")
-                    if pdf_path.is_file():
-                        found_any = True
-                        specs.append({
-                            "source_id": f"cf_{asset_id}_pdf",
-                            "course_id": course_id,
-                            "category": category,
-                            "asset_id": asset_id,
-                            "lesson_id": None,
-                            "title": f"{title} (PDF)",
-                            "kind": kind,
-                            "origin": "original",
-                            "source_type": "course_file_pdf",
-                            "file_path": str(pdf_path.resolve()),
-                            "open_url": f"/api/knowledge/source/cf_{asset_id}_pdf",
-                            "loader": lambda p=pdf_path: self._load_pdf_content(p),
-                        })
-
-                        # Check for embedded mineru-transcript.md
-                        # Note: MinerU parser transcript is original material extraction (provenance: parser, NOT AI explanation)
-                        mineru_data = self._check_embedded_mineru(pdf_path)
-                        if mineru_data:
-                            specs.append({
-                                "source_id": f"cf_{asset_id}_mineru",
-                                "course_id": course_id,
-                                "category": category,
-                                "asset_id": asset_id,
-                                "lesson_id": None,
-                                "title": f"{title} (MinerU转写)",
-                                "kind": kind,
-                                "origin": "original",
-                                "source_type": "course_file_transcript",
-                                "file_path": str(pdf_path.resolve()),
-                                "open_url": f"/api/knowledge/source/cf_{asset_id}_pdf",
-                                "lineage": {"asset_id": asset_id, "parent_source_id": f"cf_{asset_id}_pdf", "parser": "mineru-transcript.md"},
-                                "loader": lambda md=mineru_data: (md, chunk_markdown_text(md)),
-                            })
-                elif conversion.get("status") == "failed":
-                    self.store.record_source_failure(
-                        source_id=f"cf_{asset_id}_failed",
-                        course_id=course_id,
-                        category=category,
-                        title=title,
-                        kind=kind,
-                        file_path=None,
-                        error_msg=conversion.get("error", "文件转换失败"),
-                        asset_id=asset_id,
-                    )
-            except Exception as exc:
-                if not found_any:
-                    self.store.record_source_failure(
-                        source_id=f"cf_{asset_id}_failed",
-                        course_id=course_id,
-                        category=category,
-                        title=title,
-                        kind=kind,
-                        file_path=None,
-                        error_msg=f"文件加载失败: {exc}",
-                        asset_id=asset_id,
-                    )
-
-        by_asset={spec.get('asset_id'):spec for spec in specs if spec['source_type']=='course_file_original'}
-        for spec in specs:
-            if spec['source_type'] not in {'course_file_pdf','course_file_transcript'}:
+            if conversion.get("status") != "completed":
+                message = "等待 MinerU 转换完成后增量索引"
+                if conversion.get("status") == "stale":
+                    message = "原件已更新，等待重新转换"
+                elif conversion.get("status") in {'failed','error','interrupted','paused','cancelled'}:
+                    message = "MinerU 转换未完成，请继续或重新转换后增量索引"
+                waiting(message)
                 continue
-            original=by_asset.get(spec.get('asset_id'))
-            if original:
-                original_path=Path(original['file_path'])
-                parent_stat=compute_file_stat_hash(original_path)[2]
-                previous=self.store.get_source(spec['source_id'])
-                old_lineage=json.loads(previous.get('lineage') or '{}') if previous else {}
-                converted_stat=compute_file_stat_hash(Path(spec['file_path']))[2]
-                # Reindexing must not bless an unchanged old conversion with the new parent's identity.
-                if (previous and old_lineage.get('parent_stat_hash') and old_lineage['parent_stat_hash']!=parent_stat
-                        and previous.get('stat_hash')==converted_stat):
-                    self.store.mark_source_stale_and_hide_chunks(spec['source_id'],'原件已更新，转换文件尚未更新')
-                    spec['_skip_stale_conversion']=True
+            try:
+                _, original_path = self.course_files.file(category, asset_id, variant="original")
+                _, pdf_path = self.course_files.file(category, asset_id, variant="pdf")
+                original_path, pdf_path = Path(original_path), Path(pdf_path)
+                if not original_path.is_file() or not pdf_path.is_file():
+                    waiting("原件或转换后 PDF 不存在，等待恢复")
                     continue
-                item=next((x for x in items if x['id']==spec.get('asset_id')),{})
-                expected=(item.get('conversion') or {}).get('source_sha256')
+                # Shared-folder results can be identified by their embedded conversion output.
+                mineru_text = self._check_embedded_mineru(pdf_path)
+                if not str(conversion.get("engine") or "").lower().startswith("mineru") and not mineru_text:
+                    waiting("已有 PDF 未确认来自 MinerU，请完成 MinerU 转换后再索引")
+                    continue
+                parent_stat = compute_file_stat_hash(original_path)[2]
+                converted_stat = compute_file_stat_hash(pdf_path)[2]
+                previous = self.store.get_source(source_id)
+                old_lineage = json.loads(previous.get("lineage") or "{}") if previous else {}
+                if (previous and old_lineage.get("parent_stat_hash")
+                        and old_lineage["parent_stat_hash"] != parent_stat
+                        and previous.get("stat_hash") == converted_stat):
+                    self.store.mark_source_stale_and_hide_chunks(source_id, "原件已更新，转换文件尚未更新")
+                    continue
+                expected = conversion.get("source_sha256")
                 if expected:
-                    with original_path.open('rb') as stream:actual=hashlib.file_digest(stream,'sha256').hexdigest()
-                    if expected!=actual:
-                        if previous:self.store.mark_source_stale_and_hide_chunks(spec['source_id'],'转换任务的源文件版本不匹配')
-                        spec['_skip_stale_conversion']=True
+                    with original_path.open("rb") as stream:
+                        actual = hashlib.file_digest(stream, "sha256").hexdigest()
+                    if expected != actual:
+                        waiting("转换任务的源文件版本不匹配，等待重新转换")
                         continue
-                spec['lineage']={**(spec.get('lineage') or {}),'parent_source_id':original['source_id'],
-                                 'parent_file_path':str(original_path),'parent_stat_hash':parent_stat}
-        return [spec for spec in specs if not spec.get('_skip_stale_conversion')]
+                specs.append({
+                    "source_id": source_id, "course_id": course_id, "category": category,
+                    "asset_id": asset_id, "lesson_id": None, "title": title + " · MinerU 转换 PDF",
+                    "kind": kind, "origin": "original", "source_type": "course_file_pdf",
+                    "file_path": str(pdf_path.resolve()), "open_url": f"/api/knowledge/source/{source_id}",
+                    "parser_version": PARSER_VERSION + ":mineru-pdf-v3",
+                    "lineage": {"asset_id": asset_id, "parent_source_id": f"cf_{asset_id}_orig",
+                                "parent_file_path": str(original_path.resolve()), "parent_stat_hash": parent_stat,
+                                "parser": "MinerU converted PDF", "index_policy": "converted-pdf-only-v1"},
+                    "loader": lambda p=pdf_path, md=mineru_text: self._load_converted_pdf_content(p, md),
+                })
+            except (OSError, ValueError, KeyError) as exc:
+                waiting(f"转换后 PDF 暂不可用：{exc}")
+        return specs
 
     def _discover_recordings(self, category: str, course_id: str) -> list[dict[str, Any]]:
         specs: list[dict[str, Any]] = []
@@ -461,6 +404,7 @@ class CourseIngestor:
         stop: Callable[[], bool] | None,
     ) -> tuple[bool, int]:
         source_id = src_spec["source_id"]
+        parser_version = src_spec.get("parser_version", PARSER_VERSION)
         file_path = Path(src_spec["file_path"]) if src_spec.get("file_path") else None
 
         if "stat_calculator" in src_spec:
@@ -484,7 +428,7 @@ class CourseIngestor:
                             "SELECT embedding_contract,parser_version,chunker_version FROM source_revisions WHERE source_id = ? AND revision = ? AND is_active = 1",
                             (source_id, existing["active_revision"]),
                         ).fetchone()
-                        if rev_row and rev_row['embedding_contract'] == contract_str and rev_row['parser_version']==PARSER_VERSION and rev_row['chunker_version']==CHUNKER_VERSION:
+                        if rev_row and rev_row['embedding_contract'] == contract_str and rev_row['parser_version']==parser_version and rev_row['chunker_version']==CHUNKER_VERSION:
                             return False, 0
 
         # Load raw content and chunks
@@ -515,7 +459,7 @@ class CourseIngestor:
         if file_path and file_path.is_file():
             with file_path.open('rb') as stream:
                 file_digest=hashlib.file_digest(stream,'sha256').hexdigest()
-        revision = compute_content_hash(json.dumps([content_hash,file_digest,PARSER_VERSION,CHUNKER_VERSION]))
+        revision = compute_content_hash(json.dumps([content_hash,file_digest,parser_version,CHUNKER_VERSION]))
 
         # Prepare chunk data with specific open_urls
         chunks_data = []
@@ -632,7 +576,7 @@ class CourseIngestor:
             source_meta=meta_to_save,
             revision=revision,
             content_hash=content_hash,
-            parser_version=PARSER_VERSION,
+            parser_version=parser_version,
             chunker_version=CHUNKER_VERSION,
             embedding_contract=active_contract,
             chunks_data=chunks_data,
@@ -655,6 +599,49 @@ class CourseIngestor:
         except Exception:
             pass
         return None
+
+    @staticmethod
+    def _mineru_page_body(text: str) -> str:
+        # The markers are written by scripts/build_ai_friendly_pdf.py. Only the
+        # enclosed parser output is evidence; the visible original text is not.
+        body = re.sub(r'^SOURCE_PDF_PAGE:\s*\d+\s*$', '', text, flags=re.M)
+        body = re.sub(r'^The following is MinerU OCR/LaTeX\..*$', '', body, flags=re.M)
+        body = re.sub(r'^\[NO_TEXT_EXTRACTED:[^\n]*\]\s*$', '', body, flags=re.M)
+        blocks = re.split(r'^\[(TEXT|FORMULA_LATEX|TABLE_HTML|VISUAL_ONLY:[^\]\n]*|MODEL_IMAGE_ANALYSIS_UNVERIFIED:[^\]\n]*|CAPTION)\][ \t]*\n?', body, flags=re.M)
+        result = [blocks[0].strip()]
+        for idx in range(1, len(blocks), 2):
+            kind, value = blocks[idx], blocks[idx + 1].strip()
+            if kind == 'FORMULA_LATEX' and value:
+                value = '$$\n' + value + '\n$$'
+            elif kind not in {'TEXT','FORMULA_LATEX','TABLE_HTML'}:
+                value = '[' + kind + ']\n' + value
+            result.append(value)
+        return '\n\n'.join(part for part in result if part)
+
+    def _load_converted_pdf_content(self, pdf_path: Path, mineru_text: str | None) -> tuple[str, list[Chunk]]:
+        """Index page-scoped MinerU output inside one converted PDF source."""
+        import pymupdf
+        pages = []
+        has_markers = False
+        pattern = re.compile(r'\[\[AI_TRANSCRIPT_PAGE:(\d+)\]\](.*?)\[\[END_AI_TRANSCRIPT_PAGE:\1\]\]', re.S)
+        with pymupdf.open(pdf_path) as doc:
+            for index, page in enumerate(doc):
+                for match in pattern.finditer(page.get_text()):
+                    has_markers = True
+                    body = self._mineru_page_body(match.group(2))
+                    if body:
+                        # Link the physical page in the converted PDF (which may
+                        # include a cover), never guess it from the original page number.
+                        pages.append((index + 1, body))
+        if has_markers:
+            return '\n\n'.join(body for _, body in pages), chunk_pdf_document(pages)
+        if mineru_text:
+            # Legacy/native-transcript artifacts lack per-page markers. Reuse
+            # their embedded parser output, without inventing page positions.
+            return mineru_text, chunk_markdown_text(mineru_text)
+        # A completed MinerU artifact without an attachment can use its own
+        # generated text layer. Unconverted files never reach this loader.
+        return self._load_pdf_content(pdf_path)
 
     def _load_pdf_content(self, pdf_path: Path) -> tuple[str, list[Chunk]]:
         import pymupdf as fitz

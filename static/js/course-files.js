@@ -74,8 +74,8 @@ function renderFiles() {
     const settingsChanged = ready && file.mineru_settings_changed;
     const tier = {flash: '极速', basic: '基础', standard: '标准', advanced: '高级'}[conversion.mineru_settings?.tier];
     const working = ['queued', 'running', 'stopping'].includes(conversion.status);
-    const failed = ['error', 'interrupted', 'paused', 'cancelled'].includes(conversion.status);
-    const taskLink = !conversion.external || working || failed;
+    const failed = ['error', 'failed', 'interrupted', 'paused', 'cancelled'].includes(conversion.status);
+    const taskLink = working || failed;
     const latest = (file.sync || []).at(-1);
     const pending = latest && ['sending', 'unknown'].includes(latest.status);
     const syncText = latest ? latest.status === 'synced' ? `已上传到 ${latest.title}` : '上次上传结果待核对，请先在闪念贝壳查看附件。' : '尚未上传到闪念贝壳';

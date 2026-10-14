@@ -55,7 +55,12 @@ function friendlyError(task) {
   };
   return messages[task.error_kind] || task.error || '';
 }
-function operationLabel(inference = {}, receipt = {}, mode) {
+function operationLabel(inference = {}, receipt = {}, mode, task) {
+  if (task?.type === 'knowledge_index') return task.execution_location === 'local' ? '处理位置：Mac 本机' : '';
+  // Only inference tasks have ASR/MinerU receipts. A cloud note or local index
+  // cannot establish its execution location from an ASR configuration value.
+  if (task && !['asr', 'mineru'].includes(task.family)) return '';
+  if (task?.type === 'course_queue' && !inference.provider && !receipt.job_id) return '';
   return [({local:'配置：本机', remote_preferred:'配置：优先 Windows', remote_only:'配置：仅 Windows'}[mode] || ''),
     inference.provider ? `实际：${inference.provider === 'remote' ? 'Windows' : 'Mac'}` : '实际来源待确认',
     inference.fallback ? `已回退：${inference.fallback_reason || '远端确认未接受'}` : '',
@@ -101,11 +106,11 @@ function card(task) {
     inferMetrics.mineru_version ? `MinerU ${inferMetrics.mineru_version}` : '',
     tier ? `${tier === 'advanced' ? 'Advanced' : tier} 档位` : '', inference.fallback ? '已回退本机' : ''].filter(Boolean).join(' · ') : task.family === 'asr' && task.type !== 'course_queue' ? [providerName, inferMetrics.model || inference.model || '', inferMetrics.dtype || inference.dtype || '', inferMetrics.device || inference.device || '', inference.fallback ? '已回退本机' : ''].filter(Boolean).join(' · ') : '';
   const aiProvider = task.configured_ai_model ? `AI 通道：${task.configured_ai_transport === 'agy_cli' ? 'AGY CLI' : 'OpenAI 兼容 API'} · ${task.configured_ai_model}${task.configured_ai_effort ? ` · ${task.configured_ai_effort} 思考` : ''}` : '';
-  const details = [operationLabel(inference, {job_id: task.remote_job_id, state: task.remote_operation_state}, mode), aiProvider, recognition ? `识别环境：${recognition}` : '', resource?.detail, task.error && task.error !== error ? task.error : '',
+  const details = [operationLabel(inference, {job_id: task.remote_job_id, state: task.remote_operation_state}, mode, task), aiProvider, recognition ? `识别环境：${recognition}` : '', resource?.detail, task.error && task.error !== error ? task.error : '',
     task.previous_error ? `上次处理失败：${task.previous_error}；本次正在重新处理。` : '',
     task.range_end ? `片段范围：${Math.floor(task.range_start / 60)}–${Math.ceil(task.range_end / 60)} 分钟` : '',
     task.attempts > 1 ? `历史尝试 ${task.attempts} 次` : '', ...(task.warnings || [])].filter(Boolean);
-  const files = (task.files || []).map(file => `<li class="task-file"><div><b>${esc(file.source_name)}</b><span>${esc(labels[file.status] || file.status)}${file.status === 'running' && file.progress != null ? ` · ${Math.round(file.progress || 0)}%` : ''}</span></div><p>${esc(file.error || file.stage)}</p><p>${esc(operationLabel(file.inference, file.remote_operation, task.configured_provider))}</p><p>${esc(file.output_path || file.source_path)}</p>${file.download_url ? `<a href="${esc(file.download_url)}" download>下载 AI 友好 PDF</a>` : ''}</li>`).join('');
+  const files = (task.files || []).map(file => `<li class="task-file"><div><b>${esc(file.source_name)}</b><span>${esc(labels[file.status] || file.status)}${file.status === 'running' && file.progress != null ? ` · ${Math.round(file.progress || 0)}%` : ''}</span></div><p>${esc(file.error || file.stage)}</p><p>${esc(operationLabel(file.inference, file.remote_operation, task.configured_provider, task))}</p><p>${esc(file.output_path || file.source_path)}</p>${file.download_url ? `<a href="${esc(file.download_url)}" download>下载 AI 友好 PDF</a>` : ''}</li>`).join('');
   const courseDetails = task.type === 'course_queue' ? courseQueueDetails(task) : '';
   return `<article class="task-card" data-id="${esc(task.id)}" data-status="${esc(task.status)}"><div class="task-card-top">
     ${done ? '' : `<input class="task-select" type="checkbox" aria-label="选择 ${esc(task.label)}：${esc(task.title)}" ${state.selected.has(task.id) ? 'checked' : ''} ${state.busy ? 'disabled' : ''}>`}

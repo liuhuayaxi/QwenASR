@@ -18,8 +18,9 @@ class IntelligenceTasks:
             status=job['status']
             result.append({'id':'knowledge:'+job['job_id'],'type':'knowledge_index','family':'knowledge',
                            'job_id':job['job_id'],'title':job['category']+' · 知识索引','label':'课程知识索引',
-                           'category':job['category'],'status':status,'stage':job['stage'],'source':'Mac 知识库',
-                           'progress_percent':round(job['progress']*100),'error':job.get('error') or '',
+                           'category':job['category'],'status':status,'stage':job.get('message') if status=='completed' else job['stage'],'source':'Mac 知识库',
+                           'execution_location':'local',
+                           'progress':round(job['progress']*100),'progress_percent':round(job['progress']*100),'error':job.get('error') or '',
                            'created_at':job['created_at'],'updated_at':job['updated_at'],
                            'result_url':'/course-files?'+urlencode({'category':job['category']}),
                            'actions':['cancel'] if status in {'running','queued'} else [] if status=='completed' else ['retry']})

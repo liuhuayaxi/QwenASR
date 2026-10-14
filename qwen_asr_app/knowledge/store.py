@@ -341,8 +341,10 @@ class KnowledgeStore:
         file_path: str | None,
         error_msg: str,
         asset_id: str | None = None,
+        status: str = "failed",
+        source_type: str = "failed_parse",
     ) -> None:
-        """Record explicit parse failure so files are not silently discarded."""
+        """Record parse failure or waiting conversion without creating searchable chunks."""
         now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         with self._connect() as conn:
             conn.execute(
@@ -351,16 +353,28 @@ class KnowledgeStore:
                     source_id, course_id, category, asset_id, title, kind, origin,
                     source_type, active_revision, file_path, status, error,
                     open_url, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 'original', 'failed_parse', '', ?, 'failed', ?, '', ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, 'original', ?, '', ?, ?, ?, '', ?, ?)
                 ON CONFLICT(source_id) DO UPDATE SET
-                    status='failed',
+                    status=excluded.status,
+                    source_type=excluded.source_type,
                     error=excluded.error,
                     updated_at=excluded.updated_at
                 """,
-                (source_id, course_id, category, asset_id, title, kind, file_path, error_msg, now, now),
+                (source_id, course_id, category, asset_id, title, kind, source_type, file_path, status, error_msg, now, now),
             )
             conn.execute("UPDATE chunks SET is_active = 0 WHERE source_id = ?", (source_id,))
             conn.execute("DELETE FROM chunks_fts WHERE chunk_id IN (SELECT chunk_id FROM chunks WHERE source_id = ?)", (source_id,))
+
+    def exclude_legacy_course_file_variants(self, category: str | None = None) -> None:
+        """Retire raw-file and duplicate attachment indexes, keeping their history intact."""
+        with self._connect() as conn:
+            sql = "SELECT source_id FROM sources WHERE source_type IN ('course_file_original','course_file_transcript') AND status != 'excluded'"
+            rows = conn.execute(sql + (" AND category = ?" if category else ""), [category] if category else []).fetchall()
+            for row in rows:
+                source_id = row['source_id']
+                conn.execute("UPDATE sources SET status='excluded',error='仅使用 MinerU 转换后 PDF 建立资料索引' WHERE source_id=?", (source_id,))
+                conn.execute("UPDATE chunks SET is_active=0 WHERE source_id=?", (source_id,))
+                conn.execute("DELETE FROM chunks_fts WHERE chunk_id IN (SELECT chunk_id FROM chunks WHERE source_id=?)", (source_id,))
 
     def cached_vectors(self, hashes, contract):
         key=json.dumps(contract, sort_keys=True) if isinstance(contract,dict) else str(contract or '')

@@ -764,6 +764,7 @@ export function createClassroomIntelligence({ toast = () => {}, openSettings = (
       select.replaceChildren(new Option('自动关联当前讲解',''));
       for(const item of data.sources || []) {
         if(!String(item.source_id || '').startsWith('cf_') || String(item.source_id).endsWith('_mineru')) continue;
+        if(item.state != null && item.state !== 'active') continue;
         if(!['已就绪','仅词法可用'].includes(item.status)) continue;
         select.append(new Option(item.title || item.name,item.source_id));
       }

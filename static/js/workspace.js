@@ -62,6 +62,54 @@ function tab(name, recording) {
   });
   if (name !== 'overview' && name !== 'review') $('workspaceFrame').src = routes[name] + '?' + query({embedded:'1', ...(recording ? {recording} : {})});
 }
+let noteReturn = null;
+function openClassroomNote(recording, opener) {
+  const dialog = $('workspaceNoteDialog'), frame = $('workspaceNoteFrame');
+  noteReturn = {recording, opener, x:window.scrollX, y:window.scrollY};
+  const title = records.find(record => record.id === recording)?.title || '课堂笔记';
+  $('workspaceNoteTitle').textContent = title;
+  frame.title = title;
+  frame.src = '/library?' + query({embedded:'1', recording});
+  document.body.classList.add('workspace-note-open');
+  dialog.showModal();
+}
+function requestNoteClose() {
+  const frame = $('workspaceNoteFrame');
+  try {
+    const reader = frame.contentDocument?.getElementById('noteDialog');
+    const closeButton = frame.contentDocument?.getElementById('closeNoteDialog');
+    if (reader?.open && closeButton) {
+      // Let the existing reader finish edits and flush its protected autosave.
+      // It fires "close" only after saving or securing the recoverable draft.
+      closeButton.click();
+      return;
+    }
+  } catch { /* The reader has not loaded yet; there is no editable note. */ }
+  $('workspaceNoteDialog').close();
+}
+$('workspaceNoteFrame').addEventListener('load', () => {
+  if (!$('workspaceNoteDialog').open) return;
+  try {
+    $('workspaceNoteFrame').contentDocument?.getElementById('noteDialog')?.addEventListener('close', () => {
+      if ($('workspaceNoteDialog').open) $('workspaceNoteDialog').close();
+    }, {once:true});
+  } catch { /* Keep the explicit return control available if loading fails. */ }
+});
+$('workspaceNoteDialog').addEventListener('cancel', event => {
+  event.preventDefault();
+  requestNoteClose();
+});
+$('workspaceNoteDialog').addEventListener('close', () => {
+  document.body.classList.remove('workspace-note-open');
+  $('workspaceNoteFrame').src = 'about:blank';
+  const back = noteReturn;
+  noteReturn = null;
+  if (!back) return;
+  // The workspace remains mounted; a poll may have replaced the original row.
+  const opener = back.opener?.isConnected ? back.opener : [...document.querySelectorAll('#workspaceRecent [data-recording]')].find(button => button.dataset.recording === back.recording);
+  opener?.focus({preventScroll:true});
+  window.scrollTo(back.x, back.y);
+});
 function timeline() {
   $('timelineFrame').src = '/tasks?' + query({embedded:'1'});
   $('timelineDialog').showModal();
@@ -122,7 +170,7 @@ document.addEventListener('click', event => {
       }).catch(() => { button.disabled = false; });
   }
   if (button.dataset.tab) tab(button.dataset.tab);
-  if (button.dataset.recording) tab('notes',button.dataset.recording);
+  if (button.dataset.recording) openClassroomNote(button.dataset.recording,button);
   if (button.dataset.chat) {
     tab('review'); $('workspaceReview').hidden = true; $('workspaceFrame').hidden = false;
     $('workspaceFrame').src = '/?' + query({embedded:'1',chat:button.dataset.chat});
@@ -132,6 +180,7 @@ document.addEventListener('click', event => {
     $('workspaceFrame').src = '/course-files?' + query({embedded:'1'});
   }
   if (button.hasAttribute('data-timeline')) timeline();
+  if (button.hasAttribute('data-close-note')) requestNoteClose();
   if (button.dataset.close) $(button.dataset.close).close();
 });
 $('workspaceTasks').addEventListener('click',timeline);

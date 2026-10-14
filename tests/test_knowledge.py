@@ -237,6 +237,7 @@ class KnowledgeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         fpath.write_text("版本二：已更新的最新修订讲义内容。", encoding="utf-8")
         # Ensure mtime changes
         os.utime(fpath, (time.time() + 2, time.time() + 2))
+        self.course_files.convert_file('数学', 'asset_v1')
 
         self.service.sync_course("数学")
         res2_old = self.service.search("数学", "版本一", limit=5)
@@ -258,6 +259,7 @@ class KnowledgeIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         # 4. Restore file on disk and re-sync
         fpath.write_text("版本二：已更新的最新修订讲义内容。", encoding="utf-8")
+        self.course_files.convert_file('数学', 'asset_v1')
         self.service.sync_course("数学")
         res4 = self.service.search("数学", "版本二", limit=5)
         self.assertEqual(len(res4), 1)
@@ -274,6 +276,7 @@ class KnowledgeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         # Now simulate embedding failure on update
         fpath.write_text("尝试更新的内容，但嵌入模型中途断开连接报错。", encoding="utf-8")
         os.utime(fpath, (time.time() + 2, time.time() + 2))
+        self.course_files.convert_file('数学', 'asset_tx')
 
         self.embedder.fail = True
         with self.assertRaises(RuntimeError):
@@ -400,7 +403,7 @@ class KnowledgeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         validated2 = self.service.validate_evidence([evidence])
         self.assertFalse(validated2[0]["valid"])
         self.assertTrue(validated2[0]["stale"])
-        self.assertEqual(validated2[0]["reason"], "file_stat_changed")
+        self.assertIn('原件已更新', validated2[0]['reason'])
 
     async def test_fastapi_knowledge_routes(self):
         app = FastAPI()
@@ -467,7 +470,7 @@ class KnowledgeIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "title": "traversal.txt",
                 "kind": "课件",
                 "origin": "original",
-                "source_type": "course_file_original",
+                "source_type": "document",
                 "file_path": str(outside_file.resolve()),
                 "open_url": f"/api/knowledge/source/{unsafe_source_id}",
             },
@@ -531,16 +534,31 @@ class MockCourseFiles:
         self.root = root
         self.assets = {}
 
-    def add_file(self, category: str, asset_id: str, name: str, kind: str, path: Path):
+    def add_file(self, category: str, asset_id: str, name: str, kind: str, path: Path, converted: bool = True):
         self.assets.setdefault(category, {})[asset_id] = {
             "meta": {"id": asset_id, "name": name, "kind": kind, "conversion": {"status": "none"}},
             "original": path,
             "pdf": None,
         }
+        if converted:
+            self.convert_file(category, asset_id)
+
+    def convert_file(self, category: str, asset_id: str):
+        """Synthetic completed MinerU artifact; not a real conversion quality benchmark."""
+        item = self.assets[category][asset_id]
+        pdf = self.root / 'converted-fixtures' / category / (asset_id + '.pdf')
+        pdf.parent.mkdir(parents=True, exist_ok=True)
+        with fitz.open() as doc:
+            doc.new_page()
+            doc.embfile_add('mineru-transcript.md', item['original'].read_bytes())
+            doc.save(pdf)
+        item['pdf'] = pdf
+        item['meta']['conversion'] = {'status': 'completed', 'engine': 'mineru-4-v1'}
+        return pdf
 
     def add_pdf_file(self, category: str, asset_id: str, name: str, kind: str, pdf_path: Path):
         self.assets.setdefault(category, {})[asset_id] = {
-            "meta": {"id": asset_id, "name": name, "kind": kind, "conversion": {"status": "completed"}},
+            "meta": {"id": asset_id, "name": name, "kind": kind, "conversion": {"status": "completed", "engine": "mineru-4-v1"}},
             "original": pdf_path,
             "pdf": pdf_path,
         }
