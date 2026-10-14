@@ -28,6 +28,15 @@ def main():
     interpreter=ORIGINAL/'.venv/bin/python'
     if not interpreter.is_file():
         raise SystemExit('请先准备原 QwenASR 的 Python 环境。原程序未改变。')
+    if sys.argv[1:]==['--check']:
+        paths={'Python 环境':interpreter,'新版程序':WORKTREE/'app.py',
+               '原资料配置':ORIGINAL/'app-settings.json',
+               'Mac ASR 模型':ORIGINAL/'models/Qwen3-ASR-1.7B-MLX-bf16',
+               '课程向量模型':ORIGINAL/'models/knowledge'}
+        checks={name:path.exists() for name,path in paths.items()}
+        print(json.dumps(checks,ensure_ascii=False))
+        if not all(checks.values()):raise SystemExit(1)
+        return
     config=read('/api/config')
     if config and config.get('knowledge_feature_version')=='course-knowledge-v1':
         subprocess.run(['/usr/bin/open',BASE+'/workspace'],check=False)
