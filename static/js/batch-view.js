@@ -149,6 +149,9 @@ async function uploadRecordings(fileList) {
         ? els.recordName.value.trim() : file.name.replace(/\.[^.]+$/, "") || `录音 ${index + 1}`;
       config.category = selectedRecordCategory(true);
       config.summary_enabled = false;
+      if ($('#uploadUseMac')?.checked) {
+        config.inference_settings = {asr_provider:'local', mineru_provider:'local'};
+      }
       setBatchProgress(index, files.length, 0, "正在上传；上传成功的任务会在后台继续", file.name);
       accepted.push({file, config, job: await submitUploadedFile(file, config)});
     }

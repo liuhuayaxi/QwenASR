@@ -1,0 +1,1049 @@
+/* Classroom Intelligence: Side Rail Tabs, Scribbles (速记), and Related Materials */
+
+.classroom-side-rail {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  height: calc(100dvh - 124px);
+  min-height: 530px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--card);
+  overflow: hidden;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.03);
+}
+
+/* ==================== Side Rail Navigation Tabs ==================== */
+
+.side-rail-tabs {
+  display: flex;
+  align-items: stretch;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  padding: 4px 6px;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.side-rail-tab {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 0.15s ease-in-out;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.side-rail-tab:hover {
+  background: rgba(0, 0, 0, 0.04);
+  color: var(--ink);
+}
+
+html[data-theme="dark"] .side-rail-tab:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.side-rail-tab.active {
+  background: var(--card);
+  color: var(--ink);
+  font-weight: 600;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+}
+
+.side-rail-tab:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: -1px;
+}
+
+.side-tab-icon {
+  font-size: 13px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.side-tab-icon svg {
+  display: block;
+}
+
+.side-tab-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  border-radius: 999px;
+  background: var(--green-soft);
+  color: var(--green-dark);
+  min-width: 16px;
+  line-height: 1.3;
+}
+
+/* Tab Panels */
+.side-rail-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.side-rail-panel.hidden {
+  display: none !important;
+}
+
+/* ==================== Scribbles (速记) Panel ==================== */
+
+.scribbles-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.scribbles-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--card);
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.scribbles-title-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.scribbles-title-group h2 {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0;
+  color: var(--ink);
+}
+
+.scribbles-status-text {
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1;
+}
+
+.scribbles-header-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Composer */
+.scribbles-composer {
+  padding: 12px 14px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.scribbles-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 64px;
+  max-height: 160px;
+  resize: vertical;
+  padding: 8px 10px;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--ink);
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.scribbles-textarea:focus {
+  border-color: var(--green);
+  box-shadow: 0 0 0 2px var(--focus-ring);
+}
+
+.scribble-anchor-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.anchor-options {
+  display: inline-flex;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 2px;
+  gap: 2px;
+}
+
+.anchor-btn {
+  border: none;
+  background: transparent;
+  padding: 3px 8px;
+  font-size: 11px;
+  color: var(--muted);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.1s;
+}
+
+.anchor-btn:hover {
+  color: var(--ink);
+}
+
+.anchor-btn.active {
+  background: var(--green-soft);
+  color: var(--green-dark);
+  font-weight: 600;
+}
+
+.manual-time-inputs {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.time-input-field {
+  width: 54px;
+  padding: 3px 6px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--ink);
+  text-align: center;
+}
+
+.scribble-composer-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 2px;
+}
+
+.auto-enhance-toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.auto-enhance-toggle input {
+  margin: 0;
+  accent-color: var(--green);
+}
+
+.composer-buttons {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.composer-hint {
+  font-size: 10px;
+  color: var(--muted);
+}
+
+/* Cards List */
+.scribbles-list {
+  flex: 1;
+  min-height: 0;
+  padding: 12px 14px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.scribbles-empty {
+  margin: 36px 0;
+  text-align: center;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.8;
+  padding: 0 16px;
+}
+
+.scribbles-empty-icon {
+  font-size: 28px;
+  margin-bottom: 8px;
+  display: block;
+  opacity: 0.7;
+}
+
+/* Note Card */
+.scribble-card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  position: relative;
+}
+
+.scribble-card:hover {
+  border-color: #c9ced4;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+}
+
+html[data-theme="dark"] .scribble-card:hover {
+  border-color: #3e444d;
+}
+
+.scribble-card.locked {
+  border-left: 3px solid var(--green);
+}
+
+.scribble-card.pending {
+  border-color: var(--green-line);
+  background: linear-gradient(to bottom, var(--card), var(--surface));
+}
+
+.scribble-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 11px;
+}
+
+.scribble-badges {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.scribble-time-badge {
+  font-family: var(--font-mono);
+  padding: 1px 6px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.scribble-status-badge {
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.scribble-status-badge.enhanced {
+  background: var(--green-soft);
+  color: var(--green-dark);
+}
+
+.scribble-status-badge.pending {
+  background: #fdf3d8;
+  color: #8f6500;
+  animation: pulse-badge 1.6s infinite ease-in-out;
+}
+
+html[data-theme="dark"] .scribble-status-badge.pending {
+  background: #3e3215;
+  color: #f5d480;
+}
+
+.scribble-status-badge.failed {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.scribble-status-badge.locked {
+  background: var(--surface);
+  color: var(--ink);
+}
+
+@keyframes pulse-badge {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+.scribble-card-tools {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.card-tool-btn {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  padding: 2px 5px;
+  font-size: 11px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.card-tool-btn:hover {
+  background: var(--surface);
+  color: var(--ink);
+}
+
+/* Card Content Blocks */
+.scribble-raw-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.section-label-tag {
+  align-self: flex-start;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 4px;
+  text-transform: uppercase;
+}
+
+.section-label-tag.raw {
+  background: var(--surface);
+  color: var(--muted);
+}
+
+.section-label-tag.content {
+  background: var(--green-soft);
+  color: var(--green-dark);
+}
+
+.section-label-tag.suggestion {
+  background: #eef2fa;
+  color: #2b5490;
+}
+
+html[data-theme="dark"] .section-label-tag.suggestion {
+  background: #1b263b;
+  color: #9cbfee;
+}
+
+.scribble-raw-text {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--ink);
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.scribble-content-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.scribble-content-text {
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--ink);
+}
+
+/* Proposed Suggestion & Difference */
+.scribble-suggestion-block {
+  background: #f7f9fc;
+  border: 1px dashed #c0d1e8;
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+html[data-theme="dark"] .scribble-suggestion-block {
+  background: #171d24;
+  border-color: #29394f;
+}
+
+.suggestion-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 11px;
+}
+
+.suggestion-diff-box {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.scribble-diff-details {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  font-size: 12px;
+  overflow: hidden;
+}
+
+.scribble-diff-details summary {
+  padding: 6px 10px;
+  cursor: pointer;
+  font-weight: 500;
+  color: var(--muted);
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.scribble-diff-details summary:hover {
+  color: var(--ink);
+}
+
+.scribble-diff-content {
+  padding: 8px 10px;
+  border-top: 1px solid var(--line);
+  background: var(--card);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.scribble-diff-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.scribble-diff-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+
+.scribble-diff-text {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--ink);
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--surface);
+  padding: 6px 8px;
+  border-radius: 4px;
+}
+
+.suggestion-claims {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.claim-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: var(--card);
+  border: 1px solid var(--line);
+}
+
+.claim-tag {
+  align-self: flex-start;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+
+.claim-tag.classroom {
+  background: #e2f2e5;
+  color: #1f5c2b;
+}
+
+.claim-tag.material {
+  background: #e4edf8;
+  color: #1f487e;
+}
+
+.claim-tag.ai_explanation {
+  background: #fbf0dc;
+  color: #7a5000;
+}
+
+.claim-tag.check {
+  background: #fae4e1;
+  color: #8c2a1e;
+}
+
+html[data-theme="dark"] .claim-tag.classroom { background: #1c3322; color: #8fd49e; }
+html[data-theme="dark"] .claim-tag.material { background: #18283d; color: #8fb8e8; }
+html[data-theme="dark"] .claim-tag.ai_explanation { background: #3b2f13; color: #eed488; }
+html[data-theme="dark"] .claim-tag.check { background: #3d1c18; color: #f09287; }
+
+.claim-quote {
+  font-size: 11px;
+  color: var(--muted);
+  font-style: italic;
+  margin-top: 2px;
+}
+
+/* Readable Sources */
+.scribble-sources-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  align-items: center;
+  margin-top: 4px;
+}
+
+.scribble-source-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  font-size: 11px;
+  color: var(--ink);
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  text-decoration: none;
+  transition: all 0.12s ease;
+}
+
+.scribble-source-link:hover {
+  border-color: var(--green);
+  color: var(--green-dark);
+}
+
+.scribble-source-link.stale {
+  border-color: var(--coral);
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.source-origin-badge {
+  font-size: 9px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--surface);
+  color: var(--muted);
+}
+
+.source-freshness-warn {
+  font-size: 10px;
+  color: var(--danger);
+  font-weight: 500;
+}
+
+/* Card Actions */
+.scribble-card-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  padding-top: 4px;
+  border-top: 1px solid var(--line);
+}
+
+.scribble-btn {
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: 6px;
+  cursor: pointer;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink);
+  transition: all 0.12s ease;
+}
+
+.scribble-btn:hover {
+  background: var(--card);
+  border-color: #adb3ba;
+}
+
+.scribble-btn.primary {
+  background: var(--green);
+  border-color: var(--green-dark);
+  color: #fff;
+}
+
+.scribble-btn.primary:hover {
+  background: var(--green-dark);
+}
+
+/* Inline Card Editor */
+.scribble-inline-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.inline-edit-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 80px;
+  padding: 8px 10px;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--ink);
+  background: var(--card);
+  border: 1px solid var(--green);
+  border-radius: 6px;
+  outline: none;
+}
+
+.inline-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+/* ==================== Related Materials (相关资料) Panel ==================== */
+
+.related-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.related-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--card);
+  flex-shrink: 0;
+}
+
+.related-header h2 {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0;
+  color: var(--ink);
+}
+
+.related-filter-bar {
+  padding: 10px 14px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.related-inputs-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.related-input-field {
+  flex: 1;
+  padding: 6px 8px;
+  font-size: 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--ink);
+}
+
+.related-page-input {
+  width: 60px;
+  padding: 6px 8px;
+  font-size: 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--ink);
+  text-align: center;
+}
+
+.related-list {
+  flex: 1;
+  min-height: 0;
+  padding: 12px 14px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.related-empty {
+  margin: 40px 0;
+  text-align: center;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.7;
+  padding: 0 16px;
+}
+
+.related-card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 11px 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  transition: all 0.15s ease;
+}
+
+.related-card:hover {
+  border-color: var(--green-line);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+}
+
+.related-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.related-card-title-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.related-card-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.related-card-heading {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.related-card-badges {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+
+.related-origin-badge {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--surface);
+  color: var(--muted);
+  border: 1px solid var(--line);
+}
+
+.related-origin-badge.original {
+  background: var(--green-soft);
+  color: var(--green-dark);
+  border-color: var(--green-line);
+}
+
+.related-snippet {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--ink);
+  background: var(--surface);
+  padding: 8px 10px;
+  border-radius: 6px;
+  margin: 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.related-card-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 11px;
+  padding-top: 2px;
+}
+
+.related-open-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-weight: 500;
+  color: var(--green);
+  text-decoration: none;
+}
+
+.related-open-link:hover {
+  text-decoration: underline;
+}
+
+.related-stale-warning {
+  color: var(--danger);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+/* ==================== Chat Citations & Scope Styles ==================== */
+
+.chat-toolbar {
+  display: grid;
+  grid-template-columns: 1.2fr 1fr;
+  gap: 8px;
+  padding: 0 16px 8px;
+}
+
+.chat-scope-label {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.chat-scope-label select {
+  min-width: 0;
+  width: 100%;
+  padding: 7px 8px;
+  font-size: 12px;
+}
+
+.chat-scope-label > span {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.chat-freshness-warning {
+  margin: 8px 0 4px;
+  padding: 6px 10px;
+  background: var(--warning-soft);
+  color: var(--warning);
+  border: 1px solid #ebd09c;
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+html[data-theme="dark"] .chat-freshness-warning {
+  background: #362912;
+  border-color: #664d1f;
+  color: #eed599;
+}
+
+.chat-citations {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.chat-citations-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.chat-citations-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.chat-citation-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--ink);
+  text-decoration: none;
+  transition: all 0.12s ease;
+  max-width: 100%;
+}
+
+.chat-citation-link:hover {
+  border-color: var(--green);
+  color: var(--green-dark);
+}
+
+.chat-citation-link.stale {
+  border-color: var(--coral);
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.chat-citation-icon {
+  font-size: 11px;
+  line-height: 1;
+}
+
+.chat-citation-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+
+.chat-citation-origin {
+  font-size: 9px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--card);
+  color: var(--muted);
+}
+
+.chat-citation-stale-badge {
+  font-size: 9px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--danger);
+  color: #fff;
+}
+.upload-local-choice span { display: block; }
+.upload-local-choice small { display: block; margin-top: 5px; }

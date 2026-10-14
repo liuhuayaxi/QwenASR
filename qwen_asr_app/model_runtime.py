@@ -22,7 +22,9 @@ def model_worker_main(model_path: str, requests: Any, results: Any) -> None:
         from mlx_audio.stt import load
 
         print(f"Qwen 子进程正在加载 {model_path}…", flush=True)
-        model = load(model_path, lazy=False)
+        from .local_compute import metal_lease
+        with metal_lease(realtime=True, timeout=180):
+            model = load(model_path, lazy=False)
         results.put({"type": "ready"})
     except Exception as exc:
         results.put({"type": "load_error", "message": str(exc)})
@@ -172,7 +174,7 @@ class ModelManager:
         self.request_queue = None
         self.result_queue = None
 
-    def _infer_sync(
+    def _infer_with_lease(
         self,
         audio: np.ndarray,
         language: str | None,
@@ -213,6 +215,11 @@ class ModelManager:
         if message.get("type") != "result":
             raise RuntimeError(str(message.get("message") or "模型转写失败"))
         return str(message.get("text") or ""), str(message.get("language") or "")
+
+    def _infer_sync(self, audio, language, context, max_tokens, asr_params, timeout_seconds):
+        from .local_compute import metal_lease
+        with metal_lease(realtime=True, timeout=timeout_seconds):
+            return self._infer_with_lease(audio, language, context, max_tokens, asr_params, timeout_seconds)
 
     def cancel_unload(self) -> None:
         # Only the idle timer/lock wait can be cancelled. Once shutdown starts,

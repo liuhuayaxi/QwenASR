@@ -50,6 +50,8 @@ async def correct_batch_segment(
     """Correct one ASR block immediately and persist it before the next block."""
     ai_config = json.loads(json.dumps(config))
     ai_config["_batch_segment_mode"] = True
+    from .transcription_assist.service import evidence_config
+    ai_config = await evidence_config(record, ai_config, str(segment.get('raw') or ''))
     previous = [
         str(item.get("corrected") or item.get("raw") or "")
         for item in record.segments
@@ -88,6 +90,8 @@ async def correct_batch_segments(
     ai_config = json.loads(json.dumps(config))
     ai_config["_preserve_segment_boundaries"] = True
     ai_config["_batch_segment_mode"] = True
+    from .transcription_assist.service import evidence_config
+    ai_config = await evidence_config(record, ai_config, '\n'.join(str(s.get('raw') or '') for s in segments))
     first_id = int(segments[0]["id"])
     previous = [str(item.get("corrected") or item.get("raw") or "")
                 for item in record.segments if int(item.get("id", 0)) < first_id]
@@ -97,6 +101,8 @@ async def correct_batch_segments(
         history_chars = 2000
     ai_config["_transcript_context"] = "\n".join(previous)[-history_chars:] if history_chars else ""
     corrected = {}
+    candidate_by_id = {}
+    provenance_by_id = {}
     error = None
     try:
         blocks = await retry_transient_ai(lambda: polish_timestamped_segments_resilient(
@@ -108,6 +114,8 @@ async def correct_batch_segments(
         if actual != expected or len(blocks) != len(expected):
             raise AIRequestError("批量精修的段落编号不完整，原文已保留", kind="invalid_segment_mapping")
         corrected = {int(block["segment_ids"][0]): str(block["corrected"]).strip() for block in blocks}
+        candidate_by_id = {int(block['segment_ids'][0]):{**block['correction_review'],'segment_ids':block['segment_ids']} for block in blocks if block.get('correction_review')}
+        provenance_by_id = {int(block['segment_ids'][0]):block['correction_provenance'] for block in blocks if block.get('correction_provenance')}
     except Exception as exc:
         error = str(exc)
     source_by_id = {int(segment["id"]): segment for segment in segments}
@@ -121,6 +129,10 @@ async def correct_batch_segments(
             current["ai_error"] = error
         else:
             current["corrected"] = corrected[ident]
+            if ident in candidate_by_id:
+                current['correction_review']=candidate_by_id[ident]
+            if ident in provenance_by_id:
+                current['correction_provenance']=provenance_by_id[ident]
             current.pop("ai_error", None)
         updated.append(current)
     record.metadata["updated_at"] = local_now()
@@ -156,7 +168,8 @@ async def global_rewrite_events(
         ),
         "",
     )
-    global_config = json.loads(json.dumps(config))
+    from .transcription_assist.service import evidence_config
+    global_config = await evidence_config(record, config, '\n'.join(str(s.get('raw') or '') for s in record.segments)[-5000:])
     global_config["_global_mode"] = True
     fingerprint = hashlib.sha256(
         json.dumps([chunks, detected_language, global_config], ensure_ascii=False, sort_keys=True).encode()
@@ -318,13 +331,20 @@ async def build_note_summary(
                   for index, block in enumerate(source_blocks, 1)}
     blocks = [f"[来源 S{index}] [{format_clock(block['start'])}–{format_clock(block['end'])}]\n{block['text']}"
               for index, block in enumerate(source_blocks, 1)]
-    window = context_window_for(config, "summary")
-    chunks = note_summary_chunks(blocks, config)
+    from .transcription_assist.service import evidence_config
+    from .classroom_intelligence.integrations import saved_notes_markdown
+    chunk_config = await evidence_config(record, config, '\n'.join(block['text'] for block in source_blocks)[-6000:], limit=6)
+    accepted_notes=saved_notes_markdown(record)
+    if accepted_notes:
+        from .transcription_assist.service import attach_accepted_evidence
+        chunk_config=await attach_accepted_evidence(record,chunk_config)
+        chunk_config['_accepted_classroom_notes'] = accepted_notes
+    window = context_window_for(chunk_config, 'summary')
+    chunks = note_summary_chunks(blocks, chunk_config)
     if not chunks:
-        raise ValueError("录音还没有可用于生成总结的转写内容")
-    chunk_config = json.loads(json.dumps(config))
-    chunk_config["_detailed_chunk"] = len(chunks) > 1
-    chunk_config["_full_note"] = len(chunks) == 1
+        raise ValueError('录音还没有可用于生成总结的转写内容')
+    chunk_config['_detailed_chunk'] = len(chunks)>1
+    chunk_config['_full_note'] = len(chunks)==1
     # Low verbosity is appropriate for the library abstract, not lecture notes.
     provider = chunk_config.setdefault("ai", {}).setdefault("summary_provider", {})
     extra = provider.get("extra_params")
@@ -436,6 +456,11 @@ async def build_note_summary(
     rolling_summary = metadata_block + rolling_summary.lstrip()
     rolling_summary = re.sub(r'\[([^\]]+)\]\(#source-(\d+)\)',
                              lambda match: match.group(0) if match.group(2) in source_map else match.group(1) + '（来源待核对）', rolling_summary)
+    from .transcription_assist.service import validate_knowledge_answer
+    rolling_summary, knowledge_validation = await asyncio.to_thread(validate_knowledge_answer,rolling_summary,chunk_config)
+    knowledge_map={e['citation_id']:e for e in chunk_config.get('_knowledge_evidence',[])}
+    rolling_summary=re.sub(r'\[(K[A-Za-z0-9_-]+)\](?!\()',
+                           lambda m:'['+m[1]+']('+knowledge_map[m[1]]['open_url']+')' if m[1] in knowledge_map else m[0],rolling_summary)
     now = local_now()
     previous = record.metadata.get("ai_note_summary")
     item = {
@@ -449,6 +474,9 @@ async def build_note_summary(
         "updated_at": now,
         "source": "post_recording",
         "source_map": source_map,
+        "knowledge_source_map": knowledge_map,
+        "knowledge_source_validation": knowledge_validation,
+        "student_notes_included": bool(accepted_notes),
     }
     draft["phase"] = "录音库短摘要"
     # Persist the detailed Markdown before the independent short-abstract call.

@@ -1,0 +1,438 @@
+/* Course Knowledge: Unified Knowledge Search, Indexing Status & Jobs */
+
+.knowledge-search-section {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 20px;
+  margin-bottom: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.03);
+}
+
+.knowledge-section-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.knowledge-title-group h2 {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0 0 4px;
+  color: var(--ink);
+}
+
+.knowledge-title-group p {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 0;
+  line-height: 1.5;
+}
+
+.knowledge-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Search Bar */
+.knowledge-search-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.knowledge-search-input-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.knowledge-search-input {
+  flex: 1;
+  padding: 10px 14px;
+  font-size: 14px;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  outline: none;
+  transition: all 0.15s ease;
+}
+
+.knowledge-search-input:focus {
+  background: var(--card);
+  border-color: var(--green);
+  box-shadow: 0 0 0 2px var(--focus-ring);
+}
+
+.knowledge-search-options {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.cross-course-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.cross-course-label input {
+  margin: 0;
+  accent-color: var(--green);
+}
+
+.knowledge-search-status {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* Results Container */
+.knowledge-results-container {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.knowledge-empty-state {
+  padding: 32px 16px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.7;
+  background: var(--surface);
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-sm);
+}
+
+.knowledge-result-card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition: all 0.15s ease;
+}
+
+.knowledge-result-card:hover {
+  border-color: var(--green-line);
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.05);
+}
+
+.result-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.result-title-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.result-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.result-citation-id {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+.result-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+  margin: 0;
+}
+
+.result-heading {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.result-badges {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.origin-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.origin-badge.original {
+  background: var(--green-soft);
+  color: var(--green-dark);
+  border-color: var(--green-line);
+}
+
+.origin-badge.human {
+  background: #eef2fa;
+  color: #2b5490;
+  border-color: #c0d1e8;
+}
+
+.origin-badge.ai_derived {
+  background: #fbf0dc;
+  color: #7a5000;
+  border-color: #e8d0a0;
+}
+
+html[data-theme="dark"] .origin-badge.human { background: #1b263b; color: #9cbfee; border-color: #29394f; }
+html[data-theme="dark"] .origin-badge.ai_derived { background: #3b2f13; color: #eed488; border-color: #55441b; }
+
+.kind-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--muted);
+}
+
+.result-snippet {
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--ink);
+  background: var(--surface);
+  padding: 10px 12px;
+  border-radius: 6px;
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.result-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+  padding-top: 2px;
+}
+
+.result-location {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.result-open-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-weight: 500;
+  color: var(--green);
+  text-decoration: none;
+  font-size: 12px;
+  transition: all 0.12s;
+}
+
+.result-open-link:hover {
+  text-decoration: underline;
+  color: var(--green-dark);
+}
+
+.result-stale-warning {
+  color: var(--danger);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+/* ==================== Index Status & Jobs Panel ==================== */
+
+.knowledge-index-panel {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.index-summary-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.index-status-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.index-status-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  color: var(--ink);
+}
+
+.index-status-badge.ready {
+  background: var(--green-soft);
+  color: var(--green-dark);
+  border-color: var(--green-line);
+}
+
+.index-status-badge.indexing {
+  background: #fdf3d8;
+  color: #8f6500;
+  border-color: #edd18a;
+}
+
+html[data-theme="dark"] .index-status-badge.indexing {
+  background: #3e3215;
+  color: #f5d480;
+  border-color: #5d4b21;
+}
+
+.index-stat-item {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.index-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Ongoing Jobs */
+.ongoing-jobs-box {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  background: #fdf6e7;
+  border: 1px solid #ebcf93;
+  border-radius: 6px;
+  font-size: 12px;
+  color: #7b5300;
+}
+
+html[data-theme="dark"] .ongoing-jobs-box {
+  background: #2b2310;
+  border-color: #55441b;
+  color: #e5cb87;
+}
+
+.jobs-spinner {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Per-Source Status List */
+.sources-disclosure {
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+
+.sources-disclosure summary {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+  outline: none;
+}
+
+.sources-disclosure summary:hover {
+  color: var(--ink);
+}
+
+.sources-status-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.source-status-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 10px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.source-item-title {
+  font-weight: 500;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.source-rev-badge {
+  font-family: var(--font-mono);
+  font-size: 10px;
+}

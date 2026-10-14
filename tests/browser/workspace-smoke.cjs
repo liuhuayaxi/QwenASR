@@ -274,5 +274,20 @@ async function fixtures(route) {
     assert.equal(JSON.parse(push.body).create_new,false);
   });
   await scenario('课程内笔记与任务抽屉',async(page,context,origin)=>{await page.goto(origin+'/workspace?category='+encodeURIComponent(record.category));await page.locator('[data-recording="smoke-class"]').waitFor();await page.screenshot({path:path.join(output,'workspace.png'),fullPage:true});await page.locator('[data-recording="smoke-class"]').click();await page.frameLocator('#workspaceFrame').locator('#noteDialog[open]').waitFor();await page.locator('#workspaceTasks').click();await page.locator('#timelineDialog[open]').waitFor();await page.frameLocator('#timelineFrame').locator('.task-card').first().waitFor();});
+  await scenario('已保存课堂的速记增强会自动更新，原手记保留',async(page,context,origin)=>{
+    let polls=0;
+    await context.route('**/api/recordings/smoke-class/scribbles',async route=>{
+      polls++;
+      const note={id:'smoke-note',raw:'合成原始手记',content:'合成原始手记',revision:1,start:0,end:30,
+        status:polls===1?'pending':'enhanced',locked:false,job:{status:polls===1?'pending':'completed'},history:[]};
+      if(polls>1)note.suggestion={id:'smoke-suggestion',input_revision:1,content:'合成课堂依据与补充',evidence:[],claims:{},validation:{}};
+      await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({notes:[note]})});
+    });
+    await page.goto(origin+'/?chat='+record.id+'&panel=scribbles');
+    await page.getByRole('button',{name:'采纳建议',exact:true}).waitFor();
+    assert.ok(polls>=2);
+    assert.equal(await page.locator('.scribble-raw-text').innerText(),'合成原始手记');
+    assert.match(await page.locator('.suggestion-content').innerText(),/合成课堂依据与补充/);
+  });
  } finally {fs.writeFileSync(path.join(output,'smoke-results.json'),JSON.stringify({synthetic:true,results},null,2));await browser.close();await new Promise(resolve=>server.close(resolve));}
 })().catch(error=>{console.error(error);process.exitCode=1;});

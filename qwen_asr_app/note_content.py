@@ -29,7 +29,8 @@ def transcript_blocks(record: Any) -> list[dict[str, Any]]:
         members = [by_id[i] for i in ids]
         blocks.append({"start": min(float(s.get("start", 0)) for s in members),
                        "end": max(float(s.get("end", 0)) for s in members),
-                       "text": text, "refined": True, "segment_ids": ids})
+                       "text": text, "refined": not bool(part.get("correction_review")), "segment_ids": ids,
+                       **({"correction_review":part["correction_review"]} if part.get("correction_review") else {})})
         covered.update(ids)
     for segment in segments:
         if int(segment.get("id", 0)) in covered:
@@ -39,7 +40,8 @@ def transcript_blocks(record: Any) -> list[dict[str, Any]]:
         text = str(segment.get("corrected") or segment.get("raw") or "").strip()
         if text:
             blocks.append({"start": float(segment.get("start", 0)), "end": float(segment.get("end", 0)),
-                           "text": text, "refined": bool(segment.get("corrected")) and not segment.get("ai_error"),
+                           "text": text, "refined": bool(segment.get("corrected")) and not segment.get("ai_error") and not segment.get("correction_review"),
+                           **({"correction_review":segment["correction_review"]} if segment.get("correction_review") else {}),
                            "segment_ids": [int(segment.get("id", 0))]})
     return sorted(blocks, key=lambda block: block["start"])
 
@@ -59,7 +61,12 @@ def compose_push(record: Any, mode: str = "combined") -> dict[str, Any]:
     if mode not in {"combined", "summary", "transcript"}:
         raise ValueError("推送内容必须选择总结＋精修原文、仅总结或仅精修原文")
     summary = str((record.metadata.get("ai_note_summary") or {}).get("summary") or "").strip()
+    from .classroom_intelligence.integrations import saved_notes_markdown
+    classroom_notes = saved_notes_markdown(record)
     transcript, missing = transcript_markdown(record)
+    if mode != "transcript" and not summary and classroom_notes:
+        summary = classroom_notes
+        classroom_notes = ""
     if mode != "transcript" and not summary:
         raise ValueError("请先生成并保存 AI 总结，或选择仅推送精修原文")
     if mode != "summary" and not transcript:
@@ -72,6 +79,8 @@ def compose_push(record: Any, mode: str = "combined") -> dict[str, Any]:
         # Generated summaries already contain a title and metadata. Keep the
         # original verbatim inside its section to make pull round trips lossless.
         body.extend(["## AI 总结", summary])
+    if mode != 'transcript' and classroom_notes:
+        body.extend(['## 随堂速记（已保存）', classroom_notes])
     if mode != "summary":
         body.extend(["---", "## 精修录音原文（含时间戳）"])
         if missing:
@@ -133,7 +142,7 @@ def summary_from_archive(markdown: str, sync: dict[str, Any]) -> str:
     if not start:
         raise ValueError("远端笔记没有可识别的“AI 总结”章节；本地总结未被覆盖")
     tail = markdown[start.end():]
-    boundary = re.search(r"^## 精修录音原文（含时间戳）\s*$", tail, re.M)
+    boundary = re.search(r"^## (?:精修录音原文（含时间戳）|随堂速记（已保存）)\s*$", tail, re.M)
     if boundary:
         tail = tail[:boundary.start()]
         tail = re.sub(r"\n---\s*$", "", tail.rstrip())

@@ -1,4 +1,5 @@
 import { renderMarkdown } from "./markdown-reader.js?v=20261014-source-citations";
+import { createClassroomIntelligence } from "./classroom-intelligence.js";
 
 const $ = (selector) => document.querySelector(selector);
 const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];
@@ -16,7 +17,8 @@ async function api(url, options = {}) {
 const jsonOptions = (method, body) => ({ method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 
 export function createClassroomChat({ openSettings, toast }) {
-  const e = Object.fromEntries(["Messages", "Context", "Question", "Send", "Form", "Error", "Clear", "ModelSelect", "Settings", "SaveSettings", "SettingsStatus", "RefreshModels"].map(key => [key, $("#chat" + key)]));
+  const intelligence = window.__classroomIntelligence || createClassroomIntelligence({ openSettings, toast });
+  const e = Object.fromEntries(["Messages", "Context", "Question", "Send", "Form", "Error", "Clear", "ModelSelect", "Settings", "SaveSettings", "SettingsStatus", "RefreshModels", "Scope"].map(key => [key, $("#chat" + key)]));
   let sessionId = null, settings = null, defaultPrompt = "", models = [], viewVersion = 0;
   let settingsDirty = false, settingsSaving = false, refreshing = false;
   let settingsEditVersion = 0;
@@ -39,6 +41,7 @@ export function createClassroomChat({ openSettings, toast }) {
     e.Clear.disabled = !ready || busy || !doc.turns.length;
     e.ModelSelect.disabled = !settings || settingsSaving;
     e.SaveSettings.disabled = !settings || settingsSaving;
+    if (e.Scope) e.Scope.disabled = !ready || busy;
   }
   function contextText(info) {
     if (!info) return "开始录音后，自动读取本节课上下文";
@@ -46,6 +49,10 @@ export function createClassroomChat({ openSettings, toast }) {
     const parts = [`全文 ${info.segment_count} 段`, `已转写至 ${stamp(info.transcribed_until)}`];
     if (info.preview_count && settings?.context.live_preview) parts.push("含未定稿预览");
     if (info.pending_segments || info.captured_until - info.available_until > 3) parts.push("仍有语音转写中");
+    if (info.scope && info.scope !== "lesson") {
+      const scopeMap = { recent: "范围：最近3分钟", course: "范围：课程资料库", full: "范围：本堂课全文" };
+      parts.push(scopeMap[info.scope] || info.scope);
+    }
     return parts.join(" · ");
   }
   function render(force = false) {
@@ -69,6 +76,70 @@ export function createClassroomChat({ openSettings, toast }) {
           answer.className = "chat-answer markdown-body";
           answer.innerHTML = renderMarkdown(turn.answer);
           answer.querySelectorAll("a").forEach(link => { link.target = "_blank"; link.rel = "noopener noreferrer"; });
+
+          // Citations and freshness warnings
+          const citations = turn.evidence || turn.citations || [];
+          const isStale = Boolean(turn.stale || turn.freshness_warning || citations.some(c => c.stale || c.valid === false));
+          if (isStale) {
+            const warn = document.createElement("div");
+            warn.className = "chat-freshness-warning";
+            warn.setAttribute("role", "note");
+            warn.textContent = typeof turn.freshness_warning === "string" ? turn.freshness_warning : "⚠️ 引用资料版本已变动，请注意核对最新内容";
+            article.append(warn);
+          }
+          if (citations.length > 0) {
+            const citBox = document.createElement("div");
+            citBox.className = "chat-citations";
+            const citHeading = document.createElement("span");
+            citHeading.className = "chat-citations-label";
+            citHeading.textContent = "参考依据：";
+            citBox.append(citHeading);
+
+            const citList = document.createElement("div");
+            citList.className = "chat-citations-list";
+            for (const cit of citations) {
+              const item = document.createElement("a");
+              item.className = "chat-citation-link";
+              if (cit.stale || cit.valid === false) item.classList.add("stale");
+              item.target = "_blank";
+              item.rel = "noopener noreferrer";
+              const targetUrl = cit.open_url || (cit.source_id ? `/api/knowledge/source/${encodeURIComponent(cit.source_id)}?revision=${encodeURIComponent(cit.revision || "")}${cit.page ? "&page=" + encodeURIComponent(cit.page) : ""}${cit.start !== null && cit.start !== undefined ? "&start=" + encodeURIComponent(cit.start) : ""}` : "#");
+              item.href = targetUrl;
+
+              const icon = document.createElement("span");
+              icon.className = "chat-citation-icon";
+              icon.setAttribute("aria-hidden", "true");
+              icon.textContent = (cit.kind === "audio" || (cit.start !== undefined && cit.start !== null)) ? "🎙️" : "📄";
+              item.append(icon);
+
+              const title = document.createElement("span");
+              title.className = "chat-citation-title";
+              const parts = [cit.title || "资料"];
+              if (cit.heading) parts.push(cit.heading);
+              if (cit.page) parts.push(`P.${cit.page}`);
+              if (cit.start !== null && cit.start !== undefined) parts.push(stamp(cit.start));
+              title.textContent = parts.join(" ");
+              item.append(title);
+
+              if (cit.origin) {
+                const originBadge = document.createElement("span");
+                originBadge.className = "chat-citation-origin";
+                originBadge.textContent = cit.origin === "original" ? "原件" : (cit.origin === "human" ? "速记" : "AI");
+                item.append(originBadge);
+              }
+
+              if (cit.stale || cit.valid === false) {
+                const staleBadge = document.createElement("span");
+                staleBadge.className = "chat-citation-stale-badge";
+                staleBadge.textContent = "已更新";
+                item.append(staleBadge);
+              }
+
+              citList.append(item);
+            }
+            citBox.append(citList);
+            article.append(citBox);
+          }
         } else {
           answer.className = turn.status === "failed" ? "chat-error" : "chat-pending";
           answer.textContent = turn.status === "failed" ? turn.error : "正在结合本节课全文回答…";
@@ -76,7 +147,8 @@ export function createClassroomChat({ openSettings, toast }) {
         article.append(answer);
         const meta = document.createElement("div"); meta.className = "chat-turn-meta";
         const label = document.createElement("span");
-        label.textContent = [turn.model, turn.context ? `上下文至 ${stamp(turn.context.available_until)}` : ""].filter(Boolean).join(" · ");
+        const scopeLabel = turn.scope && turn.scope !== "lesson" ? (turn.scope === "recent" ? "近3分钟" : (turn.scope === "course" ? "课程资料" : "本堂课全文")) : "";
+        label.textContent = [turn.model, scopeLabel, turn.context ? `上下文至 ${stamp(turn.context.available_until)}` : ""].filter(Boolean).join(" · ");
         meta.append(label);
         if (turn.status !== "pending") {
           const action = document.createElement("button"); action.type = "button"; action.className = "ghost-button";
@@ -117,6 +189,9 @@ export function createClassroomChat({ openSettings, toast }) {
   }
   function showSession(session) {
     const next = session?.id || null;
+    if (window.__classroomIntelligence?.showSession) {
+      try { window.__classroomIntelligence.showSession(session); } catch {}
+    }
     if (next === sessionId) { void refreshConversation(); return; }
     if (sessionId) drafts.set(sessionId, e.Question.value);
     sessionId = next; viewVersion++; loadedId = null;
@@ -131,13 +206,15 @@ export function createClassroomChat({ openSettings, toast }) {
     const requestId = retry?.id || crypto.randomUUID();
     const doc = docFor(id), conversationId = doc.conversation_id;
     const turn = retry || { id: requestId, question };
+    const scope = retry?.scope || e.Scope?.value || "lesson";
+    turn.scope = scope;
     if (!retry) doc.turns.push(turn);
     turn.status = "pending"; turn.error = "";
     documents.set(id, doc); submitting.add(id);
     if (!retry) { e.Question.value = ""; drafts.delete(id); }
     error(); render(true);
     try {
-      const result = await api(baseFor(id), jsonOptions("POST", {question, request_id: requestId, conversation_id: conversationId}));
+      const result = await api(baseFor(id), jsonOptions("POST", {question, request_id: requestId, conversation_id: conversationId, scope}));
       const latest = docFor(id);
       const index = latest.turns.findIndex(item => item.id === requestId);
       if (index >= 0) latest.turns[index] = result.turn; else latest.turns.push(result.turn);

@@ -1,3 +1,5 @@
+import {renderCorrectionReview} from "./js/transcription-assist.js?v=20261014-knowledge";
+import "./js/knowledge-settings.js?v=20261014-knowledge";
 import {cachedJson} from './js/cached-json.js';
 import { createBatchView } from "./js/batch-view.js?v=20261011-20260923";
 import { createLibraryTools } from "./js/library-tools.js?v=20261007-search-focus-1";
@@ -10,6 +12,7 @@ import { createTranscriptView } from "./js/transcript-view.js?v=20261011-2026092
 import { IDEASHELL_SERVERS, normalizeIdeashellServer } from "./js/ideashell-config.js?v=20261007";
 import { createMineruSettings } from "./js/mineru-settings.js?v=20261010-routing-progress";
 import { createInferenceSettings } from "./js/inference-settings.js?v=20261010-routing-progress";
+import { createClassroomIntelligence } from "./js/classroom-intelligence.js?v=20261014-knowledge";
 import { createClassroomChat } from "./js/classroom-chat.js?v=20261014-source-citations";
 import { createSettingsNavigation } from "./js/settings-navigation.js?v=20261011-ui-final";
 import { createLibraryBackup } from "./js/library-backup.js?v=20261014-daily";
@@ -136,6 +139,7 @@ const continuation = createContinuation({
 });
 let summaryView = null;
 let classroomChat = null;
+let classroomIntelligence = null;
 const {
   clearAll, copyAll, ensureSegment, escapeHtml, formatDuration, renderAiError,
   refreshEmptyState, renderAiResult, renderError, renderFinal,
@@ -143,7 +147,7 @@ const {
 } = createTranscriptView({
   els, state, toast, updateButtons, switchView,
   onRetrySegment: retrySegmentAi,
-  onSessionShown: (session) => { summaryView?.renderSession(session); classroomChat?.showSession(session);
+  onSessionShown: (session) => { summaryView?.renderSession(session); classroomChat?.showSession(session); classroomIntelligence?.showSession(session);
     continuation.remember(session);
     const button = $("#openCompletedNote");
     button.classList.toggle("hidden", session.status === "active");
@@ -152,6 +156,7 @@ const {
 });
 summaryView = createSummaryView({ els, escapeHtml, formatDuration });
 classroomChat = createClassroomChat({openSettings: openAdvancedSettings, toast});
+classroomIntelligence = createClassroomIntelligence({openSettings: openAdvancedSettings, toast});
 const noteReader = createMarkdownReader({
   container: $("#noteSummaryReader"), source: els.noteSummaryEditor, toc: $("#noteToc"),
   onChange: () => els.noteSummaryEditor.dispatchEvent(new Event("input")),
@@ -562,6 +567,13 @@ async function loadConfig() {
   try {
     const response = await fetch("/api/config", { cache: "no-store" });
     const config = await response.json();
+    if (config.preview && !document.querySelector('#previewNotice')) {
+      const notice=document.createElement('div'); notice.id='previewNotice';
+      notice.setAttribute('role','status'); notice.style.cssText='background:#fff2cc;color:#594800;padding:12px 20px;text-align:center;border-bottom:1px solid #dbc77b';
+      notice.textContent='隔离测试页 · 使用课程副本，不含正式授权，外部同步已停用。';
+      const link=document.createElement('a');link.href='http://127.0.0.1:8765/';link.textContent=' 打开原来的正式版本';link.style.cssText='color:inherit;text-decoration:underline';notice.append(link);
+      document.body.prepend(notice); document.title='[隔离测试] '+document.title;
+    }
     state.backendCompatible = config.feature_version === REQUIRED_FEATURE_VERSION;
     els.serviceUpdateNotice.classList.toggle("hidden", state.backendCompatible);
     els.aiBaseUrl.value = config.ai_base_url || "https://api.openai.com/v1";
@@ -1368,6 +1380,7 @@ function renderNoteDialog(session) {
   libraryTools.attach(session);
   renderNoteTranscript(session);
   renderNoteSummary(session);
+  void renderCorrectionReview(session).catch(() => {});
   refreshSummaryStatus(session.id);
 }
 
@@ -1752,6 +1765,7 @@ async function deleteLibraryRecord(record) {
     if (state.shownSession?.id === record.id) {
       state.shownSession = null;
       classroomChat?.showSession(null);
+      classroomIntelligence?.showSession(null);
       clearAll();
       els.sessionBar.classList.add("hidden");
       els.downloadLinks.classList.add("hidden");
@@ -2483,17 +2497,23 @@ async function init() {
     els.libraryCategory.value = course; await loadLibrary();
   }
   if (query.get("source") === "upload") els.fileInput.click();
-  if (query.get("recording")) await openLibraryRecord(query.get("recording"));
+  if (query.get("recording")) {
+    await openLibraryRecord(query.get("recording"));
+    const sourceTime=query.get('start') ?? location.hash.match(/^#t=(\d+(?:\.\d+)?)/)?.[1];
+    const start = Number(sourceTime);
+    if (sourceTime != null && Number.isFinite(start)) await libraryTools.seek(start, false);
+  }
   if (query.get("chat")) {
     const response = await fetch(`/api/recordings/${encodeURIComponent(query.get("chat"))}`, {cache:"no-store"});
     const payload = await response.json();
-    if (response.ok && payload.session) { showSession(payload.session, true); $("#classroomChat").scrollIntoView({block:"nearest"}); }
+    if (response.ok && payload.session) { showSession(payload.session, true); classroomIntelligence?.switchTab(query.get("panel") === "scribbles" ? "scribbles" : "chat"); $("#classroomChat").scrollIntoView({block:"nearest"}); }
     else toast(payload.detail || "无法读取课堂问答来源", 5000);
   }
   if (query.get("settings") === "ai") {
     openAdvancedSettings();
     selectAiSettings("summary");
   }
+  if (query.get('settings')==='terminology') openAdvancedSettings(els.terminology);
   if (["mineru", "inference"].includes(query.get("settings"))) {
     openAdvancedSettings();
     $(query.get("settings") === "inference" ? "#inferenceSettingsGroup" : "#mineruSettingsGroup").scrollIntoView({block: 'start'});
@@ -2587,6 +2607,7 @@ $("#askNoteClass").addEventListener("click", async () => {
   if (!record || !await saveNoteSummary({quiet:true})) return;
   await closeNoteDialog();
   showSession(record, true);
+  classroomIntelligence?.switchTab('chat');
   $("#classroomChat").scrollIntoView({block:"nearest"});
 });
 $("#openCompletedNote").addEventListener("click", event => openLibraryRecord(event.currentTarget.dataset.recording));

@@ -42,7 +42,7 @@ def store_for(record):
 
 
 class LivePauseTests(unittest.IsolatedAsyncioTestCase):
-    async def test_resumed_local_recording_uses_saved_windows_for_new_audio(self):
+    async def test_resumed_live_uses_mac_and_preserves_requested_windows_config(self):
         from qwen_asr_app.inference_providers import DEFAULTS
         with tempfile.TemporaryDirectory() as directory:
             record = live_record(Path(directory))
@@ -60,9 +60,10 @@ class LivePauseTests(unittest.IsolatedAsyncioTestCase):
                 session.chunks, session.sample_count = [samples], len(samples)
                 await session.detach_and_process('silence')
                 await session.drain()
-                self.assertEqual(manager.transcribe.await_args.kwargs['inference_config']['asr_provider'], 'remote_only')
-                self.assertTrue(Path(manager.transcribe.await_args.kwargs['operation_dir'], 'request.json').is_file())
-                manager.load.assert_not_awaited()
+                self.assertEqual(manager.transcribe.await_args.kwargs['inference_config']['asr_provider'], 'local')
+                self.assertEqual(record.metadata['configured_inference_settings']['asr_provider'], 'remote_only')
+                self.assertIsNone(manager.transcribe.await_args.kwargs.get('operation_dir'))
+                manager.load.assert_awaited()
 
     async def test_remote_only_model_failure_does_not_load_local(self):
         from qwen_asr_app.inference_providers import DEFAULTS

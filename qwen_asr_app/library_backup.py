@@ -43,7 +43,9 @@ def backup_sources(settings, recordings, notes) -> list[BackupSource]:
             return
         sources.append(BackupSource(path, prefix, tuple(excluded)))
 
-    add(settings.storage_root, "资料库")
+    # SQLite indexes are derived and may change during read-only searches.
+    # Preserve authoritative sources and note histories; rebuild the index on restore.
+    add(settings.storage_root, "资料库", (".knowledge.db", ".knowledge.db-wal", ".knowledge.db-shm"))
     add(PRIVATE_ROOT, "配置/private", (
         "runtimes", "mineru4/models", "services", "backups", "compat-backups",
         "library-migrations", "repair-backups", "mineru-upgrade-backups",

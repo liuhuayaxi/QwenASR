@@ -123,7 +123,7 @@ class TranscriptionSession:
         clean = {key: value for key, value in values.items() if key not in {'type', '_remote_operation_dir'}}
         if 'inference_settings' in clean:
             from .inference_providers import inference_settings
-            clean['inference_settings'] = inference_settings.for_task('asr')
+            clean['inference_settings'] = {'asr_provider':'local','mineru_provider':'local'}
         if self.speaking and self.chunks:
             self.pending_config.update(clean)
             return True
@@ -377,6 +377,10 @@ class TranscriptionSession:
             await self.send({"type": "final", **segment})
             # ASR durability is independent of optional AI enrichment. End-save
             # drains ASR only, then suspends unfinished AI with retryable state.
+            from .classroom_intelligence.service import on_stable_transcript
+            self.track_review(on_stable_transcript(recording))
+            from .transcription_assist.service import refresh_live_terms
+            self.track_review(refresh_live_terms(self, recording))
             self.track_review(self.enrich_final(segment, config, recording))
         except Exception as exc:
             await self.send({"type": "error", "id": segment_id, "message": f"转写失败：{exc}"})
@@ -401,6 +405,8 @@ class TranscriptionSession:
                         previous_parts.append(saved_text)
                 if history_chars:
                     ai_config["_transcript_context"] = "\n".join(previous_parts)[-history_chars:]
+                from .transcription_assist.service import evidence_config
+                ai_config = await evidence_config(recording, ai_config, raw)
                 enrichment = await retry_transient_ai(
                     lambda: polish_and_translate(raw, language, ai_config)
                 )
@@ -670,7 +676,11 @@ class TranscriptionSession:
         from .inference_providers import inference_settings
         # New audio follows today's saved choice, including resumed recordings.
         # Already submitted segments retain their own immutable snapshots.
-        self.config['inference_settings'] = inference_settings.for_task('asr')
+        recording.metadata['configured_inference_settings'] = inference_settings.for_task('asr')
+        # Recording is the Mac main-system path. Optional remote acceleration
+        # remains available for durable replay jobs, while submitted old
+        # segments keep their receipt/config snapshots for safe reconciliation.
+        self.config['inference_settings'] = {'asr_provider':'local','mineru_provider':'local'}
         recording.metadata['inference_settings'] = self.config['inference_settings']
         recording.save_metadata()
         self.recording = recording

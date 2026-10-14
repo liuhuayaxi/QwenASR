@@ -5,6 +5,7 @@ import asyncio
 import contextlib
 import importlib.util
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -58,7 +59,13 @@ def normalize(raw, *, validate_remote=False):
 
 class InferenceSettings:
     def __init__(self, path=None):
-        self.path = path or PRIVATE_ROOT / "inference-providers.json"
+        classroom=os.getenv('QWEN_ASR_CLASSROOM_EDITION')=='1'
+        self.path = path or PRIVATE_ROOT / ("classroom-inference-providers.json" if classroom else "inference-providers.json")
+        if path is None and classroom and not self.path.exists():
+            legacy=PRIVATE_ROOT/'inference-providers.json'
+            raw=json.loads(legacy.read_text()) if legacy.is_file() else dict(DEFAULTS)
+            raw.update(asr_provider='local',mineru_provider='local')
+            self.save(raw)
 
     def read(self):
         try:

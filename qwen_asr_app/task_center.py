@@ -105,7 +105,7 @@ class TaskHistory:
         return restored
 
 
-def task_center_router(ai_tasks, ai_action, courses, pdfs, uploads=None):
+def task_center_router(ai_tasks, ai_action, courses, pdfs, uploads=None, intelligence_tasks=None):
     router = APIRouter(prefix="/api/tasks")
     history = TaskHistory()
 
@@ -113,6 +113,8 @@ def task_center_router(ai_tasks, ai_action, courses, pdfs, uploads=None):
         discover_courses(courses.store.settings)
         tasks = [dict(task) for task in course_tasks()]
         warnings = []
+        if intelligence_tasks is not None:
+            tasks.extend(intelligence_tasks.tasks())
         for task in ai_tasks(include_history=True):
             tasks.append({**task, "family": "ai", "title": task["recording_title"],
                           "source": "录音工作台", "stage": task.get("phase", ""),
@@ -233,6 +235,8 @@ def task_center_router(ai_tasks, ai_action, courses, pdfs, uploads=None):
         if action in {'new_local', 'new_recognition'} and payload.get('acknowledge_duplicate') is not True:
             raise HTTPException(409, '旧远端任务可能仍在执行；请确认重复计算风险后新建任务')
         try:
+            if intelligence_tasks is not None and task['type'] in {'knowledge_index','classroom_note'}:
+                return await intelligence_tasks.action(task,action)
             if task["type"] == "course_queue":
                 return await course_action(action)
             if task["type"] == "upload":

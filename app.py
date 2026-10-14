@@ -126,9 +126,21 @@ async def lifespan(_: FastAPI):
     # without opening another listener.
     async with smartclass_service.lifespan(smartclass_service.app):
         await library_watch.start()
+        await knowledge_service.start()
+        await knowledge_coordinator.start()
+        intelligence_service = getattr(intelligence_router, 'intelligence_service', None)
+        if intelligence_service and hasattr(intelligence_service, 'start'):
+            await intelligence_service.start()
         try:
             yield
         finally:
+            intelligence_service = getattr(intelligence_router, 'intelligence_service', None)
+            if intelligence_service and hasattr(intelligence_service, 'close'):
+                await intelligence_service.close()
+            await knowledge_coordinator.close()
+            await knowledge_service.close()
+            from qwen_asr_app.knowledge.embeddings import close_embedder
+            await asyncio.to_thread(close_embedder)
             await backup_manager.close()
             await library_watch.close()
             await course_stream_manager.close()
@@ -167,8 +179,25 @@ course_file_api = CourseFileAPI(app_settings, recording_store, ideashell_manager
 library_watch = LibraryWatch(app_settings, recording_store)
 backup_manager = BackupManager()
 app.include_router(course_file_api.router)
+from qwen_asr_app.knowledge.service import KnowledgeService
+from qwen_asr_app.knowledge.routes import knowledge_router
+from qwen_asr_app.knowledge.config_routes import knowledge_config_router
+from qwen_asr_app.classroom_intelligence.routes import classroom_intelligence_router
+from qwen_asr_app.transcription_assist.service import configure_knowledge
+knowledge_service = KnowledgeService(app_settings, recording_store, course_file_api.store)
+configure_knowledge(knowledge_service)
+from qwen_asr_app.knowledge.coordinator import KnowledgeCoordinator
+knowledge_coordinator = KnowledgeCoordinator(knowledge_service)
+app.include_router(knowledge_router(knowledge_service))
+app.include_router(knowledge_config_router(knowledge_service))
+from qwen_asr_app.transcription_assist.routes import transcription_assist_router
+app.include_router(transcription_assist_router(recording_store))
+intelligence_router = classroom_intelligence_router(recording_store, knowledge_service, ai_preferences, ai_secret_store, live_sessions)
+app.include_router(intelligence_router)
+from qwen_asr_app.classroom_intelligence.service import configure_intelligence
+configure_intelligence(intelligence_router.intelligence_service)
 from qwen_asr_app.classroom_chat import classroom_chat_router
-app.include_router(classroom_chat_router(recording_store, ai_preferences, ai_secret_store, live_sessions, classroom_chat_running))
+app.include_router(classroom_chat_router(recording_store, ai_preferences, ai_secret_store, live_sessions, classroom_chat_running, knowledge_service))
 
 
 class EphemeralFileResponse(FileResponse):
@@ -517,7 +546,7 @@ def _task_error_kind(error: str) -> str:
 
 
 AUTO_RETRY_KINDS = {
-    "rate_limit", "provider_busy", "network_dns", "network_connect",
+    "rate_limit", "provider_busy", "provider_unavailable", "network_dns", "network_connect",
     "network_connect_timeout", "network_read_timeout", "network_transport",
 }
 MAX_AUTOMATIC_RETRIES = 6
@@ -901,6 +930,8 @@ async def _run_refinement_job_unlocked(record: RecordingRecord, config: dict[str
         group_config = json.loads(json.dumps(config))
         history_chars = int((group_config.get("ai") or {}).get("history_chars") or 4000)
         group_config["_transcript_context"] = history[-max(0, min(history_chars, 20_000)):]
+        from qwen_asr_app.transcription_assist.service import evidence_config
+        group_config = await evidence_config(record, group_config, '\n'.join(str(s.get('raw') or '') for s in group))
         async with semaphore:
             mapped = await polish_timestamped_segments_resilient(
                 group,
@@ -923,6 +954,8 @@ async def _run_refinement_job_unlocked(record: RecordingRecord, config: dict[str
                 "segment_ids": part["segment_ids"],
                 "raw": "\n\n".join(str(member.get("raw") or "") for member in members),
                 "corrected": part["corrected"],
+                **({'correction_review':part['correction_review']} if part.get('correction_review') else {}),
+                **({'correction_provenance':part['correction_provenance']} if part.get('correction_provenance') else {}),
                 "manual_refinement": True,
             })
         record.metadata["ai_reviews"] = reviews
@@ -1239,6 +1272,8 @@ service_mutations = 0
 @app.middleware("http")
 async def service_guard(request: Request, call_next):
     global service_mutations
+    if os.getenv('QWEN_ASR_PREVIEW') == '1' and '/ideashell/' in request.url.path and request.method not in {'GET','HEAD','OPTIONS'} and request.url.path.rsplit('/',1)[-1] in {'push','pull','reconcile'}:
+        return JSONResponse({'detail':'这是隔离测试页，外部笔记同步已停用。请使用原来的 http://127.0.0.1:8765/ 正式页面。'},status_code=409)
     if not http_request_allowed(request, os.getenv("QWEN_ASR_ALLOWED_ORIGINS", ""), testing=bool(os.getenv("QWEN_ASR_DATA_DIR"))):
         return JSONResponse({"detail": "请求来源不受信任，请从本机工作台操作"}, status_code=403)
     if service_draining and request.method not in {"GET", "HEAD"} and not request.url.path.startswith("/api/service/"):
@@ -1275,8 +1310,11 @@ async def service_stop_guard(action: str, request: Request):
         *pdf_ai_background_tasks.values(),
         *course_file_api.tasks.values(),
         *upload_jobs.tasks.values(),
+        *intelligence_router.intelligence_service._running_tasks.values(),
+        *intelligence_router.intelligence_service._debounce_tasks.values(),
     ]
     if (backup_manager.busy or backup_manager.downloads or service_mutations or model_manager.active_jobs or model_manager.connected_clients or running_batch_ids or record_operations
+        or knowledge_service.job_manager._active_job_id or knowledge_service.job_manager._queue.qsize()
         or any(not t.done() for t in tasks) or (active and active.metadata.get("status") == "active")):
         raise HTTPException(409, "录音或任务仍在运行，进度已保留，请完成或暂停后再停止")
     service_draining = True
@@ -1311,6 +1349,8 @@ async def public_config() -> dict[str, Any]:
     saved_keys = ai_secret_store.status()
     return {
         "feature_version": "library-upgrade-v15-classroom-chat",
+        "knowledge_feature_version": "course-knowledge-v1",
+        "preview": os.getenv("QWEN_ASR_PREVIEW") == "1",
         "ai_base_url": os.getenv("AI_BASE_URL") or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1",
         "ai_model": os.getenv("AI_MODEL", "gpt-5-mini"),
         "ai_review_base_url": os.getenv("AI_REVIEW_BASE_URL") or os.getenv("AI_BASE_URL") or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1",
@@ -1376,6 +1416,7 @@ async def update_library_settings(payload: dict[str, Any] = Body(...)) -> dict[s
             if (record_operations or running_batch_ids or model_manager.active_jobs
                     or service_mutations > 1 or course_file_api.lock.locked() or pdf_ai_lock.locked()
                     or any(not task.done() for task in tasks)
+                    or knowledge_service.job_manager._active_job_id or knowledge_service.job_manager._queue.qsize()
                     or any(record.metadata.get("status") in {"active", "processing"}
                            for record in recording_store.list_records())):
                 raise ValueError("录音或后台任务仍在处理，请完成或暂停后再修改资料库位置")
@@ -3305,7 +3346,9 @@ async def notes_page(request: Request) -> RedirectResponse:
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 
 
-app.include_router(task_center_router(compact_ai_tasks, ai_task_action, course_file_api, pdf_jobs, upload_jobs))
+from qwen_asr_app.knowledge.task_adapter import IntelligenceTasks
+intelligence_tasks = IntelligenceTasks(knowledge_service, intelligence_router.intelligence_service, recording_store)
+app.include_router(task_center_router(compact_ai_tasks, ai_task_action, course_file_api, pdf_jobs, upload_jobs, intelligence_tasks))
 
 
 from qwen_asr_app.note_routes import note_router
@@ -3319,10 +3362,13 @@ def require_backup_idle():
     tasks = [*background_summary_tasks.values(), *background_ai_tasks.values(),
              *finalization_tasks.values(), *pdf_ai_background_tasks.values(),
              *course_file_api.tasks.values(), *upload_jobs.tasks.values(),
+             *intelligence_router.intelligence_service._running_tasks.values(),
+             *intelligence_router.intelligence_service._debounce_tasks.values(),
              smartclass_service.job, smartclass_service.catalog_job]
     if (service_draining or backup_manager.busy or service_mutations > 1
             or model_manager.active_jobs or model_manager.connected_clients
             or running_batch_ids or record_operations or classroom_chat_running
+            or knowledge_service.job_manager._active_job_id or knowledge_service.job_manager._queue.qsize()
             or course_file_api.lock.locked() or pdf_ai_lock.locked()
             or any(task is not None and not task.done() for task in tasks)
             or any(record.metadata.get("status") in {"active", "processing"}

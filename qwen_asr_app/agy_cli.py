@@ -100,6 +100,8 @@ def _error_kind(message: str) -> tuple[str, bool]:
         return "provider_auth", False
     if any(marker in value for marker in ("resource exhausted", "rate limit", "too many requests", "429")):
         return "rate_limit", True
+    if any(marker in value for marker in ('unavailable (code 503)', 'service unavailable', 'service is currently unavailable', 'bad gateway', 'gateway timeout')):
+        return 'provider_unavailable', True
     if any(marker in value for marker in ("deadline exceeded", "timed out", "timeout")):
         return "network_read_timeout", True
     if any(marker in value for marker in (

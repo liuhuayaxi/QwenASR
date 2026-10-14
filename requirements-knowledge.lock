@@ -1,0 +1,8 @@
+# Tested on Apple M4 / macOS / Python 3.12. Reuse the existing environment first.
+# No CUDA packages or additional database service are required.
+torch==2.14.0
+transformers==5.16.1
+huggingface_hub==1.30.0
+safetensors>=0.4
+numpy==2.5.2
+PyMuPDF==1.28.2

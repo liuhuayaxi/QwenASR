@@ -6,6 +6,7 @@
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <script src="/static/js/theme.js?v=20261011-ui-final"></script>
   <link rel="stylesheet" href="/static/course-files.css?v=20261013-time-1">
+  <link rel="stylesheet" href="/static/course-knowledge.css?v=20261014-knowledge-1">
   <link rel="stylesheet" href="/static/review-materials.css?v=20261013">
   <link rel="stylesheet" href="/static/ui.css?v=20261011-ui-final">
   <link rel="stylesheet" href="/static/custom-controls.css?v=20261014-selection-hover">
@@ -55,6 +56,62 @@
       </details>
 
 </section>
+    <section id="knowledgeSection" class="knowledge-search-section" aria-label="课程知识库检索与索引">
+      <div class="knowledge-section-header">
+        <div class="knowledge-title-group">
+          <h2>课程知识检索</h2>
+          <p>基于本地向量模型与精确词法索引，在课件、讲义与笔记中快速检索概念、推导和考点</p>
+        </div>
+        <div class="knowledge-header-actions">
+          <button class="ghost-button mini-button" type="button" data-knowledge-settings="knowledge">知识检索设置</button>
+        </div>
+      </div>
+
+      <div class="knowledge-search-bar">
+        <div class="knowledge-search-input-group">
+          <label for="knowledgeSearchInput" class="sr-only">搜索课程知识</label>
+          <input id="knowledgeSearchInput" class="knowledge-search-input" type="search" placeholder="输入公式、术语、概念或课堂疑问…" />
+          <button id="knowledgeSearchBtn" class="ui-button primary" type="button">知识检索</button><button id="knowledgeRerankBtn" class="ghost-button" type="button">精排结果</button>
+        </div>
+        <div class="knowledge-search-options">
+          <label class="cross-course-label">
+            <input id="knowledgeCrossCourse" type="checkbox" />
+            <span>跨课程全局检索</span>
+          </label>
+          <span id="knowledgeSearchStatus" class="knowledge-search-status" role="status">默认检索当前课程资料</span>
+        </div>
+      </div>
+
+      <div id="knowledgeResultsContainer" class="knowledge-results-container">
+        <p id="knowledgeEmptyState" class="knowledge-empty-state hidden" role="status"></p>
+        <div id="knowledgeResultsList" class="knowledge-results-list" role="feed" aria-label="知识检索结果"></div>
+      </div>
+
+      <div class="knowledge-index-panel">
+        <div class="index-summary-row">
+          <div class="index-status-info">
+            <b>知识库状态：</b>
+            <span id="knowledgeStatusBadge" class="index-status-badge">读取中…</span>
+            <span id="knowledgeDocCount" class="index-stat-item">资料：0 份</span>
+            <span id="knowledgeChunkCount" class="index-stat-item">索引段落：0 条</span>
+          </div>
+          <div class="index-actions">
+            <button id="knowledgeRebuildBtn" class="ui-button mini-button" type="button">重建当前课程索引</button>
+          </div>
+        </div>
+
+        <div id="knowledgeJobsBox" class="ongoing-jobs-box hidden" role="status">
+          <span class="jobs-spinner" aria-hidden="true"></span>
+          <span id="knowledgeJobsText">正在建立索引…</span>
+          <button id="knowledgeCancelJobBtn" class="ghost-button mini-button" type="button">取消</button>
+        </div>
+
+        <details id="knowledgeSourcesDisclosure" class="sources-disclosure">
+          <summary>查看本课程已建立索引的资料清单与版本</summary>
+          <div id="knowledgeSourcesList" class="sources-status-list"></div>
+        </details>
+      </div>
+    </section>
     <section class="file-section">
       <div class="section-toolbar"><h2>全部资料 <span id="fileCount">0</span></h2><div><button id="upgradeLegacy" class="ui-button primary" type="button" hidden>升级旧版识别</button><label for="search" class="sr-only">搜索文件</label><input id="search" type="search" placeholder="搜索文件名…" class="ui-field"><label class="sr-only" for="kindFilter">筛选类型</label><select id="kindFilter" class="ui-field"><option value="">所有类型</option><option>课件</option><option>讲义</option><option>作业</option><option>参考资料</option><option>复习资料</option><option>其他</option></select><button id="refresh" aria-label="刷新文件" class="ui-button">刷新</button></div></div>
       <p id="loadError" class="notice error" role="alert" hidden></p>
@@ -99,6 +156,8 @@
     <div class="dialog-footer"><button id="previewButton" class="ui-button">预览上传目标</button><button id="syncButton" class="ui-button primary" disabled>确认上传附件</button></div>
   </dialog>
   <div id="toast" role="status" hidden></div>
+  <script type="module" src="/static/js/knowledge-settings.js"></script>
   <script type="module" src="/static/js/course-files.js?v=20261014-course-notes"></script>
+  <script type="module" src="/static/js/course-knowledge.js?v=20261014-knowledge-1"></script>
 </body>
 </html>
