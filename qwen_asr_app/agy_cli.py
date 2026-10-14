@@ -190,9 +190,9 @@ def _request_arguments(instructions: str, payload: dict[str, Any], provider: dic
         "--mode", "plan",
         "--disable-slash-commands",
     ]
-    # AGY encodes low/medium Flash thinking in the model id and rejects the
-    # separate --effort flag for those variants. The high variant accepts it.
-    if selected_model.endswith("-high"):
+    # Current AGY fixes Gemini thinking in its model id, including the High
+    # variant. Passing --effort now fails before inference. Keep the same ID.
+    if selected_model.endswith("-high") and not selected_model.startswith('gemini-'):
         command[command.index("--mode"):command.index("--mode")] = ["--effort", selected_effort]
     return command, message, working, subprocess_environment(), timeout
 

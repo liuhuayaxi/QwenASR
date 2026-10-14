@@ -44,7 +44,7 @@ class AGYCLITests(unittest.TestCase):
         self.assertEqual(payload["event"], "user")
         self.assertIn(".local/bin", run.call_args.kwargs["env"]["PATH"])
 
-    def test_high_flash_uses_selected_effort(self):
+    def test_high_flash_keeps_high_model_and_omits_newly_unsupported_effort_flag(self):
         completed = subprocess.CompletedProcess([], 0, json.dumps({
             "event": "result", "result": {"status": "SUCCESS", "response": "OK"}
         }) + "\n", "")
@@ -53,7 +53,8 @@ class AGYCLITests(unittest.TestCase):
                 "transport": "agy_cli", "cli_model": "gemini-3.8-flash-high", "cli_effort": "high",
             })
         command = run.call_args.args[0]
-        self.assertEqual(command[command.index("--effort") + 1], "high")
+        self.assertEqual(command[command.index('--model')+1],'gemini-3.8-flash-high')
+        self.assertNotIn('--effort',command)
 
     def test_location_error_is_not_automatically_retried(self):
         with self.assertRaises(AIRequestError) as caught:
