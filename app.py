@@ -72,6 +72,7 @@ from qwen_asr_app.task_center import task_center_router
 from qwen_asr_app.course_file_routes import CourseFileAPI
 from qwen_asr_app.categories import change_category
 from qwen_asr_app.shared_library import LibraryWatch, discover_courses
+from qwen_asr_app.library_backup import BackupManager, backup_router, backup_sources
 from qwen_asr_app.library_layout import shared
 from qwen_asr_app.review import (
     bisect_audio_range,
@@ -127,6 +128,7 @@ async def lifespan(_: FastAPI):
         try:
             yield
         finally:
+            await backup_manager.close()
             await library_watch.close()
             await course_stream_manager.close()
             tasks = [
@@ -162,6 +164,7 @@ pdf_ai_jobs = pdf_jobs.jobs
 pdf_ai_background_tasks = pdf_jobs.tasks
 course_file_api = CourseFileAPI(app_settings, recording_store, ideashell_manager, pdf_ai_lock)
 library_watch = LibraryWatch(app_settings, recording_store)
+backup_manager = BackupManager()
 app.include_router(course_file_api.router)
 from qwen_asr_app.classroom_chat import classroom_chat_router
 app.include_router(classroom_chat_router(recording_store, ai_preferences, ai_secret_store, live_sessions, classroom_chat_running))
@@ -479,7 +482,10 @@ def _saved_ai_job(record: RecordingRecord, kind: str) -> dict[str, Any]:
 
 
 def _update_ai_job(record: RecordingRecord, kind: str, **values: Any) -> None:
-    _saved_ai_job(record, kind).update(values, updated_at=local_now())
+    job = _saved_ai_job(record, kind)
+    if values.get('status') in {'queued', 'running', 'waiting_retry'}:
+        job.pop('task_hidden', None)
+    job.update(values, updated_at=local_now())
     record.save_metadata()
 
 
@@ -697,7 +703,7 @@ def compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any]]:
                     saved = saved.get(kind, {})
                 status = saved.get("status")
                 ident = f"{kind}:{record.id}"
-                if ident not in existing_ids and status in {"completed", "cancelled"}:
+                if ident not in existing_ids and status in {"completed", "cancelled"} and not saved.get('task_hidden'):
                     tasks.append({**base, "id": ident, "type": kind, "label": AI_TASK_LABELS[kind],
                                   **ai_provider_snapshot(kind),
                                   "status": status, "completed": saved.get("completed", 0),
@@ -1223,6 +1229,8 @@ async def service_guard(request: Request, call_next):
         return JSONResponse({"detail": "请求来源不受信任，请从本机工作台操作"}, status_code=403)
     if service_draining and request.method not in {"GET", "HEAD"} and not request.url.path.startswith("/api/service/"):
         return JSONResponse({"detail": "服务正在安全退出，请重新启动后继续"}, status_code=503)
+    if backup_manager.busy and request.method not in {"GET", "HEAD", "OPTIONS"}:
+        return JSONResponse({"detail": "日常备份正在打包，请完成后再启动任务或修改配置"}, status_code=409)
     tracked = request.method not in {"GET", "HEAD", "OPTIONS"} and not request.url.path.startswith("/api/service/")
     if tracked:
         service_mutations += 1
@@ -1254,7 +1262,7 @@ async def service_stop_guard(action: str, request: Request):
         *course_file_api.tasks.values(),
         *upload_jobs.tasks.values(),
     ]
-    if (service_mutations or model_manager.active_jobs or model_manager.connected_clients or running_batch_ids or record_operations
+    if (backup_manager.busy or backup_manager.downloads or service_mutations or model_manager.active_jobs or model_manager.connected_clients or running_batch_ids or record_operations
         or any(not t.done() for t in tasks) or (active and active.metadata.get("status") == "active")):
         raise HTTPException(409, "录音或任务仍在运行，进度已保留，请完成或暂停后再停止")
     service_draining = True
@@ -2044,100 +2052,43 @@ def ideashell_note_title(record: RecordingRecord, max_length: int = 30) -> str:
 
 
 async def ideashell_recording_audio_parts(record: RecordingRecord) -> list[dict[str, Any]]:
-    """Return one or two IdeaShell-safe audio attachments.
-
-    A normal recording stays one attachment. An oversized recording is split
-    at the actual decoded midpoint and each half is encoded at 32 kbps mono
-    AAC. If either half is still too large, the pair is re-encoded at 24, 16,
-    then 12 kbps. The archive audio is never replaced.
-    """
+    """Prepare attachments in a temporary directory, returning only bytes."""
+    from qwen_asr_app.media_retention import file_worker
     try:
-        path = await asyncio.to_thread(record.ensure_aac)
+        source = Path(await file_worker(record.ensure_aac))
     except (FileNotFoundError, OSError) as exc:
         raise ValueError(f"这条录音没有可用的音频文件：{exc}") from exc
     title = safe_component(str(record.metadata.get("title") or "课堂录音"), "课堂录音")
-    source = Path(path)
-    try:
-        metadata = await asyncio.to_thread(audio_file_metadata, source, filename=f"{title}.aac")
-        metadata["part_index"] = 1
-        metadata["part_count"] = 1
-        return [metadata]
-    except ValueError as exc:
-        if "超过闪念贝壳单个录音附件" not in str(exc):
-            raise
 
-    source_stat = source.stat()
-    stamp = record.directory / ".ideashell-audio-parts.json"
-    destinations = [record.directory / ".ideashell-audio-part-1.aac",
-                    record.directory / ".ideashell-audio-part-2.aac"]
-    cached_bitrate = 0
-    cached_encoding = ""
-    try:
-        cache_info = json.loads(stamp.read_text(encoding="utf-8"))
-        if (cache_info.get("source_size") == source_stat.st_size
-                and cache_info.get("source_mtime_ns") == source_stat.st_mtime_ns
-                and all(path.exists() for path in destinations)):
-            cached_bitrate = int(cache_info.get("bit_rate") or 0)
-            cached_encoding = str(cache_info.get("encoding") or "")
-    except (OSError, ValueError, TypeError):
-        cached_bitrate = 0
-    last_error: Exception | None = None
-    # First attempt a packet-level copy. This preserves AAC quality exactly.
-    if cached_encoding == "copy" and all(path.exists() for path in destinations):
+    def prepare():
         try:
-            return [
-                {**await asyncio.to_thread(audio_file_metadata, path, filename=f"{title}（第{index}段）.aac"),
-                 "compressed": False, "source_bytes": source_stat.st_size,
-                 "encoding": "copy", "part_index": index, "part_count": 2}
-                for index, path in enumerate(destinations, start=1)
-            ]
-        except ValueError:
-            pass
-    try:
-        await asyncio.to_thread(split_audio_to_aac_lossless, source, destinations)
-        copied = [
-            {**await asyncio.to_thread(audio_file_metadata, path, filename=f"{title}（第{index}段）.aac"),
-             "compressed": False, "source_bytes": source_stat.st_size,
-             "encoding": "copy", "part_index": index, "part_count": 2}
-            for index, path in enumerate(destinations, start=1)
-        ]
-        if all(item["bytes"] <= MAX_AUDIO_BYTES for item in copied):
-            stamp.write_text(json.dumps({
-                "source_size": source_stat.st_size,
-                "source_mtime_ns": source_stat.st_mtime_ns,
-                "encoding": "copy",
-            }, ensure_ascii=False), encoding="utf-8")
-            return copied
-    except (ValueError, OSError):
-        pass
-
-    bitrates = [cached_bitrate] if cached_bitrate in {32_000, 24_000, 16_000, 12_000} else []
-    bitrates.extend(rate for rate in (32_000, 24_000, 16_000, 12_000) if rate not in bitrates)
-    parts: list[dict[str, Any]] | None = None
-    for bitrate in bitrates:
-        if bitrate != cached_bitrate or not all(path.exists() for path in destinations):
-            await asyncio.to_thread(split_audio_to_aac, source, destinations, bit_rate=bitrate)
-            stamp.write_text(json.dumps({
-                "source_size": source_stat.st_size,
-                "source_mtime_ns": source_stat.st_mtime_ns,
-                "bit_rate": bitrate,
-                "encoding": "aac_reencode",
-            }, ensure_ascii=False), encoding="utf-8")
-        try:
-            candidate = []
-            for index, path in enumerate(destinations, start=1):
-                item = await asyncio.to_thread(audio_file_metadata, path, filename=f"{title}（第{index}段）.aac")
-                item.update({"compressed": True, "source_bytes": source_stat.st_size,
-                             "bit_rate": bitrate, "part_index": index, "part_count": 2})
-                candidate.append(item)
-            parts = candidate
-            break
+            item = audio_file_metadata(source, filename=f"{title}.aac")
+            return [{**item, "part_index": 1, "part_count": 1}]
         except ValueError as exc:
-            last_error = exc
-            continue
-    if parts is None:
-        raise ValueError(f"录音拆分后仍无法满足闪念贝壳附件限制：{last_error}")
-    return parts
+            if "超过闪念贝壳单个录音附件" not in str(exc):
+                raise
+        source_bytes = source.stat().st_size
+        with tempfile.TemporaryDirectory(prefix="qwenasr-ideashell-audio-") as raw:
+            destinations = [Path(raw) / f"part-{index}.aac" for index in (1, 2)]
+            def read_parts(**encoding):
+                return [{**audio_file_metadata(path, filename=f"{title}（第{index}段）.aac"),
+                         "source_bytes": source_bytes, "part_index": index, "part_count": 2, **encoding}
+                        for index, path in enumerate(destinations, 1)]
+            try:
+                split_audio_to_aac_lossless(source, destinations)
+                return read_parts(compressed=False, encoding="copy")
+            except (ValueError, OSError):
+                pass
+            last_error = None
+            for bitrate in (32_000, 24_000, 16_000, 12_000):
+                try:
+                    split_audio_to_aac(source, destinations, bit_rate=bitrate)
+                    return read_parts(compressed=True, bit_rate=bitrate, encoding="aac_reencode")
+                except (ValueError, OSError) as exc:
+                    last_error = exc
+            raise ValueError(f"录音拆分后仍无法满足闪念贝壳附件限制：{last_error}")
+
+    return await file_worker(prepare)
 
 
 def ideashell_audio_preview(metadata: dict[str, Any]) -> dict[str, Any]:
@@ -3228,7 +3179,7 @@ async def transcribe_socket(websocket: WebSocket) -> None:
     ):
         await websocket.close(code=1008)
         return
-    if service_draining:
+    if service_draining or backup_manager.busy:
         await websocket.close(code=1013)
         return
     await websocket.accept()
@@ -3344,6 +3295,26 @@ from qwen_asr_app.note_library import NoteLibrary, note_library_router
 app.include_router(note_router(recording_store, recording_operation))
 review_library = NoteLibrary(app_settings, recording_store)
 app.include_router(note_library_router(app_settings, recording_store, library=review_library))
+
+
+def require_backup_idle():
+    tasks = [*background_summary_tasks.values(), *background_ai_tasks.values(),
+             *finalization_tasks.values(), *pdf_ai_background_tasks.values(),
+             *course_file_api.tasks.values(), *upload_jobs.tasks.values(),
+             smartclass_service.job, smartclass_service.catalog_job]
+    if (service_draining or backup_manager.busy or service_mutations > 1
+            or model_manager.active_jobs or model_manager.connected_clients
+            or running_batch_ids or record_operations or classroom_chat_running
+            or course_file_api.lock.locked() or pdf_ai_lock.locked()
+            or any(task is not None and not task.done() for task in tasks)
+            or any(record.metadata.get("status") in {"active", "processing"}
+                   for record in recording_store.list_records())):
+        raise HTTPException(409, "录音、课程或后台任务仍在处理，请完成或暂停后再导出日常备份")
+
+
+app.include_router(backup_router(backup_manager,
+                                lambda: backup_sources(app_settings, recording_store, review_library),
+                                require_backup_idle))
 
 # The course replay UI and API share this process and port.  Its internal
 # routes remain unchanged, so the old course service can still be tested in

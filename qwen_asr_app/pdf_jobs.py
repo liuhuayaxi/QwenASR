@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shutil
 import sys
 import time
 import uuid
@@ -213,6 +214,43 @@ class PDFJobs:
                             local_guard=LocalComputeGuard(self.lock, loop) if provider['mineru_provider'] != 'local' else None,
                             receipt_path=self.receipt_path(job, index, item),
                             progress=lambda stage, percent, callback=update: loop.call_soon_threadsafe(callback, stage, percent))
+                        # A frozen remote input lives in the disposable operation
+                        # folder. Publish the final PDF beside the user source
+                        # before discarding the frozen input and downloaded ZIP.
+                        if item.get('operation'):
+                            from .pdf_ai import ai_pdf_output_path
+                            destination = ai_pdf_output_path(Path(item['source_path']))
+                            if destination != output:
+                                published = False
+                                def publish():
+                                    import os
+                                    nonlocal published
+                                    created = False
+                                    try:
+                                        with output.open('rb') as source_file, destination.open('xb') as target_file:
+                                            created = True
+                                            shutil.copyfileobj(source_file, target_file)
+                                            target_file.flush()
+                                            os.fsync(target_file.fileno())
+                                        published = True
+                                    except BaseException:
+                                        if created:
+                                            destination.unlink(missing_ok=True)
+                                        raise
+                                from .media_retention import file_worker
+                                try:
+                                    await file_worker(publish)
+                                except asyncio.CancelledError:
+                                    if published:
+                                        item.update(status='completed', stage='转换完成', progress=100,
+                                            output_path=str(destination), output_name=destination.name,
+                                            error='', mineru_settings=dict(settings),
+                                            progress_estimate=timing.finish(), inference=inference_metadata)
+                                        self.save()
+                                        from .remote_operations import discard_completed_payloads
+                                        discard_completed_payloads(self.receipt_path(job, index, item))
+                                    raise
+                                output = destination
                         item.update(status="completed", stage="转换完成", progress=100,
                                     output_path=str(output), output_name=output.name, error="", mineru_settings=dict(settings),
                                     progress_estimate=timing.finish(), inference=inference_metadata)
@@ -222,6 +260,9 @@ class PDFJobs:
                         item.update(status='pending' if getattr(exc, 'fallback_unsafe', False) else 'error', stage='等待恢复旧操作' if getattr(exc, 'fallback_unsafe', False) else '识别失败', error=str(exc))
                         item['remote_operation'] = receipt(self.receipt_path(job, index, item))
                     self.save()
+                    if item['status'] == 'completed':
+                        from .remote_operations import discard_completed_payloads
+                        await asyncio.to_thread(discard_completed_payloads, self.receipt_path(job, index, item))
                 completed = sum(item["status"] == "completed" for item in job["files"])
                 status = "completed" if completed == total else "completed_with_errors" if completed else "failed"
                 if any(item['status'] in {'pending', 'paused'} for item in job['files']):
@@ -232,7 +273,10 @@ class PDFJobs:
             for item in job["files"]:
                 if item["status"] in {"running", "pending"}:
                     item.update(status=target, stage="已停止；继续时重新识别此文件")
-            job.update(status=target, stage="已暂停，已完成文件保留" if target == "paused" else "识别已停止，已完成文件保留")
+            if all(item['status'] == 'completed' for item in job['files']):
+                job.update(status='completed', progress=100, stage='转换完成', finished_at=time.time())
+            else:
+                job.update(status=target, stage="已暂停，已完成文件保留" if target == "paused" else "识别已停止，已完成文件保留")
         except Exception as exc:
             job.update(status="failed", stage=str(exc))
         finally:

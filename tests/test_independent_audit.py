@@ -152,7 +152,9 @@ class TaskBoundaryTests(unittest.IsolatedAsyncioTestCase):
                     remote_started.set(); await release_remote.wait()
                 else:
                     self.assertTrue(jobs.lock.locked()); local_done.set()
-                return root/(mode+'.pdf')
+                output = source.with_name(source.stem + '(AI).pdf') if mode != 'local' else root/(mode+'.pdf')
+                output.write_bytes(b'%PDF-completed')
+                return output
             with patch.object(jobs,'save'), patch.object(operations,'PRIVATE_ROOT',root/'private'), \
                  patch('qwen_asr_app.pdf_jobs.find_mineru_binary',return_value=Path('/synthetic')), \
                  patch('qwen_asr_app.pdf_jobs.conversion_worker', side_effect=worker):
@@ -165,6 +167,10 @@ class TaskBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.gather(*list(jobs.tasks.values()))
                 self.assertEqual(jobs.jobs[local['id']]['status'],'completed')
                 self.assertEqual(jobs.jobs[remote['id']]['status'],'completed')
+                remote_file = jobs.jobs[remote['id']]['files'][0]
+                self.assertEqual(Path(remote_file['output_path']), (root/'fixture(AI).pdf').resolve())
+                self.assertEqual(Path(remote_file['output_path']).read_bytes(), b'%PDF-completed')
+                self.assertFalse(Path(remote_file['operation']['blob_path']).exists())
 
     async def test_upload_remote_wait_releases_local_upload_queue(self):
         with tempfile.TemporaryDirectory() as raw:

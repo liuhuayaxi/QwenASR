@@ -344,6 +344,9 @@ class TranscriptionSession:
             if not raw:
                 recording.metadata.setdefault("pending_segments", {}).pop(str(segment_id), None)
                 recording.save_metadata()
+                from .remote_operations import discard_completed_payloads
+                if config.get('_remote_operation_dir'):
+                    await asyncio.to_thread(discard_completed_payloads, Path(config['_remote_operation_dir']) / 'receipt.json')
                 await self.send({"type": "discard", "id": segment_id})
                 self.chat_previews.pop(segment_id, None)
                 return
@@ -367,6 +370,9 @@ class TranscriptionSession:
                 }
             recording.metadata.setdefault("pending_segments", {}).pop(str(segment_id), None)
             recording.upsert_segment(segment)
+            from .remote_operations import discard_completed_payloads
+            if config.get('_remote_operation_dir'):
+                await asyncio.to_thread(discard_completed_payloads, Path(config['_remote_operation_dir']) / 'receipt.json')
             self.chat_previews.pop(segment_id, None)
             await self.send({"type": "final", **segment})
             # ASR durability is independent of optional AI enrichment. End-save

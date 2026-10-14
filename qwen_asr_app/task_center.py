@@ -131,6 +131,8 @@ def task_center_router(ai_tasks, ai_action, courses, pdfs, uploads=None):
                     continue
                 if status in ACTIVE and (category, item["id"]) not in courses.tasks:
                     status = "interrupted"
+                if status in {'completed', 'cancelled'} and state.get('task_hidden'):
+                    continue
                 if status == "error":
                     status = "failed"
                 remote = state.get('inference_settings', {}).get('mineru_provider', 'local') != 'local'

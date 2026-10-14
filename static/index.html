@@ -11,6 +11,7 @@
     <link rel="stylesheet" href="/static/ui.css?v=20261011-ui-final" />
     <link rel="stylesheet" href="/static/classroom-chat.css?v=20261011-ui-final" />
     <link rel="stylesheet" href="/static/settings-layout.css?v=20261011-ui-final" />
+    <link rel="stylesheet" href="/static/custom-controls.css?v=20261014-solid-v2" />
     <link rel="stylesheet" href="/static/vendor/katex/katex.min.css" />
   <script src="/static/vendor/katex/katex.min.js" defer></script>
 <link rel="stylesheet" href="/static/workspace.css?v=20261011-ui-final" />
@@ -266,13 +267,13 @@
             </div>
             <div class="settings-group-grid">
               <label class="wide">
-                <span>录音资料库位置 </span>
+                <span>课程资料库位置 </span>
                 <div class="inline-setting">
                   <input id="storageRoot" type="text" value="" placeholder="选择文件夹或填写绝对路径" autocomplete="off" />
                   <button id="chooseStorageRoot" class="mini-button" type="button">选择文件夹</button>
                   <button id="saveStorageRoot" class="mini-button primary-mini-button" type="button">迁移并保存</button>
                 </div>
-                <small id="storageRootHint" class="setting-hint">更换位置时迁移现有资料。</small>
+                <small id="storageRootHint" class="setting-hint">课程资料、录音和 AI 笔记统一保存在各课程目录下。更换位置时一起迁移。</small>
               </label>
               <label class="wide">
                 <span>本地推理硬件</span>
@@ -281,6 +282,19 @@
                   <option value="ane" disabled>Neural Engine / NPU（当前模型不支持）</option>
                 </select>
               </label>
+            </div>
+          </section>
+
+          <section class="settings-group wide" data-settings-page="library" aria-label="日常备份">
+            <div class="settings-group-heading"><b>日常备份</b></div>
+            <div class="settings-group-grid single-column">
+            <p class="setting-hint wide">把当前课程资料、日常录音、转写、AI 笔记及已保存的配置打包为一个 ZIP。包含 API 密钥和账号凭证，请妥善保管。</p>
+            <div class="inline-setting wide">
+              <button id="exportLibraryBackup" class="mini-button primary-mini-button" type="button">导出日常备份 ZIP</button>
+              <a id="downloadLibraryBackup" class="mini-button hidden" download>下载备份 ZIP</a>
+            </div>
+            <progress id="libraryBackupProgress" class="wide hidden" style="width:100%" max="100" aria-label="日常备份进度"></progress>
+            <p id="libraryBackupStatus" class="setting-hint wide" role="status" aria-live="polite">打包前请完成或暂停正在进行的任务。临时音频、缓存、旧任务、历史备份和模型不打包。</p>
             </div>
           </section>
 
@@ -720,6 +734,6 @@
     </dialog>
 
     <div id="toast" class="toast" role="status"></div>
-    <script src="/static/app.js?v=20261011-final-new-note" type="module"></script>
+    <script src="/static/app.js?v=20261014-daily-backup-math" type="module"></script>
   </body>
 </html>

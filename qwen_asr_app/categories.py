@@ -10,7 +10,7 @@ from pathlib import Path
 from .course_files import MARKER, MATERIALS
 from .durable import atomic_bytes, atomic_json
 from .storage import RecordingRecord, local_now, safe_component
-from .library_layout import shared
+from .library_layout import AI_NOTES, shared
 
 
 def change_category(settings, recordings, category: str, name: str | None = None):
@@ -63,6 +63,15 @@ def change_category(settings, recordings, category: str, name: str | None = None
         if not deleting and target_folder.exists():
             raise ValueError(f"资料库中已有同名目录，请使用其他名称：{target_name}")
         old_folders.add(source_folder)
+        source_notes, target_notes = source_folder / AI_NOTES, target_folder / AI_NOTES
+        if source_notes.exists():
+            check_path(source_notes, root)
+            check_path(target_notes, root)
+            if target_notes.exists():
+                for child in sorted(source_notes.iterdir()):
+                    plan_move(child, target_notes / child.name)
+            else:
+                plan_move(source_notes, target_notes)
         source_materials, target_materials = source_folder / MATERIALS, target_folder / MATERIALS
         if (source_materials / MARKER).is_file():
             check_path(source_materials / MARKER, root)

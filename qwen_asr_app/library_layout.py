@@ -6,6 +6,7 @@ import re
 
 RECORDINGS = "上课录音"
 AI_FILES = "AI友好型"
+AI_NOTES = "AI生成笔记"
 INDEX = ".qwenasr-files"
 NOTE_LIBRARY_MARKER = ".qwenasr-note-library.json"
 SHARED_LAYOUT = "shared-courses-v1"

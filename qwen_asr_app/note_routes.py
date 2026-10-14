@@ -1,5 +1,7 @@
 """Recording search, note history and seekable audio routes."""
 import asyncio
+import shutil
+import tempfile
 from pathlib import Path
 from fastapi import APIRouter, Body, HTTPException
 from fastapi.responses import FileResponse
@@ -7,6 +9,7 @@ from .library_search import LibrarySearch
 from . import note_history
 from .audio import make_playback_audio
 from .course_replay import replay_target
+from .media_retention import TemporaryMediaResponse, file_worker
 
 
 def note_router(store, recording_operation):
@@ -74,21 +77,15 @@ def note_router(store, recording_operation):
         if not source.is_file():
             raise HTTPException(404, '录音文件已不存在')
         lock = playback_locks.setdefault(session_id, asyncio.Lock())
-        async with lock:
-            output = record.directory / '.playback.m4a'
-            if not output.exists() or output.stat().st_mtime_ns < source.stat().st_mtime_ns:
-                worker = asyncio.create_task(asyncio.to_thread(make_playback_audio, source, output))
-                cancelled = False
-                while True:
-                    try:
-                        await asyncio.shield(worker)
-                        break
-                    except asyncio.CancelledError:
-                        if worker.cancelled():
-                            raise
-                        cancelled = True
-                if cancelled:
-                    raise asyncio.CancelledError
-        return FileResponse(output, media_type='audio/mp4', headers={'Cache-Control': 'private, max-age=3600'})
+        directory = Path(tempfile.mkdtemp(prefix='qwenasr-playback-'))
+        output = directory / 'playback.m4a'
+        try:
+            async with lock:
+                await file_worker(make_playback_audio, source, output)
+            return TemporaryMediaResponse(output, directory=directory, media_type='audio/mp4',
+                                          headers={'Cache-Control': 'no-store'})
+        except BaseException:
+            shutil.rmtree(directory, ignore_errors=True)
+            raise
 
     return router

@@ -112,6 +112,8 @@ class UpgradeAsyncTests(unittest.IsolatedAsyncioTestCase):
                 audio=await client.get(f'/api/recordings/{record.id}/playback',headers={'Range':'bytes=0-63'})
                 self.assertEqual(audio.status_code,206)
                 self.assertEqual(len(audio.content),64)
+                self.assertEqual(audio.headers['cache-control'],'no-store')
+                self.assertFalse((record.directory/'.playback.m4a').exists())
 
     async def test_http_rejects_untrusted_host_and_origin(self):
         import app

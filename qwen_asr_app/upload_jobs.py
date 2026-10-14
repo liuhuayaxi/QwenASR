@@ -167,6 +167,11 @@ class UploadJobs:
                     job.update(status='failed', error='转写未返回完成结果')
                 if job['status'] == 'completed' and source:
                     source.unlink(missing_ok=True)
+                if job['status'] == 'completed':
+                    from .remote_operations import discard_completed_payloads
+                    folder = job.get('config', {}).get('_remote_operation_dir')
+                    if folder:
+                        await asyncio.to_thread(discard_completed_payloads, Path(folder) / 'receipt.json')
         except asyncio.CancelledError:
             job.update(status=self.intent[job['id']], stage='已停止，已完成转写保留')
         except Exception as exc:

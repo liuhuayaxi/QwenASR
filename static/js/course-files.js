@@ -1,4 +1,4 @@
-import { initReviewMaterials } from './review-materials.js?v=20261011-materials-merged';
+import { initReviewMaterials } from './review-materials.js?v=20261014-course-notes';
 import { IDEASHELL_SERVERS as servers } from './ideashell-config.js?v=20261007';
 import {mineruEstimateLabel} from './mineru-progress-view.js?v=20261013-time-1';
 

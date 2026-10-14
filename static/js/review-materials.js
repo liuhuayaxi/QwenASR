@@ -23,7 +23,6 @@ async function load(category = state.category) {
     state.notes = sameCourse ? data.notes || [] : [];
     state.template = data.prompt_template || state.template;
     if (document.activeElement !== $('promptTemplate')) $('promptTemplate').value = state.template;
-    if (document.activeElement !== $('rootInput')) $('rootInput').value = data.storage_root || '';
     $('storagePath').textContent = data.storage_root || '';
     renderLessons(); renderNotes(); notice('loadError', '');
   } catch (error) { if (epoch === state.epoch) notice('loadError', `复习资料读取失败：${error.message}`, true); }
@@ -66,8 +65,6 @@ async function copyPrompt() {
 }
 $('copyPrompt').addEventListener('click', async () => { try { await copyPrompt(); } catch (error) { notice('promptStatus', error.message, true); } });
 $('saveTemplate').addEventListener('click', async () => { try { const result = await api('/api/notes/settings', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({prompt_template:$('promptTemplate').value})}); state.template = result.prompt_template; toast('提示词模板已保存'); } catch (error) { notice('promptStatus', error.message, true); } });
-$('chooseRoot').addEventListener('click', async () => { try { const result = await api('/api/notes/choose-root'); if (!result.cancelled) $('rootInput').value = result.storage_root; } catch (error) { toast(error.message); } });
-$('saveRoot').addEventListener('click', async () => { try { const result = await api('/api/notes/settings', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({storage_root:$('rootInput').value})}); $('storagePath').textContent = result.storage_root; $('rootInput').value = result.storage_root; toast('笔记保存路径已更新'); } catch (error) { toast(error.message); } });
 $('uploadForm').addEventListener('submit', async event => { event.preventDefault(); const file = $('noteFile').files[0]; if (!file) return; const body = new FormData(); body.append('category', state.category); body.append('title', $('noteTitle').value.trim()); body.append('source_ids', JSON.stringify([...state.selected])); body.append('file', file); $('uploadStatus').textContent = '正在保存…'; try { const result = await api('/api/notes/upload', {method:'POST', body}); $('noteTitle').value = ''; $('noteFile').value = ''; $('uploadStatus').textContent = ''; toast(`已保存“${result.note.title}”`); await reload(); } catch (error) { $('uploadStatus').textContent = error.message; } });
 return {load, selected: state.selected};
 }

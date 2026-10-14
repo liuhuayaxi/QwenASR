@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 from .durable import atomic_json
-from .library_layout import AI_FILES, INDEX, NOTE_LIBRARY_MARKER, RECORDINGS, shared
+from .library_layout import AI_FILES, AI_NOTES, INDEX, NOTE_LIBRARY_MARKER, RECORDINGS, shared
 from .storage import default_course_profile, safe_component, local_now
 
 
@@ -158,7 +158,7 @@ def change_shared_category(settings, recordings, category, name=None):
             if child.name in {'.qwenasr-course.json', INDEX}:
                 continue
             destination = target / child.name
-            if child.name in {AI_FILES, RECORDINGS} and destination.is_dir():
+            if child.name in {AI_FILES, AI_NOTES, RECORDINGS} and destination.is_dir():
                 moves.extend((item, destination / item.name) for item in child.iterdir())
             else:
                 moves.append((child, destination))

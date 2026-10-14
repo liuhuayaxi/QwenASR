@@ -561,8 +561,6 @@ class CourseFileAPI:
             operation = previous.get('operation') if resume else None
             if provider['mineru_provider'] != 'local' and operation is None:
                 operation = freeze(source, provider, settings, parent_id=asset_id)
-            if not resume and previous:
-                item.setdefault('conversion_history', []).append(dict(previous))
             operation_id = operation['operation_id'] if operation else ((previous.get('operation_id') or uuid.uuid4().hex) if resume else uuid.uuid4().hex)
             item["conversion"] = {**previous, "status": "queued", "stage": "等待 MinerU 识别",
                                   "mineru_settings": settings,
@@ -571,6 +569,7 @@ class CourseFileAPI:
                                   'operation_id': operation_id, 'operation': operation,
                                   "inference_settings": provider,
                                   "progress": 0, "progress_estimate": None, "error": "", "external": False,
+                                  "task_hidden": False,
                                   "created_at": previous.get("created_at") or local_now(), "updated_at": local_now()}
             self.store.save(category, item)
             stop = Event()
@@ -683,8 +682,6 @@ class CourseFileAPI:
                           else directory / "PDF" / (Path(item["name"]).stem + "(AI).pdf"))
                 previous_state = dict(item.get("conversion", {}))
                 legacy_backup = None
-                if output.is_file() and (needs_mineru_upgrade(previous_state) or previous_state.get("legacy_upgrade")):
-                    legacy_backup = await asyncio.to_thread(backup_previous_conversion, output, category, item)
                 if operation:
                     output = output.with_name(output.stem + '-' + generation[:12] + output.suffix)
                 update('正在准备 MinerU 识别', 1)
@@ -713,6 +710,10 @@ class CourseFileAPI:
                     item['conversion'].update(relative_path=output.relative_to(directory).as_posix(),
                                               stamp=self.store.shared_store._stamp(output))
                 self.store.save(category, item)
+                if not changed:
+                    from .remote_operations import discard_completed_payloads
+                    await asyncio.to_thread(discard_completed_payloads,
+                        PRIVATE_ROOT / 'remote-operations' / operation_id / 'receipt.json')
         except (Exception, asyncio.CancelledError) as exc:
             try:
                 item, _ = self.store.get(category, asset_id)

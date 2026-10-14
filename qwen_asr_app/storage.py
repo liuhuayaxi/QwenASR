@@ -19,7 +19,7 @@ from .lazy import lazy_module
 from .paths import data_path
 from .durable import atomic_json
 from .settings_recovery import read_settings, save_settings
-from .library_layout import RECORDINGS, shared, recording_path, manifest_time
+from .library_layout import AI_NOTES, RECORDINGS, shared, recording_path, manifest_time
 from .audio import convert_audio_to_aac
 from .note_content import transcript_markdown, transcript_blocks
 from .course_replay import replay_sources
@@ -316,6 +316,7 @@ class AppSettings:
                     target = destination / child.name
                     if not (
                         child.name == ".qwenasr-course.json"
+                        or (child.name == AI_NOTES and child.is_dir())
                         or (child.name == "课程资料" and child.is_dir() and (child / ".qwenasr-materials.json").is_file())
                         or (child.is_dir() and (child / "session.json").exists())
                     ):

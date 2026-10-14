@@ -30,9 +30,32 @@ function isObviousMath(value) {
     && !/[A-Za-z]{3,}|[A-Za-z0-9]_[A-Za-z]{2,}/.test(operands)
     && !/[^\s\dA-Za-zΑ-Ωα-ω₀-₉²³≈≠≤≥±×÷√∑∫°度_{}()\[\].,+\-*/=^<>]/.test(operands);
 }
+function mathWithReferences(value) {
+  // Source citations are Markdown links, not TeX. AI notes sometimes put
+  // them inside \text{}, where the fragment's # becomes a TeX parameter.
+  const reference = /\[([^\]\r\n]+)\]\((#source-\d+)\)/g;
+  let text = String(value).replace(/\\(?:text|textrm|textnormal)\{([^{}]*)\}/g, (raw, body) => {
+    const remainder = body.replace(reference, "").replace(/[\s,，、;；]/g, "");
+    return !remainder && body !== body.replace(reference, "") ? body.match(reference).join(" ") : raw;
+  });
+  // KaTeX supports the array alignment but not TeX's intercolumn @ spacing.
+  // Only remove spacing directives; @{=} and other inserted values are kept.
+  text = text.replace(/\\begin\{array\}\{((?:[lcr|\s]|@\{\\(?:quad|qquad|enspace)\})+)\}/g,
+    (_raw, columns) => `\\begin{array}{${columns.replace(/@\{\\(?:quad|qquad|enspace)\}/g, "")}}`);
+  const links = [], seen = new Set();
+  text = text.replace(reference, (_raw, label, href) => {
+    if (!seen.has(href)) {
+      links.push(`<a href="${href}">${escape(label)}</a>`);
+      seen.add(href);
+    }
+    return "";
+  }).trim().replace(/(?:\\(?:quad|qquad|enspace)\s*)+$/, "").trim();
+  return { text, citations: links.length ? ` <span class="math-citations">${links.join("、")}</span>` : "" };
+}
 function mathHtml(text, displayMode) {
-  try { return window.katex.renderToString(text, { displayMode, throwOnError: false, trust: false, strict: "ignore", maxExpand: 500 }); }
-  catch { return `<code>${escape(text)}</code>`; }
+  const math = mathWithReferences(text);
+  try { return window.katex.renderToString(math.text, { displayMode, throwOnError: false, trust: false, strict: "ignore", maxExpand: 500 }) + math.citations; }
+  catch { return `<code>${escape(math.text)}</code>` + math.citations; }
 }
 marked.use({ gfm: true, breaks: false, extensions: [
   // Render legacy AI formula formatting without changing token.raw. Fenced
@@ -44,9 +67,11 @@ marked.use({ gfm: true, breaks: false, extensions: [
   { name: "strong", renderer(token) {
     return isObviousMath(token.text) ? mathHtml(canonicalMathExpression(token.text), false) : false;
   } },
-  { name: "blockMath", level: "block", start: (src) => src.indexOf("$$"),
+  { name: "blockMath", level: "block", start: (src) => src.search(/\$\$|\\\[/),
     tokenizer(src) {
-      const match = /^(?: {0,3}\$\$([\s\S]+?)\$\$| {0,3}\\\[([\s\S]+?)\\\])(?:[ \t]*\n|$)/.exec(src);
+      // End at the first closing delimiter, including when a citation or
+      // punctuation follows it. Never consume later formulas to find a newline.
+      const match = /^(?: {0,3}\$\$([\s\S]+?)\$\$| {0,3}\\\[([\s\S]+?)\\\])/.exec(src);
       if (match) return { type: "blockMath", raw: match[0], text: (match[1] || match[2]).trim() };
     }, renderer: (token) => mathHtml(token.text, true) },
   { name: "inlineMath", level: "inline", start(src) { return src.search(/\$|\\\(/); },

@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="/static/course-files.css?v=20261013-time-1">
   <link rel="stylesheet" href="/static/review-materials.css?v=20261013">
   <link rel="stylesheet" href="/static/ui.css?v=20261011-ui-final">
+  <link rel="stylesheet" href="/static/custom-controls.css?v=20261014-solid-v2">
 <script>if (new URLSearchParams(location.search).get("embedded") === "1") document.addEventListener("DOMContentLoaded", () => document.body.classList.add("workspace-embedded"));</script>
 <link rel="stylesheet" href="/static/workspace.css?v=20261011-ui-final"></head>
 <body class="course-files-page">
@@ -45,7 +46,7 @@
     <p id="uploadStatus" class="notice" role="status" hidden></p>
 <section class="review-tools" aria-label="复习资料工具">
 <p id="review-loadError" class="notice error" role="alert" hidden></p>
-      <details class="storage-disclosure"><summary>保存位置</summary><section class="path-card" aria-label="笔记保存位置"><div><b>笔记保存位置</b><p id="review-storagePath" class="muted"></p></div><div class="path-actions"><button id="review-chooseRoot" class="ui-button" type="button">选择文件夹</button><button id="review-saveRoot" class="ui-button" type="button">保存路径</button></div><input id="review-rootInput" class="ui-field wide" spellcheck="false" aria-label="笔记保存绝对路径"></section></details>
+      <details class="storage-disclosure"><summary>保存位置</summary><section class="path-card" aria-label="笔记保存位置"><div><b>当前课程的 AI 笔记</b><p id="review-storagePath" class="muted"></p><p class="muted">随课程保存在“AI生成笔记”文件夹内。更换资料库位置时，笔记会一起迁移。</p></div></section></details>
       <details class="external-import"><summary>导入复习资料</summary><div class="notes-grid">
         <section class="panel lesson-panel" aria-labelledby="review-lessonHeading"><div class="panel-heading"><div><h2 id="review-lessonHeading">选择课次</h2></div><span id="review-lessonCount" class="count-badge">0</span></div><div id="review-lessons" class="lesson-list"></div><p id="review-lessonEmpty" class="empty-inline" hidden>这门课还没有保存的录音课次。</p><div class="selection-bar"><span id="review-selectionText">尚未选择课次</span><button id="review-clearSelection" class="ui-button" type="button">清除选择</button></div></section>
         <section class="panel prompt-panel" aria-labelledby="review-promptHeading"><div class="panel-heading"><div><h2 id="review-promptHeading">生成提示词</h2></div><button id="review-copyPrompt" class="ui-button primary" type="button" disabled>复制提示词</button></div><label class="field-label" for="review-promptTemplate">提示词模板 <small>可使用 {{course}} 和 {{lessons}}</small></label><textarea id="review-promptTemplate" class="ui-field prompt-editor" rows="16" spellcheck="false"></textarea><div class="prompt-actions"><button id="review-saveTemplate" class="ui-button" type="button">保存模板</button><button id="review-generatePrompt" class="ui-button primary" type="button">生成并复制</button></div><p id="review-promptStatus" class="notice" role="status" hidden></p><label class="field-label" for="review-promptOutput">本次生成结果</label><textarea id="review-promptOutput" class="ui-field prompt-output" rows="8" readonly placeholder="选择课次后点击“生成并复制”"></textarea></section>
@@ -98,6 +99,6 @@
     <div class="dialog-footer"><button id="previewButton" class="ui-button">预览上传目标</button><button id="syncButton" class="ui-button primary" disabled>确认上传附件</button></div>
   </dialog>
   <div id="toast" role="status" hidden></div>
-  <script type="module" src="/static/js/course-files.js?v=20261013-time-1"></script>
+  <script type="module" src="/static/js/course-files.js?v=20261014-course-notes"></script>
 </body>
 </html>

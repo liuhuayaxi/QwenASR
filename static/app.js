@@ -1,17 +1,18 @@
 import {cachedJson} from './js/cached-json.js';
 import { createBatchView } from "./js/batch-view.js?v=20261011-20260923";
 import { createLibraryTools } from "./js/library-tools.js?v=20261007-search-focus-1";
-import { createMarkdownReader, renderMarkdown } from "./js/markdown-reader.js?v=20261011-20261007-math-1";
+import { createMarkdownReader, renderMarkdown } from "./js/markdown-reader.js?v=20261014-source-citations";
 import { createNoteAutosave } from "./js/note-autosave.js?v=20260923-upgrade-1";
 import { DEFAULT_NOTE_SUMMARY_PROMPT } from "./js/default-prompts.js";
 import { resample } from "./js/audio.js";
-import { createSummaryView } from "./js/summary-view.js?v=20261011-20261007-math-1";
+import { createSummaryView } from "./js/summary-view.js?v=20261014-source-citations";
 import { createTranscriptView } from "./js/transcript-view.js?v=20261011-20260923-upgrade-1";
 import { IDEASHELL_SERVERS, normalizeIdeashellServer } from "./js/ideashell-config.js?v=20261007";
 import { createMineruSettings } from "./js/mineru-settings.js?v=20261010-routing-progress";
 import { createInferenceSettings } from "./js/inference-settings.js?v=20261010-routing-progress";
-import { createClassroomChat } from "./js/classroom-chat.js?v=20261010-chat-5";
+import { createClassroomChat } from "./js/classroom-chat.js?v=20261014-source-citations";
 import { createSettingsNavigation } from "./js/settings-navigation.js?v=20261011-ui-final";
+import { createLibraryBackup } from "./js/library-backup.js?v=20261014-daily";
 
 import { createContinuation, recognitionText } from "./js/workbench/continuation.js?v=20261011-ui-final";
 
@@ -123,6 +124,7 @@ const state = {
   endPolling: new Set(),
 };
 const settingsNavigation = createSettingsNavigation();
+createLibraryBackup();
 
 
 document.getElementById("courseFilesLink")?.addEventListener("click", (event) => {

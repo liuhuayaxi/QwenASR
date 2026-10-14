@@ -25,7 +25,7 @@ from fastapi.responses import FileResponse
 from .durable import atomic_json
 from .paths import PRIVATE_ROOT
 from .storage import TRASH_ROOT, local_now, safe_component
-from .library_layout import NOTE_LIBRARY_MARKER
+from .library_layout import AI_NOTES, NOTE_LIBRARY_MARKER
 
 
 MAX_NOTE_BYTES = 250 * 1024 * 1024
@@ -50,9 +50,15 @@ DEFAULT_NOTE_PROMPT = """你是大学课程复习笔记编辑。请根据我提�
 def _read_json(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
+    except FileNotFoundError:
         return {}
-    return value if isinstance(value, dict) else {}
+    except (OSError, ValueError) as exc:
+        raise ValueError("AI 笔记目录配置无法读取，原文件已保留，请检查后重试") from exc
+    if not isinstance(value, dict) or not isinstance(value.get("notes", []), list) or any(
+            not isinstance(note, dict) or not isinstance(note.get("path"), str) or not note["path"]
+            for note in value.get("notes", [])):
+        raise ValueError("AI 笔记目录配置结构无效，原文件已保留")
+    return value
 
 
 def _date_for(metadata: dict[str, Any]) -> str:
@@ -91,28 +97,110 @@ class NoteLibrary:
         self.recordings = recordings
         self.state_path = NOTE_STATE_PATH
         self.state = _read_json(self.state_path)
-        saved_root = str(self.state.get("storage_root") or "").strip()
-        # Keep the note catalog beside the user's course folders.  Its marker
-        # prevents the shared-course scanner from treating it as a course.
-        default_root = settings.storage_root / "AI生成笔记"
-        self.storage_root = Path(saved_root).expanduser() if saved_root else default_root
-        # Early development builds placed this directory at the Desktop level;
-        # with no saved notes, move that generated default beside the course
-        # folders so all material remains under the user's chosen root.
-        legacy_root = Path.home() / "Desktop" / "AI生成笔记"
-        if (saved_root and self.storage_root.resolve() == legacy_root.resolve()
-                and not self.state.get("notes")):
-            self.storage_root = default_root
-        if not self.storage_root.is_absolute():
-            self.storage_root = default_root
-        self.storage_root = self.storage_root.resolve()
-        self.storage_root.mkdir(parents=True, exist_ok=True)
-        atomic_json(self.storage_root / NOTE_LIBRARY_MARKER, {
-            "kind": "qwenasr-note-library", "updated_at": local_now()
-        })
         self.state.setdefault("notes", [])
         self.state.setdefault("prompt_template", DEFAULT_NOTE_PROMPT)
+        self._migrate_layout()
+        for category in self.settings.categories:
+            self.folder(category, create=True)
         self._save()
+
+    @property
+    def storage_root(self) -> Path:
+        # Relative catalog paths follow a whole-library move automatically.
+        return self.settings.storage_root.resolve()
+
+    def folder(self, category: str, *, create: bool = False) -> Path:
+        category = safe_component(category, "未分类")
+        folder = self.storage_root / category / AI_NOTES
+        if not folder.resolve().is_relative_to(self.storage_root) or any(
+                path.is_symlink() for path in (folder, folder.parent)):
+            raise ValueError("笔记目录不能指向资料库外部或符号链接")
+        if create:
+            folder.mkdir(parents=True, exist_ok=True)
+        return folder
+
+    def _migrate_layout(self) -> None:
+        """Move cataloged and uncataloged legacy files, with reversible moves."""
+        if self.state.get("layout") == "course-notes-v1":
+            return
+        previous = copy.deepcopy(self.state)
+        saved = Path(str(self.state.get("storage_root") or self.storage_root / AI_NOTES)).expanduser()
+        legacy = saved.resolve() if saved.is_absolute() else self.storage_root / AI_NOTES
+        moves: dict[Path, Path] = {}
+        visited: set[Path] = set()
+        known_courses = set(self.settings.categories) | {
+            str(note.get("category") or "未分类") for note in self.state["notes"]
+        }
+
+        def plan(source: Path, destination: Path) -> None:
+            if source == destination or not source.exists():
+                return
+            if source.is_symlink() or destination.exists() or destination.is_symlink():
+                raise ValueError(f"笔记迁移遇到同名文件或符号链接，原文件已保留：{destination.name}")
+            if destination in moves.values():
+                raise ValueError(f"笔记迁移目标重复，原文件已保留：{destination.name}")
+            moves[source] = destination
+
+        # Include files placed in Finder even if they were never uploaded.
+        if legacy != self.storage_root and legacy.is_dir():
+            if legacy.is_symlink():
+                raise ValueError("旧笔记目录是符号链接，请先检查保存位置")
+            for root, directories, files in os.walk(legacy, followlinks=False):
+                # A user may have selected Documents as the old note root.
+                # Only its course subfolders belong to this migration; a
+                # dedicated AI生成笔记 container can be migrated in full.
+                if Path(root) == legacy and legacy.name != AI_NOTES:
+                    directories[:] = [name for name in directories if name in known_courses]
+                    files = []
+                visited.add(Path(root))
+                if any((Path(root) / name).is_symlink() for name in directories):
+                    raise ValueError("旧笔记目录含有符号链接，原文件已保留")
+                for name in files:
+                    source = Path(root) / name
+                    relative = source.relative_to(legacy)
+                    if relative.as_posix() == NOTE_LIBRARY_MARKER:
+                        continue
+                    category = relative.parts[0] if len(relative.parts) > 1 else "未分类"
+                    tail = Path(*relative.parts[1:]) if len(relative.parts) > 1 else Path(name)
+                    plan(source, self.folder(category) / tail)
+        for note in self.state["notes"]:
+            raw = Path(str(note.get("path") or ""))
+            source = raw.resolve() if raw.is_absolute() else (legacy / raw).resolve()
+            tail = Path(source.name)
+            if source.is_relative_to(legacy):
+                relative = source.relative_to(legacy)
+                if len(relative.parts) > 1:
+                    tail = Path(*relative.parts[1:])
+            destination = moves.get(source, self.folder(str(note.get("category") or "未分类")) / tail)
+            if source not in moves:
+                plan(source, destination)
+            note["path"] = destination.relative_to(self.storage_root).as_posix()
+        completed = []
+        try:
+            for source, destination in moves.items():
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(source), str(destination))
+                completed.append((source, destination))
+            self.state["layout"] = "course-notes-v1"
+            self._save()
+        except BaseException:
+            self.state = previous
+            for source, destination in reversed(completed):
+                source.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(destination), str(source))
+                try:
+                    destination.parent.rmdir()
+                except OSError:
+                    pass
+            raise
+        # Only empty legacy containers and our own marker are removed.
+        if legacy != self.storage_root and legacy.is_dir():
+            (legacy / NOTE_LIBRARY_MARKER).unlink(missing_ok=True)
+            for folder in sorted(visited, key=lambda path: len(path.parts), reverse=True):
+                try:
+                    folder.rmdir()
+                except OSError:
+                    pass
 
     def _save(self) -> None:
         self.state["storage_root"] = str(self.storage_root)
@@ -135,16 +223,9 @@ class NoteLibrary:
         return value
 
     def set_root(self, value: str) -> Path:
-        root = Path(str(value or "").strip()).expanduser()
-        if not root.is_absolute():
-            raise ValueError("笔记保存位置必须填写绝对路径")
-        root = root.resolve()
-        root.mkdir(parents=True, exist_ok=True)
-        if not os.access(root, os.W_OK):
-            raise ValueError("笔记保存位置不可写")
-        self.storage_root = root
-        self._save()
-        return root
+        if Path(value).expanduser().resolve() != self.storage_root:
+            raise ValueError("AI 笔记随课程保存；请在“资料库与配置”中迁移整个资料库")
+        return self.storage_root
 
     def categories(self) -> list[str]:
         names = list(self.settings.categories)
@@ -155,7 +236,7 @@ class NoteLibrary:
         return names or ["未分类"]
 
     def reclassify(self, category: str, target: str) -> bool:
-        """Keep catalog course labels aligned without moving review PDFs."""
+        """Project paths to the destination before the category transaction."""
         if category == target:
             return False
         previous = copy.deepcopy(self.state)
@@ -163,6 +244,9 @@ class NoteLibrary:
         for note in self.state.get("notes", []):
             if isinstance(note, dict) and note.get("category") == category:
                 note["category"] = target
+                path = self._note_path(note)
+                if path.is_relative_to(self.storage_root / category):
+                    note["path"] = (Path(target) / path.relative_to(self.storage_root / category)).as_posix()
                 changed = True
         if changed:
             try:
@@ -208,8 +292,7 @@ class NoteLibrary:
         safe_category = safe_component(category, "未分类")
         safe_title = safe_component(title or Path(filename).stem, "AI复习笔记")
         entry_id = uuid.uuid4().hex
-        folder = self.storage_root / safe_category
-        folder.mkdir(parents=True, exist_ok=True)
+        folder = self.folder(safe_category, create=True)
         destination = folder / f"{safe_title}-{entry_id[:10]}.pdf"
         shutil.move(str(path), str(destination))
         source_set = {str(item) for item in source_ids if str(item).strip()}
@@ -219,14 +302,14 @@ class NoteLibrary:
             "category": safe_category,
             "title": safe_title,
             "filename": destination.name,
-            "path": str(destination),
+            "path": destination.relative_to(self.storage_root).as_posix(),
             "created_at": local_now(),
             "source_session_ids": [item["id"] for item in lessons],
             "source_lessons": [{key: item[key] for key in ("id", "title", "date")} for item in lessons],
         }
         self.state.setdefault("notes", []).append(entry)
         self._save()
-        return {**entry, "exists": True, "download_url": f"/api/notes/{entry_id}/download"}
+        return {**entry, "path": str(destination), "exists": True, "download_url": f"/api/notes/{entry_id}/download"}
 
     def remove(self, note_id: str) -> None:
         notes = self.state.get("notes", [])
@@ -270,7 +353,8 @@ def note_library_router(settings: Any, recordings: Any, *, library: NoteLibrary 
         if category not in categories:
             category = categories[0] if categories else "未分类"
         return {"categories": categories, "category": category, "lessons": library.lessons(category),
-                "notes": library.notes(category), "storage_root": str(library.storage_root),
+                "notes": library.notes(category), "storage_root": str(library.folder(category)),
+                "library_root": str(library.storage_root), "layout": "course-notes-v1",
                 "prompt_template": library.template()}
 
     @router.post("/api/notes/upload")
@@ -297,7 +381,7 @@ def note_library_router(settings: Any, recordings: Any, *, library: NoteLibrary 
             if not isinstance(ids, list):
                 raise ValueError("课次选择数据无效")
             entry = await asyncio.to_thread(library.add, category, title, filename, ids, temporary)
-            return {"note": entry, "storage_root": str(library.storage_root)}
+            return {"note": entry, "storage_root": str(library.folder(category))}
         except (ValueError, OSError) as exc:
             raise HTTPException(400, str(exc)) from exc
         finally:
@@ -365,14 +449,7 @@ def note_library_router(settings: Any, recordings: Any, *, library: NoteLibrary 
 
     @router.get("/api/notes/choose-root")
     async def choose_root() -> dict[str, Any]:
-        if sys.platform != "darwin":
-            raise HTTPException(400, "当前系统没有可用的原生文件夹选择器，请直接填写绝对路径")
-        script = 'POSIX path of (choose folder with prompt "选择 AI 笔记保存文件夹" default location POSIX file "' + str(library.storage_root).replace('\\', '\\\\').replace('"', '\\"') + '")'
-        result = await asyncio.to_thread(subprocess.run, ["/usr/bin/osascript", "-e", script], capture_output=True, text=True, check=False, timeout=60)
-        if result.returncode:
-            return {"cancelled": True}
-        value = result.stdout.strip()
-        return {"cancelled": not value, "storage_root": value}
+        raise HTTPException(410, "AI 笔记随课程保存；请在“资料库与配置”中迁移整个资料库")
 
     return router
 

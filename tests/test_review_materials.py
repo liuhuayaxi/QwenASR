@@ -23,14 +23,16 @@ class UnifiedReviewCatalogTests(unittest.TestCase):
             library.add(category, title, temporary.name, [], temporary)
         return library
 
-    def test_reclassifying_course_preserves_pdf_paths_and_other_courses(self):
+    def test_reclassifying_course_updates_relative_paths_and_preserves_other_courses(self):
         with tempfile.TemporaryDirectory() as raw:
             library = self.make_library(Path(raw))
             original = library.notes('旧课程')[0]
             library.reclassify('旧课程', '新课程')
+            (library.storage_root / '旧课程').rename(library.storage_root / '新课程')
             migrated = library.notes('新课程')[0]
             self.assertEqual(migrated['id'], original['id'])
-            self.assertEqual(migrated['path'], original['path'])
+            self.assertNotEqual(migrated['path'], original['path'])
+            self.assertEqual(Path(migrated['path']).parent, library.storage_root / '新课程' / 'AI生成笔记')
             self.assertTrue(Path(migrated['path']).is_file())
             self.assertEqual(len(library.notes('未分类')), 1)
 

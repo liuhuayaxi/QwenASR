@@ -20,7 +20,7 @@ def serialized(method):
 from pathlib import Path
 
 from .durable import atomic_json
-from .library_layout import AI_FILES, INDEX, RECORDINGS
+from .library_layout import AI_FILES, AI_NOTES, INDEX, RECORDINGS
 from .storage import TRASH_ROOT, local_now, safe_component
 
 
@@ -91,7 +91,7 @@ class SharedCourseFiles:
         pdfs = []
         for root, directories, files in os.walk(folder, followlinks=False):
             directories[:] = [name for name in directories if not name.startswith('.')
-                              and name not in {RECORDINGS, AI_FILES, "课程资料"}
+                              and name not in {RECORDINGS, AI_FILES, AI_NOTES, "课程资料"}
                               and not (Path(root) / name).is_symlink()]
             for name in files:
                 if name.startswith('.') or name.startswith('~$') or name.endswith(('.tmp', '.part')):

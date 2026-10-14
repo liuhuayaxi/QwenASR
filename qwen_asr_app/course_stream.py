@@ -167,16 +167,6 @@ class CourseStreamJob:
                 output.writeframes(raw)
         temporary.replace(target)
         self.record.ensure_aac()
-        # Retain one lossless local source for a later A -> A+B supplement.
-        import soundfile as sf
-        cache = self.record.directory / ".course-source.flac"
-        temporary_cache = cache.with_suffix(".tmp.flac")
-        with sf.SoundFile(str(temporary_cache), mode="w", samplerate=SAMPLE_RATE,
-                          channels=1, subtype="PCM_16", format="FLAC") as output:
-            for index in range(len(self.state["chunks"])):
-                raw = (self.record.directory / ".course-chunks" / f"{index:05}.pcm").read_bytes()
-                output.write(np.frombuffer(raw, dtype="<i2"))
-        temporary_cache.replace(cache)
 
     async def run(self):
         pipeline = None
@@ -295,6 +285,11 @@ class CourseStreamJob:
                     path.unlink(missing_ok=True)
                 except OSError:
                     pass  # Final AAC is valid; a cleanup error must not undo completion.
+            try:
+                (self.record.directory / '.course-source.flac').unlink(missing_ok=True)
+                (self.record.directory / '.course-chunks').rmdir()
+            except OSError:
+                pass
         except (Exception, asyncio.CancelledError) as exc:
             self.state.update(stage="interrupted", error=str(exc) or "任务已停止，分段与转写已保留")
             self.record.metadata["status"] = "interrupted"

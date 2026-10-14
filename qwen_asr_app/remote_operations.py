@@ -71,6 +71,27 @@ def receipt(path):
         return {'state': 'receipt_corrupt', 'recovery_required': True}
 
 
+def discard_completed_payloads(path):
+    """After durable output, retain only the small recovery/provenance receipt."""
+    if not path:
+        return
+    path = Path(path)
+    allowed = (PRIVATE_ROOT / 'remote-operations', PRIVATE_ROOT / 'uploads', PRIVATE_ROOT / 'tasks')
+    root = path.parent
+    if root.is_symlink() or not any(root.resolve() != base.resolve() and root.resolve().is_relative_to(base.resolve()) for base in allowed):
+        return
+    for child in root.iterdir() if root.is_dir() else []:
+        if child.name in {'receipt.json', 'operation.json', 'receipt.cancel.json'}:
+            continue
+        try:
+            if child.is_dir() and not child.is_symlink():
+                shutil.rmtree(child)
+            else:
+                child.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 @contextlib.asynccontextmanager
 async def execution_lock(lock, config, kind):
     if config.get(kind + '_provider', 'local') == 'local':
