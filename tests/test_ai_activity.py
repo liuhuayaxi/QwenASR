@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import app
 from qwen_asr_app.ai import AIRequestError, request_ai_text
-from qwen_asr_app.ai_activity import track_ai_activity, track_ai_request, task_ai_activity
+from qwen_asr_app.ai_activity import track_ai_activity, track_ai_request, task_ai_activity, report_ai_activity
 from qwen_asr_app.agy_cli import request_text
 from tests.test_reader_pipeline import record_at
 from tests.test_live_recovery import store_for
@@ -38,6 +38,18 @@ def event(child, data):
 
 
 class ActivityTests(unittest.IsolatedAsyncioTestCase):
+    def test_a_new_connection_does_not_reset_a_silent_output_streams_age(self):
+        with patch('qwen_asr_app.ai_activity.time.monotonic', return_value=100) as clock, \
+             track_ai_activity('ages'), track_ai_request():
+            report_ai_activity('receiving', output_chars=10)
+            clock.return_value = 120
+            with track_ai_request():
+                report_ai_activity('connecting')
+                snapshot = task_ai_activity('ages')
+                self.assertEqual(snapshot['phase'], 'receiving')
+                self.assertEqual(snapshot['idle_seconds'], 20)
+                self.assertEqual(snapshot['active_requests'], 2)
+
     async def test_stream_updates_are_visible_before_result_and_counts_do_not_double(self):
         child = process()
         with patch('qwen_asr_app.agy_cli.asyncio.create_subprocess_exec', return_value=child), \

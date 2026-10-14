@@ -26,7 +26,9 @@ class Activity:
         active = [request for request in self.requests if request.active]
         priority = {"waiting": 0, "connecting": 1, "processing": 2, "receiving": 3, "checking": 4}
         latest = max(active, key=lambda request: (priority.get(request.phase, 0), request.updated), default=None)
-        last_event = max((request.updated for request in self.requests), default=self.started)
+        # Age the request whose phase is displayed. A newly queued sibling
+        # must not make an old, silent output stream appear active again.
+        last_event = latest.updated if latest else max((request.updated for request in self.requests), default=self.started)
         return {
             "phase": latest.phase if latest else "checking" if self.requests else "waiting",
             "elapsed_seconds": int(max(0, now - self.started)),
