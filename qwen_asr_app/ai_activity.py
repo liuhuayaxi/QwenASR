@@ -1,0 +1,89 @@
+"""Live AI request activity, separate from durable completion progress.
+
+Only phases, timings and character counts leave the request context. Prompts,
+model output and credentials never enter the task feed.
+"""
+from __future__ import annotations
+
+import time
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Any
+
+
+_tasks: dict[str, "Activity"] = {}
+_current: ContextVar["Activity | None"] = ContextVar("ai_task_activity", default=None)
+_request: ContextVar["RequestActivity | None"] = ContextVar("ai_request_activity", default=None)
+
+
+class Activity:
+    def __init__(self) -> None:
+        self.started = time.monotonic()
+        self.requests: list[RequestActivity] = []
+
+    def snapshot(self) -> dict[str, Any]:
+        now = time.monotonic()
+        active = [request for request in self.requests if request.active]
+        priority = {"waiting": 0, "connecting": 1, "processing": 2, "receiving": 3, "checking": 4}
+        latest = max(active, key=lambda request: (priority.get(request.phase, 0), request.updated), default=None)
+        last_event = max((request.updated for request in self.requests), default=self.started)
+        return {
+            "phase": latest.phase if latest else "checking" if self.requests else "waiting",
+            "elapsed_seconds": int(max(0, now - self.started)),
+            "idle_seconds": int(max(0, now - last_event)),
+            "output_chars": sum(request.output_chars for request in self.requests),
+            "active_requests": len(active),
+            "requests": len(self.requests),
+        }
+
+
+class RequestActivity:
+    def __init__(self, activity: Activity) -> None:
+        self.phase = "waiting"
+        self.updated = time.monotonic()
+        self.output_chars = 0
+        self.active = True
+        activity.requests.append(self)
+
+    def update(self, phase: str, *, output_chars: int | None = None) -> None:
+        self.phase = phase
+        self.updated = time.monotonic()
+        if output_chars is not None:
+            self.output_chars = max(self.output_chars, output_chars)
+
+
+@contextmanager
+def track_ai_activity(task_id: str):
+    activity = Activity()
+    _tasks[task_id] = activity
+    token = _current.set(activity)
+    try:
+        yield activity
+    finally:
+        _current.reset(token)
+        if _tasks.get(task_id) is activity:
+            del _tasks[task_id]
+
+
+@contextmanager
+def track_ai_request():
+    activity = _current.get()
+    request = RequestActivity(activity) if activity is not None else None
+    token = _request.set(request)
+    try:
+        yield
+    finally:
+        _request.reset(token)
+        if request is not None:
+            request.active = False
+
+
+def report_ai_activity(phase: str, *, output_chars: int | None = None) -> None:
+    request = _request.get()
+    if request is not None:
+        request.update(phase, output_chars=output_chars)
+
+
+def task_ai_activity(task_id: str) -> dict[str, Any] | None:
+    activity = _tasks.get(task_id)
+    return activity.snapshot() if activity is not None else None

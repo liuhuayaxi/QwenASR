@@ -17,6 +17,7 @@ import httpx
 
 from .ai_secrets import ai_secret_store, endpoint_identity
 from .ai_limits import account_gate, agy_account_gate, agy_account_identity, shared_gate
+from .ai_activity import track_ai_request, report_ai_activity
 from .context_budget import (
     DEFAULT_CONTEXT_WINDOW,
     estimate_tokens,
@@ -563,9 +564,13 @@ async def request_ai_text(
         total = account_gate(base_url, credential)
     # Each function retains its own gate; changing a cap resizes the same pool.
     function = shared_gate(('function', mode, *identity), concurrency)
-    async with function, total:
-        return await _request_ai_text_unlimited(instructions=instructions, payload=payload,
-            config=config, mode=mode, max_output_tokens=max_output_tokens)
+    with track_ai_request():
+        async with function, total:
+            report_ai_activity("connecting")
+            result = await _request_ai_text_unlimited(instructions=instructions, payload=payload,
+                config=config, mode=mode, max_output_tokens=max_output_tokens)
+            report_ai_activity("checking", output_chars=len(result))
+            return result
 
 
 async def _request_ai_text_unlimited(
@@ -650,6 +655,7 @@ async def _request_ai_text_unlimited(
         async def post_request(
             request_url: str, body: dict[str, Any], api_name: str
         ) -> httpx.Response:
+            report_ai_activity("processing")
             last_error: httpx.HTTPError | None = None
             for attempt in range(4):
                 try:

@@ -3,6 +3,7 @@ import {aiTaskPayload} from './task-config.js?v=20260913-tasks-1';
 import {mergeLiveCourseProgress} from './course-progress.js?v=20261011-live-1';
 import {mineruEstimateLabel, legacyMineruProgress} from './mineru-progress-view.js?v=20261013-time-2';
 import {resourceStatus} from './resource-status.js?v=20261013-1';
+import {aiActivityView} from './ai-activity-view.js?v=20261014-1';
 
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c]));
@@ -38,6 +39,7 @@ function dateLabel(value) {
   return Number.isNaN(date.getTime()) ? '' : date.toLocaleString('zh-CN', {month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit'});
 }
 function friendlyError(task) {
+  if (!task.error) return '';
   const messages = {
     network_dns: '模型服务域名暂时无法解析，网络恢复后可继续。',
     output_truncated: '模型输出达到长度上限，可继续处理或重试。',
@@ -76,16 +78,18 @@ function courseQueueDetails(task) {
 function card(task) {
   const done = task.status === 'completed';
   const actions = done ? [] : (task.actions || []);
+  const activity = aiActivityView(task);
   const resultClass = done ? 'task-result-link' : 'ui-button';
   const legacyProgress = legacyMineruProgress(task);
   const progress = task.status === 'completed' ? 100 : legacyProgress !== null ? legacyProgress : Object.hasOwn(task, 'progress') ? task.progress : (task.total ? Math.round((task.completed || 0) / task.total * 100) : null);
-  const bounded = progress === null ? null : Math.max(0, Math.min(100, Number(progress) || 0));
+  const bounded = activity || progress === null ? null : Math.max(0, Math.min(100, Number(progress) || 0));
   const estimate = task.family === 'mineru' ? task.progress_estimate : null;
   const estimateLabel = mineruEstimateLabel(estimate, task.status) || (legacyProgress !== null ? '按已完成页段显示 · 整体耗时预估尚未就绪' : task.family === 'mineru' && task.status === 'running' ? '正在计算整体进度' : '');
   const resource = resourceStatus(task);
-  const count = task.total ? `${task.completed || 0}/${task.total}${task.type === 'course_queue' ? ' 堂课' : task.family === 'mineru' ? ' 个文件' : ' 段'}` : '';
+  const count = task.total ? `${task.family === 'ai' ? '已完成 ' : ''}${task.completed || 0}/${task.total}${task.type === 'course_queue' ? ' 堂课' : task.family === 'mineru' ? ' 个文件' : task.family === 'ai' ? ' 批' : ' 段'}` : '';
   const wait = task.status === 'waiting_retry' && task.retry_in_seconds ? ` · 约 ${task.retry_in_seconds} 秒后自动重试` : '';
-  const stage = (task.stage || (task.status === 'pending' ? '等待手动开始处理' : labels[task.status])) + wait;
+  const stage = (activity ? [task.stage, activity.label].filter(Boolean).join(' · ')
+    : task.stage || (task.status === 'pending' ? '等待手动开始处理' : labels[task.status])) + wait;
   const error = friendlyError(task);
   const inference = task.inference || {}; // Mixed batches report each file separately.
   const inferMetrics = inference.metrics || {};
@@ -98,6 +102,7 @@ function card(task) {
     tier ? `${tier === 'advanced' ? 'Advanced' : tier} 档位` : '', inference.fallback ? '已回退本机' : ''].filter(Boolean).join(' · ') : task.family === 'asr' && task.type !== 'course_queue' ? [providerName, inferMetrics.model || inference.model || '', inferMetrics.dtype || inference.dtype || '', inferMetrics.device || inference.device || '', inference.fallback ? '已回退本机' : ''].filter(Boolean).join(' · ') : '';
   const aiProvider = task.configured_ai_model ? `AI 通道：${task.configured_ai_transport === 'agy_cli' ? 'AGY CLI' : 'OpenAI 兼容 API'} · ${task.configured_ai_model}${task.configured_ai_effort ? ` · ${task.configured_ai_effort} 思考` : ''}` : '';
   const details = [operationLabel(inference, {job_id: task.remote_job_id, state: task.remote_operation_state}, mode), aiProvider, recognition ? `识别环境：${recognition}` : '', resource?.detail, task.error && task.error !== error ? task.error : '',
+    task.previous_error ? `上次处理失败：${task.previous_error}；本次正在重新处理。` : '',
     task.range_end ? `片段范围：${Math.floor(task.range_start / 60)}–${Math.ceil(task.range_end / 60)} 分钟` : '',
     task.attempts > 1 ? `历史尝试 ${task.attempts} 次` : '', ...(task.warnings || [])].filter(Boolean);
   const files = (task.files || []).map(file => `<li class="task-file"><div><b>${esc(file.source_name)}</b><span>${esc(labels[file.status] || file.status)}${file.status === 'running' && file.progress != null ? ` · ${Math.round(file.progress || 0)}%` : ''}</span></div><p>${esc(file.error || file.stage)}</p><p>${esc(operationLabel(file.inference, file.remote_operation, task.configured_provider))}</p><p>${esc(file.output_path || file.source_path)}</p>${file.download_url ? `<a href="${esc(file.download_url)}" download>下载 AI 友好 PDF</a>` : ''}</li>`).join('');
@@ -108,6 +113,7 @@ function card(task) {
     <div class="task-meta"><span class="task-type">${esc(task.label)}</span><span>${esc(task.category || task.source)}</span>${recognition ? `<span>${esc(recognition)}</span>` : ''}${resource ? `<span class="task-resource ${resource.tone === 'error' ? 'error' : ''}" title="${esc(resource.detail)}">${esc(resource.text)}</span>` : ''}${dateLabel(task.updated_at) ? `<span>更新于 ${esc(dateLabel(task.updated_at))}</span>` : ''}</div>
     <div class="task-stage"><span>${esc(stage)}</span><span>${esc(count)}${bounded !== null ? `${count ? ' · ' : ''}${estimate?.estimated && !done ? '整体预估 ' : legacyProgress !== null ? '已完成页段 ' : ''}${bounded}%` : ''}</span></div>
     ${bounded !== null ? `<progress class="task-progress" max="100" value="${bounded}" aria-label="${esc(task.label)}${estimate?.estimated && !done ? '整体预估' : legacyProgress !== null ? '已完成页段' : ''}进度"></progress>` : active.has(task.status) ? `<div class="task-progress-indeterminate" role="progressbar" aria-label="${esc(task.label)}进度待计算"></div>` : ''}
+    ${activity ? `<p class="task-ai-activity" role="status">${esc(activity.detail)}</p>` : ''}
     ${estimateLabel ? `<p class="task-estimate">${esc(estimateLabel)}</p>` : ''}
     ${error ? `<div class="task-error">${esc(error)}</div>` : ''}
     ${actions.length || task.result_url || task.download_url ? `<div class="task-actions">${actions.map(action => `<button data-action="${action}" class="ui-button ${action === 'cancel' ? 'danger' : action === 'continue' ? 'primary' : ''}" ${state.busy ? 'disabled' : ''}>${actionLabels[action]}</button>`).join('')}

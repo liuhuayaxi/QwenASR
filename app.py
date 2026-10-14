@@ -64,6 +64,7 @@ from qwen_asr_app.live_session import TranscriptionSession
 from qwen_asr_app.ideashell_sync import ideashell_manager
 from qwen_asr_app.ideashell_attachments import MAX_AUDIO_BYTES, audio_attachment_arguments_many, audio_file_metadata
 from qwen_asr_app.model_runtime import ModelManager
+from qwen_asr_app.ai_activity import track_ai_activity, task_ai_activity
 from qwen_asr_app.request_security import websocket_origin_allowed, http_request_allowed
 from qwen_asr_app.pdf_ai import find_mineru_binary
 from qwen_asr_app.mineru_settings import mineru_settings, runtime_info, DEFAULT_MINERU_SETTINGS
@@ -611,6 +612,7 @@ def compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any]]:
                 "total": int(draft.get("total_parts") or 0),
                 "phase": ("详细笔记已保存 · 短摘要待补齐" if abstract_pending and status == "completed_with_errors"
                           else "录音库短摘要" if abstract_pending else str(draft.get("phase") or "")),
+                "ai_activity": task_ai_activity(f"summary:{record.id}"),
                 "resume_stage": "abstract" if abstract_pending else "",
                 "retry_in_seconds": int(summary.get("retry_in_seconds") or 0),
                 "auto_retry_count": int(summary.get("auto_retry_count") or 0),
@@ -641,7 +643,9 @@ def compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any]]:
             if status == "completed" and missing_blocks:
                 status = "pending"
             if status != "completed":
-                task_error = str(refinement_job.get("error") or (failed_errors[-1] if failed_errors else ""))
+                historical_error = failed_errors[-1] if failed_errors else ""
+                retrying = refinement_running and saved_status in {"queued", "running"}
+                task_error = str(refinement_job.get("error") or ("" if retrying else historical_error))
                 tasks.append({
                     **base,
                     **ai_provider_snapshot("refinement"),
@@ -650,7 +654,9 @@ def compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any]]:
                     "label": AI_TASK_LABELS["refinement"],
                     "status": status,
                     "error": task_error,
-                    "error_kind": str(refinement_job.get("error_kind") or _task_error_kind(task_error)),
+                    "error_kind": str(refinement_job.get("error_kind") or _task_error_kind(task_error)) if task_error else "",
+                    "previous_error": historical_error if retrying else "",
+                    "ai_activity": task_ai_activity(f"refinement:{record.id}"),
                     "completed": int(refinement_job.get("completed") or 0),
                     "total": int(refinement_job.get("total") or len(missing_blocks)),
                     "missing_blocks": len(missing_blocks),
@@ -674,7 +680,9 @@ def compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any]]:
                 "running" if live_running else saved_status or "failed"
             )
             if status != "completed":
-                error = str(live_job.get("error") or (failed or {}).get("ai_error") or "")
+                historical_error = str((failed or {}).get("ai_error") or "")
+                retrying = live_running and saved_status in {"queued", "running"}
+                error = str(live_job.get("error") or ("" if retrying else historical_error))
                 failed_end = int(round(float((failed or {}).get("end", 0))))
                 tasks.append({
                     **base,
@@ -684,7 +692,9 @@ def compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any]]:
                     "label": AI_TASK_LABELS["live_summary"],
                     "status": status,
                     "error": error,
-                    "error_kind": str(live_job.get("error_kind") or (failed or {}).get("error_kind") or _task_error_kind(error)),
+                    "previous_error": historical_error if retrying else "",
+                    "ai_activity": task_ai_activity(f"live_summary:{record.id}"),
+                    "error_kind": str(live_job.get("error_kind") or (failed or {}).get("error_kind") or _task_error_kind(error)) if error else "",
                     "completed": int(live_job.get("completed") or len([item for item in summaries if item.get("summary") and not item.get("ai_error")])),
                     "total": int(live_job.get("total") or len(summaries)),
                     "range_start": float((failed or {}).get("start", 0)),
@@ -738,12 +748,12 @@ def _start_aux_ai_job(record: RecordingRecord, kind: str, runner: Any) -> bool:
         completed=0, auto_retry_count=0, retry_in_seconds=0, pause_requested=False,
     )
 
-    async def run() -> None:
+    async def execute() -> None:
         automatic_attempt = 0
         try:
             while True:
                 try:
-                    _update_ai_job(record, kind, status="running", retry_in_seconds=0)
+                    _update_ai_job(record, kind, status="running", error="", error_kind="", retry_in_seconds=0)
                     await runner()
                     _update_ai_job(
                         record, kind, status="completed", error="", error_kind="",
@@ -784,6 +794,10 @@ def _start_aux_ai_job(record: RecordingRecord, kind: str, runner: Any) -> bool:
             raise
         finally:
             background_ai_tasks.pop(task_id, None)
+
+    async def run() -> None:
+        with track_ai_activity(task_id):
+            await execute()
 
     task = asyncio.create_task(run())
     background_ai_tasks[task_id] = task
@@ -1698,7 +1712,7 @@ def start_summary_job(record: RecordingRecord, payload: dict[str, Any], *, autom
     }
     record.save_metadata()
 
-    async def run() -> None:
+    async def execute() -> None:
         automatic_attempt = 0
 
         def save_state(status: str, error: str = "", **values: Any) -> None:
@@ -1761,6 +1775,10 @@ def start_summary_job(record: RecordingRecord, payload: dict[str, Any], *, autom
             raise
         finally:
             background_summary_tasks.pop(session_id, None)
+
+    async def run() -> None:
+        with track_ai_activity(f"summary:{session_id}"):
+            await execute()
 
     task = asyncio.create_task(run())
     background_summary_tasks[session_id] = task

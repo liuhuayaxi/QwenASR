@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from .ai import AIRequestError
+from .ai_activity import report_ai_activity
 from .paths import PRIVATE_ROOT
 
 
@@ -231,21 +232,70 @@ async def request_text(instructions: str, payload: dict[str, Any], provider: dic
         )
     except OSError as exc:
         raise AIRequestError(f"启动 AGY CLI 失败：{exc}", kind="agy_cli_unavailable", retriable=False) from exc
-    try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(message.encode("utf-8")), timeout=timeout)
-    except (asyncio.CancelledError, asyncio.TimeoutError) as exc:
-        if process.returncode is None:
+
+    async def read_stdout() -> bytes:
+        chunks = []
+        output_chars = 0
+        while line := await process.stdout.readline():
+            chunks.append(line)
             try:
-                process.kill()
-            except ProcessLookupError:
+                event = json.loads(line)
+            except (ValueError, UnicodeDecodeError):
+                continue
+            if not isinstance(event, dict):
+                continue
+            if event.get("event") == "init":
+                report_ai_activity("processing")
+            elif event.get("event") == "step_update":
+                step = event.get("step_update")
+                if not isinstance(step, dict):
+                    continue
+                delta = step.get("text_delta")
+                if step.get("step_type") == "agent_response" and isinstance(delta, str) and delta:
+                    output_chars += len(delta)
+                    report_ai_activity("receiving", output_chars=output_chars)
+                elif step.get("step_type") == "agent_response":
+                    report_ai_activity("processing")
+        return b"".join(chunks)
+
+    async def communicate() -> tuple[bytes, bytes]:
+        # Drain both pipes concurrently so diagnostic output cannot block the
+        # model, while stdout events become visible before the final result.
+        readers = [asyncio.create_task(read_stdout()), asyncio.create_task(process.stderr.read())]
+        try:
+            try:
+                process.stdin.write(message.encode("utf-8"))
+                await process.stdin.drain()
+            except (BrokenPipeError, ConnectionResetError):
+                # Early CLI failures can close stdin before producing their
+                # structured error. Preserve that result instead of a pipe error.
                 pass
-        await process.wait()
+            finally:
+                process.stdin.close()
+            stdout, stderr = await asyncio.gather(*readers)
+            await process.wait()
+            return stdout, stderr
+        finally:
+            for reader in readers:
+                reader.cancel()
+            await asyncio.gather(*readers, return_exceptions=True)
+
+    try:
+        stdout, stderr = await asyncio.wait_for(communicate(), timeout=timeout)
+    except (asyncio.CancelledError, asyncio.TimeoutError) as exc:
         if isinstance(exc, asyncio.CancelledError):
             raise
         raise AIRequestError(
             f"AGY CLI 超过 {timeout} 秒仍未完成，请稍后重试",
             kind="network_read_timeout", retriable=True,
         ) from exc
+    finally:
+        if process.returncode is None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            await process.wait()
     return _decode_output(stdout.decode("utf-8", errors="replace"), stderr.decode("utf-8", errors="replace"))
 
 

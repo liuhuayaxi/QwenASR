@@ -7,9 +7,9 @@
   <title>课程回放 · QwenASR</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <script src="/static/js/theme.js?v=20261011-ui-final"></script>
-  <link rel="stylesheet" href="/static/smartclass.css?v=20261011-ui-final">
+  <link rel="stylesheet" href="/static/smartclass.css?v=20261014-lesson-selection">
   <link rel="stylesheet" href="/static/ui.css?v=20261011-ui-final">
-  <link rel="stylesheet" href="/static/custom-controls.css?v=20261014-solid-v2">
+  <link rel="stylesheet" href="/static/custom-controls.css?v=20261014-selection-hover">
 <script>if (new URLSearchParams(location.search).get("embedded") === "1") document.addEventListener("DOMContentLoaded", () => document.body.classList.add("workspace-embedded"));</script>
 <link rel="stylesheet" href="/static/workspace.css?v=20261011-ui-final"></head>
 <body class="replay-page">
@@ -55,7 +55,10 @@
 
         <label>本学期课程<select id="courses" class="ui-field"><option value="">登录后选择课程…</option></select></label>
         <button id="refresh" class="ui-button secondary" type="button">刷新课程</button>
-        <button id="loadLessons" class="ui-button secondary" type="button">查看 / 刷新回放</button><div id="lessons" aria-live="polite"></div>
+        <button id="loadLessons" class="ui-button secondary" type="button">刷新回放列表</button>
+        <p id="lessonsStatus" class="muted" role="status" hidden></p>
+        <div id="lessons" aria-live="polite"></div>
+        <p id="selectionStatus" class="muted" role="status">勾选课次后加入队列；右侧按钮可直接打开回放。</p>
         <label class="save"><input type="checkbox" id="allowSingle">允许单独获取尚未配对的一节课</label>
         <details>
         <summary>笔记设置</summary>
@@ -94,6 +97,6 @@
       return nativeFetch(input, init);
     };
   </script>
-  <script src="/static/js/smartclass.js?v=20261012-discovery-login"></script>
+  <script src="/static/js/smartclass.js?v=20261014-lesson-selection"></script>
 </body>
 </html>

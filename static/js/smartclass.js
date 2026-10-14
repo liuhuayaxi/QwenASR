@@ -1,5 +1,6 @@
 const $ = id => document.getElementById(id);
 let currentGroups = [], courseVersion = '', catalogRevision = null, optionsLoaded = false;
+const selectedLessonIds = new Set();
 let busy = false, submitting = false, loadingCourse = '', loadSerial = 0, accountCollapsed = false;
 let replayLoginSubmitted = false;
 let sessionCheckInFlight = false, lastSessionCheck = 0;
@@ -31,14 +32,20 @@ async function post(path, body) {
   return value;
 }
 function updateSelection() {
-  $('import').disabled = busy || submitting || !!loadingCourse || !document.querySelector('#lessons input:checked:not(:disabled)');
+  const count = selectedLessonIds.size;
+  $('import').disabled = busy || submitting || !!loadingCourse || !count;
+  $('import').textContent = count ? `将 ${count} 个选中课次加入队列` : '将选中课次加入队列';
   $('loadLessons').disabled = busy || !!loadingCourse || !$('courses').value;
+  const message = count ? `已选择 ${count} 个课次` : '勾选课次后加入队列；右侧按钮可直接打开回放。';
+  if ($('selectionStatus').textContent !== message) $('selectionStatus').textContent = message;
 }
 function clearLessons() {
   loadSerial++;
   loadingCourse = '';
   currentGroups = [];
+  selectedLessonIds.clear();
   $('lessons').replaceChildren();
+  $('lessonsStatus').hidden = true;
   updateSelection();
 }
 function renderLessonStatus(row, state) {
@@ -59,7 +66,9 @@ function updateLessonStatuses(statuses) {
     renderLessonStatus(row, currentGroups.find(group => group.id === row.dataset.group)?.import_status);
   }
 }
-function renderLessons(chosen = new Set([...document.querySelectorAll('#lessons input:checked')].map(e => e.value))) {
+function renderLessons() {
+  const available = new Set(currentGroups.filter(g => g.videos.length !== 1 || $('allowSingle').checked).map(g => g.id));
+  for (const id of selectedLessonIds) if (!available.has(id)) selectedLessonIds.delete(id);
   $('lessons').replaceChildren();
   for (const g of currentGroups) {
     const row = document.createElement('div'), choice = document.createElement('label');
@@ -68,8 +77,12 @@ function renderLessons(chosen = new Set([...document.querySelectorAll('#lessons 
     const checkbox = document.createElement('input');
     checkbox.type = 'checkbox'; checkbox.value = g.id;
     checkbox.disabled = g.videos.length === 1 && !$('allowSingle').checked;
-    checkbox.checked = chosen.has(g.id) && !checkbox.disabled;
-    checkbox.onchange = updateSelection;
+    checkbox.checked = selectedLessonIds.has(g.id);
+    checkbox.onchange = () => {
+      if (checkbox.checked) selectedLessonIds.add(g.id);
+      else selectedLessonIds.delete(g.id);
+      updateSelection();
+    };
     const text = document.createElement('div'), title = document.createElement('strong'), detail = document.createElement('small');
     title.textContent = g.course_name + ' · ' + g.date + ' ' + g.start.slice(11,16) + '–' + g.stop.slice(11,16);
     const periods = g.periods.filter(Boolean);
@@ -100,9 +113,9 @@ async function loadLessons() {
   const key = $('courses').value;
   if (!key) return;
   const serial = ++loadSerial;
-  const chosen = new Set([...document.querySelectorAll('#lessons input:checked')].map(e => e.value));
   loadingCourse = key;
-  $('lessons').textContent = '正在获取回放列表…';
+  $('lessonsStatus').textContent = '正在获取回放列表…';
+  $('lessonsStatus').hidden = false;
   updateSelection(); notice();
   try {
     const response = await fetch('/api/lessons?course=' + encodeURIComponent(key));
@@ -110,9 +123,13 @@ async function loadLessons() {
     if (serial !== loadSerial) return;
     if (!response.ok) throw Error(result.detail);
     currentGroups = result.groups;
-    renderLessons(chosen);
+    renderLessons();
+    $('lessonsStatus').hidden = true;
   } catch (e) {
-    if (serial === loadSerial) { currentGroups = []; $('lessons').textContent = e.message; }
+    if (serial === loadSerial) {
+      $('lessonsStatus').textContent = currentGroups.length
+        ? `刷新回放失败，当前列表和选择已保留：${e.message}` : e.message;
+    }
   } finally {
     if (serial === loadSerial) { loadingCourse = ''; updateSelection(); }
   }
@@ -251,7 +268,7 @@ $('reconnect').onclick = async () => {
 $('resumeQueue').onclick = async () => { try { await post('/api/resume'); await refresh(); } catch (e) { notice(e.message); } };
 $('courses').onchange = () => { clearLessons(); if ($('courses').value) loadLessons(); };
 $('loadLessons').onclick = loadLessons;
-$('allowSingle').onchange = () => { if (!loadingCourse) renderLessons(); };
+$('allowSingle').onchange = renderLessons;
 $('refresh').onclick = async () => {
   notice();
   try { await post('/api/refresh'); await refresh(); } catch (e) { notice(e.message); }
@@ -292,15 +309,17 @@ window.addEventListener('pagehide', () => {
     body:JSON.stringify(selectedOptions()), keepalive:true}).catch(() => {});
 });
 $('import').onclick = async () => {
-  if (submitting) return;
-  const ids = [...document.querySelectorAll('#lessons input:checked:not(:disabled)')].map(e => e.value);
+  if (busy || submitting || loadingCourse) return;
+  const ids = [...selectedLessonIds];
+  const course = $('courses').value;
   if (!ids.length) return;
   submitting = true; updateSelection(); notice();
   try {
     await saveOptions();
     const result = await post('/api/import', {ids});
-    for (const input of document.querySelectorAll('#lessons input:checked')) {
-      if (ids.includes(input.value)) input.checked = false;
+    if ($('courses').value === course) {
+      for (const id of ids) selectedLessonIds.delete(id);
+      for (const input of $('lessons').querySelectorAll('input')) input.checked = selectedLessonIds.has(input.value);
     }
     notice(result.already_queued ? '所选课次已在队列中。' : `已添加 ${result.added?.length || ids.length} 个课次，可以继续选择其他课程。`, 'success');
     await refresh();

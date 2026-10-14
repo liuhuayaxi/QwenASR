@@ -25,6 +25,8 @@
 .lesson { display: flex !important; gap: 12px; align-items: flex-start; padding: 15px 0; border-bottom: 1px solid var(--line); }
 .lesson strong { display: block; font-size: var(--text-control); font-weight: 600; }
 .lesson .lesson-choice { display: flex; gap: 12px; min-width: 0; flex: 1; }
+.lesson-choice:has(input:not(:disabled)) { cursor: pointer; }
+.lesson:has(input:checked) { background: var(--green-soft); border-bottom-color: var(--green-line); }
 .lesson-choice > div { min-width: 0; }
 .lesson-replays { display: flex; flex: 0 0 auto; flex-direction: column; gap: 6px; }
 .lesson-replays .lesson-replay { padding: 5px 9px; font-size: var(--text-xs); white-space: nowrap; }
@@ -36,6 +38,7 @@
 .lesson small { display: block; color: var(--muted); font-size: var(--text-sm); margin-top: 4px; }
 .lesson-choice:has(input:disabled) { opacity: .55; }
 #lessons:not(:empty) { margin: 8px 0 16px; font-size: var(--text-control); color: var(--muted); }
+#lessonsStatus, #selectionStatus { margin: 8px 0 12px; }
 details { margin: 20px 0; }
 summary { cursor: pointer; font-size: var(--text-control); margin-bottom: 14px; color: var(--green-dark); }
 #accountDetails { margin: 0; }

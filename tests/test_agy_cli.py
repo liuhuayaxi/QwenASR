@@ -94,10 +94,13 @@ class AGYCLITests(unittest.TestCase):
 class AGYCancellationTests(unittest.IsolatedAsyncioTestCase):
     async def test_cancelled_request_reaps_its_cli_child(self):
         entered = asyncio.Event()
-        async def communicate(*args):
+        async def readline():
             entered.set()
             await asyncio.Event().wait()
-        process = SimpleNamespace(returncode=None, communicate=communicate,
+        process = SimpleNamespace(returncode=None,
+                                  stdin=SimpleNamespace(write=Mock(), drain=AsyncMock(), close=Mock()),
+                                  stdout=SimpleNamespace(readline=readline),
+                                  stderr=SimpleNamespace(read=AsyncMock(return_value=b'')),
                                   kill=Mock(), wait=AsyncMock())
         with patch('qwen_asr_app.agy_cli.asyncio.create_subprocess_exec', new=AsyncMock(return_value=process)):
             task = asyncio.create_task(request_text('测试', {}, {'cli_model': 'gemini-3.8-flash-high'}))

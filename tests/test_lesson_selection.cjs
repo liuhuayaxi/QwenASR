@@ -1,0 +1,179 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+const source = fs.readFileSync(path.join(__dirname, '../static/js/smartclass.js'), 'utf8')
+  .replace(/\ncheckSession\(\);\nscheduledRefresh\(\);\s*$/, `
+globalThis.selection = {loadLessons, renderLessons, renderCourseState,
+  groups(value) { currentGroups = value; renderLessons(); },
+  ids() { return [...selectedLessonIds]; }};`);
+
+class Element {
+  constructor(tag = 'div') {
+    this.tag = tag; this.children = []; this.dataset = {}; this.style = {};
+    this.value = ''; this.checked = false; this.disabled = false; this.className = '';
+  }
+  set textContent(value) { this.text = value; this.children = []; }
+  get textContent() { return this.text || ''; }
+  replaceChildren(...children) { this.text = ''; this.children = children; }
+  append(...children) { this.children.push(...children); }
+  add(child) { this.append(child); }
+  addEventListener(event, callback) { this[event] = callback; }
+  querySelectorAll(selector) {
+    const matches = node => selector.startsWith('.')
+      ? node.className.split(' ').includes(selector.slice(1)) : node.tag === selector;
+    return this.children.flatMap(child => [
+      ...(matches(child) ? [child] : []), ...child.querySelectorAll(selector),
+    ]);
+  }
+  querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
+}
+
+const group = (id, single = false) => ({id, course_name: '测试课程', date: '2026-10-14',
+  start: '2026-10-14 08:00', stop: '2026-10-14 09:35', duration: 5640,
+  periods: single ? [1] : [1, 2], videos: (single ? [1] : [1, 2]).map(n => ({NewID: `${id}-${n}`}))});
+const deferred = () => {
+  let resolve, reject;
+  const promise = new Promise((ok, fail) => { resolve = ok; reject = fail; });
+  return {promise, resolve, reject};
+};
+
+function environment(groups = [group('a'), group('b')]) {
+  const elements = new Map(), requests = [];
+  const element = id => {
+    if (!elements.has(id)) elements.set(id, new Element());
+    return elements.get(id);
+  };
+  const status = () => ({state: 'running', courses: [
+    {key: 'course-a', CourseName: '课程 A', TeacherName: '教师', VideoTotal: 4},
+    {key: 'course-b', CourseName: '课程 B', TeacherName: '教师', VideoTotal: 2},
+  ], course_revision: null, options: {}, imports: [], lesson_course: element('courses').value});
+  const env = {element, requests, lessonResponse: async () => ({groups}),
+    importResponse: async () => ({added: ['a']}), status};
+  const context = {URL, URLSearchParams, Date, clearTimeout() {},
+    Option: function(text, value) { const node = new Element('option'); node.textContent = text; node.value = value; return node; },
+    location: {origin: 'http://127.0.0.1:8765', search: ''},
+    document: {getElementById: element, createElement: tag => new Element(tag), addEventListener() {}},
+    window: {addEventListener() {}},
+    async fetch(url, init) {
+      requests.push({url, body: init?.body ? JSON.parse(init.body) : null});
+      const data = url.startsWith('/api/lessons?') ? await env.lessonResponse(url)
+        : url === '/api/import' ? await env.importResponse()
+        : url.startsWith('/api/status') ? status() : {saved: true};
+      return {ok: true, json: async () => data};
+    },
+  };
+  vm.createContext(context); vm.runInContext(source, context);
+  env.api = context.selection;
+  element('courses').value = 'course-a';
+  env.api.groups(groups);
+  env.input = id => element('lessons').querySelectorAll('input').find(input => input.value === id);
+  env.choose = (id, checked = true) => { const input = env.input(id); input.checked = checked; input.onchange(); };
+  env.ids = () => Array.from(env.api.ids());
+  return env;
+}
+
+test('checking a lesson updates the count and polling keeps the same checkbox and choice', () => {
+  const env = environment();
+  assert.equal(env.element('import').disabled, true);
+  env.choose('a');
+  const input = env.input('a');
+  assert.equal(env.element('import').disabled, false);
+  assert.equal(env.element('selectionStatus').textContent, '已选择 1 个课次');
+  assert.match(env.element('import').textContent, /1 个/);
+  env.api.renderCourseState(env.status());
+  env.api.renderCourseState(env.status());
+  assert.equal(env.input('a'), input);
+  assert.equal(input.checked, true);
+  env.choose('a', false);
+  assert.deepEqual(env.ids(), []);
+  assert.equal(env.element('import').disabled, true);
+});
+
+test('refresh leaves the list visible and retains choices made while its request is pending', async () => {
+  const env = environment(), response = deferred();
+  env.choose('a'); env.lessonResponse = () => response.promise;
+  const loading = env.api.loadLessons();
+  assert.equal(env.input('a').checked, true);
+  assert.equal(env.element('import').disabled, true);
+  env.choose('b');
+  response.resolve({groups: [group('a'), group('b')]}); await loading;
+  assert.equal(env.input('a').checked, true);
+  assert.equal(env.input('b').checked, true);
+  assert.deepEqual(env.ids(), ['a', 'b']);
+  assert.equal(env.element('import').disabled, false);
+  assert.equal(env.element('lessonsStatus').hidden, true);
+});
+
+test('failed refresh and a later retry preserve selection, while removed lessons are pruned', async () => {
+  const env = environment(); env.choose('a'); env.choose('b');
+  env.lessonResponse = async () => { throw Error('网络中断'); };
+  await env.api.loadLessons();
+  assert.equal(env.input('a').checked, true);
+  assert.equal(env.element('import').disabled, false);
+  assert.match(env.element('lessonsStatus').textContent, /选择已保留.*网络中断/);
+  env.lessonResponse = async () => ({groups: [group('a')]});
+  await env.api.loadLessons();
+  assert.deepEqual(env.ids(), ['a']);
+  assert.equal(env.input('a').checked, true);
+});
+
+test('a response from the previous course cannot overwrite the new course or its selection', async () => {
+  const env = environment(), old = deferred(), next = deferred();
+  env.choose('a'); env.lessonResponse = () => old.promise;
+  const first = env.api.loadLessons();
+  env.element('courses').value = 'course-b'; env.lessonResponse = () => next.promise;
+  env.element('courses').onchange();
+  assert.deepEqual(env.ids(), []);
+  next.resolve({groups: [group('new')]});
+  await new Promise(resolve => setImmediate(resolve));
+  env.choose('new'); old.resolve({groups: [group('a')]}); await first;
+  assert.deepEqual(env.ids(), ['new']);
+  assert.equal(env.input('a'), undefined);
+  assert.equal(env.input('new').checked, true);
+});
+
+test('turning off single-period import during a refresh removes the invalid choice', async () => {
+  const env = environment([group('a'), group('single', true)]), response = deferred();
+  assert.equal(env.input('single').disabled, true);
+  env.element('allowSingle').checked = true; env.element('allowSingle').onchange(); env.choose('single');
+  env.lessonResponse = () => response.promise; const loading = env.api.loadLessons();
+  env.element('allowSingle').checked = false; env.element('allowSingle').onchange();
+  assert.equal(env.input('single').disabled, true);
+  assert.deepEqual(env.ids(), []);
+  response.resolve({groups: [group('a'), group('single', true)]}); await loading;
+  assert.equal(env.input('single').checked, false);
+  assert.equal(env.element('import').disabled, true);
+});
+
+test('failed import keeps the choice; success clears only submitted lessons', async () => {
+  const env = environment(); env.choose('a');
+  env.importResponse = async () => { throw Error('提交失败'); };
+  await env.element('import').onclick();
+  assert.deepEqual(env.ids(), ['a']);
+  assert.equal(env.input('a').checked, true);
+  assert.equal(env.element('import').disabled, false);
+  const response = deferred(); env.importResponse = () => response.promise;
+  const submitting = env.element('import').onclick();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(env.requests.at(-1).body.ids, ['a']);
+  env.choose('b'); response.resolve({added: ['a']}); await submitting;
+  assert.deepEqual(env.ids(), ['b']);
+  assert.equal(env.input('a').checked, false);
+  assert.equal(env.input('b').checked, true);
+  assert.equal(env.element('selectionStatus').textContent, '已选择 1 个课次');
+});
+
+test('import completion from a previous course does not clear a new selection', async () => {
+  const env = environment(), response = deferred(); env.choose('a');
+  env.importResponse = () => response.promise;
+  const submitting = env.element('import').onclick();
+  await new Promise(resolve => setImmediate(resolve));
+  env.element('courses').value = 'course-b';
+  env.lessonResponse = async () => ({groups: [group('a')]}); env.element('courses').onchange();
+  await new Promise(resolve => setImmediate(resolve)); env.choose('a');
+  response.resolve({added: ['a']}); await submitting;
+  assert.deepEqual(env.ids(), ['a']);
+  assert.equal(env.input('a').checked, true);
+});

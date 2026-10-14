@@ -46,6 +46,10 @@
 .task-progress::-webkit-progress-value { background: var(--green); border-radius: 4px; }
 .task-progress::-moz-progress-bar { background: var(--green); border-radius: 4px; }
 .task-progress-indeterminate { height: 7px; border-radius: 4px; overflow: hidden; background: var(--green-soft); }
+.task-progress-indeterminate::after { content: ""; display: block; width: 35%; height: 100%; border-radius: inherit; background: var(--green); animation: task-activity 1.8s ease-in-out infinite; }
+.task-ai-activity { margin: 8px 0 0; color: var(--muted); font-size: var(--text-xs); line-height: 1.7; font-variant-numeric: tabular-nums; }
+@keyframes task-activity { from { transform: translateX(-100%); } to { transform: translateX(286%); } }
+@media (prefers-reduced-motion: reduce) { .task-progress-indeterminate::after { animation: none; } }
 .task-resource.error { color: var(--danger); }
 .task-estimate { margin: 8px 0 0; color: var(--muted); font-size: var(--text-xs); line-height: 1.7; font-variant-numeric: tabular-nums; }
 .task-actions { display: flex; flex-wrap: wrap; gap: 7px; margin: 14px 0 0; }

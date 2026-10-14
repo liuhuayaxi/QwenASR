@@ -233,7 +233,7 @@ input[type="checkbox"]:not(.toggle-row input):not([hidden]) {
 }
 
 /* Hover */
-input[type="checkbox"]:not(.toggle-row input):not([hidden]):hover:not(:disabled) {
+input[type="checkbox"]:not(.toggle-row input):not([hidden]):hover:not(:disabled):not(:checked) {
   border-color: var(--green-line);
   background: var(--green-soft);
 }
@@ -328,7 +328,7 @@ input[type="radio"] {
   flex-shrink: 0;
 }
 
-input[type="radio"]:hover:not(:disabled) {
+input[type="radio"]:hover:not(:disabled):not(:checked) {
   border-color: var(--green-line);
   background: var(--green-soft);
 }
