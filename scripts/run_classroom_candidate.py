@@ -1,4 +1,4 @@
-"""Start the reviewed worktree against existing Mac data; keep original code intact."""
+"""Start the classroom edition from this checkout, preserving the primary data paths."""
 from __future__ import annotations
 
 import json
@@ -11,7 +11,12 @@ import urllib.request
 from pathlib import Path
 
 WORKTREE=Path(__file__).resolve().parent.parent
-ORIGINAL=Path('/Users/liuhuayaxi/AIcreatedapplication/QwenASR')
+try:
+    common=Path(subprocess.check_output(['git','rev-parse','--git-common-dir'],cwd=WORKTREE,text=True).strip())
+    if not common.is_absolute():common=WORKTREE/common
+    ORIGINAL=common.resolve().parent
+except (OSError,subprocess.CalledProcessError):
+    ORIGINAL=WORKTREE
 BASE='http://127.0.0.1:8765'
 
 

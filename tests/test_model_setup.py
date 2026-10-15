@@ -49,6 +49,7 @@ class ModelLaunchPolicyTests(unittest.TestCase):
                 fake=binary/'python'
                 fake.write_text('''#!/bin/bash
 printf '%s\\n' "$*" >> "$LAUNCH_LOG"
+printf 'CLASSROOM_EDITION=%s\\n' "$QWEN_ASR_CLASSROOM_EDITION" >> "$LAUNCH_LOG"
 if [[ "$*" == *check_environment.py* ]]; then exit "${DEPENDENCIES_MISSING:-0}"; fi
 if [[ "$*" == *"model_setup requirements"* ]]; then printf '%s\\n' "$PWD/requirements-core.lock"; fi
 ''');fake.chmod(0o755)
@@ -61,9 +62,11 @@ if [[ "$*" == *"model_setup requirements"* ]]; then printf '%s\\n' "$PWD/require
                 hf=binary/'hf';hf.write_text('#!/bin/bash\nexit 99\n');hf.chmod(0o755)
                 env={**os.environ,'PATH':str(root)+os.pathsep+os.environ['PATH'],'LAUNCH_LOG':str(log),
                      'DEPENDENCIES_MISSING':str(int(fresh)),'WTP_NO_OPEN':'1','QWEN_ASR_DATA_DIR':str(root/'data')}
+                env.pop('QWEN_ASR_CLASSROOM_EDITION',None)
                 result=subprocess.run(['bash',str(launcher)],env=env,capture_output=True,text=True)
                 self.assertEqual(result.returncode,0,result.stderr)
                 calls=log.read_text()
                 self.assertIn('model_setup check',calls);self.assertIn('service_control start',calls)
+                self.assertIn('CLASSROOM_EDITION=1',calls)
                 self.assertNotIn('download',calls);self.assertNotIn('model_setup prepare',calls)
                 if fresh:self.assertIn('requirements-core.lock',calls)

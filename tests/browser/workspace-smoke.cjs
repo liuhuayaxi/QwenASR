@@ -390,6 +390,8 @@ async function fixtures(route) {
     await reader.locator('#noteSaveStatus').getByText('失败',{exact:false}).waitFor();
     assert.equal(await outer.isVisible(),true);assert.equal(await page.locator('#workspaceFrame').isVisible(),false);
     failSave=false;await reader.locator('#askNoteClass').click();await outer.waitFor({state:'hidden'});
+    await page.waitForFunction(()=>document.querySelector('#workspaceTabs [aria-current="page"]')?.dataset.tab==='review'
+      && new URL(document.getElementById('workspaceFrame').src).searchParams.get('chat')==='smoke-class');
     assert.equal(await page.locator('#workspaceTabs [aria-current="page"]').getAttribute('data-tab'),'review');
     const url=new URL(await page.locator('#workspaceFrame').getAttribute('src'),origin);
     assert.equal(url.searchParams.get('chat'),'smoke-class');

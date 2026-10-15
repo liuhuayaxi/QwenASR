@@ -4,6 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
+export QWEN_ASR_CLASSROOM_EDITION="${QWEN_ASR_CLASSROOM_EDITION:-1}"
 
 PORT="${QWEN_ASR_PORT:-8765}"
 URL="http://127.0.0.1:${PORT}"
