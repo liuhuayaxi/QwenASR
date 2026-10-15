@@ -82,6 +82,7 @@ class ModelManager:
         self.unload_task: asyncio.Task[Any] | None = None
         self._unloading = False
         self._closing = False
+        self._retained_unready_worker = False
 
     async def _worker_thread(self, operation: Any) -> None:
         """Keep the caller's locks until an uncancellable worker thread exits."""
@@ -92,29 +93,42 @@ class ModelManager:
         self.cancel_unload()
         async with self.load_lock:
             if self.worker is not None and self.worker.is_alive():
+                if getattr(self, '_retained_unready_worker', False):
+                    raise RuntimeError("模型尚未加载成功且原子进程未退出，请先释放该进程后重试")
                 return
             self.status = "loading"
             self.detail = "正在按需加载 Qwen3-ASR-1.7B…"
             started = time.monotonic()
+            load_completed = False
+            def start_worker():
+                nonlocal load_completed
+                self._start_worker_sync()
+                load_completed = True
+                self._retained_unready_worker = False
             try:
                 if not self.model_path.exists():
                     raise FileNotFoundError(f"模型目录不存在：{self.model_path}；请运行 .venv/bin/python -m qwen_asr_app.model_setup prepare，或在设置中选择仅远程 ASR")
-                await self._worker_thread(self._start_worker_sync)
+                await self._worker_thread(start_worker)
                 self.load_seconds = round(time.monotonic() - started, 1)
                 self.status = "ready"
                 self.detail = f"Qwen3-ASR-1.7B BF16 已就绪 · {self.device}"
             except asyncio.CancelledError:
                 # Loading may have completed after its requester disconnected.
-                if self.worker is not None and self.worker.is_alive():
+                if load_completed and self.worker is not None and self.worker.is_alive():
                     self.status = "ready"
                     self.detail = f"Qwen3-ASR-1.7B BF16 已就绪 · {self.device}"
                     self.load_seconds = round(time.monotonic() - started, 1)
+                elif self.worker is not None and self.worker.is_alive():
+                    self._retained_unready_worker = True
+                    self.status = "error"
+                    self.detail = "模型加载未完成，子进程尚未退出；暂不启动新模型"
                 else:
                     self.status = "idle"
                     self.detail = "模型加载已取消 · 下次转写时自动加载"
                 self.schedule_unload()
                 raise
             except Exception as exc:  # pragma: no cover - exposed by health endpoint
+                self._retained_unready_worker = bool(not load_completed and self.worker is not None and self.worker.is_alive())
                 self.status = "error"
                 self.detail = f"模型加载失败：{exc}"
                 print(self.detail, flush=True)
@@ -169,6 +183,7 @@ class ModelManager:
                 except Exception:
                     pass
         self.worker = None
+        self._retained_unready_worker = False
         self.request_queue = None
         self.result_queue = None
 
