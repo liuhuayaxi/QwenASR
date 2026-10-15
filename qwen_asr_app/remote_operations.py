@@ -64,7 +64,10 @@ def receipt(path):
     if not path:
         return {}
     try:
-        return json.loads(Path(path).read_text())
+        value = json.loads(Path(path).read_text())
+        if not isinstance(value, dict) or not isinstance(value.get('state', ''), str):
+            raise ValueError('远程操作收据必须是状态有效的对象')
+        return value
     except FileNotFoundError:
         return {}
     except (OSError, ValueError):

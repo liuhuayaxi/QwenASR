@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 import ipaddress
 
 from .durable import atomic_json
+from .async_tasks import await_owned_task
 from .paths import PRIVATE_ROOT, ROOT
 
 MODES = ("local", "remote_preferred", "remote_only")
@@ -239,12 +240,7 @@ class RemoteASRProvider:
                     raise RuntimeError("远程音频未处理到结束")
                 return value, metadata
         pending = asyncio.create_task(asyncio.to_thread(operation))
-        try:
-            return await asyncio.shield(pending)
-        except asyncio.CancelledError:
-            stop.set()
-            await asyncio.gather(pending, return_exceptions=True)
-            raise
+        return await await_owned_task(pending, stop=stop)
 
 
 def runtime_fingerprint(config):
