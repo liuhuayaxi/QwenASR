@@ -108,8 +108,10 @@ def normalize_live_params(raw: Any) -> dict[str, float]:
     result: dict[str, float] = {}
     for name, (low, high) in limits.items():
         try:
+            if isinstance(params[name], bool):
+                raise ValueError("boolean is not a numeric parameter")
             value = float(params[name])
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, OverflowError) as exc:
             raise ValueError(f"实时分段参数 {name} 必须是数字") from exc
         if not low <= value <= high:
             raise ValueError(f"实时分段参数 {name} 必须在 {low}–{high} 之间")
@@ -134,8 +136,13 @@ def normalize_asr_params(raw: Any, fallback_max_tokens: int = 384) -> dict[str, 
 
     def integer(name: str, low: int, high: int) -> int:
         try:
-            value = int(params[name])
-        except (TypeError, ValueError) as exc:
+            candidate = params[name]
+            if isinstance(candidate, bool):
+                raise ValueError("boolean is not an integer parameter")
+            value = int(candidate)
+            if not isinstance(candidate, str) and candidate != value:
+                raise ValueError("integer parameters cannot be truncated")
+        except (TypeError, ValueError, OverflowError) as exc:
             raise ValueError(f"ASR 参数 {name} 必须是整数") from exc
         if not low <= value <= high:
             raise ValueError(f"ASR 参数 {name} 必须在 {low}–{high} 之间")
@@ -143,8 +150,10 @@ def normalize_asr_params(raw: Any, fallback_max_tokens: int = 384) -> dict[str, 
 
     def number(name: str, low: float, high: float) -> float:
         try:
+            if isinstance(params[name], bool):
+                raise ValueError("boolean is not a numeric parameter")
             value = float(params[name])
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, OverflowError) as exc:
             raise ValueError(f"ASR 参数 {name} 必须是数字") from exc
         if not low <= value <= high:
             raise ValueError(f"ASR 参数 {name} 必须在 {low}–{high} 之间")
@@ -167,8 +176,10 @@ def normalize_asr_params(raw: Any, fallback_max_tokens: int = 384) -> dict[str, 
     penalty = params.get("repetition_penalty")
     if penalty is not None:
         try:
+            if isinstance(penalty, bool):
+                raise ValueError("boolean is not a numeric parameter")
             penalty = float(penalty)
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, OverflowError) as exc:
             raise ValueError("ASR 参数 repetition_penalty 必须是数字或 null") from exc
         if not 0.1 <= penalty <= 5.0:
             raise ValueError("ASR 参数 repetition_penalty 必须在 0.1–5.0 之间或设为 null")

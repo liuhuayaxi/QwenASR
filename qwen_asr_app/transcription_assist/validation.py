@@ -10,7 +10,7 @@ def sensitive_signature(text):
     normalized = re.sub(r'\[\d{1,2}:\d{2}(?::\d{2})?(?:[–—-]\d{1,2}:\d{2}(?::\d{2})?)?\]', '', str(text))
     normalized = normalized.replace('−', '-').replace('－', '-').replace('＋', '+')
     normalized = re.sub(r'(?<=\d),(?=\d{3}(?:\D|$))', '', normalized)
-    numbers = re.findall(r'(?<![0-9A-Za-z_.])[+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\s*(?:%|[μµu]?[mMkKG]?Hz|[μµu]?[mMkK]?W|[μµu]?[mMc]?A|[μµu]?[mMkK]?V|[μµu]?[mMc]?s|[μµu]?m|dB|℃|°C|nm|毫米|厘米|毫瓦|瓦|伏|秒|赫兹)?', normalized)
+    numbers = re.findall(r'(?<![0-9A-Za-z_.])[+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?\s*(?:%|[μµu]?[mMkKG]?Hz|[μµu]?[mMkK]?W|[μµu]?[mMc]?A|[μµu]?[mMkK]?V|[μµu]?[mMc]?s|[μµu]?m|dB|℃|°C|nm|毫米|厘米|毫瓦|瓦|伏|秒|赫兹)?', normalized)
     numbers = [re.sub(r'\s+', '', n).replace('µ','μ') for n in numbers]
     negations = re.findall(r'不是|不能|不会|不等于|不成立|不存在|不满足|没有|未测量|无关|非(?=相干|线性|同步|相关|对称|平稳|因果|零|负)|无(?=噪声|损耗|损|效|解)|不(?!仅|断|同|管|论|过|但)|(?:\bnot\b|\bnever\b|\bno\b)', normalized, flags=re.I)
     relations = re.findall(r'<=|>=|!=|≤|≥|≠|(?<![<>])[<>](?![<>])|不小于|不大于|大于等于|小于等于|大于|小于|至少|至多', normalized)

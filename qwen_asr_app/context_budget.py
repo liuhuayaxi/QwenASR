@@ -18,8 +18,14 @@ _CJK_RE = re.compile(
 
 def normalize_context_window(value: Any) -> int:
     try:
-        tokens = int(value or DEFAULT_CONTEXT_WINDOW)
-    except (TypeError, ValueError) as exc:
+        if isinstance(value, bool) or (value is not None and not isinstance(value, (int, float, str))):
+            raise ValueError("context window must be a numeric value")
+        # Keep the existing zero/empty sentinel used by saved configurations.
+        candidate = value or DEFAULT_CONTEXT_WINDOW
+        tokens = int(candidate)
+        if not isinstance(candidate, str) and candidate != tokens:
+            raise ValueError("context window cannot be truncated")
+    except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError("Context Window 必须是整数") from exc
     if not MIN_CONTEXT_WINDOW <= tokens <= MAX_CONTEXT_WINDOW:
         raise ValueError(

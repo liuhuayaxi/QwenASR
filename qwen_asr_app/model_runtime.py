@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .lazy import lazy_module
+from .async_tasks import await_owned_task
 
 from .scheduler import PriorityGate
 from .settings import SAMPLE_RATE, normalize_asr_params
@@ -81,49 +82,53 @@ class ModelManager:
         self.unload_task: asyncio.Task[Any] | None = None
         self._unloading = False
         self._closing = False
+        self._retained_unready_worker = False
 
     async def _worker_thread(self, operation: Any) -> None:
         """Keep the caller's locks until an uncancellable worker thread exits."""
         pending = asyncio.create_task(asyncio.to_thread(operation))
-        cancelled = False
-        while True:
-            try:
-                await asyncio.shield(pending)
-                break
-            except asyncio.CancelledError:
-                if pending.cancelled():
-                    raise
-                cancelled = True
-        if cancelled:
-            raise asyncio.CancelledError
+        await await_owned_task(pending)
 
     async def load(self, force_local: bool = False, inference_config=None) -> None:
         self.cancel_unload()
         async with self.load_lock:
             if self.worker is not None and self.worker.is_alive():
+                if getattr(self, '_retained_unready_worker', False):
+                    raise RuntimeError("模型尚未加载成功且原子进程未退出，请先释放该进程后重试")
                 return
             self.status = "loading"
             self.detail = "正在按需加载 Qwen3-ASR-1.7B…"
             started = time.monotonic()
+            load_completed = False
+            def start_worker():
+                nonlocal load_completed
+                self._start_worker_sync()
+                load_completed = True
+                self._retained_unready_worker = False
             try:
                 if not self.model_path.exists():
                     raise FileNotFoundError(f"模型目录不存在：{self.model_path}；请运行 .venv/bin/python -m qwen_asr_app.model_setup prepare，或在设置中选择仅远程 ASR")
-                await self._worker_thread(self._start_worker_sync)
+                await self._worker_thread(start_worker)
                 self.load_seconds = round(time.monotonic() - started, 1)
                 self.status = "ready"
                 self.detail = f"Qwen3-ASR-1.7B BF16 已就绪 · {self.device}"
             except asyncio.CancelledError:
                 # Loading may have completed after its requester disconnected.
-                if self.worker is not None and self.worker.is_alive():
+                if load_completed and self.worker is not None and self.worker.is_alive():
                     self.status = "ready"
                     self.detail = f"Qwen3-ASR-1.7B BF16 已就绪 · {self.device}"
                     self.load_seconds = round(time.monotonic() - started, 1)
+                elif self.worker is not None and self.worker.is_alive():
+                    self._retained_unready_worker = True
+                    self.status = "error"
+                    self.detail = "模型加载未完成，子进程尚未退出；暂不启动新模型"
                 else:
                     self.status = "idle"
                     self.detail = "模型加载已取消 · 下次转写时自动加载"
                 self.schedule_unload()
                 raise
             except Exception as exc:  # pragma: no cover - exposed by health endpoint
+                self._retained_unready_worker = bool(not load_completed and self.worker is not None and self.worker.is_alive())
                 self.status = "error"
                 self.detail = f"模型加载失败：{exc}"
                 print(self.detail, flush=True)
@@ -163,6 +168,13 @@ class ModelManager:
             if worker.is_alive():
                 worker.terminate()
                 worker.join(timeout=3)
+            if worker.is_alive():
+                worker.kill()
+                worker.join(timeout=3)
+            if worker.is_alive():
+                # Retain ownership: starting a new worker could duplicate GPU
+                # allocations while the old process still uses these queues.
+                raise RuntimeError("模型子进程未能退出，保留进程引用以防重复加载")
         for channel in (request_queue, result_queue):
             if channel is not None:
                 try:
@@ -171,6 +183,7 @@ class ModelManager:
                 except Exception:
                     pass
         self.worker = None
+        self._retained_unready_worker = False
         self.request_queue = None
         self.result_queue = None
 
@@ -268,8 +281,12 @@ class ModelManager:
             await self._worker_thread(self._stop_worker_sync)
         finally:
             self._unloading = False
-            self.status = "idle"
-            self.detail = "Qwen3-ASR 已卸载释放内存 · 下次转写时自动加载"
+            if self.worker is None:
+                self.status = "idle"
+                self.detail = "Qwen3-ASR 已卸载释放内存 · 下次转写时自动加载"
+            else:
+                self.status = "error"
+                self.detail = "Qwen3-ASR 子进程尚未退出，暂不启动新模型"
 
     async def close(self) -> None:
         self._closing = True
@@ -398,11 +415,7 @@ class ModelManager:
                         return result
                 # Cancellation must not release the GPU while its thread still owns it.
                 inference = asyncio.create_task(infer())
-                try:
-                    text, detected = await asyncio.shield(inference)
-                except asyncio.CancelledError:
-                    await asyncio.gather(inference, return_exceptions=True)
-                    raise
+                text, detected = await await_owned_task(inference)
             return text, detected, round(time.monotonic() - started, 2)
         finally:
             self.active_jobs = max(0, self.active_jobs - 1)

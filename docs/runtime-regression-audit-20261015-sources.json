@@ -1,0 +1,95 @@
+{
+  "repository": "liuhuayaxi/QwenASR",
+  "baseline_commit": "a2c1f10e1e6d5559a7cde61f968c4036a6190c47",
+  "scope": "Exact-SHA-verified local dependency subset, not the complete repository.",
+  "files": {
+    "qwen_asr_app/__init__.py": {
+      "git_blob_sha": "0ab81e489f584d63d812bad7764b1514e0a019d2",
+      "bytes": 68
+    },
+    "qwen_asr_app/paths.py": {
+      "git_blob_sha": "80157346ca1086f6db7bcf60952101431ba394af",
+      "bytes": 443
+    },
+    "qwen_asr_app/lazy.py": {
+      "git_blob_sha": "5438e50e71992ad846e5708c57bb792de688bdf3",
+      "bytes": 637
+    },
+    "qwen_asr_app/scheduler.py": {
+      "git_blob_sha": "d1c610bb5a7628737963668b45c4cf656b143b2e",
+      "bytes": 1706
+    },
+    "qwen_asr_app/durable.py": {
+      "git_blob_sha": "ff5ad0f91cd64adba80a377e0953d9ded8e36b03",
+      "bytes": 809
+    },
+    "qwen_asr_app/settings.py": {
+      "git_blob_sha": "ec310f863540e47ff333714664d0dd67ff3ead0a",
+      "bytes": 9324
+    },
+    "qwen_asr_app/model_runtime.py": {
+      "git_blob_sha": "c36ea279d1b766dd1b33a86164cd23d887875a8a",
+      "bytes": 18061
+    },
+    "qwen_asr_app/inference_providers.py": {
+      "git_blob_sha": "f3583905653893e50a635066e9cd667bcd565f6d",
+      "bytes": 12412
+    },
+    "tests/isolation.py": {
+      "git_blob_sha": "576ce80e5e03725abf189cc19f2a5b35fb9e4db5",
+      "bytes": 1211
+    },
+    "tests/__init__.py": {
+      "git_blob_sha": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+      "bytes": 0
+    },
+    "qwen_asr_app/remote_operations.py": {
+      "git_blob_sha": "89843d7a4d29815692a14a1e3c8c4f4c09295d16",
+      "bytes": 5877
+    },
+    "ai-infer-node/workers/text_merge.py": {
+      "git_blob_sha": "37fd29b608fa890e8ae6fe1aba658ce54219af41",
+      "bytes": 355
+    },
+    "qwen_asr_app/conversion_control.py": {
+      "git_blob_sha": "1c9af305acd1f6d419519fd84196fcff2e61337a",
+      "bytes": 902
+    },
+    "qwen_asr_app/media_retention.py": {
+      "git_blob_sha": "2e128bc157cb82f40f9bd94029d9efd926402316",
+      "bytes": 1492
+    },
+    "qwen_asr_app/transcription_assist/validation.py": {
+      "git_blob_sha": "30ff6d02f7578075157d4ea797e44fb37533939a",
+      "bytes": 3775
+    },
+    "qwen_asr_app/transcription_assist/__init__.py": {
+      "git_blob_sha": "e4aa14c32b6833f012dc07e258fd6ab28c20e3e4",
+      "bytes": 78
+    },
+    "qwen_asr_app/context_budget.py": {
+      "git_blob_sha": "19c9ab063427421aa1fe36b5502119a89d7301d9",
+      "bytes": 4670
+    },
+    "qwen_asr_app/transcription_assist/service.py": {
+      "git_blob_sha": "f1eff3ce19a382dde833bb140c3b818da42be308",
+      "bytes": 5696
+    },
+    "qwen_asr_app/terminology.py": {
+      "git_blob_sha": "6c4291764d244579518d6bf947449571dccdf009",
+      "bytes": 8010
+    },
+    "tests/test_transcription_assist.py": {
+      "git_blob_sha": "d9304a1fabcf32f7b0063895ae031e627e043da3",
+      "bytes": 1983
+    },
+    "static/js/cached-json.js": {
+      "git_blob_sha": "4879fe173c1023208da63f0d0a22c798838dbea9",
+      "bytes": 702
+    },
+    "tests/test_cached_json.cjs": {
+      "git_blob_sha": "4ba02d13ed56c80b91c372d5cf3bce32d2cf2189",
+      "bytes": 902
+    }
+  }
+}
