@@ -59,4 +59,6 @@ Native PDF text extraction, selected-page rendering, image matching and completi
 
 Knowledge-store connections close at each transaction boundary. Vector serialization retains the existing float32 format. Exact cosine ranking streams database rows into a bounded top-k heap using the standard library, so retrieval does not load a permanent NumPy runtime or allocate a full matrix in the web service. Actual local inference remains a separate, on-demand process.
 
+Remote search initially loads only replica identities and versions. It fetches vector bytes only for the next changed batch (at most 64 vectors), and loads the original text only for returned, freshly revalidated hits. Waiting for Windows therefore does not retain every vector and paragraph in a course. Deleted entries, changed source versions and unmatched result IDs remain excluded.
+
 Measure an idle service with no recording, AI, indexing or export work. On macOS compare physical footprint (including the process's compressed/swapped allocation), not just RSS; record active worker processes separately. A cold process, an indexing process and a service after real requests are different measurements.
