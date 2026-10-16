@@ -1,4 +1,5 @@
-import {taskGroups, filterTaskGroups, groupCounts, actionableTasks, activeStatuses, errorStatuses} from './task-center-view.js?v=20261016-unified-1';
+import {taskGroups, filterTaskGroups, groupCounts, actionableTasks, completedTasks, taskMatchesType, activeStatuses, errorStatuses} from './task-center-view.js?v=20261016-unified-1';
+import {createTaskPdfDialog} from './task-pdf-dialog.js?v=20261016-deep-ui-1';
 import {aiTaskPayload} from './task-config.js?v=20260913-tasks-1';
 import {mergeLiveCourseProgress} from './course-progress.js?v=20261011-live-1';
 import {mineruEstimateLabel, legacyMineruProgress} from './mineru-progress-view.js?v=20261013-time-2';
@@ -29,7 +30,11 @@ async function api(path, body) {
 function filteredGroups(filter = state.filter) {
   return filterTaskGroups(state.groups, {filter, type: $('typeFilter').value, category: $('categoryFilter').value, query: $('taskSearch').value});
 }
-function filteredTasks() { return actionableTasks(filteredGroups()); }
+function filteredTasks() { return actionableTasks(filteredGroups(), $('typeFilter').value); }
+function visibleCompleted() { return completedTasks(filteredGroups(), $('typeFilter').value); }
+function retryCandidates() {
+  return defaultBulkTasks(filteredTasks()).filter(task => attention.has(task.status) && (task.actions || []).some(action => ['retry', 'continue'].includes(action)));
+}
 function dateLabel(value) {
   if (!value) return '';
   const date = new Date(typeof value === 'number' ? value * 1000 : value);
@@ -90,7 +95,7 @@ function defaultBulkTasks(tasks) { return tasks.filter(task => !isReviewTask(tas
 function card(task, historical = false) {
   const recovered = !!task.recovered || task.display_status === 'recovered';
   const done = historical || task.status === 'completed' || recovered;
-  const actions = done ? [] : (task.actions || []);
+  const actions = done || !taskMatchesType(task, $('typeFilter').value) ? [] : (task.actions || []);
   const review = !done && isReviewTask(task);
   const activity = aiActivityView(task);
   const resultClass = done ? 'task-result-link' : 'ui-button';
@@ -141,7 +146,7 @@ function card(task, historical = false) {
     </div></div></article>`;
 }
 function contextQueueCard(task) {
-  return `<article class="task-card task-context-card" data-id="${esc(task.id)}">${task.actions?.length ? `<p class="task-queue-scope">队列操作会影响全部课次。</p><label><input class="task-select" type="checkbox" aria-label="选择整个课程队列" ${state.selected.has(task.id) ? 'checked' : ''} ${state.busy ? 'disabled' : ''}> 选择整个课程队列参与批量处理</label><div class="task-actions">${task.actions.map(action => `<button data-action="${action}" class="ui-button ${action === 'cancel' ? 'danger' : ''}" ${state.busy ? 'disabled' : ''}>${taskActionLabel(task, action)}</button>`).join('')}</div>` : ''}${courseQueueDetails(task)}</article>`;
+  return `<article class="task-card task-context-card" data-id="${esc(task.id)}">${task.actions?.length && taskMatchesType(task, $('typeFilter').value) ? `<p class="task-queue-scope">队列操作会影响全部课次。</p><label><input class="task-select" type="checkbox" aria-label="选择整个课程队列" ${state.selected.has(task.id) ? 'checked' : ''} ${state.busy ? 'disabled' : ''}> 选择整个课程队列参与批量处理</label><div class="task-actions">${task.actions.map(action => `<button data-action="${action}" class="ui-button ${action === 'cancel' ? 'danger' : ''}" ${state.busy ? 'disabled' : ''}>${taskActionLabel(task, action)}</button>`).join('')}</div>` : ''}${courseQueueDetails(task)}</article>`;
 }
 function groupCard(group) {
   const current = group.current_tasks;
@@ -187,11 +192,11 @@ function selectionControls() {
     button.disabled = state.busy || !count;
     button.textContent = `${actionLabels[button.dataset.bulk]}${count ? ` (${count})` : ''}`;
   });
-  const completed = state.tasks.filter(task => task.status === 'completed');
+  const completed = visibleCompleted();
   $('clearCompleted').disabled = state.busy || !completed.length;
   $('restoreCompleted').hidden = state.busy || !state.history.can_restore;
   $('restoreCompleted').disabled = state.busy;
-  $('retryFailed').disabled = state.busy || !actionableTasks(state.groups).some(task => !task.is_context && attention.has(task.status) && (task.actions || []).some(action => ['retry', 'continue'].includes(action)));
+  $('retryFailed').disabled = state.busy || !retryCandidates().length;
 }
 function detailKey(node) {
   return `${node.closest('[data-group-id]')?.dataset.groupId || ''}|${node.closest('[data-id]')?.dataset.id || ''}|${node.dataset.detailKey || ''}`;
@@ -230,7 +235,7 @@ function setFilter(filter) { state.filter = filter; applyFilters(); }
 async function load() {
   if (state.busy) return;
   if (state.loading) { state.reloadRequested = true; return; }
-  clearTimeout(timer); state.loading = true; const revision = state.revision, hadReady = state.ready;
+  clearTimeout(timer); state.loading = true; $('taskList').setAttribute('aria-busy', 'true'); const revision = state.revision, hadReady = state.ready;
   try {
     let data = await api('/api/tasks');
     let courseWarning = '';
@@ -247,8 +252,8 @@ async function load() {
     state.tasks = data.tasks || []; state.groups = taskGroups(data); state.counts = groupCounts(state.groups); state.history = data.history || {}; state.ready = true;
     const actionable = new Set(actionableTasks(state.groups).map(task => task.id));
     state.selected = new Set([...state.selected].filter(id => actionable.has(id)));
-    const categories = [...new Set([...state.groups.map(group => group.category), new URLSearchParams(location.search).get('category')].filter(Boolean))].sort((a,b) => a.localeCompare(b,'zh-CN'));
     const categoryValue = hadReady ? $('categoryFilter').value : new URLSearchParams(location.search).get('category') || '';
+    const categories = [...new Set([...state.groups.map(group => group.category), categoryValue].filter(value => value && value !== '__local__'))].sort((a,b) => a.localeCompare(b,'zh-CN'));
     const categoryOptions = '<option value="">全部课程</option>' + categories.map(value => `<option value="${esc(value)}">${esc(value)}</option>`).join('') + '<option value="__local__">本地 PDF</option>';
     if ($('categoryFilter').innerHTML !== categoryOptions) $('categoryFilter').innerHTML = categoryOptions;
     if ([...$('categoryFilter').options].some(option => option.value === categoryValue)) $('categoryFilter').value = categoryValue;
@@ -267,10 +272,32 @@ async function load() {
     else if (!document.hidden) timer = setTimeout(load, 3000);
   }
 }
+function actionFocus() {
+  const element = document.activeElement;
+  return {element, group: element?.closest('[data-group-id]')?.dataset.groupId,
+    id: element?.closest('[data-id]')?.dataset.id, action: element?.dataset.action};
+}
+function restoreActionFocus(origin) {
+  // Do not take focus from an input the user moved to while IO was pending.
+  if (document.activeElement !== document.body) return;
+  if (origin.element?.isConnected && !origin.element.disabled && origin.element.getClientRects().length) {
+    origin.element.focus({preventScroll:true}); return;
+  }
+  const group = [...$('taskList').querySelectorAll('[data-group-id]')].find(node => node.dataset.groupId === origin.group);
+  const card = [...(group?.querySelectorAll('[data-id]') || [])].find(node => node.dataset.id === origin.id);
+  const button = [...(card?.querySelectorAll('[data-action]') || [])].find(node => node.dataset.action === origin.action && !node.disabled);
+  const target = button || group?.querySelector('.task-group-head h3') || $('listTitle');
+  if (!button) target.tabIndex = -1;
+  target.focus({preventScroll:true});
+}
+
 async function perform(targets, action, bulk = false) {
+  if (state.busy || !targets.length) return;
+  if (action === 'cancel' && !confirm(`确认取消 ${targets.length} 个处理步骤？已完成的结果仍保留。${targets.some(task => task.type === 'course_queue') ? '课程队列操作会影响全部课次。' : ''}`)) return;
   const newOperation = ['new_local', 'new_recognition'].includes(action);
   if (newOperation && !confirm('旧远端任务可能仍在运行。新任务可能重复计算，旧收据与结果会保留。确认创建新任务？')) return;
   if (state.busy || !targets.length) return;
+  const focus = actionFocus();
   state.busy = true; state.revision += 1; render(); notice('actionResult', '');
   try {
     // The backend rebuilds AI settings from its local durable store. Do not
@@ -279,14 +306,15 @@ async function perform(targets, action, bulk = false) {
     if (bulk) {
       const result = await api('/api/tasks/bulk-action', {action, items});
       const failures = result.results.filter(item => !item.ok).map(item => `${targets.find(task => task.id === item.id)?.title || '任务'}：${item.error}`);
+      for (const item of result.results) if (item.ok) state.selected.delete(item.id);
       notice('actionResult', `已提交${actionLabels[action]} ${result.accepted}/${result.requested} 项任务${failures.length ? '\n' + failures.join('\n') : ''}`);
     } else {
       await api('/api/tasks/action', items[0]);
+      state.selected.delete(targets[0].id);
       toast(action === 'pause' || action === 'cancel' ? `已请求${actionLabels[action]}，正在保存进度` : '任务已加入后台队列');
     }
-    state.selected.clear();
   } catch (error) { notice('actionResult', error.message); }
-  finally { state.busy = false; lastPayload = ''; await load(); render(); }
+  finally { state.busy = false; lastPayload = ''; await load(); render(); restoreActionFocus(focus); }
 }
 $('statusFilters').addEventListener('click', event => { const button = event.target.closest('[data-status]'); if (button) setFilter(button.dataset.status); });
 document.querySelectorAll('[data-summary]').forEach(button => button.addEventListener('click', () => setFilter(button.dataset.summary)));
@@ -302,18 +330,29 @@ document.querySelectorAll('[data-bulk]').forEach(button => button.addEventListen
 }));
 $('refreshTasks').addEventListener('click', load);
 $('retryFailed').addEventListener('click', async () => {
-  if (state.busy) return;
-  state.busy = true; state.revision += 1; render(); notice('actionResult', '');
+  const targets = retryCandidates();
+  if (state.busy || !targets.length) return;
+  if (targets.length > 200) { toast('每次最多操作 200 项任务，请缩小筛选范围'); return; }
+  state.busy = true; state.revision += 1;
+  state.selected = new Set(targets.map(task => task.id)); render(); notice('actionResult', '');
+  const results = [];
   try {
-    const result = await api('/api/tasks/retry-failed', {});
-    const failures = (result.results || []).filter(item => !item.ok).map(item => `${item.id}：${item.error}`);
-    notice('actionResult', `已提交失败任务重试 ${result.accepted}/${result.requested} 项${failures.length ? '\n' + failures.join('\n') : ''}`);
-    state.selected.clear(); lastPayload = '';
-  } catch (error) { notice('actionResult', error.message); }
-  finally { state.busy = false; await load(); render(); }
+    // Freeze the visible identities, not the server-wide failure collection.
+    // Use each step's supported action; resumed steps need not support retry.
+    for (const action of ['retry', 'continue']) {
+      const batch = targets.filter(task => (task.actions.includes('retry') ? 'retry' : 'continue') === action);
+      if (!batch.length) continue;
+      const result = await api('/api/tasks/bulk-action', {action, items: batch.map(task => aiTaskPayload(task, action))});
+      results.push(...result.results);
+      for (const item of result.results) if (item.ok) state.selected.delete(item.id);
+    }
+    const failures = results.filter(item => !item.ok).map(item => `${item.id}：${item.error}`);
+    notice('actionResult', `已提交失败任务重试 ${results.filter(item => item.ok).length}/${targets.length} 项${failures.length ? '\n' + failures.join('\n') : ''}`);
+  } catch (error) { notice('actionResult', `已确认提交 ${results.filter(item => item.ok).length}/${targets.length} 项。${error.message}；未确认的步骤仍保留选择，请先核对状态。`); }
+  finally { state.busy = false; lastPayload = ''; await load(); render(); }
 });
 $('clearCompleted').addEventListener('click', async () => {
-  const completed = state.tasks.filter(task => task.status === 'completed');
+  const completed = visibleCompleted();
   if (!completed.length || state.busy) return;
   state.busy = true; state.revision += 1; render(); notice('actionResult', '');
   try {
@@ -333,26 +372,18 @@ $('restoreCompleted').addEventListener('click', async () => {
   } catch (error) { notice('actionResult', error.message); }
   finally { state.busy = false; await load(); render(); }
 });
-$('newPdf').addEventListener('click', () => $('pdfDialog').showModal());
-$('closePdf').addEventListener('click', () => $('pdfDialog').close());
-$('choosePdf').addEventListener('click', async () => {
-  $('choosePdf').disabled = true; notice('pdfError', '');
-  try { const result = await api('/api/pdf-ai/choose-files'); if (!result.cancelled) $('pdfPaths').value = result.paths.join('\n'); }
-  catch (error) { notice('pdfError', error.message); }
-  finally { $('choosePdf').disabled = false; }
-});
-$('pdfForm').addEventListener('submit', async event => {
-  event.preventDefault(); $('submitPdf').disabled = true; notice('pdfError', '');
-  try {
-    await api('/api/tasks/pdf', {paths: $('pdfPaths').value.split('\n').map(path => path.trim()).filter(Boolean)});
-    $('pdfDialog').close(); $('pdfPaths').value = ''; setFilter('active'); $('typeFilter').value = ''; $('categoryFilter').value = ''; $('taskSearch').value = '';
-    toast('PDF 识别任务已加入队列'); lastPayload = ''; await load(); render();
-  } catch (error) { notice('pdfError', error.message); }
-  finally { $('submitPdf').disabled = false; }
-});
+const pdfDialog = createTaskPdfDialog({api, toast, async onCreated({showCreated}) {
+  if (showCreated) {
+    $('typeFilter').value = ''; $('categoryFilter').value = ''; $('taskSearch').value = '';
+    setFilter('active');
+  }
+  lastPayload = ''; await load(); render();
+}});
 document.addEventListener('visibilitychange', () => { clearTimeout(timer); if (!document.hidden) load(); });
 window.addEventListener('online', load);
 load();
 if (new URLSearchParams(location.search).get('new') === 'pdf') {
-  $('pdfDialog').showModal(); history.replaceState(null, '', '/tasks');
+  pdfDialog.open();
+  const url = new URL(location.href); url.searchParams.delete('new');
+  history.replaceState(history.state, '', url.pathname + url.search + url.hash);
 }

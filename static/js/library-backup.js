@@ -4,24 +4,32 @@ export function createLibraryBackup() {
   const progress = document.getElementById("libraryBackupProgress");
   const status = document.getElementById("libraryBackupStatus");
   if (!button || !download || !progress || !status) return;
-  let timer, busy = false, latest = null;
+  let timer, busy = false, request = null, uncertain = true;
   const size = value => Number(value || 0) >= 1024 ** 3
     ? `${(Number(value) / 1024 ** 3).toFixed(2)} GB`
     : `${(Number(value || 0) / 1024 ** 2).toFixed(1)} MB`;
   async function api(path, options = {}) {
-    const response = await fetch(path, { cache: "no-store", ...options });
+    const response = await fetch(path, {cache:"no-store", signal:AbortSignal.timeout(30000), ...options});
     const data = await response.json();
     if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : "无法读取备份进度");
+    if (!Object.hasOwn(data, 'backup') || (data.backup && !['scanning','packing','verifying','failed','completed','released'].includes(data.backup.status))) {
+      throw new Error('备份状态响应不完整，请重新读取');
+    }
     return data.backup;
   }
+  function controls() {
+    button.disabled = !!request || (busy && !uncertain);
+    button.textContent = uncertain && !request ? "重新读取备份进度"
+      : busy || request === 'create' ? "正在打包日常备份…"
+      : request ? "正在读取备份进度…" : "导出日常备份 ZIP";
+  }
   function render(job) {
-    latest = job;
+    uncertain = false;
     busy = !!job && ["scanning", "packing", "verifying"].includes(job.status);
-    button.disabled = busy;
-    button.textContent = busy ? "正在打包日常备份…" : "导出日常备份 ZIP";
     download.classList.toggle("hidden", job?.status !== "completed");
     progress.classList.toggle("hidden", !job || ["failed", "released"].includes(job.status));
-    if (!job) return;
+    if (job?.status !== 'completed') { download.removeAttribute('href'); download.removeAttribute('download'); }
+    if (!job) { status.textContent = '暂无正在处理的备份，可以导出日常备份。'; return; }
     if (job.percent == null) progress.removeAttribute("value");
     else progress.value = job.percent;
     if (job.status === "scanning") status.textContent = "正在清点课程资料、录音和配置…";
@@ -35,35 +43,25 @@ export function createLibraryBackup() {
     }
     else if (job.status === "released") status.textContent = "临时 ZIP 已清理。请到浏览器的下载列表查看结果；如需重新下载，请再次导出。";
   }
-  async function refresh() {
-    clearTimeout(timer);
+  // Serialize reads and creation. A tab-refresh cannot unlock a pending POST,
+  // and an unknown POST outcome must be reconciled by GET before another POST.
+  async function run(kind) {
+    if (request) return;
+    clearTimeout(timer); request = kind; controls();
     try {
-      render(await api("/api/library/backup"));
-      if (busy) timer = setTimeout(refresh, 1000);
+      render(await api('/api/library/backup', kind === 'create'
+        ? {method:'POST', headers:{'X-QwenASR-Client':'library-backup'}} : {}));
     } catch (error) {
-      // Keep the last state so a connection error cannot cause a second export.
-      button.disabled = false;
-      button.textContent = "重新读取备份进度";
-      status.textContent = `备份进度暂时无法读取：${error.message}`;
+      uncertain = true;
+      status.textContent = `备份结果尚未确认：${error.message}。请重新读取进度，暂不重复创建。`;
+    } finally {
+      request = null; controls();
+      if (busy) timer = setTimeout(refresh, uncertain ? 1500 : 1000);
     }
   }
-  button.addEventListener("click", async () => {
-    button.disabled = true;
-    try {
-      if (busy) { await refresh(); return; }
-      clearTimeout(timer);
-      render(await api("/api/library/backup", {
-        method: "POST", headers: { "X-QwenASR-Client": "library-backup" },
-      }));
-      timer = setTimeout(refresh, 300);
-    } catch (error) {
-      button.disabled = false;
-      status.textContent = error.message;
-      // A previous export may still be working on the server.
-      if (latest && busy) timer = setTimeout(refresh, 1500);
-    }
-  });
-  document.querySelector('[data-settings-tab="library"]')?.addEventListener("click", refresh);
+  const refresh = () => run('read');
+  button.addEventListener('click', () => run(uncertain || busy ? 'read' : 'create'));
+  document.querySelector('[data-settings-tab="library"]')?.addEventListener('click', refresh);
   refresh();
-  return { refresh };
+  return {refresh};
 }

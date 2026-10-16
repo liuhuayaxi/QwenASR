@@ -2,7 +2,11 @@ import {cachedJson} from './cached-json.js';
 import {escapeHtml as esc, recordingId, activeStatuses, attentionStatuses} from './workbench/continuation.js?v=20261011-ui-final';
 const $ = id => document.getElementById(id);
 const params = new URLSearchParams(location.search);
-let category = params.get('category') || '', records = [], tasks = [], categories = [], timer, loading = false, recordsLoaded = false, tasksLoaded = false;
+let category = params.get('category') || '', records = [], tasks = [], categories = [], timer, recordsLoaded = false, tasksLoaded = false;
+const PAGE_SIZE = 20;
+let activeRequest = null, refreshQueued = false, moreQueued = false;
+let loadedPages = 1, loadingMore = false, paginationError = '';
+let currentTab = 'overview';
 const routes = {records:'/library', notes:'/library', materials:'/course-files', review:'/course-files'};
 const query = values => new URLSearchParams({category, ...values}).toString();
 const hasNote = record => Boolean(record.has_note || record.ai_note_summary?.summary || record.has_ai_summary);
@@ -46,12 +50,24 @@ function render() {
   $('workspaceTaskHeading').textContent = pending.length ? '待处理任务' : '最近任务';
   $('workspaceTaskCount').textContent = pending.length ? String(pending.length) : '';
   replace('workspaceTimeline', shown.map(task => `<article class="workspace-task"><b>${esc(task.title || task.label || '任务')}</b><p><span>${esc(task.label || '')}</span><span class="workspace-task-status" data-attention="${attentionStatuses.has(task.status)}">${esc(taskLabels[task.status] || task.stage || '处理中')}</span></p></article>`).join('') || `<p class="workspace-empty">${tasksLoaded ? '暂无任务' : '任务状态暂不可用'}</p>`);
-  replace('workspaceQuestions', (lessons.map(record => recordRow(record,true)).join('') || '<p class="workspace-empty">暂无课堂记录</p>') + (nextOffset !== null ? '<button class="secondary-button" data-more-records>加载更多课堂</button>' : ''));
+  const pagination = nextOffset !== null ? `<div class="workspace-pagination">${paginationError ? `<p id="workspacePaginationError" role="alert">${esc(paginationError)}</p>` : ''}<button id="workspaceLoadMore" class="secondary-button" data-more-records aria-controls="workspaceQuestions" aria-disabled="${loadingMore || moreQueued}" aria-busy="${loadingMore || moreQueued}">${loadingMore || moreQueued ? '正在加载…' : paginationError ? '重试加载' : '加载更多课堂'}</button></div>` : '';
+  replace('workspaceQuestions', (lessons.map(record => recordRow(record,true)).join('') || '<p class="workspace-empty">暂无课堂记录</p>') + pagination);
+  $('workspaceQuestions').setAttribute('aria-busy', String(loadingMore));
+  if (!recordsLoaded) {
+    $('workspaceMeta').textContent = '正在读取课程…';
+    replace('workspaceRecent', '<p class="workspace-empty">正在读取…</p>');
+    replace('workspaceQuestions', '<p class="workspace-empty">正在读取…</p>');
+  }
   $('microphoneSource').href = '/?' + query({});
   $('uploadSource').href = '/?' + query({source:'upload'});
 }
 function tab(name, recording) {
   if (!['overview','review',...Object.keys(routes)].includes(name)) return;
+  currentTab = name;
+  const address = new URLSearchParams(location.search);
+  if (category) address.set('category', category); else address.delete('category');
+  if (name === 'overview') address.delete('tab'); else address.set('tab', name);
+  history.replaceState(null, '', '/workspace' + (address.size ? '?' + address : ''));
   $('workspaceOverview').hidden = name !== 'overview';
   $('workspaceReview').hidden = name !== 'review';
   $('workspaceFrame').hidden = name === 'overview' || name === 'review';
@@ -60,14 +76,21 @@ function tab(name, recording) {
     if (button.dataset.tab === name) button.setAttribute('aria-current','page');
     else button.removeAttribute('aria-current');
   });
-  if (name !== 'overview' && name !== 'review') $('workspaceFrame').src = routes[name] + '?' + query({embedded:'1', ...(recording ? {recording} : {})});
+  if (name !== 'overview' && name !== 'review') setFrameSource($('workspaceFrame'), routes[name] + '?' + query({embedded:'1', ...(recording ? {recording} : {})}));
+}
+// Avoid tearing down a live iframe when the selected destination is unchanged.
+// dataset stores the requested URL; frame.src may be absolute in a browser.
+function setFrameSource(frame, source) {
+  if (frame.dataset.requestedSource === source) return;
+  frame.dataset.requestedSource = source;
+  frame.src = source;
 }
 let noteReturn = null;
 let noteReaderObserver = null;
 let noteChatTarget = null;
 function openClassroomChat(recording) {
   tab('review'); $('workspaceReview').hidden = true; $('workspaceFrame').hidden = false;
-  $('workspaceFrame').src = '/?' + query({embedded:'1',chat:recording});
+  setFrameSource($('workspaceFrame'), '/?' + query({embedded:'1',chat:recording}));
 }
 function openClassroomNote(recording, opener) {
   const dialog = $('workspaceNoteDialog'), frame = $('workspaceNoteFrame');
@@ -147,61 +170,134 @@ function timeline() {
   $('timelineFrame').src = '/tasks?' + query({embedded:'1'});
   $('timelineDialog').showModal();
 }
+function beginRequest() {
+  clearTimeout(timer);
+  const request = {controller: new AbortController(), category};
+  // Bound the whole operation, including all retained pages, to avoid a stuck
+  // spinner and allow the user to retry. Category switches abort immediately.
+  request.timeout = setTimeout(() => request.controller.abort(new Error('读取超时')), 15000);
+  activeRequest = request;
+  return request;
+}
+function finishRequest(request) {
+  clearTimeout(request.timeout);
+  if (activeRequest !== request) return;
+  activeRequest = null;
+  if (moreQueued) {
+    moreQueued = false;
+    if (nextOffset !== null) { void loadMore(); return; }
+    render();
+  }
+  if (!document.hidden) {
+    const delay = refreshQueued ? 0 : tasks.some(task => activeStatuses.has(task.status)) ? 15000 : 60000;
+    refreshQueued = false;
+    timer = setTimeout(load, delay);
+  }
+}
+function libraryPage(request, offset = 0) {
+  return cachedJson('/api/library?' + new URLSearchParams({category:request.category, limit:String(PAGE_SIZE), offset:String(offset), include_settings:'false'}), {signal:request.controller.signal});
+}
+async function libraryWindow(request) {
+  let metadata, page, offset = 0, combined = [];
+  // Refresh the already visible window, not just page one. Stage the whole
+  // window and commit atomically so a failure never discards loaded pages.
+  for (let index = 0; index < loadedPages; index++) {
+    page = await libraryPage(request, offset);
+    metadata ||= page;
+    combined.push(...(page.records || []));
+    const next = page.next_offset;
+    if (next == null) break;
+    if (!Number.isInteger(next) || next <= offset) throw new Error('课堂分页数据无效');
+    offset = next;
+  }
+  return {...metadata, records:[...new Map(combined.map(record => [record.id,record])).values()], next_offset:page.next_offset ?? null};
+}
 async function load() {
-  if (loading) return;
-  loading = true;
-  const requestedCategory = category;
+  if (activeRequest) { refreshQueued = true; return; }
+  const request = beginRequest();
   try {
     const result = await Promise.allSettled([
-      '/api/library?' + new URLSearchParams({category, limit:'20', include_settings:'false'}),
-      '/api/tasks?' + new URLSearchParams({category}),
-    ].map(url => cachedJson(url, {signal:AbortSignal.timeout(15000)})));
-    if (requestedCategory !== category) return;
+      libraryWindow(request),
+      cachedJson('/api/tasks?' + new URLSearchParams({category:request.category}), {signal:request.controller.signal}),
+    ]);
+    if (activeRequest !== request) return;
     if (result[0].status === 'fulfilled') {
-      records = result[0].value.records || [];
-      recordTotal = result[0].value.total ?? records.length;
-      noteTotal = result[0].value.note_count ?? records.filter(hasNote).length;
-      nextOffset = result[0].value.next_offset ?? null;
+      const data = result[0].value;
+      records = data.records;
+      recordTotal = data.total ?? records.length;
+      noteTotal = data.note_count ?? records.filter(hasNote).length;
+      nextOffset = data.next_offset;
       recordsLoaded = true;
-      categories = [...new Set([...(result[0].value.categories || []), ...records.map(record => record.category), ...(category ? [category] : [])].filter(Boolean))];
+      categories = [...new Set([...(data.categories || []), ...records.map(record => record.category), ...(category ? [category] : [])].filter(Boolean))];
       replace('workspaceCourse', [`<option value="" ${!category ? 'selected' : ''}>全部课程</option>`, ...categories.map(name => `<option value="${esc(name)}" ${name===category ? 'selected' : ''}>${esc(name)}</option>`)].join(''));
       $('workspaceCourse').disabled = false;
     }
     if (result[1].status === 'fulfilled') { tasks = result[1].value.tasks || []; tasksLoaded = true; }
-    if (recordsLoaded) render();
+    render();
     const failures = result.map((value, index) => value.status === 'rejected' ? (index ? '任务' : '课堂记录') : '').filter(Boolean);
     $('workspaceError').hidden = !failures.length;
     $('workspaceError').textContent = failures.length ? `${failures.join('、')}读取失败，正在重试。` : '';
     if (!recordsLoaded) {
       $('workspaceMeta').textContent = '暂时无法读取课程';
       replace('workspaceRecent','<p class="workspace-empty">课堂记录暂不可用</p>');
-      replace('workspaceTimeline','<p class="workspace-empty">任务状态暂不可用</p>');
+      replace('workspaceQuestions','<p class="workspace-empty">课堂记录暂不可用</p>');
     }
+  } finally { finishRequest(request); }
+}
+async function loadMore() {
+  if (nextOffset === null || loadingMore || moreQueued) return;
+  if (activeRequest) { moreQueued = true; render(); return; }
+  const request = beginRequest(), offset = nextOffset;
+  const focused = document.activeElement?.id === 'workspaceLoadMore';
+  const oldIds = new Set(records.map(record => record.id));
+  let appended = false;
+  loadingMore = true; paginationError = ''; render();
+  try {
+    const data = await libraryPage(request, offset);
+    if (activeRequest !== request) return;
+    if (data.next_offset != null && (!Number.isInteger(data.next_offset) || data.next_offset <= offset)) throw new Error('课堂分页数据无效');
+    records = [...new Map([...records, ...(data.records || [])].map(record => [record.id, record])).values()];
+    nextOffset = data.next_offset ?? null;
+    recordTotal = data.total ?? recordTotal;
+    noteTotal = data.note_count ?? noteTotal;
+    appended = true;
+    loadedPages++;
+  } catch {
+    if (activeRequest === request) paginationError = '更多课堂读取失败，请重试。';
   } finally {
-    loading = false;
-    clearTimeout(timer);
-    if (!document.hidden) timer = setTimeout(load, requestedCategory !== category ? 0 : tasks.some(task => activeStatuses.has(task.status)) ? 15000 : 60000);
+    if (activeRequest === request) {
+      loadingMore = false; render();
+      // Continue reading at the first new row, not at the document root or a
+      // load-more button now below the fold. Do not steal focus moved elsewhere.
+      if (appended && focused && (document.activeElement === document.body || document.activeElement?.id === 'workspaceLoadMore')) {
+        [...$('workspaceQuestions').querySelectorAll('[data-chat]')].find(button => !oldIds.has(button.dataset.chat))?.focus({preventScroll:true});
+      }
+    }
+    finishRequest(request);
   }
 }
 $('workspaceCourse').addEventListener('change', () => {
-  category = $('workspaceCourse').value;
+  const nextCategory = $('workspaceCourse').value;
+  if (nextCategory === category) return;
+  if (activeRequest) {
+    clearTimeout(activeRequest.timeout);
+    activeRequest.controller.abort();
+    activeRequest = null;
+  }
+  clearTimeout(timer);
+  category = nextCategory;
+  refreshQueued = moreQueued = loadingMore = false;
+  loadedPages = 1; paginationError = '';
+  records = []; tasks = []; recordsLoaded = tasksLoaded = false;
+  recordTotal = noteTotal = 0; nextOffset = null;
+  $('workspaceError').hidden = true;
   try { localStorage.setItem('qwen-asr-last-course-v1',category); } catch { /* optional preference */ }
-  history.replaceState(null,'','/workspace?' + query({}));
-  records = []; recordTotal = noteTotal = 0; nextOffset = null; render(); tab('overview'); void load();
+  render(); tab(currentTab); void load();
 });
 document.addEventListener('click', event => {
   const button = event.target.closest('button');
   if (!button) return;
-  if (button.hasAttribute('data-more-records')) {
-    button.disabled = true;
-    const selected = category;
-    cachedJson('/api/library?' + new URLSearchParams({category, limit:'20', offset:String(nextOffset), include_settings:'false'}))
-      .then(data => {
-        if (selected !== category) return;
-        records = [...new Map([...records, ...(data.records || [])].map(record => [record.id, record])).values()];
-        nextOffset = data.next_offset ?? null; render();
-      }).catch(() => { button.disabled = false; });
-  }
+  if (button.hasAttribute('data-more-records')) { void loadMore(); return; }
   if (button.dataset.tab) tab(button.dataset.tab);
   if (button.dataset.recording) openClassroomNote(button.dataset.recording,button);
   if (button.dataset.chat) {
@@ -209,7 +305,7 @@ document.addEventListener('click', event => {
   }
   if (button.hasAttribute('data-external-review')) {
     tab('review'); $('workspaceReview').hidden = true; $('workspaceFrame').hidden = false;
-    $('workspaceFrame').src = '/course-files?' + query({embedded:'1'});
+    setFrameSource($('workspaceFrame'), '/course-files?' + query({embedded:'1'}));
   }
   if (button.hasAttribute('data-timeline')) timeline();
   if (button.hasAttribute('data-close-note')) requestNoteClose();
@@ -218,6 +314,7 @@ document.addEventListener('click', event => {
 $('workspaceTasks').addEventListener('click',timeline);
 $('newClass').addEventListener('click', () => $('newClassDialog').showModal());
 document.addEventListener('visibilitychange', () => { if (!document.hidden) void load(); else clearTimeout(timer); });
+tab(params.get('tab') || 'overview');
 void load();
 
 const libraryEvents = new EventSource('/api/library/events');

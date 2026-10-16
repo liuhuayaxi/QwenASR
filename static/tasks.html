@@ -6,7 +6,7 @@
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <script src="/static/js/theme.js?v=20261011-ui-final"></script>
   <link rel="stylesheet" href="/static/ui.css?v=20261011-ui-final">
-  <link rel="stylesheet" href="/static/tasks.css?v=20261016-unified-1">
+  <link rel="stylesheet" href="/static/tasks.css?v=20261016-deep-ui-1">
   <link rel="stylesheet" href="/static/custom-controls.css?v=20261014-selection-hover">
 <link rel="stylesheet" href="/static/workspace.css?v=20261014-followups-1"><script>if (new URLSearchParams(location.search).get("embedded") === "1") document.addEventListener("DOMContentLoaded", () => document.body.classList.add("workspace-embedded"));</script>
 </head>
@@ -60,7 +60,7 @@
           <label class="sr-only" for="categoryFilter">课程</label><select id="categoryFilter" class="ui-field"><option value="">全部课程</option></select>
           <button id="refreshTasks" class="ui-button">刷新</button>
         </div></div>
-        <div class="task-bulk"><label><input id="selectAll" type="checkbox"> 全选当前处理步骤</label><span id="selectionCount">可选择具体步骤批量处理</span><div><button data-bulk="continue" class="ui-button" disabled>继续</button><button data-bulk="pause" class="ui-button" disabled>暂停</button><button data-bulk="retry" class="ui-button" disabled>重试</button><button data-bulk="cancel" class="ui-button danger" disabled>取消</button><details class="task-history-tools"><summary>历史记录管理</summary><button id="retryFailed" class="ui-button primary" type="button">重试当前失败步骤</button><button id="clearCompleted" class="ui-button" type="button">收起已完成记录</button><button id="restoreCompleted" class="ui-button" type="button" hidden>恢复刚收起的记录</button></details></div></div>
+        <div class="task-bulk"><label><input id="selectAll" type="checkbox"> 全选当前处理步骤</label><span id="selectionCount">可选择具体步骤批量处理</span><div><button data-bulk="continue" class="ui-button" disabled>继续</button><button data-bulk="pause" class="ui-button" disabled>暂停</button><button data-bulk="retry" class="ui-button" disabled>重试</button><button data-bulk="cancel" class="ui-button danger" disabled>取消</button><details class="task-history-tools"><summary>历史记录管理</summary><button id="retryFailed" class="ui-button primary" type="button">重试当前失败步骤</button><button id="clearCompleted" class="ui-button" type="button">收起当前结果中的已完成记录</button><button id="restoreCompleted" class="ui-button" type="button" hidden>恢复刚收起的记录</button></details></div></div>
         <p id="loadError" class="task-notice error" role="alert" hidden></p>
         <p id="sourceWarning" class="task-notice" role="status" hidden></p>
         <p id="actionResult" class="task-notice" role="status" hidden></p>
@@ -75,6 +75,6 @@
       <div class="dialog-footer"><button id="submitPdf" class="ui-button primary">加入识别队列</button></div></form>
   </dialog>
   <div id="toast" class="task-toast" role="status" hidden></div>
-  <script type="module" src="/static/js/tasks.js?v=20261016-unified-1"></script>
+  <script type="module" src="/static/js/tasks.js?v=20261016-deep-ui-1"></script>
 </body>
 </html>

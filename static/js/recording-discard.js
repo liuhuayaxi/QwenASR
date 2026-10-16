@@ -2,8 +2,10 @@
 // Polls may finish after another recording starts; callbacks keep that id.
 export function createRecordingDiscard({button, dialog, getSession, onAccepted, onDiscarded, onRestored, onFailed, onChange, toast}) {
   const storageKey = 'qwen-asr-pending-discard-v1';
-  const pending = new Set(), accepted = new Set(), finished = new Set(), settled = new Set(), polling = new Set();
+  const pending = new Set(), accepted = new Set(), finished = new Set(), settled = new Set(), polling = new Map(), attempts = new Map();
   try { for (const id of JSON.parse(localStorage.getItem(storageKey) || '[]')) if (typeof id === 'string') pending.add(id); } catch {}
+  for (const id of pending) attempts.set(id, Symbol(id));
+  const current = (id, attempt) => pending.has(id) && !settled.has(id) && attempts.get(id) === attempt;
   const title = dialog.querySelector('[data-discard-title]'), target = dialog.querySelector('[data-discard-target]');
   const explain = dialog.querySelector('[data-discard-explain]'), first = dialog.querySelector('[data-discard-continue]');
   const final = dialog.querySelector('[data-discard-confirm]'), cancel = dialog.querySelector('[data-discard-cancel]');
@@ -17,7 +19,7 @@ export function createRecordingDiscard({button, dialog, getSession, onAccepted, 
   }
   function changed() { persist(); update(); onChange?.(); }
   function accept(id, result) {
-    settled.delete(id); finished.delete(id);
+    if (settled.has(id)) return;
     pending.add(id);
     if (!accepted.has(id)) { accepted.add(id); onAccepted?.(id, result); }
     changed();
@@ -39,19 +41,21 @@ export function createRecordingDiscard({button, dialog, getSession, onAccepted, 
     onFailed?.(id, error);
     toast(`丢弃未完成：${error.message}。录音资料仍保留，请核对后重试。`, 7000);
   }
-  async function poll(id) {
-    if (polling.has(id) || settled.has(id)) return;
-    polling.add(id);
+  async function poll(id, attempt = attempts.get(id)) {
+    if (!current(id, attempt) || polling.get(id) === attempt) return;
+    polling.set(id, attempt);
     try {
-      while (pending.has(id)) {
+      while (current(id, attempt)) {
         let response, result;
         try {
-          response = await fetch(`/api/recordings/${encodeURIComponent(id)}/discard`, {cache:'no-store'});
+          response = await fetch(`/api/recordings/${encodeURIComponent(id)}/discard`, {cache:'no-store', signal:AbortSignal.timeout(15000)});
           result = await response.json();
         } catch {
+          if (!current(id, attempt)) return;
           toast('正在等待丢弃结果；已确认的录音不会继续收音，连接恢复后继续核对。', 5000);
           await new Promise(resolve => setTimeout(resolve, 2000)); continue;
         }
+        if (!current(id, attempt)) return;
         if (!response.ok) throw new Error(result.detail || '无法核对丢弃进度');
         if (result.session_id !== id) throw new Error('返回的录音编号不一致');
         if (result.status === 'failed') throw new Error(result.error || result.message || '回收处理未完成');
@@ -61,8 +65,8 @@ export function createRecordingDiscard({button, dialog, getSession, onAccepted, 
         accept(id, result);
         await new Promise(resolve => setTimeout(resolve, 1000));
       }
-    } catch (error) { fail(id, error); }
-    finally { polling.delete(id); }
+    } catch (error) { if (current(id, attempt)) fail(id, error); }
+    finally { if (polling.get(id) === attempt) polling.delete(id); }
   }
   button.addEventListener('click', () => {
     const session = getSession();
@@ -84,20 +88,24 @@ export function createRecordingDiscard({button, dialog, getSession, onAccepted, 
   dialog.addEventListener('close', () => { candidate = null; });
   final.addEventListener('click', async () => {
     if (!candidate || pending.has(candidate.id)) return;
-    const id = candidate.id;
+    const id = candidate.id, attempt = Symbol(candidate.id);
+    attempts.set(id, attempt); settled.delete(id); finished.delete(id);
     final.disabled = true; accept(id, {status:'requesting'}); dialog.close();
     try {
-      let response;
+      let response, result;
       try {
         response = await fetch(`/api/recordings/${encodeURIComponent(id)}/discard`, {
           method:'POST', headers:{'Content-Type':'application/json'},
           body:JSON.stringify({confirmed:true, expected_session_id:id}),
+          signal:AbortSignal.timeout(30000),
         });
+        result = await response.json();
       } catch {
+        if (!current(id, attempt)) return;
         toast('丢弃请求的结果尚未确认，正在核对这条录音的状态。', 6000);
-        void poll(id); return;
+        void poll(id, attempt); return;
       }
-      const result = await response.json();
+      if (!current(id, attempt)) return;
       if (!response.ok) throw new Error(result.detail || '无法丢弃录音');
       if (result.session_id !== id) throw new Error('返回的录音编号不一致');
       if (result.status === 'failed') throw new Error(result.error || result.message || '丢弃未完成');
@@ -105,7 +113,7 @@ export function createRecordingDiscard({button, dialog, getSession, onAccepted, 
       else if (result.status === 'restored') restored(id, result);
       else if (result.status === 'discarding') { accept(id, result); void poll(id); }
       else throw new Error('丢弃进度状态无法识别');
-    } catch (error) { fail(id, error); }
+    } catch (error) { if (current(id, attempt)) fail(id, error); }
   });
   function receive(message) {
     const id = message.session_id;

@@ -45,7 +45,7 @@ const write = (key, value) => { try { localStorage.setItem(key, value); } catch 
 
 export function createContinuation({root = document, openRecord, toast, fetcher = fetch}) {
   const list = root.querySelector('#continuationList'), error = root.querySelector('#continuationError');
-  let records = [], tasks = [], timer, loading = false, busy = false, loaded = false;
+  let records = [], tasks = [], timer, loading = false, busy = false, loaded = false, revision = 0, refreshRequested = false;
   function render() {
     const pending = tasks.filter(task => attentionStatuses.has(task.status));
     const running = tasks.filter(task => activeStatuses.has(task.status));
@@ -61,10 +61,11 @@ export function createContinuation({root = document, openRecord, toast, fetcher 
     }).join('') + (!items.length ? '<p>暂无待处理内容。</p>' : '');
   }
   async function refresh() {
-    if (loading || busy) return;
-    loading = true; clearTimeout(timer);
+    if (loading || busy) { refreshRequested = true; return; }
+    loading = true; refreshRequested = false; const started = revision; clearTimeout(timer);
     try {
       const results = await Promise.allSettled(['/api/library?limit=20&include_settings=false','/api/tasks'].map(path => cachedJson(path, {signal:AbortSignal.timeout(15000)}, fetcher)));
+      if (started !== revision || busy) return;
       const problems = [];
       results.forEach((result,index) => {
         if (result.status === 'fulfilled') { if (index === 0) records = result.value.records || []; else { tasks = result.value.tasks || []; loaded = true; } }
@@ -74,33 +75,39 @@ export function createContinuation({root = document, openRecord, toast, fetcher 
         .filter(id => !records.some(record => record.id === id)).slice(0, 100);
       if (wanted.length) {
         try {
-          const linked = await cachedJson('/api/library?' + new URLSearchParams({ids:wanted.join(','), include_settings:'false'}), {}, fetcher);
+          const linked = await cachedJson('/api/library?' + new URLSearchParams({ids:wanted.join(','), include_settings:'false'}), {signal:AbortSignal.timeout(15000)}, fetcher);
+          if (started !== revision || busy) return;
           records = [...new Map([...records, ...(linked.records || [])].map(record => [record.id, record])).values()];
         } catch { problems.push('关联课堂暂时无法读取'); }
       }
+      if (started !== revision || busy) return;
       render();
       error.hidden = !problems.length;
       error.textContent = problems.length ? `${problems.join('；')}，显示上次状态。稍后自动重试。` : '';
       if (!loaded && problems.length) list.insertAdjacentHTML('afterbegin','<p>任务数量待确认</p>');
     } finally {
       loading = false;
-      if (!document.hidden) timer = setTimeout(refresh, tasks.some(task => activeStatuses.has(task.status)) ? 15000 : 60000);
+      if (refreshRequested && !busy) queueMicrotask(refresh);
+      else if (!document.hidden && !busy) timer = setTimeout(refresh, tasks.some(task => activeStatuses.has(task.status)) ? 15000 : 60000);
     }
   }
   list.addEventListener('click', async event => {
     const button = event.target.closest('button');
     if (!button || busy) return;
-    if (button.dataset.recording) { await openRecord(button.dataset.recording); return; }
+    if (button.dataset.recording) {
+      try { await openRecord(button.dataset.recording); } catch (problem) { toast(problem.message); }
+      return;
+    }
     const task = tasks.find(task => task.id === button.dataset.task);
     if (!task || !(task.actions || []).includes(button.dataset.action)) return;
-    busy = true; render();
+    busy = true; revision += 1; render();
     try {
-      const response = await fetcher('/api/tasks/action', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(aiTaskPayload(task,button.dataset.action))});
+      const response = await fetcher('/api/tasks/action', {method:'POST',signal:AbortSignal.timeout(30000),headers:{'Content-Type':'application/json','X-QwenASR-Client':'task-center'},body:JSON.stringify(aiTaskPayload(task,button.dataset.action))});
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || '无法继续任务');
       toast('已提交后台处理');
     } catch (problem) { toast(problem.message); }
-    finally { busy = false; await refresh(); }
+    finally { busy = false; render(); await refresh(); }
   });
   document.addEventListener('visibilitychange', () => { if (!document.hidden) void refresh(); else clearTimeout(timer); });
   return {refresh, setRecords(value) { records = value; render(); }, lastCourse: () => read(COURSE_KEY),

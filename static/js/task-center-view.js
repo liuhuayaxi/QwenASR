@@ -56,6 +56,14 @@ export function filterTaskGroups(groups, {filter = 'daily', type = '', category 
 export function groupCounts(groups) {
   return Object.fromEntries(['all', 'active', 'attention', 'review', 'pending', 'paused', 'completed', 'cancelled', 'recovered'].map(key => [key, groups.filter(group => groupMatchesStatus(group, key)).length]));
 }
-export function actionableTasks(groups) {
-  return [...new Map(groups.flatMap(group => [...group.current_tasks, ...(group.context_tasks || [])]).filter(task => !archived(task) && (task.actions || []).length).map(task => [task.id, task])).values()];
+export function taskMatchesType(task, type = '') {
+  return !type || task.type === type || task.family === type;
+}
+export function completedTasks(groups, type = '') {
+  return [...new Map(groups.flatMap(group => [...group.tasks, ...group.history])
+    .filter(task => task.status === 'completed' && taskMatchesType(task, type))
+    .map(task => [task.id, task])).values()];
+}
+export function actionableTasks(groups, type = '') {
+  return [...new Map(groups.flatMap(group => [...group.current_tasks, ...(group.context_tasks || [])]).filter(task => !archived(task) && taskMatchesType(task, type) && (task.actions || []).length).map(task => [task.id, task])).values()];
 }

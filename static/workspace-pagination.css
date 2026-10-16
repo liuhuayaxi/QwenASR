@@ -1,0 +1,4 @@
+/* Pagination is keyboard reachable while an operation is in flight. */
+.workspace-pagination { display: grid; justify-items: center; gap: 10px; padding: 18px 24px; }
+.workspace-pagination [role="alert"] { margin: 0; color: var(--danger); font-size: 13px; }
+.workspace-pagination [aria-disabled="true"] { opacity: .6; cursor: wait; }
