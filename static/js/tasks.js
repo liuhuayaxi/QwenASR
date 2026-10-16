@@ -232,7 +232,8 @@ function render() {
   const focused = document.activeElement;
   const focusedDetail = focused?.matches('summary') ? detailKey(focused.parentElement) : null;
   const focusedGroup = focused?.closest('[data-group-id]')?.dataset.groupId;
-  const focusedId = focused?.closest('#taskList [data-id]')?.dataset.id;
+  const focusedCard = focused?.closest('#taskList article.task-card');
+  const focusedId = focusedCard ? focusedCard.dataset.id : focused?.closest('#taskList [data-id]')?.dataset.id;
   const focusedHref = focused?.matches('a[href]') ? focused.getAttribute('href') : null;
   const focusSelector = focused?.matches('.task-select') ? '.task-select' : focused?.matches('summary') ? 'summary' : focused?.dataset.action ? `[data-action="${focused.dataset.action}"]` : null;
   const groups = progressGroups(filteredGroups());
@@ -253,7 +254,8 @@ function render() {
   }
   if (focusedHref !== null && focusedGroup) {
     const group = [...$('taskList').querySelectorAll('[data-group-id]')].find(node => node.dataset.groupId === focusedGroup);
-    const owner = focusedId ? [...(group?.querySelectorAll('[data-id]') || [])].find(node => node.dataset.id === focusedId) : group;
+    const owner = focusedCard ? [...(group?.querySelectorAll('article.task-card[data-id]') || [])].find(node => node.dataset.id === focusedId)
+      : focusedId ? [...(group?.querySelectorAll('[data-id]') || [])].find(node => node.dataset.id === focusedId) : group;
     [...(owner?.querySelectorAll('a[href]') || [])].find(node => node.getAttribute('href') === focusedHref)?.focus({preventScroll:true});
   }
   document.querySelectorAll('[data-count]').forEach(node => node.textContent = state.counts[node.dataset.count] || 0);

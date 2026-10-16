@@ -180,14 +180,22 @@ def setup_tasks(page,query='',tasks=None):
 def task_filter(page,category='',type=''):
  page.locator('#categoryFilter').select_option(category);page.locator('#typeFilter').select_option(type)
 def history_tools(page):
+ if not page.locator('.task-management').evaluate('e=>e.open'):page.locator('.task-management > summary').click()
  if not page.locator('.task-history-tools').evaluate('e=>e.open'):page.locator('.task-history-tools > summary').click()
+def select_all(page):
+ if not page.locator('.task-management').evaluate('e=>e.open'):page.locator('.task-management > summary').click()
+ page.locator('#selectAll').check()
+def open_steps(page):
+ details=page.locator('.group-details')
+ for i in range(details.count()):
+  if not details.nth(i).evaluate('e=>e.open'):details.nth(i).locator('> summary').click()
 
 def post_items(page):
  return [item['id'] for r in page.evaluate('__net.requests') if r['path']=='/api/tasks/bulk-action' for item in r['body']['items']]
 
 @test('tasks_bulk_respects_course_and_step_type')
 def task_scope(p):
- setup_tasks(p);task_filter(p,'Optics','summary');p.locator('#selectAll').check();p.locator('[data-bulk="retry"]').click()
+ setup_tasks(p);task_filter(p,'Optics','summary');select_all(p);p.locator('[data-bulk="retry"]').click()
  check(post_items(p)==['a-summary'],'Bulk action escaped selected course/type: '+repr(post_items(p)))
 
 @test('tasks_retry_failed_respects_current_filters')
@@ -206,9 +214,9 @@ def task_clear_scope(p):
 @test('tasks_partial_failure_preserves_failed_selection')
 def task_partial(p):
  setup_tasks(p);task_filter(p,type='summary');p.evaluate("__net.bulkFailureIds=['b-summary']")
- p.locator('#selectAll').check();p.locator('[data-bulk="retry"]').click()
- expect(p.locator('[data-id="b-summary"] .task-select')).to_be_checked()
- expect(p.locator('[data-id="a-summary"] .task-select')).not_to_be_checked()
+ select_all(p);p.locator('[data-bulk="retry"]').click();open_steps(p)
+ expect(p.locator('article.task-card[data-id="b-summary"] .task-select')).to_be_checked()
+ expect(p.locator('article.task-card[data-id="a-summary"] .task-select')).not_to_be_checked()
  expect(p.locator('#actionResult')).to_contain_text('fixture conflict')
 
 @test('tasks_refresh_keeps_a_disappearing_course_filter')
@@ -219,9 +227,10 @@ def task_disappear(p):
 
 @test('tasks_live_refresh_preserves_result_link_focus')
 def task_link_focus(p):
- setup_tasks(p);link=p.locator('[data-id="a-summary"] .task-actions a');link.focus()
+ setup_tasks(p);open_steps(p);link=p.locator('article.task-card[data-id="a-summary"] .task-actions a');link.focus()
  p.evaluate("__net.tasks.groups[0].tasks[0].stage='New stage';window.dispatchEvent(new Event('online'))")
- expect(p.locator('[data-id="a-summary"] .task-stage')).to_contain_text('New stage');expect(link).to_be_focused()
+ open_steps(p)
+ expect(p.locator('article.task-card[data-id="a-summary"] .task-stage')).to_contain_text('New stage');expect(link).to_be_focused()
 
 @test('tasks_malformed_snapshot_does_not_erase_previous_list')
 def task_malformed(p):
@@ -235,12 +244,12 @@ def task_network(p):
 
 @test('tasks_old_refresh_cannot_overwrite_an_action_refresh')
 def task_old_refresh(p):
- setup_tasks(p);hold(p,'GET','/api/tasks');p.locator('#refreshTasks').click();p.locator('[data-id="a-summary"] [data-action="retry"]').click()
+ setup_tasks(p);hold(p,'GET','/api/tasks');p.locator('#refreshTasks').click();p.locator('.focus-actions [data-action="retry"]').first.click()
  reply(p,{'tasks':[],'groups':[]});expect(p.locator('#taskList .task-group-card')).to_have_count(2)
 
 @test('tasks_selection_clears_when_filter_changes')
 def task_change_filter(p):
- setup_tasks(p);p.locator('#selectAll').check();task_filter(p,'Electronics');expect(p.locator('#selectAll')).not_to_be_checked();expect(p.locator('[data-bulk="retry"]')).not_to_be_visible()
+ setup_tasks(p);select_all(p);task_filter(p,'Electronics');expect(p.locator('#selectAll')).not_to_be_checked();expect(p.locator('[data-bulk="retry"]')).not_to_be_visible()
 
 @test('tasks_pdf_delayed_submit_cannot_close_reopened_dialog')
 def task_pdf_reopen(p):
@@ -428,8 +437,8 @@ def discard_attempt(p):
 @test('tasks_type_filter_updates_group_error_count')
 def task_scoped_count(p):
  setup_tasks(p);task_filter(p,'Optics','summary')
- expect(p.locator('[data-group-id="recording:a"] .group-status')).to_contain_text('1 \u9879\u9700\u5904\u7406')
- expect(p.locator('[data-group-id="recording:a"] .group-current-tasks .task-card')).to_have_count(1)
+ expect(p.locator('[data-group-id="recording:a"] .group-status')).to_contain_text('失败')
+ expect(p.locator('[data-group-id="recording:a"] .group-details > .task-card')).to_have_count(1)
 
 @test('tasks_type_and_status_filters_intersect')
 def task_scoped_status(p):

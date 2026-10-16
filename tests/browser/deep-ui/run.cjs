@@ -42,13 +42,16 @@ async function setup(options={}){
   async resolve(name,spec={}){await p.evaluate(([n,s])=>__fixture.resolve(n,s),[name,spec]);await p.waitForTimeout(25)},
   async waitGate(name){await p.waitForFunction(n=>!!__fixture.pending[n],name)},
   async refresh(){await p.locator('#refreshTasks').click();await p.waitForFunction(()=>document.querySelector('#taskList').getAttribute('aria-busy')==='false');await p.waitForTimeout(25)},
-  async history(){await p.locator('.task-history-tools > summary').click()},
+  async management(){const m=p.locator('.task-management');if(await m.count()>0&&!(await m.evaluate(el=>el.open)))await p.locator('.task-management > summary').click()},
+  async history(){await this.management();const h=p.locator('.task-history-tools');if(await h.count()>0&&!(await h.evaluate(el=>el.open)))await p.locator('.task-history-tools > summary').click()},
+  async openSteps(groupId=null){const loc=groupId?p.locator(`[data-group-id="${groupId}"] .group-details`):p.locator('.group-details');const count=await loc.count();for(let i=0;i<count;i++){const item=loc.nth(i);if(!(await item.evaluate(e=>e.open)))await item.locator('> summary').click();}},
+  async selectAll(){await this.management();await p.locator('#selectAll').check()},
   async filter(type,category){if(type!==undefined)await p.locator('#typeFilter').selectOption(type);if(category!==undefined)await p.locator('#categoryFilter').selectOption(category)},
   async pdf(){await p.locator('#newPdf').click();await p.locator('#pdfPaths').fill('/fixture/first.pdf')},
  };
 }
 test('01-render-and-navigate-status',async t=>{const p=t.p;assert.equal(await p.locator('#taskList [data-group-id]').count(),2);await p.locator('#statusFilters [data-status=completed]').click();assert.equal(await p.locator('#taskList [data-group-id]').count(),2);await p.locator('[data-summary=attention]').click();assert.equal(await p.locator('#statusFilters [data-status=attention]').getAttribute('aria-current'),'page');});
-test('02-type-filter-select-all-is-scoped',async t=>{await t.filter('summary',COURSE_A);await t.p.locator('#selectAll').check();await t.p.locator('[data-bulk=retry]').click();await t.p.waitForTimeout(40);assert.deepEqual((await t.posts()).find(x=>x.path.endsWith('bulk-action')).body.items.map(x=>x.id),['s1']);});
+test('02-type-filter-select-all-is-scoped',async t=>{await t.filter('summary',COURSE_A);await t.selectAll();await t.p.locator('[data-bulk=retry]').click();await t.p.waitForTimeout(40);assert.deepEqual((await t.posts()).find(x=>x.path.endsWith('bulk-action')).body.items.map(x=>x.id),['s1']);});
 test('03-retry-failed-honors-course',async t=>{await t.filter('',COURSE_A);await t.history();await t.p.locator('#retryFailed').click();await t.p.waitForTimeout(40);const posts=await t.posts();assert(!posts.some(x=>x.path.endsWith('retry-failed')),'unscoped endpoint called');assert.deepEqual(posts.flatMap(x=>x.body?.items?.map(t=>t.id)||[]).sort(),['s1','u1']);});
 require('./task-cases.cjs')({test,assert,task,data,COURSE_A,COURSE_B});
 require('./component-cases.cjs')({test,assert,task,data,COURSE_A,COURSE_B});
