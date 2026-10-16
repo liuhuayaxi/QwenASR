@@ -63,7 +63,8 @@ class SummaryNamingTests(unittest.IsolatedAsyncioTestCase):
         saved = await self.run_job()
         self.assertEqual(saved.metadata["title"], "光纤归一化频率")
         self.assertEqual(saved.metadata["category"], "光电子学")
-        self.assertEqual(saved.metadata["summary_job"]["status"], "completed")
+        self.assertEqual(saved.metadata["summary_job"]["status"], "completed_with_errors")
+        self.assertEqual(saved.metadata['ai_note_summary']['review_status'],'unreviewed')
         self.assertTrue(saved.ai_summary_path.exists())
         self.assertFalse(self.record.directory.exists())
         self.title.assert_awaited_once()
@@ -79,7 +80,7 @@ class SummaryNamingTests(unittest.IsolatedAsyncioTestCase):
     async def test_title_failure_preserves_note_and_manual_retry_clears_error(self):
         self.title.side_effect = RuntimeError("取名服务暂时失败")
         saved = await self.run_job()
-        self.assertEqual(saved.metadata["summary_job"]["status"], "completed")
+        self.assertEqual(saved.metadata["summary_job"]["status"], "completed_with_errors")
         self.assertEqual(saved.metadata["title"], "原标题")
         self.assertEqual(saved.metadata["ai_note_summary"]["title_error"], "取名服务暂时失败")
         self.assertIn("归一化频率", saved.ai_summary_path.read_text())

@@ -45,7 +45,7 @@ test('an active AI card shows an activity bar and keeps the previous error in de
     labels: {running: '进行中', completed: '已完成'}, actionLabels: {}, dateLabel: () => ''};
   vm.createContext(context);
   for (const [start, end] of [['function friendlyError(', 'function operationLabel('],
-    ['function operationLabel(', 'function courseQueueDetails('], ['function card(', 'function selectionControls(']]) {
+    ['function operationLabel(', 'function courseQueueDetails('], ['function taskStatus(', 'function selectionControls(']]) {
     vm.runInContext(section(start, end), context);
   }
   const item = {...task({phase: 'processing', elapsed_seconds: 30, idle_seconds: 25}),

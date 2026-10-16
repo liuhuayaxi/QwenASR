@@ -2,7 +2,7 @@
  * Classroom Intelligence: Side Rail Tabs, Scribbles (速记), and Related Materials.
  * Follows the QwenASR knowledge development contract.
  */
-import { renderMarkdown } from "./markdown-reader.js?v=20261014-source-citations";
+import { renderMarkdown } from "./markdown-reader.js?v=20261015-reader-math-scope-8";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => document.querySelectorAll(selector);

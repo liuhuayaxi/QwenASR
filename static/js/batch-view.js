@@ -1,3 +1,5 @@
+import { renderMarkdown } from "./markdown-reader.js?v=20261015-reader-math-scope-8";
+
 // Uploaded files are submitted before observing their background jobs.
 export function createBatchView({els, state, formatDuration, escapeHtml, summaryView, showSession, updateButtons, toast, sessionConfig, selectedRecordCategory, loadLibrary}) {
 const $ = selector => document.querySelector(selector);
@@ -9,11 +11,13 @@ function setBatchProgress(fileIndex, fileCount, progress, stage, filename) {
 }
 
 function addBatchBlock(container, segment, text, label) {
-  const block = document.createElement("p");
+  const rich = container === els.batchAi;
+  const block = document.createElement("div");
+  block.className = "batch-block";
   block.dataset.id = String(segment?.id || "");
   const timing = segment && Number.isFinite(Number(segment.start))
     ? `${formatDuration(segment.start)}–${formatDuration(segment.end)}` : "";
-  block.innerHTML = `<small>${escapeHtml(label)}${timing ? ` · ${timing}` : ""}</small>${escapeHtml(text || "")}`;
+  block.innerHTML = `<small>${escapeHtml(label)}${timing ? ` · ${timing}` : ""}</small>${rich ? `<div class="transcript-markdown markdown-body">${renderMarkdown(text || "")}</div>` : escapeHtml(text || "")}`;
   container.appendChild(block);
   container.scrollTop = container.scrollHeight;
 }
@@ -149,7 +153,7 @@ async function uploadRecordings(fileList) {
         ? els.recordName.value.trim() : file.name.replace(/\.[^.]+$/, "") || `录音 ${index + 1}`;
       config.category = selectedRecordCategory(true);
       config.summary_enabled = false;
-      if ($('#uploadUseMac')?.checked) {
+      if ($('#uploadUseMac')?.checked && !config.inference_settings?.classroom_power_saving) {
         config.inference_settings = {asr_provider:'local', mineru_provider:'local'};
       }
       setBatchProgress(index, files.length, 0, "正在上传；上传成功的任务会在后台继续", file.name);

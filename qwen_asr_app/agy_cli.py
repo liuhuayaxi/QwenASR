@@ -7,10 +7,14 @@ has a relatively small argv limit) and prevents the agent from editing the
 QwenASR checkout while it is being used as an AI provider.
 """
 from __future__ import annotations
+from contextvars import ContextVar
+
+last_session_id = ContextVar('agy_last_session_id', default='')
 
 import json
 import asyncio
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -91,6 +95,24 @@ def _error_kind(message: str) -> tuple[str, bool]:
     value = message.lower()
     if "location is not supported" in value or "user location" in value:
         return "provider_region", False
+    # Explicit rejected credentials must never become retryable merely because
+    # a diagnostic also mentions OAuth, EOF, or an ambiguous handshake timeout.
+    if re.search(r'\b401\b',value) or any(marker in value for marker in (
+        'invalid_grant','invalid grant','invalid_client','invalid client','revoked',
+        'bad credentials','invalid credentials','invalid api key','unauthorized',
+        'not logged in','login required',
+    )):
+        return 'provider_auth',False
+    # Refreshing a still-valid grant can fail before an HTTP response exists.
+    # Match the actual transport evidence before broad "oauth" auth matching;
+    # a generic refresh/login failure alone still requires authentication help.
+    refresh_network='token refresh failed due to network error' in value
+    oauth_transport=('oauth2.googleapis.com' in value and re.search(
+        r'dial tcp|lookup[^\n]*no such host|connection (?:reset|refused|closed)|'
+        r'network is unreachable|no route to host|broken pipe|\beof\b|'
+        r'i/o timeout|(?:tls handshake|connection|connect) timed?\s*out|deadline exceeded',value))
+    if refresh_network or oauth_transport:
+        return 'network_transport',True
     # This CLI message covers a timed-out eligibility/auth handshake. It is
     # ambiguous, unlike an explicit revoked grant or login requirement, so
     # permit bounded transport retries before asking the user to sign in.
@@ -105,7 +127,7 @@ def _error_kind(message: str) -> tuple[str, bool]:
     if any(marker in value for marker in ("deadline exceeded", "timed out", "timeout")):
         return "network_read_timeout", True
     if any(marker in value for marker in (
-        "connection reset", "unexpected eof", "post \"http", ": eof", "eof",
+        "connection reset", "broken pipe", "unexpected eof", "post \"http", ": eof", "eof",
         "the stream was interrupted", "stream interrupted",
         "network issue connecting to the server",
     )):
@@ -298,7 +320,15 @@ async def request_text(instructions: str, payload: dict[str, Any], provider: dic
             except ProcessLookupError:
                 pass
             await process.wait()
-    return _decode_output(stdout.decode("utf-8", errors="replace"), stderr.decode("utf-8", errors="replace"))
+    decoded=stdout.decode('utf-8',errors='replace')
+    last_session_id.set('')
+    for line in decoded.splitlines():
+        try:
+            event=json.loads(line)
+            ident=event.get('conversation_id') or (event.get('result') or {}).get('conversation_id')
+            if ident:last_session_id.set(str(ident))
+        except (ValueError,TypeError):pass
+    return _decode_output(decoded, stderr.decode("utf-8", errors="replace"))
 
 
 def status(provider: dict[str, Any]) -> dict[str, Any]:

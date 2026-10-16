@@ -15,7 +15,7 @@
     <link rel="stylesheet" href="/static/custom-controls.css?v=20261014-selection-hover" />
     <link rel="stylesheet" href="/static/vendor/katex/katex.min.css" />
   <script src="/static/vendor/katex/katex.min.js" defer></script>
-<link rel="stylesheet" href="/static/workspace.css?v=20261015-note-reader-3" />
+<link rel="stylesheet" href="/static/workspace.css?v=20261015-reader-math-scope-8" />
 <script>
   const readerParams = new URLSearchParams(location.search);
   const fullNoteReader = location.pathname === '/library' && readerParams.get('note_reader') === '1';
@@ -91,12 +91,13 @@
               <span>↑</span> 上传录音
             </button>
             <button id="endButton" class="end-button hidden" type="button">结束并保存</button>
+            <button id="discardRecordingButton" class="ui-button danger" type="button" hidden>丢弃录音</button>
             <input id="fileInput" class="hidden" type="file" multiple accept="audio/*,video/mp4,video/quicktime,video/webm" />
           </div>
 
           <label class="toggle-row upload-local-choice" title="只用于新上传的录音。恢复任务仍核对并使用原任务回执。">
-            <span><b>课后录音在 Mac 处理</b><small>关闭后使用设置中的可选加速器</small></span>
-            <input id="uploadUseMac" type="checkbox" checked />
+            <span><b>本次上传单独使用 Mac</b><small>默认沿用已保存位置；课堂省电模式下此选项停用</small></span>
+            <input id="uploadUseMac" type="checkbox" />
             <i class="toggle"></i>
           </label>
           <section class="continuation-panel" aria-labelledby="continuationHeading"><h2 id="continuationHeading">继续处理</h2><div id="continuationList" aria-live="polite">正在读取课堂与任务…</div><p id="continuationError" role="status" hidden></p></section>
@@ -345,6 +346,12 @@
       <span id="footerDevice" class="visually-hidden">Qwen3-ASR-1.7B · MLX BF16</span>
     </main>
 
+    <dialog id="discardRecordingDialog" class="ui-dialog discard-recording-dialog" aria-labelledby="discardRecordingTitle">
+      <div class="dialog-header"><h2 id="discardRecordingTitle" data-discard-title>丢弃这条录音？</h2></div>
+      <div class="dialog-body"><p data-discard-target></p><p data-discard-explain></p>
+        <div class="discard-confirm-actions"><button type="button" class="ui-button" data-discard-cancel>取消，保留录音</button><button type="button" class="ui-button danger" data-discard-continue>继续确认丢弃</button><button type="button" class="ui-button danger" data-discard-confirm hidden>确认丢弃这条录音</button></div>
+      </div>
+    </dialog>
     <dialog id="noteVersionsDialog" class="ui-dialog note-versions-dialog" aria-label="笔记版本历史">
       <div class="page-heading"><div><h2>笔记版本历史</h2><p>− 为历史版本内容，+ 为当前版本内容。恢复前的笔记也会保留。</p></div><button id="closeNoteVersions" class="ui-button">关闭</button></div>
       <div id="noteVersionList"></div><pre id="noteVersionDiff"></pre><button id="restoreNoteVersion" class="ui-button primary" disabled>恢复所选版本</button>
@@ -410,10 +417,12 @@
             <div class="settings-group-grid">
               <label><span>文档识别</span><select id="inferenceMineruProvider" class="field-select"><option value="local">本机 Mac</option><option value="remote_preferred">优先 Windows，确认未接受时回退</option><option value="remote_only">仅 Windows</option></select></label>
               <label><span>语音识别</span><select id="inferenceAsrProvider" class="field-select"><option value="local">本机 Mac</option><option value="remote_preferred">优先 Windows，确认未接受时回退</option><option value="remote_only">仅 Windows</option></select></label>
+              <label><span>向量计算与检索</span><select id="inferenceKnowledgeProvider" class="field-select"><option value="local">本机 Mac</option><option value="remote_only">仅 Windows（不可用时使用词法检索）</option></select></label>
+              <label><span>课堂省电模式</span><select id="inferencePowerSaving" class="field-select"><option value="off">关闭 · 使用分别设置的位置</option><option value="on">启用 · ASR 与向量仅 Windows</option></select></label>
               <label class="wide"><span>远程网关地址</span><input id="inferenceRemoteUrl" type="url" value="http://100.81.62.69:8765" /></label>
             </div>
             <div class="settings-actions"><button id="saveInferenceSettings" type="button" class="ui-button primary" disabled>保存推理位置</button><button id="testInferenceConnection" type="button" class="ui-button" disabled>测试远程连接</button></div>
-            <p class="setting-hint">实时录音在 Mac 转写。Windows 推理设置用于课后回放与资料转换；任务已接受时会先核对回执。</p><p id="inferenceSettingsStatus" class="setting-hint" role="status" aria-live="polite">打开设置后读取配置</p>
+            <p class="setting-hint">课堂省电模式将实时语音、上传与回放识别、文档和查询向量及相似度检索放在 Windows。Windows 按已保存片段返回正式转写，不提供本机滚动预览。断网时录音仍保存、片段等待补转，检索使用中文词法。设置在下一段音频生效；已提交任务沿用原回执。Windows 模型需提前准备。</p><p id="inferenceSettingsStatus" class="setting-hint" role="status" aria-live="polite">打开设置后读取配置</p>
           </section>
           <section class="settings-group wide" id="mineruSettingsGroup" data-settings-page="documents">
             <div class="settings-group-heading"><b>MinerU 文件识别</b><small id="mineruRuntimeStatus">打开设置后读取本机版本</small></div>
@@ -814,7 +823,9 @@
           <div class="note-pane-heading">
             <div><b>课堂笔记</b></div>
             <div class="note-summary-actions">
-              <a id="downloadNoteSummary" class="mini-button note-download-button" href="#">下载 课后复习笔记</a>
+              <a id="downloadNoteSummary" class="mini-button note-download-button" href="#">下载复习笔记 PDF</a>
+              <button id="chooseReviewMaterials" type="button" class="mini-button">补选本节课件</button>
+              <button id="previewNoteProposal" type="button" class="mini-button" hidden>查看新候选版本</button>
               <button id="pullNoteSummary" class="mini-button" type="button">从 IdeaShell 拉取</button>
               <button id="pushNoteSummary" class="mini-button" type="button">推送到 IdeaShell ▾</button>
               <button id="askNoteClass" class="mini-button" type="button">课堂问答</button>
@@ -873,6 +884,6 @@
     </dialog>
 
     <div id="toast" class="toast" role="status"></div>
-    <script src="/static/app.js?v=20261015-note-reader-3" type="module"></script>
+    <script src="/static/app.js?v=20261015-reader-math-scope-8" type="module"></script>
   </body>
 </html>

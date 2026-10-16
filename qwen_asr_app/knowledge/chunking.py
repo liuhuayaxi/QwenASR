@@ -6,6 +6,21 @@ from typing import Any
 
 PARSER_VERSION = "qwenasr-parser-v2"
 CHUNKER_VERSION = "qwenasr-chunker-v3"
+EMBEDDING_SPLIT_VERSION = "embedding-budget-v1"
+
+
+def embedding_byte_budget(max_length: int) -> int:
+    """Conservative Qwen byte-BPE bound, reserving room for special tokens.
+
+    This does not load a tokenizer/model on the Mac. Every UTF-8 byte can be
+    represented by at most one byte-BPE token; document inputs have no prompt.
+    The worker still checks the actual token count without truncation.
+    """
+    return max(1, int(max_length) - 32)
+
+
+def bounded_chunker_version(max_length: int) -> str:
+    return f"{CHUNKER_VERSION}+{EMBEDDING_SPLIT_VERSION}-{int(max_length)}"
 
 # Regex patterns for atomic structural blocks
 _FORMULA_BLOCK_RE = re.compile(
@@ -18,7 +33,7 @@ _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
 
 # Pattern to avoid splitting numbers:
 # e.g., 3.14, 10,000, 1.2e-4, 2026-10-14, 99.8%
-_NUMBER_RE = re.compile(r"(\d+(?:[.,]\d+)*(?:e[+-]?\d+)?%?)", re.IGNORECASE)
+_NUMBER_RE = re.compile(r"(?<![\w.])[-+−]?(?:\d+(?:[.,]\d+)*|[.,]\d+)(?:e[+-]?\d+)?%?", re.IGNORECASE)
 
 
 class Chunk:
@@ -50,6 +65,128 @@ class Chunk:
             "segment_ids": self.segment_ids,
             "chunk_index": self.chunk_index,
         }
+
+
+def _utf8_size(text: str) -> int:
+    return len(text.encode("utf-8"))
+
+
+def _bounded_prose(text: str, budget: int) -> list[str]:
+    """Lossless prose pieces, keeping inline math/numbers/words atomic.
+
+    An individual atom larger than the budget remains intact. Ingest retains
+    that full atom for lexical retrieval and reports the missing vector.
+    """
+    protected = sorted(
+        [match.span() for pattern in (
+            _INLINE_FORMULA_RE, _NUMBER_RE,
+            re.compile(r"[A-Za-z_][A-Za-z_0-9./-]*"),
+        ) for match in pattern.finditer(text)]
+    )
+    pieces: list[str] = []
+    start = 0
+    while start < len(text):
+        end = start
+        size = 0
+        while end < len(text):
+            added = _utf8_size(text[end])
+            if size + added > budget:
+                break
+            size += added
+            end += 1
+        if end == len(text):
+            pieces.append(text[start:])
+            break
+        # Never cut a protected atom. Overlapping number/word spans are
+        # deliberately resolved repeatedly before choosing the boundary.
+        cut = max(start + 1, end)
+        while True:
+            overlaps = [(left, right) for left, right in protected
+                        if left < cut < right]
+            if not overlaps:
+                break
+            left = min(item[0] for item in overlaps)
+            if left > start:
+                cut = left
+            else:
+                cut = max(item[1] for item in overlaps)
+        # Prefer a nearby sentence/space boundary without producing tiny
+        # pieces; leave the boundary character in the preceding piece.
+        if _utf8_size(text[start:cut]) <= budget:
+            choices = [m.end() + start for m in re.finditer(
+                r"[。！？!?;；\n\s]+", text[start:cut]
+            )]
+            choices = [value for value in choices if value >= start + (cut-start)//2]
+            if choices:
+                candidate = choices[-1]
+                if not any(left < candidate < right for left, right in protected):
+                    cut = candidate
+        pieces.append(text[start:cut])
+        start = cut
+    return pieces
+
+
+def _bounded_table(text: str, budget: int) -> list[str]:
+    """Split only between complete rows, repeating the original table header."""
+    lines = text.splitlines()
+    header: list[str] = []
+    if len(lines) >= 2:
+        cells = lines[1].strip().strip("|").split("|")
+        if cells and all(re.fullmatch(r"\s*:?-{3,}:?\s*", cell) for cell in cells):
+            header, lines = lines[:2], lines[2:]
+    if not lines:
+        return [text]
+    result: list[str] = []
+    rows: list[str] = []
+    for line in lines:
+        candidate = "\n".join([*header, *rows, line])
+        if rows and _utf8_size(candidate) > budget:
+            result.append("\n".join([*header, *rows]))
+            rows = []
+        rows.append(line)
+        if _utf8_size("\n".join([*header, *rows])) > budget:
+            # A single wide row/header must remain readable and complete.
+            result.append("\n".join([*header, *rows]))
+            rows = []
+    if rows:
+        result.append("\n".join([*header, *rows]))
+    return result
+
+
+def bound_chunks_for_embedding(chunks: list[Chunk], max_length: int) -> tuple[list[Chunk], bool]:
+    """Fit structural chunks to a token contract without losing source text.
+
+    Normal chunks retain their exact text. Long tables split by rows; prose
+    splits without cutting inline math/numbers/words. Display formulas and
+    individually oversized rows/atoms stay whole for explicit lexical-only
+    handling. Every child keeps its parent's page/time/segment provenance.
+    """
+    budget = embedding_byte_budget(max_length)
+    result: list[Chunk] = []
+    changed = False
+    for chunk in chunks:
+        if _utf8_size(chunk.text) <= budget:
+            parts = [chunk.text]
+        else:
+            parts = []
+            for block in _split_into_blocks(chunk.text):
+                content = block["content"]
+                if _utf8_size(content) <= budget or block["type"] == "formula":
+                    parts.append(content)
+                elif block["type"] == "table":
+                    parts.extend(_bounded_table(content, budget))
+                else:
+                    parts.extend(_bounded_prose(content, budget))
+            changed = changed or parts != [chunk.text]
+        for part in parts:
+            if not part.strip():
+                continue
+            result.append(Chunk(
+                text=part, heading=chunk.heading, page=chunk.page,
+                start=chunk.start, end=chunk.end, segment_ids=chunk.segment_ids,
+                chunk_index=len(result),
+            ))
+    return result, changed
 
 
 def _split_into_blocks(text: str) -> list[dict[str, Any]]:

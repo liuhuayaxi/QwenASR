@@ -1,5 +1,5 @@
-import { renderMarkdown } from "./markdown-reader.js?v=20261014-source-citations";
-import { createClassroomIntelligence } from "./classroom-intelligence.js";
+import { renderMarkdown } from "./markdown-reader.js?v=20261015-reader-math-scope-8";
+import { createClassroomIntelligence } from "./classroom-intelligence.js?v=20261015-reader-math-scope-8";
 
 const $ = (selector) => document.querySelector(selector);
 const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];

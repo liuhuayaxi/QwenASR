@@ -16,6 +16,9 @@ from .chunking import (
     CHUNKER_VERSION,
     PARSER_VERSION,
     Chunk,
+    bound_chunks_for_embedding,
+    bounded_chunker_version,
+    embedding_byte_budget,
     chunk_markdown_text,
     chunk_pdf_document,
     chunk_transcript_segments,
@@ -23,6 +26,11 @@ from .chunking import (
 from .store import KnowledgeStore, make_citation_id
 
 SIDECAR_FILENAME = ".qwenasr-course-id.json"
+
+
+def _is_embedding_budget_error(error: Exception | str) -> bool:
+    message = str(error)
+    return "超过模型输入预算" in message or "EMBEDDING_INPUT_TOO_LONG" in message
 
 
 def terminology_text(settings, category):
@@ -406,6 +414,9 @@ class CourseIngestor:
         source_id = src_spec["source_id"]
         parser_version = src_spec.get("parser_version", PARSER_VERSION)
         file_path = Path(src_spec["file_path"]) if src_spec.get("file_path") else None
+        max_length = active_contract.get("max_length") if isinstance(active_contract, dict) else None
+        bounded_version = (bounded_chunker_version(max_length)
+                           if type(max_length) is int and max_length > 32 else None)
 
         if "stat_calculator" in src_spec:
             mtime, size, stat_hash = src_spec["stat_calculator"]()
@@ -428,7 +439,7 @@ class CourseIngestor:
                             "SELECT embedding_contract,parser_version,chunker_version FROM source_revisions WHERE source_id = ? AND revision = ? AND is_active = 1",
                             (source_id, existing["active_revision"]),
                         ).fetchone()
-                        if rev_row and rev_row['embedding_contract'] == contract_str and rev_row['parser_version']==parser_version and rev_row['chunker_version']==CHUNKER_VERSION:
+                        if rev_row and rev_row['embedding_contract'] == contract_str and rev_row['parser_version']==parser_version and rev_row['chunker_version'] in {CHUNKER_VERSION, bounded_version}:
                             return False, 0
 
         # Load raw content and chunks
@@ -454,12 +465,20 @@ class CourseIngestor:
         if stop and stop():
             return False, 0
 
+        # Only affected sources receive a new chunk revision. Existing valid
+        # sources remain unchanged, and no local tokenizer/model is loaded.
+        chunker_version = CHUNKER_VERSION
+        if bounded_version:
+            chunks, repartitioned = bound_chunks_for_embedding(chunks, max_length)
+            if repartitioned:
+                chunker_version = bounded_version
+
         content_hash = compute_content_hash(full_text)
         file_digest = ''
         if file_path and file_path.is_file():
             with file_path.open('rb') as stream:
                 file_digest=hashlib.file_digest(stream,'sha256').hexdigest()
-        revision = compute_content_hash(json.dumps([content_hash,file_digest,parser_version,CHUNKER_VERSION]))
+        revision = compute_content_hash(json.dumps([content_hash,file_digest,parser_version,chunker_version]))
 
         # Prepare chunk data with specific open_urls
         chunks_data = []
@@ -495,7 +514,7 @@ class CourseIngestor:
         if embedder and hasattr(embedder, "encode_documents") and texts_to_embed:
             if hasattr(embedder, "config"):
                 from .settings import prepared
-                can_embed = prepared(embedder.config)
+                can_embed = bool(getattr(embedder, 'remote', False)) or prepared(embedder.config)
             else:
                 can_embed = True
 
@@ -506,6 +525,12 @@ class CourseIngestor:
             cached = self.store.cached_vectors([c['content_hash'] for c in chunks_data], active_contract)
             vectors = [cached.get(c['content_hash']) for c in chunks_data]
             missing=[i for i,value in enumerate(vectors) if value is None]
+            if bounded_version:
+                budget = embedding_byte_budget(max_length)
+                oversized = {i for i in missing if len(texts_to_embed[i].encode('utf-8')) > budget}
+                if oversized:
+                    vector_warning = '部分完整公式、表格行或不可分词项超过模型输入预算，保留全文供词法查询；其余分块已向量化'
+                    missing = [i for i in missing if i not in oversized]
             try:
                 for offset in range(0,len(missing),batch_size):
                     if stop and stop():
@@ -514,21 +539,21 @@ class CourseIngestor:
                     try:
                         batch_vecs = embedder.encode_documents([texts_to_embed[i] for i in indexes])
                     except Exception as batch_error:
-                        if '超过模型输入预算' not in str(batch_error):
+                        if not _is_embedding_budget_error(batch_error):
                             raise
                         batch_vecs=[]
                         for i in indexes:
                             try:
                                 batch_vecs.append(embedder.encode_documents([texts_to_embed[i]])[0])
                             except Exception as item_error:
-                                if '超过模型输入预算' not in str(item_error):
+                                if not _is_embedding_budget_error(item_error):
                                     raise
                                 batch_vecs.append(None)
                                 vector_warning='部分完整结构块超过模型输入预算，保留全文供词法查询；其余分块已向量化'
                     for i,vector in zip(indexes,batch_vecs):
                         vectors[i]=vector
             except Exception as exc:
-                if "尚未准备" in str(exc) or "not prepared" in str(exc).lower() or "超过模型输入预算" in str(exc):
+                if "尚未准备" in str(exc) or "not prepared" in str(exc).lower() or _is_embedding_budget_error(exc):
                     vectors = None
                 else:
                     raise RuntimeError(f"Embedding failure for source {source_id}: {exc}") from exc
@@ -577,7 +602,7 @@ class CourseIngestor:
             revision=revision,
             content_hash=content_hash,
             parser_version=parser_version,
-            chunker_version=CHUNKER_VERSION,
+            chunker_version=chunker_version,
             embedding_contract=active_contract,
             chunks_data=chunks_data,
             vectors=vectors,

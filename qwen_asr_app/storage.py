@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import copy
+import contextlib
+import fcntl
 import os
 import re
 import shutil
@@ -16,7 +18,7 @@ from typing import Any
 
 from .lazy import lazy_module
 
-from .paths import data_path
+from .paths import data_path, PRIVATE_ROOT
 from .durable import atomic_json
 from .settings_recovery import read_settings, save_settings
 from .library_layout import AI_NOTES, RECORDINGS, shared, recording_path, manifest_time
@@ -564,6 +566,10 @@ class RecordingRecord:
             "source": source,
         }
         self.metadata["ai_note_summary"] = item
+        if not isinstance(previous, dict) or previous.get('summary') != text:
+            item['review_status'] = 'stale'
+            item.pop('pdf_sha256', None)
+            item['review_warning'] = '正文已修改，PDF 与独立审查需要重新生成'
         sync = self.metadata.get("ideashell_sync")
         if isinstance(sync, dict) and sync.get("note_id") and source != "ideashell_pull":
             sync["status"] = "local_changes"
@@ -914,7 +920,7 @@ class RecordingRecord:
         self.metadata["ended_at"] = local_now()
         self.metadata["updated_at"] = self.metadata["ended_at"]
         self.save_all()
-        if self.working_audio_path != self.audio_path:
+        if self.working_audio_path != self.audio_path and not self.metadata.get('pending_segments'):
             self.working_audio_path.unlink(missing_ok=True)
 
     def ensure_aac(self) -> Path:
@@ -976,7 +982,7 @@ class RecordingRecord:
     def list_item(self) -> dict[str, Any]:
         """Allowlist: new metadata fields cannot accidentally bloat list APIs."""
         keys = ('id', 'title', 'category', 'status', 'kind', 'started_at', 'recorded_at',
-                'ended_at', 'updated_at', 'sample_count')
+                'ended_at', 'updated_at', 'sample_count', 'source_filename')
         result = {key: self.metadata[key] for key in keys if key in self.metadata}
         note = self.metadata.get('ai_note_summary') or {}
         summary, source = self.library_summary()
@@ -985,10 +991,11 @@ class RecordingRecord:
                       library_summary=summary[:240], summary_source=source,
                       library_summary_error=self.library_summary_error()[:500],
                       course_replay_sources=replay_sources(self),
+                      course_stream=bool(self.metadata.get('course_stream')),
                       downloads={name.replace('-', '_'): f'/api/recordings/{self.id}/download/{name}'
                                  for name in ('bundle', 'audio', 'transcript', 'raw-transcript', 'corrected-transcript', 'ai-summary', 'json')})
         for name, fields in {
-            'ai_note_summary': ('abstract', 'abstract_error', 'title_error'),
+            'ai_note_summary': ('abstract', 'abstract_error', 'title_error', 'review_status','review_warning','image_count'),
             'summary_job': ('status', 'error', 'resume_stage', 'updated_at'),
             'finalization': ('status', 'error', 'updated_at'),
             'batch_progress': ('stage', 'message', 'progress', 'percent'),
@@ -1070,7 +1077,21 @@ class RecordingStore:
         self.active: RecordingRecord | None = None
         self.paths: dict[str, Path] = {}
         self._read_cache = {}
-        self.refresh(mark_interrupted=True)
+        # CLI readers import this module too. Only the actual serving process
+        # may reconcile abandoned work, after it owns the service lifetime lock.
+        self.refresh()
+
+    @contextlib.contextmanager
+    def service_startup(self):
+        folder = PRIVATE_ROOT / 'services'
+        folder.mkdir(parents=True, exist_ok=True)
+        with (folder / 'recording-owner.lock').open('a') as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise RuntimeError('已有 QwenASR 服务持有录音任务，拒绝重复启动和更改任务状态') from None
+            self.refresh(mark_interrupted=True)
+            yield
 
     def _metadata_paths(self) -> list[Path]:
         found: dict[str, Path] = {}
@@ -1097,7 +1118,7 @@ class RecordingStore:
                 cached = self._read_cache.get(meta_path)
                 record = cached[1] if cached and cached[0] == stamp else RecordingRecord.load(meta_path.parent)
                 self._read_cache[meta_path] = (stamp, record)
-                if shared(app_settings) and record.directory.is_relative_to(app_settings.storage_root):
+                if mark_interrupted and shared(app_settings) and record.directory.is_relative_to(app_settings.storage_root):
                     category = record.directory.relative_to(app_settings.storage_root).parts[0]
                     if record.metadata.get('category') != category:
                         record.metadata['category'] = category

@@ -684,7 +684,14 @@ async def import_group(group: dict, run_options: dict | None = None):
         if options.get("generate_summary", True) and not options.get("summary_provider", {}).get("model"):
             raise SmartClassError("请在笔记设置中填写 AI 模型，或从语音工作台的课程回放入口同步设置")
         if record and record.get("status") == "completed":
-            complete = record
+            # The library list intentionally omits the directory and large
+            # transcript. A resumed, already-transcribed lesson still needs
+            # its full identity to publish the note; never transcribe again.
+            response = await local.get(WORKBENCH + f"/api/recordings/{record['id']}")
+            response.raise_for_status()
+            complete = response.json().get("session") or {}
+            if complete.get("id") != record["id"] or not complete.get("directory"):
+                raise SmartClassError("原转写已保留，但无法核对课堂保存位置；请刷新后继续")
             entry["record_id"] = record["id"]
             complete_import_phase(entry, "download", "回放音频已获取")
             complete_import_phase(entry, "asr", "语音转写已完成")
@@ -747,7 +754,8 @@ async def import_group(group: dict, run_options: dict | None = None):
                 summary_percent = 5 if not total_parts else min(95, 100 * completed_parts / total_parts)
                 summary_detail = str(state.get("phase") or "正在生成课堂笔记")
                 if total_parts:
-                    summary_detail += f" · {completed_parts}/{total_parts} 个分块"
+                    unit = state.get('progress_unit') if state.get('progress_unit') in {'页', '批'} else '个分块'
+                    summary_detail += f" · {completed_parts}/{total_parts} {unit}"
                 update_import_phase(entry, "summary", summary_percent, summary_detail)
                 entry["message"] = summary_detail
                 status["message"] = f"{group['title']}：{summary_detail}"

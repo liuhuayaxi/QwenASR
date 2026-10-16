@@ -70,7 +70,7 @@ class UploadJobs:
         if record and record.metadata.get('batch_options', {}).get('inference_settings'):
             config['inference_settings'] = copy.deepcopy(record.metadata['batch_options']['inference_settings'])
         if not record or not record.metadata.get('batch_options', {}).get('inference_settings'):
-            config['inference_settings'] = saved_config() if record else inference_settings.for_task('asr', config.get('inference_settings'))
+            config['inference_settings'] = saved_config() if record else inference_settings.for_new_task('asr', config.get('inference_settings'))
         if record:
             for job in self.jobs.values():
                 identity = job.get('recording_id') or job.get('config', {}).get('_upload_recording_id')
@@ -233,6 +233,10 @@ class UploadJobs:
             job.update(status='queued', error='', stage='等待对账并继续转写')
             self.schedule(job)
         elif action in {'new_local', 'new_recognition'}:
+            if action=='new_local':
+                from .inference_providers import inference_settings
+                if inference_settings.read().get('classroom_power_saving'):
+                    raise ValueError('课堂省电模式禁止新建 Mac 识别；请先在推理位置中明确关闭省电模式')
             if task and not task.done():
                 raise ValueError('请先暂停旧任务；它可能仍在 Windows 运行')
             source = Path(job['source_path']) if job['source_path'] else None

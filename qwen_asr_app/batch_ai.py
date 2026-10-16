@@ -321,6 +321,22 @@ async def build_note_summary(
     record: RecordingRecord,
     config: dict[str, Any],
 ) -> dict[str, Any]:
+    from .ai import provider_for_mode
+    provider = provider_for_mode(config.get('ai', {}), 'summary')
+    if provider.get('transport') == 'agy_cli':
+        from .review_notes import generate
+        return await generate(record, config)
+    result = await _build_text_note_summary(record, config)
+    result['review_status'] = 'unreviewed'
+    result['review_warning'] = '当前提供商没有已验证的图文审查能力；完整 Markdown 已保存，未完成视觉审查'
+    record.save_metadata()
+    return result
+
+
+async def _build_text_note_summary(
+    record: RecordingRecord,
+    config: dict[str, Any],
+) -> dict[str, Any]:
     """Generate the user-requested post-recording Markdown summary.
 
     This is stored separately from live summaries so only this editable result can
@@ -333,7 +349,14 @@ async def build_note_summary(
               for index, block in enumerate(source_blocks, 1)]
     from .transcription_assist.service import evidence_config
     from .classroom_intelligence.integrations import saved_notes_markdown
-    chunk_config = await evidence_config(record, config, '\n'.join(block['text'] for block in source_blocks)[-6000:], limit=6)
+    chunk_config = json.loads(json.dumps(config))
+    evidence = {}
+    for block in source_blocks:
+        part_config = await evidence_config(record, config, block['text'], limit=4)
+        for item in part_config.get('_knowledge_evidence', []):
+            evidence[item['citation_id']] = item
+    if evidence:
+        chunk_config['_knowledge_evidence'] = list(evidence.values())
     accepted_notes=saved_notes_markdown(record)
     if accepted_notes:
         from .transcription_assist.service import attach_accepted_evidence

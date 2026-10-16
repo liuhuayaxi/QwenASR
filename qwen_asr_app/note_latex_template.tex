@@ -1,0 +1,60 @@
+\documentclass[UTF8,fontset=none,11pt,a4paper]{ctexart}
+\usepackage[margin=23mm,top=22mm,bottom=24mm,headheight=15pt]{geometry}
+\usepackage{fontspec}
+\setmainfont{texgyretermes}[UprightFont=*-regular.otf,BoldFont=*-bold.otf,ItalicFont=*-italic.otf,BoldItalicFont=*-bolditalic.otf]
+\setsansfont{texgyreheros}[UprightFont=*-regular.otf,BoldFont=*-bold.otf,ItalicFont=*-italic.otf,BoldItalicFont=*-bolditalic.otf]
+\setCJKmainfont{Songti.ttc}[Path=/System/Library/Fonts/Supplemental/,FontIndex=6,BoldFont=Songti.ttc,BoldFeatures={FontIndex=1},ItalicFont=Songti.ttc,ItalicFeatures={FontIndex=6,FakeSlant=.15}]
+\setCJKsansfont{Hiragino Sans GB.ttc}[Path=/System/Library/Fonts/,FontIndex=0,BoldFont=Hiragino Sans GB.ttc,BoldFeatures={FontIndex=2}]
+\usepackage{amsmath,amssymb,mathtools,bm}
+\usepackage{siunitx}
+\usepackage{graphicx,xcolor,booktabs,longtable,tabularx,array,multirow}
+\usepackage{enumitem,fancyhdr,caption,needspace,microtype}
+\usepackage[most]{tcolorbox}
+\usepackage[unicode,hidelinks]{hyperref}
+\definecolor{CourseBlue}{HTML}{244E68}
+\definecolor{CourseMuted}{HTML}{596C78}
+\definecolor{CoursePale}{HTML}{F2F6F8}
+\definecolor{FormulaPale}{HTML}{FFF8E9}
+\definecolor{FormulaRule}{HTML}{C7A86C}
+\definecolor{FormulaTitle}{HTML}{705725}
+\definecolor{ProblemPale}{HTML}{F7F7F5}
+\definecolor{ProblemRule}{HTML}{C4C8CA}
+\definecolor{MethodPale}{HTML}{EDF5FA}
+\definecolor{MethodRule}{HTML}{A6C2D4}
+\definecolor{WarningPale}{HTML}{FBF1EF}
+\definecolor{WarningRule}{HTML}{CFA39D}
+\definecolor{WarningTitle}{HTML}{8B4C44}
+\ctexset{section={format=\Large\sffamily\bfseries\color{CourseBlue},beforeskip=3.5ex plus .8ex minus .4ex,afterskip=1.2ex},subsection={format=\large\sffamily\bfseries\color{CourseBlue},beforeskip=2.7ex plus .5ex,afterskip=.9ex},subsubsection={format=\normalsize\sffamily\bfseries,beforeskip=2.2ex,afterskip=.7ex}}
+\linespread{1.22}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{.65em plus .2em minus .1em}
+\setlength{\emergencystretch}{2em}
+\setlength{\tabcolsep}{5pt}
+\renewcommand{\arraystretch}{1.25}
+\setlist{nosep,leftmargin=1.8em,itemsep=.3em,topsep=.5em}
+\captionsetup{font=small,labelfont=bf,labelsep=quad,skip=6pt}
+\pagestyle{fancy}\fancyhf{}
+\fancyhead[L]{\small\sffamily\color{CourseMuted}课后复习笔记}
+\fancyhead[R]{\small\sffamily\color{CourseMuted}\nouppercase{\leftmark}}
+\fancyfoot[C]{\small\color{CourseMuted}\thepage}
+\renewcommand{\headrulewidth}{.25pt}
+\newcommand{\CourseTitle}[2]{\par\noindent{\LARGE\sffamily\bfseries\color{CourseBlue}#1\par}\vspace{.25em}{\small\color{CourseMuted}#2\par}\vspace{.45em}}
+\makeatletter
+\newif\ifCourseSourceRun
+\newdimen\CourseSourceUsed
+\newsavebox{\CourseSourceBox}
+\newcommand{\CourseSourceEnd}{\par\endgroup\CourseSourceRunfalse}
+\def\CourseSourceColon：{\mbox{\XeTeXinterchartokenstate=1 ：}\CourseSourceEnd}
+\newcommand{\CourseSource}[3]{\ifCourseSourceRun\else\par\nopagebreak[2]\noindent\begingroup\small\color{CourseMuted}\setlength{\parskip}{.1em}\XeTeXinterchartokenstate=0 \CourseSourceUsed=0pt\CourseSourceRuntrue\fi\sbox{\CourseSourceBox}{\XeTeXinterchartokenstate=1 〔课堂 S#1 · #2--#3〕}\ifdim\dimexpr\CourseSourceUsed+\wd\CourseSourceBox\relax>\linewidth\par\noindent\CourseSourceUsed=0pt\fi\usebox{\CourseSourceBox}\hskip.4em\advance\CourseSourceUsed by\wd\CourseSourceBox\advance\CourseSourceUsed by.4em\relax\@ifnextchar\CourseSource{}{\@ifnextchar：{\CourseSourceColon}{\CourseSourceEnd}}}
+\makeatother
+\newcommand{\TimeRange}[1]{\Needspace{5\baselineskip}{\small\color{CourseMuted}授课时间段：#1}\par\nopagebreak[4]}
+\newcommand{\CourseFigure}[3]{\par\addvspace{.55\baselineskip}\noindent\begin{minipage}{\linewidth}\centering\includegraphics[width=.96\linewidth,height=.30\textheight,keepaspectratio]{#1}\captionsetup{skip=4pt}\captionof{figure}{#2}\vspace{.15em}{\raggedright\small\color{CourseMuted}#3\par}\end{minipage}\par\addvspace{.45\baselineskip}}
+\tcbset{coursebox/.style={enhanced,breakable,colback=CoursePale,colframe=MethodRule,boxrule=.3pt,arc=.7mm,left=3mm,right=3mm,top=2mm,bottom=2mm,before skip=.75em,after skip=.75em,fonttitle=\sffamily\bfseries,coltitle=CourseBlue,colbacktitle=CoursePale,attach boxed title to top left={xshift=2mm,yshift=-1mm},boxed title style={boxrule=0pt,arc=0pt}}}
+\newtcolorbox{ConceptBox}[1]{coursebox,title={#1}}
+\newtcolorbox{FormulaBox}[1]{coursebox,colback=FormulaPale,colbacktitle=FormulaPale,colframe=FormulaRule,coltitle=FormulaTitle,title={#1}}
+\newtcolorbox{ExampleBox}[1]{coursebox,colback=ProblemPale,colbacktitle=ProblemPale,colframe=ProblemRule,coltitle=CourseMuted,title={#1}}
+\newtcolorbox{MethodBox}[1]{coursebox,colback=MethodPale,colbacktitle=MethodPale,colframe=MethodRule,title={#1}}
+\newtcolorbox{WarningBox}[1]{coursebox,colback=WarningPale,colbacktitle=WarningPale,colframe=WarningRule,coltitle=WarningTitle,title={#1}}
+\begin{document}
+% QWENASR_BODY
+\end{document}

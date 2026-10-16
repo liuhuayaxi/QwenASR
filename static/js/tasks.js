@@ -1,4 +1,4 @@
-import {groupTasks, attentionStatuses} from './workbench/continuation.js?v=20261011';
+import {taskGroups, filterTaskGroups, groupCounts, actionableTasks, activeStatuses, errorStatuses} from './task-center-view.js?v=20261016-unified-1';
 import {aiTaskPayload} from './task-config.js?v=20260913-tasks-1';
 import {mergeLiveCourseProgress} from './course-progress.js?v=20261011-live-1';
 import {mineruEstimateLabel, legacyMineruProgress} from './mineru-progress-view.js?v=20261013-time-2';
@@ -7,12 +7,12 @@ import {aiActivityView} from './ai-activity-view.js?v=20261014-1';
 
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c]));
-const active = new Set(['running', 'queued', 'waiting_retry', 'stopping']);
-const attention = attentionStatuses;
-const labels = {running:'进行中', queued:'排队中', waiting_retry:'等待自动重试', stopping:'正在停止', paused:'已暂停', failed:'失败', error:'失败', interrupted:'已中断', pending:'待处理', stale:'原件已更新', completed_with_errors:'部分失败', completed:'已完成', cancelled:'已取消'};
+const active = activeStatuses;
+const attention = errorStatuses;
+const labels = {running:'进行中', queued:'排队中', waiting_retry:'等待自动重试', stopping:'正在停止', paused:'已暂停', failed:'失败', error:'失败', interrupted:'已中断', pending:'待处理', stale:'原件已更新', completed_with_errors:'部分失败', completed:'已完成', cancelled:'已取消', recovered:'已恢复', active:'进行中', attention:'需要处理'};
 const actionLabels = {continue:'继续', retry:'重试', regenerate:'重新生成', pause:'暂停', cancel:'取消', download:'仅恢复下载', new_recognition:'新建识别', new_local:'新建本地任务'};
-const filterLabels = {daily:'需要继续', all:'全部任务', active:'进行中', attention:'待处理', paused:'已暂停', completed:'已完成', cancelled:'已取消'};
-const state = {tasks: [], counts: {}, history: {}, filter: 'daily', selected: new Set(), busy: false, loading: false, ready: false};
+const filterLabels = {daily:'当前进展', all:'全部课堂与资料', active:'进行中', attention:'需要处理', review:'待核对', pending:'尚未开始', paused:'已暂停', completed:'已完成', cancelled:'已取消', recovered:'有恢复记录'};
+const state = {tasks: [], groups: [], counts: {}, history: {}, filter: 'daily', selected: new Set(), busy: false, loading: false, ready: false, reloadRequested: false, revision: 0, detailState: new Map()};
 let timer, toastTimer, lastPayload = '';
 
 function notice(id, message) { $(id).textContent = message; $(id).hidden = !message; }
@@ -22,17 +22,14 @@ async function api(path, body) {
     method: 'POST', headers: {'Content-Type': 'application/json', 'X-QwenASR-Client': 'task-center'}, body: JSON.stringify(body),
   })});
   let data;
-  try { data = await response.json(); } catch { throw new Error('后台尚未更新或连接已中断，请重启服务后刷新'); }
+  try { data = await response.json(); } catch { throw new Error('任务服务响应不完整，正在尝试重新连接'); }
   if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : `请求失败（${response.status}）`);
   return data;
 }
-function filteredTasks() {
-  const query = $('taskSearch').value.trim().toLocaleLowerCase();
-  const type = $('typeFilter').value, category = $('categoryFilter').value;
-  return state.tasks.filter(task => (state.filter === 'all' || (state.filter === 'daily' ? active.has(task.status) || attention.has(task.status) : state.filter === 'active' ? active.has(task.status) : state.filter === 'attention' ? attention.has(task.status) : task.status === state.filter))
-    && (!type || task.type === type || task.family === type) && (!category || (category === '__local__' ? !task.category : task.category === category || task.type === 'course_queue' && !task.category))
-    && (!query || [task.title, task.category, task.label, ...(task.files || []).map(file => file.source_name)].join(' ').toLocaleLowerCase().includes(query)));
+function filteredGroups(filter = state.filter) {
+  return filterTaskGroups(state.groups, {filter, type: $('typeFilter').value, category: $('categoryFilter').value, query: $('taskSearch').value});
 }
+function filteredTasks() { return actionableTasks(filteredGroups()); }
 function dateLabel(value) {
   if (!value) return '';
   const date = new Date(typeof value === 'number' ? value * 1000 : value);
@@ -53,7 +50,13 @@ function friendlyError(task) {
     invalid_json: '模型返回的 JSON 结构不完整，可继续重新生成。',
     invalid_segment_mapping: '模型返回的段落编号不可靠，可继续重新处理。',
   };
-  return messages[task.error_kind] || task.error || '';
+  if (messages[task.error_kind]) return messages[task.error_kind];
+  const raw = String(task.error);
+  if (/Broken pipe|Errno 32/i.test(raw)) return '与 AI 通道的连接中断，可继续处理；已有内容已保留。';
+  if (/EMBEDDING_INPUT_TOO_LONG|maximum.*tokens|input.*too.*long/i.test(raw)) return '索引片段超过模型长度限制，需要拆分后继续。';
+  if (/timeout|timed out|超时/i.test(raw)) return '等待处理结果超时，可继续检查或重试。';
+  if (/connection|connect|network|连接|网络/i.test(raw)) return '处理服务暂时无法连接，可在连接恢复后继续。';
+  return raw.length <= 180 && !/Traceback|File "|\\Users\\/.test(raw) ? raw : '本步骤尚未完成，请展开处理详情查看原因并继续。';
 }
 function operationLabel(inference = {}, receipt = {}, mode, task) {
   if (task?.type === 'knowledge_index') return task.execution_location === 'local' ? '处理位置：Mac 本机' : '';
@@ -68,9 +71,9 @@ function operationLabel(inference = {}, receipt = {}, mode, task) {
     receipt.state ? `操作阶段：${receipt.state}` : ''].filter(Boolean).join(' · ');
 }
 function courseQueueDetails(task) {
-  const items = task.course_items || [];
+  const items = task.course_item ? [task.course_item] : task.course_items || [];
   if (!items.length) return '';
-  return `<details class="task-details course-queue-details" open><summary>未完成课次（${items.length}）</summary><div class="course-queue-items">${items.map(item => {
+  return `<details class="task-details course-queue-details" data-detail-key="course-progress" open><summary>${task.course_item ? '本课回放进度' : `未完成课次（${items.length}）`}</summary><div class="course-queue-items">${items.map(item => {
     const phases = (item.phases || []).map(phase => {
       const percent = Math.max(0, Math.min(100, Number(phase.percent) || 0));
       const phaseState = phase.state === 'completed' ? 'completed' : phase.state === 'running' ? 'running' : 'pending';
@@ -80,22 +83,29 @@ function courseQueueDetails(task) {
     return `<article class="course-queue-item"><div class="course-queue-item-head"><b>${esc(item.title)}</b><span>${esc(item.state === 'running' ? '进行中' : item.state === 'paused' ? '已暂停' : '排队中')}</span></div><p>${esc(item.course || '')}${esc(window)}</p><div class="course-phases">${phases || `<small>${esc(item.message || '等待课程回放处理')}</small>`}</div></article>`;
   }).join('')}</div></details>`;
 }
-function card(task) {
-  const done = task.status === 'completed';
+function taskStatus(task) { return task.recovered || task.display_status === 'recovered' ? '已恢复' : task.status === 'pending' && (task.attention_kind === 'review' || Number(task.review_required_blocks) > 0) ? '待核对' : labels[task.status] || task.status; }
+function taskActionLabel(task, action) { return task.type === 'course_queue' && ['continue', 'retry', 'pause', 'cancel'].includes(action) ? `${actionLabels[action]}课程队列` : actionLabels[action]; }
+function isReviewTask(task) { return task.status === 'pending' && task.attention_kind === 'review'; }
+function defaultBulkTasks(tasks) { return tasks.filter(task => !isReviewTask(task) && !task.is_context); }
+function card(task, historical = false) {
+  const recovered = !!task.recovered || task.display_status === 'recovered';
+  const done = historical || task.status === 'completed' || recovered;
   const actions = done ? [] : (task.actions || []);
+  const review = !done && isReviewTask(task);
   const activity = aiActivityView(task);
   const resultClass = done ? 'task-result-link' : 'ui-button';
   const legacyProgress = legacyMineruProgress(task);
   const progress = task.status === 'completed' ? 100 : legacyProgress !== null ? legacyProgress : Object.hasOwn(task, 'progress') ? task.progress : (task.total ? Math.round((task.completed || 0) / task.total * 100) : null);
-  const bounded = activity || progress === null ? null : Math.max(0, Math.min(100, Number(progress) || 0));
+  const bounded = review || activity || progress === null ? null : Math.max(0, Math.min(100, Number(progress) || 0));
   const estimate = task.family === 'mineru' ? task.progress_estimate : null;
   const estimateLabel = mineruEstimateLabel(estimate, task.status) || (legacyProgress !== null ? '按已完成页段显示 · 整体耗时预估尚未就绪' : task.family === 'mineru' && task.status === 'running' ? '正在计算整体进度' : '');
   const resource = resourceStatus(task);
-  const count = task.total ? `${task.family === 'ai' ? '已完成 ' : ''}${task.completed || 0}/${task.total}${task.type === 'course_queue' ? ' 堂课' : task.family === 'mineru' ? ' 个文件' : task.family === 'ai' ? ' 批' : ' 段'}` : '';
+  const reviewCount = Number(task.review_required_blocks) || Number(task.total) || 0;
+  const count = review ? (reviewCount ? `${reviewCount} 段待核对` : '等待人工核对') : task.total ? `${task.family === 'ai' ? '已完成 ' : ''}${task.completed || 0}/${task.total}${task.type === 'course_queue' ? ' 堂课' : task.family === 'mineru' ? ' 个文件' : task.family === 'ai' ? (task.progress_unit === '页' ? ' 页' : ' 批') : ' 段'}` : '';
   const wait = task.status === 'waiting_retry' && task.retry_in_seconds ? ` · 约 ${task.retry_in_seconds} 秒后自动重试` : '';
   const stage = (activity ? [task.stage, activity.label].filter(Boolean).join(' · ')
     : task.stage || (task.status === 'pending' ? '等待手动开始处理' : labels[task.status])) + wait;
-  const error = friendlyError(task);
+  const error = historical ? '' : friendlyError(task);
   const inference = task.inference || {}; // Mixed batches report each file separately.
   const inferMetrics = inference.metrics || {};
   const mode = task.configured_provider;
@@ -107,34 +117,71 @@ function card(task) {
     tier ? `${tier === 'advanced' ? 'Advanced' : tier} 档位` : '', inference.fallback ? '已回退本机' : ''].filter(Boolean).join(' · ') : task.family === 'asr' && task.type !== 'course_queue' ? [providerName, inferMetrics.model || inference.model || '', inferMetrics.dtype || inference.dtype || '', inferMetrics.device || inference.device || '', inference.fallback ? '已回退本机' : ''].filter(Boolean).join(' · ') : '';
   const aiProvider = task.configured_ai_model ? `AI 通道：${task.configured_ai_transport === 'agy_cli' ? 'AGY CLI' : 'OpenAI 兼容 API'} · ${task.configured_ai_model}${task.configured_ai_effort ? ` · ${task.configured_ai_effort} 思考` : ''}` : '';
   const details = [operationLabel(inference, {job_id: task.remote_job_id, state: task.remote_operation_state}, mode, task), aiProvider, recognition ? `识别环境：${recognition}` : '', resource?.detail, task.error && task.error !== error ? task.error : '',
-    task.previous_error ? `上次处理失败：${task.previous_error}；本次正在重新处理。` : '',
+    task.previous_error ? `上次处理失败：${task.previous_error}` : '',
+    recovered ? `恢复说明：${task.recovery_reason || '后续处理已完成，旧错误保留供核对。'}` : '',
     task.range_end ? `片段范围：${Math.floor(task.range_start / 60)}–${Math.ceil(task.range_end / 60)} 分钟` : '',
     task.attempts > 1 ? `历史尝试 ${task.attempts} 次` : '', ...(task.warnings || [])].filter(Boolean);
   const files = (task.files || []).map(file => `<li class="task-file"><div><b>${esc(file.source_name)}</b><span>${esc(labels[file.status] || file.status)}${file.status === 'running' && file.progress != null ? ` · ${Math.round(file.progress || 0)}%` : ''}</span></div><p>${esc(file.error || file.stage)}</p><p>${esc(operationLabel(file.inference, file.remote_operation, task.configured_provider, task))}</p><p>${esc(file.output_path || file.source_path)}</p>${file.download_url ? `<a href="${esc(file.download_url)}" download>下载 AI 友好 PDF</a>` : ''}</li>`).join('');
   const courseDetails = task.type === 'course_queue' ? courseQueueDetails(task) : '';
-  return `<article class="task-card" data-id="${esc(task.id)}" data-status="${esc(task.status)}"><div class="task-card-top">
-    ${done ? '' : `<input class="task-select" type="checkbox" aria-label="选择 ${esc(task.label)}：${esc(task.title)}" ${state.selected.has(task.id) ? 'checked' : ''} ${state.busy ? 'disabled' : ''}>`}
-    <div class="task-main"><div class="task-title"><h3>${esc(task.title)}</h3><span class="task-status">${esc(labels[task.status] || task.status)}</span></div>
-    <div class="task-meta"><span class="task-type">${esc(task.label)}</span><span>${esc(task.category || task.source)}</span>${recognition ? `<span>${esc(recognition)}</span>` : ''}${resource ? `<span class="task-resource ${resource.tone === 'error' ? 'error' : ''}" title="${esc(resource.detail)}">${esc(resource.text)}</span>` : ''}${dateLabel(task.updated_at) ? `<span>更新于 ${esc(dateLabel(task.updated_at))}</span>` : ''}</div>
+  const select = `<input class="task-select" type="checkbox" aria-label="选择${review ? '重新处理' : ''} ${esc(task.label)}：${esc(task.title)}" ${state.selected.has(task.id) ? 'checked' : ''} ${state.busy ? 'disabled' : ''}>`;
+  const buttons = actions.map(action => `<button data-action="${action}" class="ui-button ${action === 'cancel' ? 'danger' : !review && action === 'continue' ? 'primary' : ''}" ${state.busy ? 'disabled' : ''}>${review ? action === 'cancel' ? '取消重新处理任务' : `重新处理（${actionLabels[action]}）` : taskActionLabel(task, action)}</button>`).join('');
+  return `<article class="task-card" data-id="${esc(task.id)}" data-status="${esc(recovered ? 'recovered' : task.status)}"><div class="task-card-top">
+    ${actions.length && !review ? select : ''}
+    <div class="task-main"><div class="task-title"><h3>${esc(task.label || task.title)}</h3><span class="task-status">${esc(taskStatus(task))}</span></div>
+    <div class="task-meta"><span>${esc(task.source || task.category)}</span>${recognition ? `<span>${esc(recognition)}</span>` : ''}${resource ? `<span class="task-resource ${resource.tone === 'error' ? 'error' : ''}" title="${esc(resource.detail)}">${esc(resource.text)}</span>` : ''}${dateLabel(task.updated_at) ? `<span>更新于 ${esc(dateLabel(task.updated_at))}</span>` : ''}</div>
     <div class="task-stage"><span>${esc(stage)}</span><span>${esc(count)}${bounded !== null ? `${count ? ' · ' : ''}${estimate?.estimated && !done ? '整体预估 ' : legacyProgress !== null ? '已完成页段 ' : ''}${bounded}%` : ''}</span></div>
     ${bounded !== null ? `<progress class="task-progress" max="100" value="${bounded}" aria-label="${esc(task.label)}${estimate?.estimated && !done ? '整体预估' : legacyProgress !== null ? '已完成页段' : ''}进度"></progress>` : active.has(task.status) ? `<div class="task-progress-indeterminate" role="progressbar" aria-label="${esc(task.label)}进度待计算"></div>` : ''}
     ${activity ? `<p class="task-ai-activity" role="status">${esc(activity.detail)}</p>` : ''}
     ${estimateLabel ? `<p class="task-estimate">${esc(estimateLabel)}</p>` : ''}
     ${error ? `<div class="task-error">${esc(error)}</div>` : ''}
-    ${actions.length || task.result_url || task.download_url ? `<div class="task-actions">${actions.map(action => `<button data-action="${action}" class="ui-button ${action === 'cancel' ? 'danger' : action === 'continue' ? 'primary' : ''}" ${state.busy ? 'disabled' : ''}>${actionLabels[action]}</button>`).join('')}
-    ${task.result_url ? `<a href="${esc(task.result_url)}" class="${resultClass}">${task.type === 'course_queue' ? '打开课程回放' : task.family === 'ai' || task.type === 'upload' ? '查看笔记' : '查看课程文件'}</a>` : ''}${task.download_url ? `<a href="${esc(task.download_url)}" class="${resultClass}" download>下载 AI 友好 PDF</a>` : ''}</div>` : ''}
-    ${courseDetails || files || details.length ? `${courseDetails || `<details class="task-details"><summary>${files ? `文件明细（${task.files.length}）` : '任务详情'}</summary>${details.map(text => `<p>${esc(text)}</p>`).join('')}${files ? `<ul>${files}</ul>` : ''}</details>`}` : ''}
+    ${!review && actions.length || task.result_url || task.download_url ? `${task.type === 'course_queue' && actions.length ? '<p class="task-queue-scope">队列操作会影响全部课次。</p>' : ''}<div class="task-actions">${review ? '' : buttons}
+    ${task.result_url ? `<a href="${esc(task.result_url)}" class="${resultClass}${review ? ' primary' : ''}">${review ? '查看并核对' : task.type === 'course_queue' ? '打开课程回放' : task.family === 'ai' || task.type === 'upload' ? '查看笔记' : '查看课程文件'}</a>` : ''}${task.download_url ? `<a href="${esc(task.download_url)}" class="${resultClass}" download>下载 AI 友好 PDF</a>` : ''}</div>` : ''}
+    ${review && actions.length ? `<details class="task-details task-reprocess" data-detail-key="reprocess"><summary>重新处理选项</summary><p>重新调用 AI 处理这些片段会使用当前已保存的配置，不会标记为已人工核对。</p><label>${select} 选择此步骤参与批量重新处理</label><div class="task-actions">${buttons}</div></details>` : ''}
+    ${courseDetails || files || details.length ? `${courseDetails || `<details class="task-details" data-detail-key="technical"><summary>${files ? `文件明细（${task.files.length}）` : '处理详情'}</summary>${details.map(text => `<p>${esc(text)}</p>`).join('')}${files ? `<ul>${files}</ul>` : ''}</details>`}` : ''}
     </div></div></article>`;
 }
+function contextQueueCard(task) {
+  return `<article class="task-card task-context-card" data-id="${esc(task.id)}">${task.actions?.length ? `<p class="task-queue-scope">队列操作会影响全部课次。</p><label><input class="task-select" type="checkbox" aria-label="选择整个课程队列" ${state.selected.has(task.id) ? 'checked' : ''} ${state.busy ? 'disabled' : ''}> 选择整个课程队列参与批量处理</label><div class="task-actions">${task.actions.map(action => `<button data-action="${action}" class="ui-button ${action === 'cancel' ? 'danger' : ''}" ${state.busy ? 'disabled' : ''}>${taskActionLabel(task, action)}</button>`).join('')}</div>` : ''}${courseQueueDetails(task)}</article>`;
+}
+function groupCard(group) {
+  const current = group.current_tasks;
+  const history = group.history;
+  const stages = [...new Map([...history, ...current].map(task => [task.label || task.type || task.id, task])).values()].slice(0, 6);
+  const waiting = current.filter(task => task.status === 'pending' && !task.error && task.attention_kind !== 'review' && !Number(task.review_required_blocks));
+  const visible = current.filter(task => !waiting.includes(task));
+  const historyLabel = `${history.length} 条处理记录${group.recovered_count ? ` · ${group.recovered_count} 条错误已恢复` : ''}`;
+  return `<section class="task-group task-group-card" data-group-id="${esc(group.id)}" data-group-status="${esc(group.status)}">
+    <header class="task-group-head"><div><p class="task-group-course">${esc(group.category || '本地资料与处理')}</p><h3>${esc(group.title)}</h3></div><span class="group-status" data-tone="${group.errors.length ? 'attention' : active.has(group.status) ? 'active' : 'quiet'}">${esc(group.review_count && group.status === 'pending' ? '待核对' : labels[group.status] || group.status)}${group.errors.length ? ` · ${group.errors.length} 项需处理` : ''}</span></header>
+    <p class="group-current"><span>${group.errors.length && !active.has(group.status) ? '需要处理' : active.has(group.status) ? '现在正在' : group.review_count && group.status === 'pending' ? '待核对' : group.status === 'pending' ? '接下来' : '当前状态'}</span>${esc(group.current_stage || labels[group.status] || '')}</p>
+    <div class="group-stages" aria-label="本课堂处理步骤">${stages.map(task => `<span data-state="${esc(task.recovered ? 'recovered' : task.status)}">${esc(task.label || '处理')}<b>${esc(taskStatus(task))}</b></span>`).join('')}</div>
+    ${visible.length ? `<div class="group-current-tasks">${visible.map(task => card(task)).join('')}</div>` : ''}
+    ${waiting.length ? `<details class="group-waiting" data-detail-key="waiting"><summary>尚未开始 · ${waiting.length} 个步骤 <span>${waiting.map(task => esc(task.label || '等待处理')).join('、')}</span></summary>${waiting.map(task => card(task)).join('')}</details>` : ''}
+    ${!current.length && group.result_url ? `<a class="ui-button group-result" href="${esc(group.result_url)}">${group.recording_id ? '打开课堂笔记' : '查看处理结果'}</a>` : ''}
+    ${group.context_tasks?.length ? `<details class="task-details group-context" data-detail-key="queue-context"><summary>课程队列控制与本课进度</summary>${group.context_tasks.map(contextQueueCard).join('')}</details>` : ''}
+    ${history.length ? `<details class="group-history" data-detail-key="history"><summary>已完成与历史 · ${historyLabel}</summary><p class="group-history-note">已恢复的错误已由后续结果核实，原始记录仍保留在这里。</p>${history.map(task => card(task, true)).join('')}</details>` : ''}
+    </section>`;
+}
+function groupSection(groups, title, key, collapsed = false) {
+  if (!groups.length) return '';
+  const content = groups.map(groupCard).join('');
+  return collapsed ? `<details class="task-collection" data-detail-key="collection:${key}"><summary>${esc(title)} <span>${groups.length} 项</span></summary><div class="task-list-section">${content}</div></details>` : `<div class="task-list-section">${content}</div>`;
+}
 function selectionControls() {
-  const visible = filteredTasks();
-  const selectable = visible.filter(task => (task.actions || []).length);
+  const selectable = filteredTasks();
   const selected = selectable.filter(task => state.selected.has(task.id));
+  const defaults = defaultBulkTasks(selectable);
+  const defaultSelected = defaults.filter(task => state.selected.has(task.id));
+  // A shared course queue can appear under several lessons. Its checkboxes
+  // represent the same durable owner and must reflect one choice immediately.
+  $('taskList').querySelectorAll('.task-select').forEach(input => {
+    input.checked = state.selected.has(input.closest('[data-id]').dataset.id);
+    input.disabled = state.busy;
+  });
   document.querySelectorAll('[data-bulk]').forEach(button => button.hidden = !selected.length);
-  $('selectionCount').textContent = selected.length ? `已选 ${selected.length} 项` : '未选择任务';
-  $('selectAll').checked = selectable.length > 0 && selected.length === selectable.length;
-  $('selectAll').indeterminate = selected.length > 0 && selected.length < selectable.length;
-  $('selectAll').disabled = !selectable.length || state.busy;
+  $('selectionCount').textContent = selected.length ? `已选 ${selected.length} 个处理步骤` : '可选择具体步骤批量处理';
+  $('selectAll').checked = defaults.length > 0 && defaultSelected.length === defaults.length;
+  $('selectAll').indeterminate = defaultSelected.length > 0 && defaultSelected.length < defaults.length;
+  $('selectAll').disabled = !defaults.length || state.busy;
   document.querySelectorAll('[data-bulk]').forEach(button => {
     const count = selected.filter(task => task.actions.includes(button.dataset.bulk)).length;
     button.disabled = state.busy || !count;
@@ -144,34 +191,50 @@ function selectionControls() {
   $('clearCompleted').disabled = state.busy || !completed.length;
   $('restoreCompleted').hidden = state.busy || !state.history.can_restore;
   $('restoreCompleted').disabled = state.busy;
-  $('retryFailed').disabled = state.busy || !state.tasks.some(task => attention.has(task.status) && (task.actions || []).some(action => ['retry', 'continue'].includes(action)));
+  $('retryFailed').disabled = state.busy || !actionableTasks(state.groups).some(task => !task.is_context && attention.has(task.status) && (task.actions || []).some(action => ['retry', 'continue'].includes(action)));
+}
+function detailKey(node) {
+  return `${node.closest('[data-group-id]')?.dataset.groupId || ''}|${node.closest('[data-id]')?.dataset.id || ''}|${node.dataset.detailKey || ''}`;
 }
 function render() {
-  const opened = new Set([...$('taskList').querySelectorAll('details[open]')].map(node => node.closest('[data-id]').dataset.id));
+  $('taskList').querySelectorAll('details').forEach(node => state.detailState.set(detailKey(node), node.open));
   const focused = document.activeElement;
+  const focusedDetail = focused?.matches('summary') ? detailKey(focused.parentElement) : null;
+  const focusedGroup = focused?.closest('[data-group-id]')?.dataset.groupId;
   const focusedId = focused?.closest('#taskList [data-id]')?.dataset.id;
   const focusSelector = focused?.matches('.task-select') ? '.task-select' : focused?.matches('summary') ? 'summary' : focused?.dataset.action ? `[data-action="${focused.dataset.action}"]` : null;
-  const tasks = filteredTasks();
-  $('listTitle').textContent = `${filterLabels[state.filter]} · ${tasks.length}`;
-  $('taskList').innerHTML = tasks.length ? groupTasks(tasks).map(group => `<section class="task-group"><h3>${esc(group.title)}${group.category && group.category !== group.title ? ` · ${esc(group.category)}` : ''}</h3>${group.tasks.map(card).join('')}</section>`).join('') : `<div class="task-empty"><b>${state.tasks.length ? '没有符合条件的任务' : '目前没有任务'}</b>${state.tasks.length ? '可以切换状态、类型或课程，或清空搜索。' : '在工作台生成 AI 笔记，或添加 PDF 识别任务，进度会显示在这里。'}</div>`;
-  $('taskList').querySelectorAll('[data-id]').forEach(node => {
-    if (opened.has(node.dataset.id) && node.querySelector('details')) node.querySelector('details').open = true;
-    if (node.dataset.id === focusedId && focusSelector) node.querySelector(focusSelector)?.focus({preventScroll: true});
-  });
+  const groups = filteredGroups();
+  $('listTitle').textContent = `${filterLabels[state.filter]} · ${groups.length} 项`;
+  let html = '';
+  if (state.filter === 'daily' || state.filter === 'all') {
+    const current = groups.filter(group => !['pending', 'completed', 'cancelled'].includes(group.status) || group.errors.length || group.review_count);
+    const pending = groups.filter(group => group.status === 'pending' && !group.errors.length && !group.review_count);
+    const completed = groups.filter(group => ['completed', 'cancelled'].includes(group.status) && !group.errors.length);
+    html = groupSection(current, '', 'current') + groupSection(pending, '尚未开始', 'pending', true) + groupSection(completed, '已完成与已取消', 'completed', true);
+  } else html = groupSection(groups, '', 'filtered');
+  $('taskList').innerHTML = html || `<div class="task-empty"><b>${state.groups.length ? '这里暂时没有需要处理的项目' : '目前没有任务'}</b>${state.groups.length ? '可以切换状态、类型或课程，查看其他课堂与历史记录。' : '课堂转写、复习笔记、资料识别和索引会按课堂或资料汇总到这里。'}</div>`;
+  $('taskList').querySelectorAll('details').forEach(node => { if (state.detailState.has(detailKey(node))) node.open = state.detailState.get(detailKey(node)); });
+  if (focusedDetail) [...$('taskList').querySelectorAll('details')].find(node => detailKey(node) === focusedDetail)?.querySelector('summary')?.focus({preventScroll:true});
+  else if (focusedId && focusSelector) {
+    const candidates = [...$('taskList').querySelectorAll('[data-id]')];
+    candidates.find(node => node.dataset.id === focusedId && node.closest('[data-group-id]')?.dataset.groupId === focusedGroup)?.querySelector(focusSelector)?.focus({preventScroll:true});
+  }
   document.querySelectorAll('[data-count]').forEach(node => node.textContent = state.counts[node.dataset.count] || 0);
-  document.querySelectorAll('[data-status]').forEach(node => { if (node.matches('button')) node.setAttribute('aria-current', node.dataset.status === state.filter ? 'page' : 'false'); });
+  document.querySelectorAll('#statusFilters [data-status]').forEach(node => node.setAttribute('aria-current', node.dataset.status === state.filter ? 'page' : 'false'));
   document.querySelectorAll('[data-summary]').forEach(node => node.setAttribute('aria-pressed', String(node.dataset.summary === state.filter)));
+  $('taskOverview').textContent = `${state.counts.all || 0} 项课堂与资料 · ${state.counts.attention || 0} 项需要处理 · ${state.counts.review || 0} 项待核对${state.counts.recovered ? ` · ${state.counts.recovered} 项含已恢复的历史错误` : ''}`;
   selectionControls();
 }
 function applyFilters() { state.selected.clear(); render(); }
 function setFilter(filter) { state.filter = filter; applyFilters(); }
 async function load() {
-  if (state.loading || state.busy) return;
-  clearTimeout(timer); state.loading = true;
+  if (state.busy) return;
+  if (state.loading) { state.reloadRequested = true; return; }
+  clearTimeout(timer); state.loading = true; const revision = state.revision, hadReady = state.ready;
   try {
     let data = await api('/api/tasks');
     let courseWarning = '';
-    if ((data.tasks || []).some(task => task.type === 'course_queue')) {
+    if (!Array.isArray(data.groups) && (data.tasks || []).some(task => task.type === 'course_queue')) {
       try {
         const response = await fetch('/course/api/status', {cache: 'no-store', signal: AbortSignal.timeout(5000)});
         if (!response.ok) throw new Error('课程服务暂时不可用');
@@ -180,30 +243,35 @@ async function load() {
         courseWarning = '课程回放实时进度暂时不可用，当前显示已保存的进度，正在自动重连。';
       }
     }
-    state.tasks = data.tasks || []; state.counts = data.counts || {}; state.history = data.history || {}; state.ready = true;
-    state.selected = new Set([...state.selected].filter(id => state.tasks.some(task => task.id === id)));
-    const categories = [...new Set([...state.tasks.map(task => task.category), new URLSearchParams(location.search).get('category')].filter(Boolean))].sort((a,b) => a.localeCompare(b,'zh-CN'));
-    const categoryValue = state.ready && lastPayload ? $('categoryFilter').value : new URLSearchParams(location.search).get('category') || '';
-    $('categoryFilter').innerHTML = '<option value="">全部课程</option>' + categories.map(value => `<option value="${esc(value)}">${esc(value)}</option>`).join('') + '<option value="__local__">本地 PDF</option>';
+    if (revision !== state.revision || state.busy) return;
+    state.tasks = data.tasks || []; state.groups = taskGroups(data); state.counts = groupCounts(state.groups); state.history = data.history || {}; state.ready = true;
+    const actionable = new Set(actionableTasks(state.groups).map(task => task.id));
+    state.selected = new Set([...state.selected].filter(id => actionable.has(id)));
+    const categories = [...new Set([...state.groups.map(group => group.category), new URLSearchParams(location.search).get('category')].filter(Boolean))].sort((a,b) => a.localeCompare(b,'zh-CN'));
+    const categoryValue = hadReady ? $('categoryFilter').value : new URLSearchParams(location.search).get('category') || '';
+    const categoryOptions = '<option value="">全部课程</option>' + categories.map(value => `<option value="${esc(value)}">${esc(value)}</option>`).join('') + '<option value="__local__">本地 PDF</option>';
+    if ($('categoryFilter').innerHTML !== categoryOptions) $('categoryFilter').innerHTML = categoryOptions;
     if ([...$('categoryFilter').options].some(option => option.value === categoryValue)) $('categoryFilter').value = categoryValue;
     const signature = JSON.stringify(data);
     if (signature !== lastPayload) { render(); lastPayload = signature; }
     notice('loadError', ''); notice('sourceWarning', [...(data.warnings || []), courseWarning].filter(Boolean).join('\n'));
     $('lastUpdated').textContent = `已同步 ${new Date().toLocaleTimeString('zh-CN')} · 每 3 秒自动更新`;
   } catch (error) {
+    if (revision !== state.revision || state.busy) return;
     notice('loadError', `${error.message}。${state.ready ? '当前保留上次读取的任务。' : ''}`);
     if (!state.ready) $('taskList').innerHTML = '<div class="task-empty">暂时无法读取任务，请稍后刷新。</div>';
     $('lastUpdated').textContent = '连接中断，正在自动重连';
   } finally {
     state.loading = false; $('taskList').setAttribute('aria-busy', 'false');
-    if (!document.hidden) timer = setTimeout(load, 3000);
+    if (state.reloadRequested && !state.busy) { state.reloadRequested = false; queueMicrotask(load); }
+    else if (!document.hidden) timer = setTimeout(load, 3000);
   }
 }
 async function perform(targets, action, bulk = false) {
   const newOperation = ['new_local', 'new_recognition'].includes(action);
   if (newOperation && !confirm('旧远端任务可能仍在运行。新任务可能重复计算，旧收据与结果会保留。确认创建新任务？')) return;
   if (state.busy || !targets.length) return;
-  state.busy = true; render(); notice('actionResult', '');
+  state.busy = true; state.revision += 1; render(); notice('actionResult', '');
   try {
     // The backend rebuilds AI settings from its local durable store. Do not
     // fetch or pass browser-local provider values during task actions.
@@ -224,9 +292,9 @@ $('statusFilters').addEventListener('click', event => { const button = event.tar
 document.querySelectorAll('[data-summary]').forEach(button => button.addEventListener('click', () => setFilter(button.dataset.summary)));
 for (const id of ['typeFilter', 'categoryFilter']) $(id).addEventListener('change', applyFilters);
 $('taskSearch').addEventListener('input', applyFilters);
-$('selectAll').addEventListener('change', () => { state.selected = new Set($('selectAll').checked ? filteredTasks().filter(task => (task.actions || []).length).map(task => task.id) : []); render(); });
+$('selectAll').addEventListener('change', () => { state.selected = new Set($('selectAll').checked ? defaultBulkTasks(filteredTasks()).map(task => task.id) : []); render(); });
 $('taskList').addEventListener('change', event => { if (!event.target.matches('.task-select')) return; const id = event.target.closest('[data-id]').dataset.id; if (event.target.checked) state.selected.add(id); else state.selected.delete(id); selectionControls(); });
-$('taskList').addEventListener('click', event => { const button = event.target.closest('[data-action]'); if (!button) return; const task = state.tasks.find(task => task.id === button.closest('[data-id]').dataset.id); if (task) perform([task], button.dataset.action); });
+$('taskList').addEventListener('click', event => { const button = event.target.closest('[data-action]'); if (!button) return; const task = actionableTasks(state.groups).find(task => task.id === button.closest('[data-id]').dataset.id); if (task) perform([task], button.dataset.action); });
 document.querySelectorAll('[data-bulk]').forEach(button => button.addEventListener('click', () => {
   const targets = filteredTasks().filter(task => state.selected.has(task.id) && task.actions.includes(button.dataset.bulk));
   if (targets.length > 200) { toast('每次最多操作 200 项任务，请减少选择'); return; }
@@ -235,7 +303,7 @@ document.querySelectorAll('[data-bulk]').forEach(button => button.addEventListen
 $('refreshTasks').addEventListener('click', load);
 $('retryFailed').addEventListener('click', async () => {
   if (state.busy) return;
-  state.busy = true; render(); notice('actionResult', '');
+  state.busy = true; state.revision += 1; render(); notice('actionResult', '');
   try {
     const result = await api('/api/tasks/retry-failed', {});
     const failures = (result.results || []).filter(item => !item.ok).map(item => `${item.id}：${item.error}`);
@@ -247,17 +315,17 @@ $('retryFailed').addEventListener('click', async () => {
 $('clearCompleted').addEventListener('click', async () => {
   const completed = state.tasks.filter(task => task.status === 'completed');
   if (!completed.length || state.busy) return;
-  state.busy = true; render(); notice('actionResult', '');
+  state.busy = true; state.revision += 1; render(); notice('actionResult', '');
   try {
     const result = await api('/api/tasks/clear-completed', {items: completed.map(task => ({id: task.id, generation: task.history_generation}))});
-    toast(`已清理 ${result.cleared} 条已完成任务记录，原文件和结果仍保留`);
+    toast(`已收起 ${result.cleared} 条已完成记录，原文件和结果仍保留`);
     lastPayload = '';
   } catch (error) { notice('actionResult', error.message); }
   finally { state.busy = false; await load(); render(); }
 });
 $('restoreCompleted').addEventListener('click', async () => {
   if (state.busy || !state.history.can_restore) return;
-  state.busy = true; render(); notice('actionResult', '');
+  state.busy = true; state.revision += 1; render(); notice('actionResult', '');
   try {
     const result = await api('/api/tasks/restore-completed', {});
     toast(`已恢复 ${result.restored} 条刚清理的任务记录`);

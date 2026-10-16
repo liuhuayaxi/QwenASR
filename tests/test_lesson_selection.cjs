@@ -177,3 +177,27 @@ test('import completion from a previous course does not clear a new selection', 
   assert.deepEqual(env.ids(), ['a']);
   assert.equal(env.input('a').checked, true);
 });
+
+test('course timing UI preserves unknown durations and labels measured loading separately', () => {
+  const env = environment();
+  const status = env.status();
+  const render = metrics => {
+    status.imports = [{state:'queued', title:'课堂任务', metrics}];
+    env.api.renderCourseState(status);
+    return env.element('result').querySelectorAll('p').at(-1).textContent;
+  };
+  const unknown = render({first_text_seconds:50.9, asr_queue_seconds:null,
+    asr_inference_seconds:null, asr_load_seconds:null});
+  assert.match(unknown, /首段文字 50\.9 秒/);
+  assert.match(unknown, /ASR 排队 未记录.*纯推理 未记录.*模型加载 未记录/);
+  assert.doesNotMatch(unknown, /0\.0 秒/);
+  // The old service returned fabricated zero totals before nested receipts
+  // were counted. Cached pages must not turn those into a timing claim.
+  assert.match(render({first_text_seconds:1,asr_queue_seconds:0,asr_inference_seconds:0}),
+    /ASR 排队 未记录.*纯推理 未记录/);
+  const measured = render({first_text_seconds:0,asr_queue_seconds:0,
+    asr_inference_seconds:91.01,asr_load_seconds:69.81,
+    asr_timing_observations:{asr_queue_seconds:4,asr_inference_seconds:13,asr_load_seconds:13}});
+  assert.match(measured, /首段文字 0\.0 秒.*ASR 排队 0\.0 秒.*纯推理 91\.0 秒.*模型加载 69\.8 秒/);
+  assert.match(measured, /已完成片段累计/);
+});

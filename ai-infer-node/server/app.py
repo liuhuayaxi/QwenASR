@@ -186,6 +186,10 @@ class Gateway:
 
     async def stop(self):
         self.stopping = True
+        classroom=getattr(self,'classroom',None)
+        if classroom:
+            if classroom.timer:classroom.timer.cancel()
+            await classroom.close()
         if self.loop:
             await self.loop
         self.store.db.close()
@@ -245,6 +249,10 @@ class Gateway:
         cleaned = 0
         while not self.stopping:
             try:
+                classroom = getattr(self, 'classroom', None)
+                if classroom and (classroom.reserved() or classroom.guard.locked()):
+                    await asyncio.sleep(.25)
+                    continue
                 shared_isolation = self.coordination/'resource-isolation.json'
                 if shared_isolation.exists():
                     self.isolation = json.loads(shared_isolation.read_text())
@@ -552,6 +560,8 @@ async def lifespan(app):
 
 
 app = FastAPI(title="AI inference node", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+from .classroom import install as install_classroom
+install_classroom(app)
 
 
 @app.middleware("http")

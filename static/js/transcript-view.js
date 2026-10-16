@@ -1,3 +1,5 @@
+import { renderMarkdown } from "./markdown-reader.js?v=20261015-reader-math-scope-8";
+
 export function createTranscriptView({
   els, state, toast, updateButtons, switchView, onSessionShown = () => {},
   onRetrySegment = () => {},
@@ -200,12 +202,12 @@ export function createTranscriptView({
     card.dataset.translation = review.translation || "";
     const refinedBlocks = (review.blocks || []).filter((block) => block.corrected);
     const refinedContent = refinedBlocks.length
-      ? `<div class="review-window-blocks">${refinedBlocks.map((block) => `<section class="review-window-block"><span>${formatDuration(block.start)}–${formatDuration(block.end)}</span><p class="corrected-text review-text">${escapeHtml(block.corrected)}</p>${block.translation ? `<div class="translation-block"><small>翻译</small><p class="translation-text">${escapeHtml(block.translation)}</p></div>` : ""}</section>`).join("")}</div>`
-      : corrected ? `<p class="corrected-text review-text">${escapeHtml(corrected)}</p>` : "";
+      ? `<div class="review-window-blocks">${refinedBlocks.map((block) => `<section class="review-window-block"><span>${formatDuration(block.start)}–${formatDuration(block.end)}</span><div class="corrected-text review-text transcript-markdown markdown-body">${renderMarkdown(block.corrected)}</div>${block.translation ? `<div class="translation-block"><small>翻译</small><div class="translation-text transcript-markdown markdown-body">${renderMarkdown(block.translation)}</div></div>` : ""}</section>`).join("")}</div>`
+      : corrected ? `<div class="corrected-text review-text transcript-markdown markdown-body">${renderMarkdown(corrected)}</div>` : "";
     card.innerHTML = `<span class="segment-index review-index">${badge}</span><div class="segment-body">
       <div class="segment-meta"><span class="language-pill">${label}</span><span class="review-time-range">${timing}</span></div>
       ${refinedContent}
-      ${!refinedBlocks.length && review.translation ? `<div class="translation-block"><small>翻译</small><p class="translation-text">${escapeHtml(review.translation)}</p></div>` : ""}
+      ${!refinedBlocks.length && review.translation ? `<div class="translation-block"><small>翻译</small><div class="translation-text transcript-markdown markdown-body">${renderMarkdown(review.translation)}</div></div>` : ""}
       ${review.ai_error ? `<p class="ai-error">五分钟整体整理未完成：${escapeHtml(review.ai_error)}</p>` : ""}
       ${review.raw ? `<details class="review-source"><summary>查看合并前的小段文本</summary><p>${escapeHtml(review.raw)}</p></details>` : ""}
       ${!failed && (review.segment_ids || []).length ? `<p class="review-timestamp-note">本窗口覆盖 ${(review.segment_ids || []).length} 个原分段；下方仍保留其完整时间戳</p>` : ""}
@@ -258,9 +260,9 @@ export function createTranscriptView({
       body.querySelectorAll(".corrected-text").forEach((node) => node.remove());
       rawNode.classList.add("dimmed");
       rawNode.innerHTML = `<span class="raw-label">原始识别</span>${escapeHtml(raw)}`;
-      const corrected = document.createElement("p");
-      corrected.className = "corrected-text";
-      corrected.textContent = message.corrected;
+      const corrected = document.createElement("div");
+      corrected.className = "corrected-text transcript-markdown markdown-body";
+      corrected.innerHTML = renderMarkdown(message.corrected);
       rawNode.before(corrected);
       card.dataset.finalText = message.corrected;
     }
@@ -268,7 +270,7 @@ export function createTranscriptView({
       body.querySelector(".translation-block")?.remove();
       const translation = document.createElement("div");
       translation.className = "translation-block";
-      translation.innerHTML = `<small>${message.translation_target === "English" ? "ENGLISH" : "中文翻译"}</small><p class="translation-text">${escapeHtml(message.translation)}</p>`;
+      translation.innerHTML = `<small>${message.translation_target === "English" ? "ENGLISH" : "中文翻译"}</small><div class="translation-text transcript-markdown markdown-body">${renderMarkdown(message.translation)}</div>`;
       body.appendChild(translation);
       card.dataset.translation = message.translation;
     }

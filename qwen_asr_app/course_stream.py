@@ -39,8 +39,12 @@ def public_config(config):
 
 class CourseStreamJob:
     def __init__(self, record, config, model, busy_ids):
-        self.record, self.config, self.model, self.busy_ids = record, config, model, busy_ids
+        from .remote_operations import saved_config
+        self.record, self.model, self.busy_ids = record, model, busy_ids
         self.state = record.metadata["course_stream"]
+        snapshot=self.state.get('inference_settings') or record.metadata.get('batch_options',{}).get('inference_settings')
+        self.config={**config,'inference_settings':saved_config(snapshot or config.get('inference_settings'))}
+        self.state['inference_settings']=self.config['inference_settings']
         self.event = asyncio.Event()
         self.lock = asyncio.Lock()
         self.task = None
@@ -66,6 +70,7 @@ class CourseStreamJob:
     def start(self):
         self.recover_chunks()
         self.record.metadata.update(status="processing", batch_options=public_config(self.config))
+        self.record.metadata['inference_settings']=self.config['inference_settings']
         self.state.pop("error", None)
         self.state["paused"] = False
         self.state.setdefault("started_at", time.time())
@@ -85,10 +90,37 @@ class CourseStreamJob:
         self.task.add_done_callback(cleanup)
 
     def snapshot(self):
+        import math
         r, s = self.record, self.state
         chunks = s["chunks"]
         corrected = sum(segment_ai_complete(v, self.config) for v in r.segments)
         done = int(s.get("completed_chunks", 0))
+        timing_fields={
+            'asr_queue_seconds':('queue_seconds',),
+            'asr_inference_seconds':('inference_seconds',),
+            'asr_load_seconds':('load_seconds',),
+            'asr_worker_seconds':('total_seconds','seconds'),
+            'asr_gateway_seconds':('gateway_job_seconds',),
+        }
+        totals={key:[] for key in (*timing_fields,'asr_client_seconds')}
+        def valid(value):
+            return isinstance(value,(int,float)) and not isinstance(value,bool) and math.isfinite(value) and value>=0
+        for segment in r.segments:
+            outer=segment.get('metrics')
+            outer=outer if isinstance(outer,dict) else {}
+            nested=outer.get('metrics')
+            layers=(nested,outer) if isinstance(nested,dict) else (outer,)
+            for name,fields in timing_fields.items():
+                # Remote receipts wrap worker timings in metrics.metrics;
+                # local inference writes flat timings. Pick one observation,
+                # never add aliases or reinterpret worker total as inference.
+                value=next((layer[field] for layer in layers for field in fields
+                    if valid(layer.get(field))),None)
+                if value is not None:totals[name].append(value)
+            if valid(segment.get('latency')):totals['asr_client_seconds'].append(segment['latency'])
+        timing={key:round(sum(values),3) if values else None for key,values in totals.items()}
+        timing['asr_timing_observations']={key:len(values) for key,values in totals.items()}
+        timing['asr_timing_basis']='completed_transcript_segments'
         return {"id": r.id, "directory": str(r.directory), "status": r.metadata["status"],
                 "next_index": len(chunks), "download_seconds": round(r.duration, 2),
                 "expected_seconds": round(float(s.get("expected_seconds", 0)), 2),
@@ -100,8 +132,7 @@ class CourseStreamJob:
                 "ai_pending": sum(bool(v.get("ai_pending")) for v in r.segments),
                 "metrics": {"first_text_seconds": s.get("first_text_seconds"),
                             "download_wall_seconds": s.get("download_wall_seconds"),
-                            "asr_queue_seconds": round(sum(v.get("metrics", {}).get("queue_seconds", 0) for v in r.segments), 3),
-                            "asr_inference_seconds": round(sum(v.get("metrics", {}).get("inference_seconds", 0) for v in r.segments), 3),
+                            **timing,
                             "archive_seconds": s.get("archive_seconds")},
                 "resume": chunks[-1].get("cursor") if chunks else None}
 
@@ -215,12 +246,17 @@ class CourseStreamJob:
                     self.state["stage"] = f"正在转写第 {index + 1} 段 · 下载与精修同时进行"
                     self.record.save_metadata()
                     metrics = {}
+                    routing=self.config['inference_settings']
+                    operation_dir=None
+                    if routing.get('asr_provider','local')!='local':
+                        operation_dir=self.record.directory/'.course-operations'/f'{index:05d}-{start}-{end}'
                     inference = asyncio.create_task(self.model.transcribe(
                         audio[start:end], self.config.get("language"),
                         asr_terminology_context(self.config.get("context", ""), self.config.get("terminology")),
                         max_tokens=min(1536, max(256, int(seconds * 10) + 128)),
                         asr_params=asr_params_with_terminology(self.config.get("asr_params"), self.config.get("terminology")),
                         timeout_seconds=180, metrics=metrics,
+                        inference_config=routing,operation_dir=operation_dir,
                     ))
                     try:
                         text, language, latency = await asyncio.shield(inference)
@@ -343,6 +379,8 @@ class CourseStreamManager:
         except (OSError, ValueError) as exc:
             raise HTTPException(409, str(exc)) from exc
         config["asr_params"] = normalize_asr_params(config.get("asr_params"), DEFAULT_ASR_PARAMS["max_tokens"])
+        from .inference_providers import inference_settings
+        config['inference_settings']=inference_settings.for_new_task('asr')
         key = str(data.get("key", ""))
         try:
             duration = float(data.get("duration", 0))
@@ -379,6 +417,10 @@ class CourseStreamManager:
                 raise HTTPException(409, "这条录音正在处理，请完成后再继续课程转写")
             if record and not record.metadata.get("course_stream"):
                 raise HTTPException(409, "旧版导入请从语音工作台继续")
+            if record:
+                from .remote_operations import saved_config
+                config['inference_settings']=saved_config(record.metadata.get('course_stream',{}).get('inference_settings')
+                    or record.metadata.get('batch_options',{}).get('inference_settings'))
             if record is None:
                 category = self.settings.add_category(config.get("category") or "未分类")
                 starts = sorted(str(item.get("start")) for item in sources if item.get("start"))

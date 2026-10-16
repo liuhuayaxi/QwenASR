@@ -14,7 +14,7 @@ import time
 import uuid
 from datetime import datetime
 from collections import deque
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from functools import wraps
 from pathlib import Path
 from typing import Any
@@ -120,45 +120,52 @@ model_manager = ModelManager(MODEL_PATH)
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    # The course page used to run as a second uvicorn process on port 8766.
-    # It now mounts below /course in this app, so enter its lifecycle here as
-    # well.  This keeps credential recovery and the durable course queue alive
-    # without opening another listener.
-    async with smartclass_service.lifespan(smartclass_service.app):
-        await library_watch.start()
-        await knowledge_service.start()
-        await knowledge_coordinator.start()
-        intelligence_service = getattr(intelligence_router, 'intelligence_service', None)
-        if intelligence_service and hasattr(intelligence_service, 'start'):
-            await intelligence_service.start()
-        try:
-            yield
-        finally:
+    with recording_store.service_startup():
+        # The course page used to run as a second uvicorn process on port 8766.
+        # It now mounts below /course in this app, so enter its lifecycle here as
+        # well.  This keeps credential recovery and the durable course queue alive
+        # without opening another listener.
+        async with smartclass_service.lifespan(smartclass_service.app):
+            await library_watch.start()
+            await knowledge_service.start()
+            await knowledge_coordinator.start()
             intelligence_service = getattr(intelligence_router, 'intelligence_service', None)
-            if intelligence_service and hasattr(intelligence_service, 'close'):
-                await intelligence_service.close()
-            await knowledge_coordinator.close()
-            await knowledge_service.close()
-            from qwen_asr_app.knowledge.embeddings import close_embedder
-            await asyncio.to_thread(close_embedder)
-            await backup_manager.close()
-            await library_watch.close()
-            await course_stream_manager.close()
-            tasks = [
-                *background_summary_tasks.values(),
-                *background_ai_tasks.values(),
-                *finalization_tasks.values(),
-                *pdf_ai_background_tasks.values(),
-                *course_file_api.tasks.values(),
-                *upload_jobs.tasks.values(),
-            ]
-            for task in tasks:
-                task.cancel()
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
-            await model_manager.close()
-            await close_ai_clients()
-
+            if intelligence_service and hasattr(intelligence_service, 'start'):
+                await intelligence_service.start()
+            from qwen_asr_app.remote_backlog import recovery_loop
+            backlog=asyncio.create_task(recovery_loop(recording_store,model_manager,live_sessions,
+                lambda ident: ident in record_operations or ident in finalization_tasks or ident in running_batch_ids or recording_discard.busy(ident),
+                claim=backlog_record_claim,on_completed=backlog_completed))
+            try:
+                yield
+            finally:
+                backlog.cancel()
+                await asyncio.gather(backlog,return_exceptions=True)
+                await recording_discard.close()
+                intelligence_service = getattr(intelligence_router, 'intelligence_service', None)
+                if intelligence_service and hasattr(intelligence_service, 'close'):
+                    await intelligence_service.close()
+                await knowledge_coordinator.close()
+                await knowledge_service.close()
+                from qwen_asr_app.knowledge.embeddings import close_embedder
+                await asyncio.to_thread(close_embedder)
+                await backup_manager.close()
+                await library_watch.close()
+                await course_stream_manager.close()
+                tasks = [
+                    *background_summary_tasks.values(),
+                    *background_ai_tasks.values(),
+                    *finalization_tasks.values(),
+                    *pdf_ai_background_tasks.values(),
+                    *course_file_api.tasks.values(),
+                    *upload_jobs.tasks.values(),
+                ]
+                for task in tasks:
+                    task.cancel()
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                await model_manager.close()
+                await close_ai_clients()
 
 app = FastAPI(title="Qwen3-ASR 本地语音工作台", lifespan=lifespan)
 record_operations: set[str] = set()
@@ -211,6 +218,9 @@ class EphemeralFileResponse(FileResponse):
 
 
 def recording_is_busy(session_id: str, *, owner: asyncio.Task[Any] | None = None) -> bool:
+    discard = globals().get('recording_discard')
+    if discard and discard.busy(session_id):
+        return True
     if session_id in record_operations or session_id in running_batch_ids or session_id in classroom_chat_running:
         return True
     uploads = globals().get("upload_jobs")
@@ -230,21 +240,48 @@ def require_recording_available(session_id: str, *, owner: asyncio.Task[Any] | N
         )
 
 
+@contextmanager
+def backlog_record_claim(session_id):
+    require_recording_available(session_id, owner=asyncio.current_task())
+    record_operations.add(session_id)
+    try:yield
+    finally:record_operations.discard(session_id)
+
+
+def backlog_completed(session_id):
+    record=recording_store.find(session_id)
+    if record is None or record.metadata.get('status')!='completed':return
+    intent=record.metadata.get('summary_job') or {}
+    if intent.get('status')=='queued' and intent.get('automatic') and not intent.get('cancel_requested'):
+        start_summary_job(record,{'config':ai_preferences.task_config()},automatic=True)
+
+
+SUMMARY_WORKFLOW_TIMEOUT_SECONDS = 7200
+SUMMARY_SMALL_OPERATION_TIMEOUT_SECONDS = 1800
+
+
 def recording_operation(function):
     @wraps(function)
     async def guarded(session_id: str, *args, **kwargs):
         # A queued summary owns this record before its decorated runner starts.
         require_recording_available(session_id, owner=asyncio.current_task())
         record_operations.add(session_id)
-        is_summary = function.__name__ in {"generate_library_summary", "generate_library_summary_abstract"}
+        is_summary = function.__name__ in {"generate_library_summary", "generate_library_summary_abstract", "upgrade_library_note_pdf"}
+        # Full illustrated notes include source reading, writing, LaTeX and
+        # independent page review. Each request/compile already has its own
+        # bounded timeout; the old single-response budget cut off live work.
+        timeout_seconds = (SUMMARY_WORKFLOW_TIMEOUT_SECONDS
+                           if function.__name__ in {"generate_library_summary", "upgrade_library_note_pdf"}
+                           else SUMMARY_SMALL_OPERATION_TIMEOUT_SECONDS)
         if is_summary:
-            summary_jobs[session_id] = {"task": asyncio.current_task(), "started": time.monotonic()}
+            summary_jobs[session_id] = {"task": asyncio.current_task(), "started": time.monotonic(),
+                                        "timeout_seconds": timeout_seconds}
         try:
             if is_summary:
-                return await asyncio.wait_for(function(session_id, *args, **kwargs), timeout=1800)
+                return await asyncio.wait_for(function(session_id, *args, **kwargs), timeout=timeout_seconds)
             return await function(session_id, *args, **kwargs)
         except asyncio.TimeoutError as exc:
-            raise HTTPException(status_code=504, detail="生成耗时超过 30 分钟，已释放任务；重新生成会复用已完成分块") from exc
+            raise HTTPException(status_code=504, detail=f"本次处理达到 {timeout_seconds // 60:g} 分钟总时限，已保存检查点；继续会复用已完成内容") from exc
         except asyncio.CancelledError as exc:
             if background_summary_tasks.get(session_id) is asyncio.current_task():
                 # Let the background owner persist its paused/cancelled state.
@@ -332,7 +369,14 @@ async def get_inference_settings():
 async def save_inference_settings(payload: dict[str, Any] = Body(...)):
     from qwen_asr_app.inference_providers import inference_settings
     try:
-        return {"settings": inference_settings.save(payload.get('settings'))}
+        cfg=inference_settings.save(payload.get('settings'))
+        for session in list(live_sessions.values()):
+            session.update_config({'inference_settings':cfg})
+        if cfg['asr_provider']=='remote_only':await model_manager.release_if_idle()
+        if cfg['knowledge_provider']!='local':
+            from qwen_asr_app.knowledge.embeddings import close_embedder
+            await asyncio.to_thread(close_embedder)
+        return {"settings":cfg,'message':'设置已保存；新音频从下一段生效，已提交任务沿用其快照'}
     except (OSError, ValueError) as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -344,7 +388,12 @@ async def test_inference_connection(payload: dict[str, Any] = Body(...)):
     try:
         cfg = normalize(payload.get('settings'))
         health = await asyncio.to_thread(lambda: remote_client(cfg).health())
-        return {'health': health}
+        from qwen_asr_app.remote_classroom import capabilities
+        try:
+            caps=await asyncio.to_thread(capabilities,cfg)
+        except RuntimeError:
+            caps={'version':'旧节点','vectors':False,'asr_session':False}
+        return {'health': health,'capabilities':caps}
     except Exception as exc:
         if isinstance(exc, httpx.ConnectTimeout):
             message = '远程连接超时，请检查 Windows Tailscale 节点和内网服务入口'
@@ -455,13 +504,103 @@ async def summary_status(session_id: str) -> dict[str, Any]:
     if not record:
         raise HTTPException(status_code=404, detail="没有找到这条录音")
     draft = record.metadata.get("ai_note_summary_draft") or {}
+    progress = _summary_phase_progress(record, draft)
     saved_job = record.metadata.get("summary_job") or {}
     return {"running": bool(job) or session_id in background_summary_tasks,
             "status": saved_job.get("status", ""), "error": saved_job.get("error", ""),
-            "completed_parts": len(draft.get("parts", [])),
-            "total_parts": draft.get("total_parts", 0), "phase": (job or {}).get("phase") or draft.get("phase", ""),
+            "completed_parts": progress['completed_parts'],
+            "total_parts": progress['total_parts'], "progress_unit": progress.get('unit', '批'),
+            "phase": (job or {}).get("phase") or progress['phase'],
             "elapsed_seconds": round(time.monotonic() - job["started"]) if job else 0,
-            "has_summary": bool(record.metadata.get("ai_note_summary", {}).get("summary"))}
+            "has_summary": bool(record.metadata.get("ai_note_summary", {}).get("summary")),
+            "review_status": (record.metadata.get('ai_note_summary') or {}).get('review_status','unreviewed')}
+
+
+@app.post('/api/recordings/{session_id}/review-pdf')
+async def start_review_pdf(session_id: str):
+    record=recording_store.find(session_id)
+    if record is None:raise HTTPException(404,'没有找到这次录音')
+    if record.metadata.get('status')!='completed':raise HTTPException(409,'请先保存录音')
+    start_summary_job(record,{'_pdf_only':True})
+    return {'queued':True,'message':'正在导出并逐页独立审查；已有正文保留'}
+
+
+@app.get('/api/recordings/{session_id}/review-materials')
+async def review_material_choices(session_id: str):
+    from qwen_asr_app.course_files import CourseFiles
+    record=recording_store.find(session_id)
+    if record is None:raise HTTPException(404,'没有找到这次录音')
+    return {'selected':record.metadata.get('review_material_ids'),'materials':[
+        {'id':i['id'],'name':i['name'],'sha256':i['sha256']} for i in CourseFiles(app_settings).list(record.metadata['category'])]}
+
+
+@app.get('/api/recordings/{session_id}/note-proposal')
+async def get_note_proposal(session_id: str):
+    from qwen_asr_app.review_materials import safe_path
+    record=recording_store.find(session_id)
+    if record is None:raise HTTPException(404,'没有找到这次录音')
+    ident=(record.metadata.get('ai_note_proposal') or {}).get('task_id','')
+    if not re.fullmatch(r'[a-f0-9]{24}',ident):raise HTTPException(404,'没有待采用的候选版本')
+    path=safe_path(record.directory,f'.review-notes/{ident}/proposed-note.json')
+    if not path.is_file():raise HTTPException(404,'候选版本不存在')
+    note=json.loads(path.read_text())
+    return {'note':note,'task_id':ident,'current_summary':(record.metadata.get('ai_note_summary') or {}).get('summary','')}
+
+
+@app.post('/api/recordings/{session_id}/note-proposal/adopt')
+@recording_operation
+async def adopt_note_proposal(session_id: str,payload:dict=Body(...)):
+    from qwen_asr_app.note_pdf import reviewed_pdf
+    from types import SimpleNamespace
+    record=recording_store.find(session_id)
+    proposal=await get_note_proposal(session_id)
+    if payload.get('task_id')!=proposal['task_id'] or payload.get('expected_summary')!=proposal['current_summary']:
+        raise HTTPException(409,'正文或候选版本已改变，请重新预览后采用')
+    note=proposal['note']
+    try:await asyncio.to_thread(reviewed_pdf,SimpleNamespace(directory=record.directory,metadata={'ai_note_summary':note}))
+    except (ValueError,RuntimeError) as exc:raise HTTPException(409,'候选版本尚未通过当前视觉审查：'+str(exc)) from exc
+    record.metadata['ai_note_summary']=note
+    record.metadata.pop('ai_note_proposal',None)
+    # Adopting a note changes the note only. save_all also regenerates text
+    # transcripts, which can contain the prior summary or user edits.
+    record.save_metadata()
+    record.save_summary_markdown()
+    return {'summary':note,'session':record.public()}
+
+
+@app.put('/api/recordings/{session_id}/review-materials')
+@recording_operation
+async def save_review_material_choices(session_id: str,payload:dict=Body(...)):
+    from qwen_asr_app.course_files import CourseFiles
+    record=recording_store.find(session_id)
+    if record is None:raise HTTPException(404,'没有找到这次录音')
+    ids=payload.get('material_ids')
+    valid={i['id'] for i in CourseFiles(app_settings).list(record.metadata['category'])}
+    if ids is not None and (not isinstance(ids,list) or any(not isinstance(i,str) or i not in valid for i in ids)):
+        raise HTTPException(400,'所选课件不属于本课程或已移除')
+    record.metadata['review_material_ids']=ids
+    record.save_metadata()
+    return {'saved':True,'message':'已保存本节课件范围，继续生成时会复用输入不变的阶段'}
+
+
+@recording_operation
+async def upgrade_library_note_pdf(session_id: str, payload):
+    from qwen_asr_app.review_notes import upgrade_pdf
+    record=recording_store.find(session_id)
+    if record is None:raise HTTPException(404,'没有找到这次录音')
+    result=await upgrade_pdf(record,payload['config'])
+    return {'summary':record.metadata.get('ai_note_summary'),'review':result}
+
+
+@app.get('/api/recordings/{session_id}/note-assets/{task_id}/{asset}')
+async def note_asset(session_id: str, task_id: str, asset: str):
+    from qwen_asr_app.review_materials import safe_path
+    record=recording_store.find(session_id)
+    if record is None or not re.fullmatch(r'(?:legacy-)?[a-f0-9]{24}',task_id) or not re.fullmatch(r'fig-[a-f0-9]{16}\.png',asset):
+        raise HTTPException(404,'笔记图片不存在')
+    path=safe_path(record.directory,f'.review-notes/{task_id}/assets/{asset}')
+    if not path.is_file():raise HTTPException(404,'笔记图片不存在')
+    return FileResponse(path,media_type='image/png',headers={'Cache-Control':'private, max-age=31536000, immutable'})
 
 
 @app.post("/api/recordings/{session_id}/cancel-summary")
@@ -521,6 +660,15 @@ def _update_ai_job(record: RecordingRecord, kind: str, **values: Any) -> None:
 
 def _task_error_kind(error: str) -> str:
     value = str(error or "").lower()
+    # These are the redacted material-channel messages, not raw CLI output.
+    # Keep their transport category when a public HTTP boundary wraps them.
+    if "agy 资料会话" in value:
+        if "连接中断" in value:
+            return "network_transport"
+        if "连接超时" in value:
+            return "network_connect_timeout"
+        if "响应超时" in value:
+            return "network_read_timeout"
     if "agy cli" in value:
         from qwen_asr_app.agy_cli import _error_kind as agy_error_kind
         kind, _ = agy_error_kind(value)
@@ -545,6 +693,43 @@ def _task_error_kind(error: str) -> str:
     return "upstream"
 
 
+def _summary_phase_progress(record, draft):
+    """Show the actual current writing phase, never an earlier plan's 6/6."""
+    value = {'phase': str(draft.get('phase') or ''),
+             'completed_parts': len(draft.get('parts') or []),
+             'total_parts': draft.get('total_parts') or 0}
+    task_id = str(draft.get('review_task') or '')
+    if not re.fullmatch(r'[a-f0-9]{24}', task_id):
+        return value
+    try:
+        folder = record.directory / '.review-notes' / task_id
+        if value['phase'].startswith('独立审查'):
+            task = json.loads((folder / 'task.json').read_text())
+            total, completed = task.get('review_total_pages'), task.get('reviewed_pages')
+            if (type(total) is int and type(completed) is int and 1 <= total <= 10000
+                    and 0 <= completed <= total and task.get('id') == task_id
+                    and re.fullmatch(r'[a-f0-9]{64}', str(task.get('pdf_sha256') or ''))):
+                return {'phase': f'独立审查 · 已查看 {completed}/{total} 页',
+                        'completed_parts': completed, 'total_parts': total, 'unit': '页'}
+            return value
+        if not value['phase'].startswith('LaTeX 排版'):
+            return value
+        path = folder / 'latex' / 'batch-progress.json'
+        if not path.resolve().is_relative_to(record.directory.resolve()) or not path.is_file() or path.stat().st_size > 32000:
+            return value
+        progress = json.loads(path.read_text())
+        total, completed = progress['total_batches'], progress['completed_batches']
+        if (type(total) is not int or type(completed) is not int or not 1 <= total <= 10000
+                or not 0 <= completed <= total
+                or progress.get('binding', {}).get('markdown_sha256') != hashlib.sha256((folder / 'note.md').read_bytes()).hexdigest()):
+            return value
+        current = min(total, completed + 1)
+        return {'phase': f'LaTeX 排版 · 已保存 {completed}/{total} 批' if completed == total else f'LaTeX 排版 · 第 {current}/{total} 批',
+                'completed_parts': completed, 'total_parts': total}
+    except (OSError, ValueError, KeyError, TypeError):
+        return value
+
+
 AUTO_RETRY_KINDS = {
     "rate_limit", "provider_busy", "provider_unavailable", "network_dns", "network_connect",
     "network_connect_timeout", "network_read_timeout", "network_transport",
@@ -553,6 +738,16 @@ MAX_AUTOMATIC_RETRIES = 6
 
 
 def _error_kind(exc: BaseException) -> str:
+    # A route translates provider errors to HTTP responses for clients. The
+    # server-owned retry still has the original typed cause and must retain it.
+    current = exc
+    seen = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        kind = getattr(current, "kind", "")
+        if kind:
+            return str(kind)
+        current = current.__cause__
     if isinstance(exc, HTTPException):
         return _task_error_kind(str(exc.detail))
     return str(getattr(exc, "kind", "") or _task_error_kind(str(exc)))
@@ -621,9 +816,19 @@ def compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any]]:
             "recording_title": str(record.metadata.get("title") or "未命名录音"),
             "category": str(record.metadata.get("category") or "未分类"),
         }
+        pending=record.metadata.get('pending_segments') or {}
+        if pending and any((p.get('config_snapshot') or {}).get('inference_settings',{}).get('asr_provider')=='remote_only' for p in pending.values()):
+            backlog=record.metadata.get('remote_backlog') or {}
+            status=backlog.get('status','pending')
+            tasks.append({**base,'id':f'remote_asr:{record.id}','type':'remote_asr','status':status,
+                'phase':backlog.get('message','录音已保存，等待 Windows 补转'),
+                'total':len(pending),'completed':0,'configured_provider':'remote_only','actual_provider':'remote',
+                'actions':['continue','cancel'] if status in {'paused','cancelled'} else ['pause','cancel'],
+                'updated_at':record.metadata.get('updated_at')})
         summary = record.metadata.get("summary_job") or {}
         if isinstance(summary, dict) and summary.get("status") in {"queued", "running", "waiting_retry", "paused", "failed", "interrupted", "completed_with_errors"}:
             draft = record.metadata.get("ai_note_summary_draft") or {}
+            summary_progress = _summary_phase_progress(record, draft)
             status = str(summary.get("status"))
             abstract_pending = _summary_abstract_pending(record)
             if abstract_pending and status in {"failed", "interrupted"}:
@@ -637,10 +842,11 @@ def compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any]]:
                 "status": status,
                 "error": str(summary.get("error") or ""),
                 "error_kind": _task_error_kind(str(summary.get("error") or "")),
-                "completed": len(draft.get("parts") or []),
-                "total": int(draft.get("total_parts") or 0),
+                "completed": summary_progress['completed_parts'],
+                "total": int(summary_progress['total_parts'] or 0),
+                "progress_unit": summary_progress.get('unit', '批'),
                 "phase": ("详细笔记已保存 · 短摘要待补齐" if abstract_pending and status == "completed_with_errors"
-                          else "录音库短摘要" if abstract_pending else str(draft.get("phase") or "")),
+                          else "录音库短摘要" if abstract_pending else summary_progress['phase']),
                 "ai_activity": task_ai_activity(f"summary:{record.id}"),
                 "resume_stage": "abstract" if abstract_pending else "",
                 "retry_in_seconds": int(summary.get("retry_in_seconds") or 0),
@@ -651,6 +857,8 @@ def compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any]]:
 
         refinement_job = _saved_ai_job(record, "refinement")
         missing_blocks = [block for block in transcript_blocks(record) if not block["refined"]]
+        review_blocks = sum(bool(block.get("correction_review")) for block in missing_blocks)
+        unprocessed_blocks = len(missing_blocks) - review_blocks
         refinement_running = f"refinement:{record.id}" in background_ai_tasks
         live_session = live_sessions.get(record.id)
         if live_session and (
@@ -675,12 +883,14 @@ def compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any]]:
                 historical_error = failed_errors[-1] if failed_errors else ""
                 retrying = refinement_running and saved_status in {"queued", "running"}
                 task_error = str(refinement_job.get("error") or ("" if retrying else historical_error))
+                review_only = bool(review_blocks and not unprocessed_blocks and not task_error
+                                   and not refinement_running and status == "pending")
                 tasks.append({
                     **base,
                     **ai_provider_snapshot("refinement"),
                     "id": f"refinement:{record.id}",
                     "type": "refinement",
-                    "label": AI_TASK_LABELS["refinement"],
+                    "label": "转写待核对" if review_only else AI_TASK_LABELS["refinement"],
                     "status": status,
                     "error": task_error,
                     "error_kind": str(refinement_job.get("error_kind") or _task_error_kind(task_error)) if task_error else "",
@@ -689,6 +899,10 @@ def compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any]]:
                     "completed": int(refinement_job.get("completed") or 0),
                     "total": int(refinement_job.get("total") or len(missing_blocks)),
                     "missing_blocks": len(missing_blocks),
+                    "review_required_blocks": review_blocks,
+                    "unprocessed_blocks": unprocessed_blocks,
+                    "attention_kind": "review" if review_only else "error" if task_error else "pending",
+                    "phase": f"转写已完成 · {review_blocks} 段数字或公式改动待核对" if review_only else "",
                     "retry_in_seconds": int(refinement_job.get("retry_in_seconds") or 0),
                     "auto_retry_count": int(refinement_job.get("auto_retry_count") or 0),
                     "actions": ["pause", "cancel"] if status in {"queued", "running", "waiting_retry"} else ["continue", "retry", "cancel"],
@@ -1065,6 +1279,11 @@ async def ai_task_action(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="没有找到这条录音")
     if record_id in running_batch_ids:
         raise HTTPException(409, "课程正在转写或补齐，请完成后再操作 AI 任务")
+    if kind=='remote_asr':
+        if action not in {'pause','cancel','retry','continue'}:raise HTTPException(400,'待补转任务操作无效')
+        record.metadata.setdefault('remote_backlog',{}).update(status={'pause':'paused','cancel':'cancelled'}.get(action,'pending'))
+        record.save_metadata()
+        return {'saved':True,'audio_preserved':True}
     if kind not in AI_TASK_LABELS or action not in {"retry", "regenerate", "continue", "pause", "cancel"}:
         raise HTTPException(status_code=400, detail="AI 任务操作无效")
     if action == "pause":
@@ -1216,6 +1435,7 @@ async def ai_task_action(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
         summary_payload = {
             "config": config,
             "_resume_abstract": resume_abstract,
+            "_pdf_only": (record.metadata.get('summary_job') or {}).get('resume_stage') == 'pdf',
             "summary_system_prompt": config.get("_note_summary_system_prompt") or DEFAULT_NOTE_SUMMARY_PROMPT,
             "abstract_system_prompt": config.get("_note_abstract_system_prompt") or DEFAULT_NOTE_ABSTRACT_PROMPT,
         }
@@ -1280,6 +1500,15 @@ async def service_guard(request: Request, call_next):
         return JSONResponse({"detail": "服务正在安全退出，请重新启动后继续"}, status_code=503)
     if backup_manager.busy and request.method not in {"GET", "HEAD", "OPTIONS"}:
         return JSONResponse({"detail": "日常备份正在打包，请完成后再启动任务或修改配置"}, status_code=409)
+    target = re.match(r'^/api/recordings/([^/]+)(?:/|$)', request.url.path)
+    if target:
+        # A manually restored recording keeps its identity, but a completed
+        # discard receipt must no longer fence its archived files forever.
+        recording_discard.reconcile_restored(target.group(1))
+    if (target and request.method not in {'GET', 'HEAD', 'OPTIONS'}
+            and not request.url.path.endswith('/discard')
+            and recording_discard.busy(target.group(1))):
+        return JSONResponse({'detail': '这条录音正在安全丢弃，请等待完成'}, status_code=409)
     tracked = request.method not in {"GET", "HEAD", "OPTIONS"} and not request.url.path.startswith("/api/service/")
     if tracked:
         service_mutations += 1
@@ -1307,6 +1536,7 @@ async def service_stop_guard(action: str, request: Request):
         *background_summary_tasks.values(),
         *background_ai_tasks.values(),
         *finalization_tasks.values(),
+        *recording_discard.tasks.values(),
         *pdf_ai_background_tasks.values(),
         *course_file_api.tasks.values(),
         *upload_jobs.tasks.values(),
@@ -1379,6 +1609,9 @@ async def recording_library(request: Request = None, category: str = '', date: s
         raise HTTPException(400, '分页或日期参数无效')
     discover_courses(app_settings)
     records = recording_store.list_records()
+    restored = [recording_discard.reconcile_restored(record.id) for record in records]
+    if any(restored):
+        records = recording_store.list_records()
     if ids:
         wanted = ids.split(',')
         if len(wanted) > 100 or any(not re.fullmatch(r'[A-Za-z0-9_-]{6,80}', value) for value in wanted):
@@ -1746,10 +1979,13 @@ def start_summary_job(record: RecordingRecord, payload: dict[str, Any], *, autom
     cancel_requested_tasks.discard(f"summary:{session_id}")
     resume_abstract = bool(payload.get("_resume_abstract")) and _summary_abstract_pending(record)
     # Only progress is persisted; credentials remain in this task's memory.
+    previous = record.metadata.get("summary_job") or {}
+    previous_error = previous.get("error") or previous.get("previous_error") or ""
     record.metadata["summary_job"] = {
         "status": "queued", "automatic": automatic, "started_at": local_now(), "error": "",
         "auto_retry_count": 0, "retry_in_seconds": 0, "pause_requested": False,
-        "resume_stage": "abstract" if resume_abstract else "",
+        "resume_stage": "pdf" if payload.get('_pdf_only') else "abstract" if resume_abstract else "",
+        "previous_error": previous_error,
     }
     record.save_metadata()
 
@@ -1766,8 +2002,12 @@ def start_summary_job(record: RecordingRecord, payload: dict[str, Any], *, autom
             while True:
                 try:
                     save_state("running", retry_in_seconds=0)
-                    result = await (generate_library_summary_abstract(session_id, payload) if resume_abstract
+                    result = await (upgrade_library_note_pdf(session_id, payload) if payload.get('_pdf_only') else generate_library_summary_abstract(session_id, payload) if resume_abstract
                                     else generate_library_summary(session_id, payload))
+                    note_result = result.get('summary') or {}
+                    if note_result.get('review_status') in {'needs_revision','unreviewed'}:
+                        save_state('completed_with_errors',note_result.get('review_warning') or '候选笔记已保存，独立审查仍有待处理项',resume_stage='pdf')
+                        return
                     abstract_error = (result.get("summary") or {}).get("abstract_error")
                     if abstract_error:
                         save_state("completed_with_errors", str(abstract_error), resume_stage="abstract",
@@ -1884,6 +2124,10 @@ async def begin_recording_end(session: TranscriptionSession, summary_payload: di
                 session.recovered = False
             await session.recover_pending()
             await session.drain(include_ai=False)
+            # Final utterances can arrive after the pause lease is revoked.
+            # Release again only after they finish, so replay jobs are not
+            # left waiting for a stale 90-second classroom reservation.
+            await session.release_remote_compute()
             await session.suspend_ai_for_archive()
             # Suspend optional manual AI work before the archive writes.
             auxiliary = [task for key, task in background_ai_tasks.items()
@@ -1892,7 +2136,10 @@ async def begin_recording_end(session: TranscriptionSession, summary_payload: di
                 for task in auxiliary:
                     task.cancel()
                 await asyncio.gather(*auxiliary, return_exceptions=True)
-            if record.metadata.get("pending_segments"):
+            remote_pending = bool(record.metadata.get('pending_segments')) and all(
+                (p.get('config_snapshot') or {}).get('inference_settings',{}).get('asr_provider')=='remote_only'
+                for p in record.metadata.get('pending_segments',{}).values())
+            if record.metadata.get("pending_segments") and not remote_pending:
                 raise RuntimeError("部分录音尚未成功转写，音频已保留，请重试结束保存")
             completion = asyncio.create_task(asyncio.to_thread(record.complete))
             cancelled = False
@@ -1915,6 +2162,11 @@ async def begin_recording_end(session: TranscriptionSession, summary_payload: di
             await session.send({"type": "ended", "session": record.public()})
             session.recording = None
             live_sessions.pop(record.id, None)
+            if remote_pending:
+                record.metadata['remote_backlog']={'status':'pending','count':len(record.metadata['pending_segments']),
+                    'message':'录音已归档，Windows 待处理片段将在连接恢复后补转'}
+                record.save_metadata()
+                return
             summary_intent = record.metadata.get("summary_job") or {}
             if not summary_intent.get("cancel_requested"):
                 # No await after scheduling: release finalization ownership
@@ -2534,6 +2786,76 @@ async def delete_recording(session_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+async def _quiesce_discarded_recording(record, session):
+    """Drain target writers; never cancel an AAC or accepted inference thread."""
+    from qwen_asr_app.recording_discard import finish_owned
+    if session is not None:
+        session.reset_audio()  # All accepted microphone samples are already in WAV.
+        if session.remote_lease_task:
+            lease = session.remote_lease_task
+            session.remote_lease_task = None
+            lease.cancel()
+            await asyncio.gather(lease, return_exceptions=True)
+    finalizer = finalization_tasks.get(record.id)
+    if finalizer is not None and not finalizer.done():
+        await finish_owned(finalizer)
+    if session is not None:
+        await session.drain(include_ai=False)
+        await session.suspend_ai_for_archive()
+        await session.release_remote_compute()
+    # Manual and summary jobs can own exported files or a renderer thread.
+    # They finish before the directory is moved, without touching other jobs.
+    pending = [background_summary_tasks.get(record.id)]
+    pending.extend(task for key, task in background_ai_tasks.items() if key.endswith(':' + record.id))
+    summary = summary_jobs.get(record.id)
+    if summary:
+        pending.append(summary.get('task'))
+    for task in set(pending):
+        if task is not None and task is not asyncio.current_task() and not task.done():
+            task.cancel()
+            try:
+                await finish_owned(task)
+            except asyncio.CancelledError:
+                if not task.done():raise
+            except Exception:
+                pass  # Its finished failure is retained in the recording.
+    from qwen_asr_app.classroom_intelligence.store import read_notes_doc
+    intelligence = intelligence_router.intelligence_service
+    for note in read_notes_doc(record).get('notes', []):
+        await intelligence.cancel_task(note['id'])
+    # Existing HTTP classroom questions/recording operations expose their
+    # ownership until their final save; the middleware fences new requests.
+    while record.id in record_operations or record.id in classroom_chat_running:
+        await asyncio.sleep(.05)
+
+
+from qwen_asr_app.recording_discard import RecordingDiscard
+recording_discard = RecordingDiscard(recording_store, live_sessions, _quiesce_discarded_recording)
+
+
+@app.post('/api/recordings/{session_id}/discard')
+async def discard_recording(session_id: str, payload: dict[str, Any] = Body(...)):
+    if payload.get('confirmed') is not True or payload.get('expected_session_id') != session_id:
+        raise HTTPException(400, '请再次确认要丢弃的具体录音')
+    from qwen_asr_app.live_ownership import control_lock
+    async with control_lock():
+        try:
+            result = recording_discard.start(session_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except (ValueError, OSError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+    return JSONResponse(result, status_code=202 if result['status'] == 'discarding' else 200)
+
+
+@app.get('/api/recordings/{session_id}/discard')
+async def discarded_recording_status(session_id: str):
+    try:
+        return recording_discard.snapshot(session_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
 @app.get("/api/session")
 async def current_session() -> dict[str, Any]:
     record = recording_store.active
@@ -2684,10 +3006,21 @@ async def download_recording(session_id: str, kind: str) -> FileResponse:
             ".mp3": "audio/mpeg",
         }.get(path.suffix.lower(), "application/octet-stream")
     elif kind == "ai-summary":
-        record.save_summary_markdown()
-        path = record.ai_summary_path
-        filename = f"{safe_component(str(record.metadata.get('title') or session_id), session_id)}-AI总结.md"
-        media_type = "text/markdown; charset=utf-8"
+        from qwen_asr_app.note_pdf import reviewed_pdf
+        try:
+            path = await asyncio.to_thread(reviewed_pdf, record)
+        except (ValueError, RuntimeError) as exc:
+            if (record.metadata.get('ai_note_summary') or {}).get('summary'):
+                async def prepare_requested_pdf():
+                    await asyncio.sleep(0)  # release this download's record guard first
+                    current=recording_store.find(session_id)
+                    if current is not None:
+                        try:start_summary_job(current,{'_pdf_only':True})
+                        except (HTTPException,ValueError):pass
+                asyncio.create_task(prepare_requested_pdf())
+            raise HTTPException(409, str(exc)+'；已安排后台导出与审查，请在任务中心查看') from exc
+        filename = f"{safe_component(str(record.metadata.get('title') or session_id), session_id)}-课后复习笔记.pdf"
+        media_type = "application/pdf"
     elif kind == "transcript":
         record.save_transcripts()
         path = record.transcript_path
@@ -2718,7 +3051,7 @@ async def download_recording(session_id: str, kind: str) -> FileResponse:
             media_type=media_type,
             headers={"Cache-Control": "no-store"},
         )
-    return FileResponse(path, filename=filename, media_type=media_type)
+    return FileResponse(path, filename=filename, media_type=media_type, headers={'Cache-Control':'no-store'})
 
 
 def stream_event(event_type: str, **payload: Any) -> bytes:
@@ -3266,6 +3599,13 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                 await websocket.send_json({"type": "pong"})
                 continue
             async with control_lock():
+                if getattr(session, 'discarding', False):
+                    # The old socket cannot pause/end/resume a discarded
+                    # session or bind its draining tasks to a new recording.
+                    if kind not in {'config', 'start'}:
+                        await websocket.send_json({'type': 'control_error', 'message': '这条录音已经停止并进入丢弃流程'})
+                        continue
+                    session = TranscriptionSession(websocket, model_manager, recording_store)
                 active = recording_store.active
                 canonical = live_sessions.get(active.id) if active else None
                 if kind == "config":
@@ -3282,6 +3622,10 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                     await websocket.send_json({"type": "configured", "pending": pending,
                                                "warning": values.get('_ai_config_warning', '')})
                 elif kind in {"start", "end", "pause", "stop"}:
+                    if active and recording_discard.busy(active.id):
+                        await websocket.send_json({'type': 'start_error' if kind == 'start' else 'control_error',
+                                                   'message': '上一条录音正在安全丢弃，请完成后再开始'})
+                        continue
                     writer = getattr(canonical, 'writer', None) if canonical else None
                     takeover = kind == 'start' and payload.get('takeover') is True
                     if writer is not None and writer is not websocket and not takeover:
@@ -3361,6 +3705,7 @@ app.include_router(note_library_router(app_settings, recording_store, library=re
 def require_backup_idle():
     tasks = [*background_summary_tasks.values(), *background_ai_tasks.values(),
              *finalization_tasks.values(), *pdf_ai_background_tasks.values(),
+             *recording_discard.tasks.values(),
              *course_file_api.tasks.values(), *upload_jobs.tasks.values(),
              *intelligence_router.intelligence_service._running_tasks.values(),
              *intelligence_router.intelligence_service._debounce_tasks.values(),

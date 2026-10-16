@@ -21,6 +21,7 @@ from .paths import PRIVATE_ROOT, ROOT
 
 MODES = ("local", "remote_preferred", "remote_only")
 DEFAULTS = {"mineru_provider": "local", "asr_provider": "local", "base_url": "http://100.81.62.69:8765",
+    "knowledge_provider": "local", "classroom_power_saving": False,
     "token_file": str(PRIVATE_ROOT / "remote-infer" / "token"), "connect_timeout_seconds": 10,
     "request_timeout_seconds": 1800, "job_timeout_seconds": 14400, "poll_seconds": 2,
     "network_recovery_seconds": 60}
@@ -30,12 +31,16 @@ def normalize(raw, *, validate_remote=False):
     if not isinstance(raw, dict) or set(raw) - set(DEFAULTS):
         raise ValueError("推理配置字段无效")
     result = {**DEFAULTS, **raw}
-    for key in ("mineru_provider", "asr_provider"):
+    if type(result['classroom_power_saving']) is not bool:
+        raise ValueError('课堂省电模式必须为布尔值')
+    if result['classroom_power_saving']:
+        result.update(asr_provider='remote_only', knowledge_provider='remote_only')
+    for key in ("mineru_provider", "asr_provider", "knowledge_provider"):
         if result[key] not in MODES:
             raise ValueError("推理模式无效")
     if result["token_file"] != DEFAULTS["token_file"]:
         raise ValueError("令牌文件位置固定在本机受保护目录")
-    if not validate_remote and all(result[key] == 'local' for key in ('mineru_provider', 'asr_provider')):
+    if not validate_remote and all(result[key] == 'local' for key in ('mineru_provider', 'asr_provider', 'knowledge_provider')):
         return result
     url = urlsplit(str(result["base_url"]))
     if url.scheme not in ("http", "https") or not url.hostname or url.username or url.password or url.query or url.fragment or '\\' in str(result['base_url']) or any(c.isspace() for c in str(result['base_url'])):
@@ -65,7 +70,7 @@ class InferenceSettings:
         if path is None and classroom and not self.path.exists():
             legacy=PRIVATE_ROOT/'inference-providers.json'
             raw=json.loads(legacy.read_text()) if legacy.is_file() else dict(DEFAULTS)
-            raw.update(asr_provider='local',mineru_provider='local')
+            raw.update(asr_provider='local',mineru_provider='local',knowledge_provider='local',classroom_power_saving=False)
             self.save(raw)
 
     def read(self):
@@ -75,6 +80,8 @@ class InferenceSettings:
             return dict(DEFAULTS)
 
     def for_task(self, kind, explicit=None):
+        if explicit is not None and explicit.get('classroom_power_saving'):
+            return normalize(explicit, validate_remote=True)
         if explicit is not None and explicit.get(kind + '_provider', 'local') == 'local':
             return {'mineru_provider': 'local', 'asr_provider': 'local'}
         if explicit is None:
@@ -84,6 +91,8 @@ class InferenceSettings:
                 raw = {}
         else:
             raw = explicit
+        if raw.get('classroom_power_saving'):
+            return normalize(raw, validate_remote=True)
         mode = raw.get(kind + '_provider', 'local')
         if mode == 'local':
             return {'mineru_provider': 'local', 'asr_provider': 'local'}
@@ -94,6 +103,13 @@ class InferenceSettings:
         atomic_json(self.path, result)
         self.path.chmod(0o600)
         return result
+
+    def for_new_task(self, kind, explicit=None):
+        """New work honors the saved power policy; old snapshots use for_task."""
+        saved=self.for_task(kind)
+        if saved.get('classroom_power_saving'):
+            return saved
+        return self.for_task(kind,explicit) if explicit is not None else saved
 
 
 inference_settings = InferenceSettings()
@@ -187,6 +203,40 @@ def prepare_audio(folder, audio, language, context, max_tokens, cfg, asr_params=
     return request
 
 
+def classroom_clip_operation(folder, request):
+    """Reuse the resident model for bounded clips, preserving accepted jobs.
+
+    Course imports already persist short clips, just like live recordings.
+    Sending each of them to the file gateway starts and destroys a model for
+    every clip. Existing file receipts remain on that protocol for recovery;
+    their uncertainty must never start a second classroom operation.
+    """
+    folder = Path(folder)
+    classroom = (folder / 'classroom-receipt.json').exists()
+    legacy = (folder / 'receipt.json').exists()
+    if classroom and legacy:
+        from .remote_operations import ResultNeedsRepair
+        raise ResultNeedsRepair('远程语音操作存在两种协议收据，请保留现场修复')
+    if classroom:
+        return True
+    if legacy or (folder / 'receipt.cancel.json').exists():
+        return False
+    bounded = 0 < request['duration'] <= 90 and request['max_new_tokens'] <= 8192
+    live = 'live' in folder.parts and 'remote-operations' in folder.parts
+    course = '.course-operations' in folder.parts
+    if not bounded or not (live or course):
+        return False
+    if request['max_new_tokens'] > 2048:
+        # Older resident workers silently capped generation at 2048. Retain
+        # the user's saved ceiling and use their file job until upgraded.
+        from .remote_classroom import capabilities
+        caps = capabilities(request['config'])
+        ceiling = caps.get('classroom_asr_max_new_tokens', 2048)
+        if type(ceiling) is not int or request['max_new_tokens'] > ceiling:
+            return False
+    return True
+
+
 class RemoteASRProvider:
     async def transcribe(self, audio, language, context, max_tokens, cfg, operation_dir=None, asr_params=None):
         started = time.monotonic()
@@ -206,6 +256,12 @@ class RemoteASRProvider:
                 folder.mkdir(parents=True, exist_ok=True, mode=0o700)
                 source = folder / 'audio.wav'
                 request = prepare_audio(folder, audio, language, context, max_tokens, cfg, asr_params)
+                if classroom_clip_operation(folder, request):
+                    from .remote_classroom import transcribe_clip
+                    result = transcribe_clip(folder, request['config'], source, request['language'], request['prompt'], request['max_new_tokens'], stop=stop)
+                    value = {'text': result['text'], 'language':result.get('language',''),
+                             'segments':[{'start':0,'end':request['duration'],'text':result['text'],'merged_text':result['text']}]}
+                    return value, result
                 metadata = remote_client(request['config']).run('asr', source, folder/'result',
                     {k: request[k] for k in ('language', 'prompt', 'max_new_tokens')}, stop=stop,
                     key=operation_key, receipt_path=folder/'receipt.json')

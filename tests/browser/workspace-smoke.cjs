@@ -67,6 +67,7 @@ async function fixtures(route) {
  const browser=await chromium.launch({...(process.env.QWEN_ASR_BROWSER_CHANNEL === 'chromium' ? {} : {channel:process.env.QWEN_ASR_BROWSER_CHANNEL || 'chrome'}),headless:true,args:['--use-fake-device-for-media-stream','--use-fake-ui-for-media-stream']});
  const results=[];
  async function scenario(name,run) {
+  if(process.env.QWEN_ASR_SMOKE_FILTER && !name.includes(process.env.QWEN_ASR_SMOKE_FILTER))return;
   tasks=[{...baseTask},{...baseTask,id:'refinement:smoke-class',type:'refinement',label:'转写校对',status:'running',stage:'正在校对',actions:['pause']},{...baseTask,id:'summary:old',recording_id:'old',title:'已完成合成课堂',status:'completed',actions:[]}];
   uploaded=false;reviewUploaded=false;activeSession=null;liveCourse=null;optimizedReady=false;syntheticRecords=null;unknownSync=false;linkedSync=false;courseFixtureFiles=null;requests=[];
   const context=await browser.newContext({permissions:['microphone'],viewport:{width:1440,height:1000}});
@@ -165,6 +166,112 @@ async function fixtures(route) {
   });
   await scenario('首页与来源证据',async(page,context,origin)=>{await page.goto(origin);await page.locator('#continuationList [data-recording]').waitFor();await page.locator('.recognition-details summary').click();await page.waitForFunction(()=>document.getElementById('recognitionStatus').textContent.includes('识别来源'));assert.match(await page.locator('#recognitionStatus').innerText(),/来源：待确认/);assert.match(await page.locator('#recognitionStatus').innerText(),/仅远程，不自动回退/);await page.screenshot({path:path.join(output,'workbench.png'),fullPage:true});});
   await scenario('新建课堂来源入口',async(page,context,origin)=>{await page.goto(origin+'/workspace');await page.locator('#workspaceRecent [data-recording]').waitFor();assert.equal(await page.locator('#workspaceCourse').inputValue(),'');await page.locator('#newClass').click();await page.locator('#newClassDialog[open]').waitFor();assert.equal(await page.locator('#newClassDialog a').count(),3);});
+  await scenario('工作台三栏占满可用高度并分别滚动',async(page,context,origin)=>{
+    activeSession={...record,status:'active',kind:'live',segments:Array.from({length:60},(_,i)=>({id:i+1,start:i*20,end:(i+1)*20,raw:'合成课堂的长段原文。'.repeat(35),corrected:'合成精修内容。'.repeat(35)}))};
+    await page.setViewportSize({width:2048,height:1220});await page.goto(origin);await page.locator('#transcript .segment').first().waitFor();
+    async function inspect(label){
+      const proof=await page.evaluate(()=>({viewport:{width:innerWidth,height:innerHeight},documentRange:document.scrollingElement.scrollHeight-document.scrollingElement.clientHeight,
+        boxes:Object.fromEntries(['.workspace','.control-panel','.classroom-workspace','.transcript-panel','.classroom-side-rail','#transcriptView','#transcript'].map(selector=>{const e=document.querySelector(selector),b=e.getBoundingClientRect();return [selector,{top:b.top,bottom:b.bottom,height:b.height,range:e.scrollHeight-e.clientHeight,overflowY:getComputedStyle(e).overflowY}]}))}));
+      fs.writeFileSync(path.join(output,`workbench-height-${label}.json`),JSON.stringify(proof,null,2));
+      assert.ok(proof.documentRange<=1,`workbench document must not scroll: ${JSON.stringify(proof)}`);
+      const values=['.control-panel','.transcript-panel','.classroom-side-rail'].map(s=>proof.boxes[s]);
+      for(const b of values){assert.ok(b.bottom<=proof.viewport.height+1);assert.ok(proof.viewport.height-b.bottom<42);}
+      assert.ok(Math.max(...values.map(b=>b.bottom))-Math.min(...values.map(b=>b.bottom))<=1,'three panels share available height');
+      return proof;
+    }
+    await inspect('large');await page.screenshot({path:path.join(output,'workbench-height-large.png')});
+    const left=page.locator('.control-panel');await left.hover();await page.mouse.wheel(0,900);await page.waitForFunction(()=>document.querySelector('.control-panel').scrollTop>0);
+    const main=page.locator('#transcript');await main.hover();await page.mouse.wheel(0,-1500);await page.waitForFunction(()=>document.querySelector('#transcript').scrollTop<document.querySelector('#transcript').scrollHeight-document.querySelector('#transcript').clientHeight);
+    await inspect('scrolled');
+    await page.setViewportSize({width:1280,height:640});await inspect('short');
+    await page.locator('#sideTabChat').click();await page.locator('#chatQuestion').waitFor({state:'visible'});await inspect('chat');
+    const composer=await page.locator('#chatForm').boundingBox();assert.ok(composer.y+composer.height<=640,'chat composer stays in viewport');
+    await page.setViewportSize({width:390,height:844});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'narrow workbench has no horizontal clipping');
+  });
+  await scenario('工作台中文翻译和精修公式安全渲染且原文保留',async(page,context,origin)=>{
+    const translated=String.raw`相位延迟为 $\phi = \frac{2\pi}{\lambda} n L$，其中 $\lambda$ 是波长，$n$ 是折射率，$L$ 是长度。`;
+    const raw='The phase delay equals two pi n L over lambda. Keep $literal$ and <b>spoken text</b> as recognized.';
+    const math={...record,segments:[{id:2,start:32,end:77,language:'English',raw,corrected:String.raw`The phase delay is $\phi = \frac{2\pi}{\lambda} n L$.`,translation:translated+'<script>window.__transcriptXss=1</script><a href="javascript:window.__transcriptXss=2">unsafe link</a>'}],
+      ai_reviews:[{id:'math-review',start:32,end:77,segment_ids:[2],corrected:String.raw`精修：$\lambda$ 与 $n$。`,translation:translated,manual_refinement:true}]};
+    await context.route('**/api/recordings/smoke-class',route=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({session:math})}));
+    await context.route('**/api/recordings/smoke-class/summary-status',route=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({job:{running:false,status:'completed'},session:math})}));
+    await page.goto(origin+'/?chat='+record.id);await page.locator('.segment[data-id="2"]').waitFor();
+    const card=page.locator('.segment[data-id="2"]'),translation=card.locator('.translation-text');
+    await translation.locator('.katex').first().waitFor();assert.equal(await translation.locator('.katex').count(),4);
+    assert.doesNotMatch(await translation.innerText(),/\$|\\frac|\\lambda/);assert.equal(await card.locator('.corrected-text .katex').count(),1);
+    assert.equal(await card.locator('.raw-text .katex').count(),0);assert.ok((await card.locator('.raw-text').innerText()).endsWith(raw));
+    assert.equal(await translation.locator('script,[onerror],a[href^="javascript:"]').count(),0);assert.equal(await page.evaluate(()=>window.__transcriptXss),undefined);
+    assert.match(await card.locator('.segment-meta').innerText(),/00:00:32–00:01:17/);
+    assert.equal(await page.locator('.periodic-review .translation-text .katex').count(),4);
+    await page.goto(origin+'/library?recording='+record.id);await page.locator('#noteDialog[open]').waitFor();
+    assert.equal(await page.locator('#noteTranscript .translation-text .katex').count(),4);
+    await page.locator('#noteTranscriptMode').selectOption('raw');assert.equal(await page.locator('#noteTranscript .katex').count(),0);assert.match(await page.locator('#noteTranscript').innerText(),/\$literal\$/);
+  });
+  await scenario('结束保存期间丢弃录音必须两次确认，取消不发请求',async(page,context,origin)=>{
+    activeSession={...record,status:'processing',kind:'microphone',finalization:{status:'running'}};
+    let posts=0,polls=0,done=false;
+    await context.route('**/api/recordings/smoke-class',route=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({session:activeSession || record})}));
+    await context.route('**/api/recordings/smoke-class/discard',route=>{
+      const request=route.request();
+      if(request.method()==='POST'){
+        posts++;assert.deepEqual(request.postDataJSON(),{confirmed:true,expected_session_id:'smoke-class'});
+        return route.fulfill({status:202,contentType:'application/json',body:JSON.stringify({session_id:'smoke-class',status:'discarding',recoverable:true})});
+      }
+      polls++;done=polls>=2;if(done)activeSession=null;
+      return route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({session_id:'smoke-class',status:done?'discarded':'discarding',recoverable:true})});
+    });
+    await page.goto(origin);const button=page.locator('#discardRecordingButton'),dialog=page.locator('#discardRecordingDialog');
+    await button.waitFor({state:'visible'});assert.equal(await page.locator('#endButton').isDisabled(),true);
+    await button.click();await dialog.locator('[data-discard-cancel]').click();assert.equal(posts,0);
+    await button.click();await dialog.locator('[data-discard-continue]').click();await dialog.locator('[data-discard-cancel]').click();assert.equal(posts,0);
+    await button.click();await dialog.locator('[data-discard-continue]').click();
+    const firstPoll=page.waitForResponse(r=>r.url().endsWith('/smoke-class/discard')&&r.request().method()==='GET');
+    await dialog.locator('[data-discard-confirm]').click();await firstPoll;await page.reload();
+    await button.waitFor({state:'hidden'});assert.equal(posts,1);assert.ok(polls>=2);assert.equal(done,true);
+    assert.match(await page.locator('#toast').innerText(),/废纸篓/);
+  });
+  await scenario('丢弃录音结果核对发现已恢复时保留资料并解除旧等待状态',async(page,context,origin)=>{
+    activeSession={...record,status:'processing',kind:'microphone',finalization:{status:'running'}};
+    let posts=0,polls=0;
+    await context.addInitScript(()=>{
+      localStorage.setItem('qwen-asr-pending-discard-v1',JSON.stringify(['smoke-class']));
+      localStorage.setItem('qwen-asr-pending-end-v1','smoke-class');
+    });
+    await context.addInitScript(old=>{
+      class SyntheticSocket {
+        static OPEN=1;
+        constructor(){this.readyState=0;window.__restoredSocket=this;setTimeout(()=>{this.readyState=1;this.onopen?.();},10);}
+        send(value){if(typeof value!=='string')return;const message=JSON.parse(value);if(message.type==='start')setTimeout(()=>this.onmessage?.({data:JSON.stringify({type:'session_started',session:{...old,id:'smoke-successor',title:'恢复之后的新录音',status:'active',kind:'microphone'}})}),10);}
+        close(){this.readyState=3;this.onclose?.();}
+      }
+      window.WebSocket=SyntheticSocket;
+      window.__lateRestoredEnd=()=>window.__restoredSocket.onmessage?.({data:JSON.stringify({type:'ended',session:old})});
+    },record);
+    await context.route('**/api/recordings/smoke-class/discard',route=>{
+      if(route.request().method()==='POST')posts++;else polls++;
+      return route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({session_id:'smoke-class',status:'restored',recoverable:true})});
+    });
+    await page.goto(origin);
+    await page.locator('#toast').filter({hasText:'已从废纸篓恢复'}).waitFor();
+    assert.equal(posts,0);assert.equal(polls,1);
+    assert.equal(await page.locator('#discardRecordingButton').isVisible(),false);
+    assert.equal(await page.locator('#recordButton').isDisabled(),false);
+    assert.match(await page.locator('#recordLabel').innerText(),/新建并开始/);
+    assert.match(await page.locator('#listeningLabel').innerText(),/已从废纸篓恢复/);
+    assert.doesNotMatch(await page.locator('#toast').innerText(),/丢弃未完成|未知|移入废纸篓/);
+    assert.equal(await page.evaluate(()=>localStorage.getItem('qwen-asr-pending-end-v1')),null);
+    assert.deepEqual(await page.evaluate(()=>JSON.parse(localStorage.getItem('qwen-asr-pending-discard-v1'))),[]);
+    await page.locator('#recordButton').click();
+    await page.waitForFunction(()=>document.getElementById('recordButton').classList.contains('recording'));
+    await page.evaluate(()=>window.__lateRestoredEnd());
+    assert.match(await page.locator('#recordName').inputValue(),/恢复之后的新录音/);
+    assert.equal(await page.locator('#recordButton').evaluate(el=>el.classList.contains('recording')),true);
+    activeSession=null;
+    await page.goto(origin+'/library');
+    await page.locator('.library-card').first().waitFor();
+    assert.ok((await page.locator('body').innerText()).includes(record.title));
+    assert.equal(posts,0);
+  });
   await scenario('课堂记录直接打开笔记',async(page,context,origin)=>{await page.goto(origin+'/library?recording='+record.id);await page.locator('#noteDialog[open]').waitFor();assert.match(await page.locator('#noteSummaryReader').innerText(),/菲涅耳公式/);});
   await scenario('任务默认过滤分组与恢复',async(page,context,origin)=>{await page.goto(origin+'/tasks');await page.locator('.task-group').waitFor();assert.equal(await page.locator('.task-group').count(),1);assert.equal(await page.locator('.task-card').count(),2);await page.locator('[data-id="summary:smoke-class"] [data-action="continue"]').click();await page.getByText('任务已加入后台队列',{exact:true}).waitFor();assert.ok(requests.some(request=>request.path==='/api/tasks/action'));await page.locator('[data-status="completed"]').click();assert.equal(await page.locator('.task-card').count(),1);await page.goto(origin+'/tasks?category='+encodeURIComponent('空课程'));await page.locator('#lastUpdated').filter({hasText:'已同步'}).waitFor();assert.equal(await page.locator('.task-card').count(),0);});
   await scenario('MinerU 两端稳定耗时进度、刷新与旧任务兼容',async(page,context,origin)=>{
@@ -199,6 +306,9 @@ async function fixtures(route) {
     await page.goto(origin+'/tasks');await page.locator('#lastUpdated').filter({hasText:'已同步'}).waitFor();
     await page.locator('button[data-status="all"]').click();
     assert.doesNotMatch(await page.locator('[data-id="course_queue"]').innerText(),/遥测|来源未验证|资源释放/);
+    await page.locator('[data-detail-key="collection:completed"] > summary').click();
+    await page.locator('[data-group-id="task:remote-asr"] .group-history > summary').click();
+    await page.locator('[data-id="remote-asr"]').waitFor({state:'visible'});
     assert.match(await page.locator('[data-id="remote-asr"]').innerText(),/显存释放已确认/);
     await page.screenshot({path:path.join(output,'resource-status.png'),fullPage:true});
   });
@@ -396,6 +506,53 @@ async function fixtures(route) {
     const url=new URL(await page.locator('#workspaceFrame').getAttribute('src'),origin);
     assert.equal(url.searchParams.get('chat'),'smoke-class');
     await page.frameLocator('#workspaceFrame').locator('#classroomChat').waitFor();
+  });
+  await scenario('普通课堂记录全屏笔记只保留内容滚动',async(page,context,origin)=>{
+    const long={...record,title:'完整课堂笔记与较长标题，用于验证全屏阅读的滚动边界',
+      segments:Array.from({length:90},(_,i)=>({id:i+1,start:i*60,end:(i+1)*60,raw:'合成课堂原文。'.repeat(35),corrected:'合成课堂精修原文。'.repeat(35)})),
+      ai_note_summary:{summary:Array.from({length:65},(_,i)=>`## 第 ${i+1} 节\n\n${'合成课堂笔记的完整段落。'.repeat(45)}`).join('\n\n')},ai_note_proposal:{task_id:'synthetic-proposal'}};
+    syntheticRecords=Array.from({length:35},(_,i)=>({...record,id:i?`synthetic-${i}`:record.id,title:`第 ${i+1} 节合成课堂`}));
+    await context.route('**/api/recordings/smoke-class',route=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({session:long})}));
+    await context.route('**/api/recordings/smoke-class/summary-status',route=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({job:{running:false,status:'completed'},session:long})}));
+    await context.route('**/api/recordings/smoke-class/note-proposal',route=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({task_id:'synthetic-proposal',current_summary:long.ai_note_summary.summary,note:{review_status:'passed',summary:'# 合成候选版本\n\n只供预览。'}})}));
+    await page.setViewportSize({width:1440,height:650});await page.goto(origin+'/library');
+    await page.locator('.library-open').first().waitFor();
+    await page.evaluate(()=>scrollTo(0,300));
+    await page.locator('.library-open').first().click();await page.locator('#noteDialog[open]').waitFor();
+    async function inspect(label){
+      const proof=await page.evaluate(()=>{
+        const range=el=>el.scrollHeight-el.clientHeight;
+        const list=[document.documentElement,document.body,...document.querySelectorAll('#noteDialog,#noteColumns,.note-summary-pane,.reader-layout,#noteSummaryReader,#noteSummaryEditor,#noteTranscript')];
+        return {viewport:{width:innerWidth,height:innerHeight},scrollY,
+          scrollHosts:list.filter(el=>el.getClientRects().length).map(el=>({id:el===document.documentElement?'HTML':el===document.body?'BODY':el.id||el.className||el.tagName,range:range(el),overflowY:getComputedStyle(el).overflowY,right:el.getBoundingClientRect().right,bottom:el.getBoundingClientRect().bottom,height:el.clientHeight})),
+          backgroundVisible:!!document.querySelector('.shell')?.getClientRects().length};
+      });
+      fs.writeFileSync(path.join(output,`note-scroll-${label}.json`),JSON.stringify(proof,null,2));
+      const scrolling=proof.scrollHosts.filter(el=>el.range>1 && /auto|scroll/.test(el.overflowY));
+      const right=scrolling.filter(el=>Math.abs(el.right-proof.viewport.width)<3);
+      assert.deepEqual(right.map(el=>el.id),[await page.locator('#noteSummaryEditor').isVisible()?'noteSummaryEditor':'noteSummaryReader'],JSON.stringify(proof));
+      for(const id of ['HTML','BODY','noteDialog','noteColumns','note-summary-pane','reader-layout']){
+        const host=proof.scrollHosts.find(el=>el.id===id);if(host)assert.ok(host.range<=1,`${id} has nested overflow: ${JSON.stringify(proof)}`);
+      }
+      return proof;
+    }
+    await inspect('desktop');await page.screenshot({path:path.join(output,'note-scroll-desktop.png')});
+    await page.locator('#previewNoteProposal').click();await page.getByRole('button',{name:'保留原文并关闭',exact:true}).click();
+    assert.equal(await page.evaluate(()=>document.documentElement.classList.contains('note-reader-open')),true,'nested preview close preserves main reader lock');
+    await inspect('preview-closed');
+    const reader=page.locator('#noteSummaryReader');await reader.hover();await page.mouse.wheel(0,900);await page.waitForFunction(()=>document.getElementById('noteSummaryReader').scrollTop>0);
+    await reader.evaluate(el=>el.scrollTop=el.scrollHeight);await reader.hover();await page.mouse.wheel(0,900);await inspect('desktop-end');
+    await page.locator('#toggleNoteFocus').click();await inspect('focus');
+    await page.locator('#toggleNoteSource').click();await inspect('source');await page.locator('#toggleNoteSource').click();
+    await page.setViewportSize({width:390,height:540});await inspect('mobile');await page.screenshot({path:path.join(output,'note-scroll-mobile.png')});
+    await page.locator('#toggleNoteMobilePane').click();assert.equal(await page.locator('.note-summary-pane').isVisible(),false);
+    const transcript=page.locator('#noteTranscript');await transcript.hover();await page.mouse.wheel(0,700);await page.waitForFunction(()=>document.getElementById('noteTranscript').scrollTop>0);
+    await page.locator('#toggleNoteMobilePane').click();
+    await page.locator('#closeNoteDialog').click();await page.locator('#noteDialog').waitFor({state:'hidden'});
+    await page.waitForFunction(()=>!document.documentElement.classList.contains('note-reader-open'));
+    assert.equal(await page.locator('.shell').isVisible(),true);
+    assert.equal(await page.evaluate(()=>document.documentElement.classList.contains('note-reader-open')),false);
+    await page.setViewportSize({width:1440,height:650});assert.ok(await page.evaluate(()=>document.scrollingElement.scrollHeight>innerHeight),'library scroll restored');
   });
   await scenario('长课堂笔记仅一个标题，内容独立滚动且无外层裁切',async(page,context,origin)=>{
     const fixturePath=process.env.QWEN_ASR_LONG_NOTE_FIXTURE || path.join(output,'real-long-note-fixture.json');

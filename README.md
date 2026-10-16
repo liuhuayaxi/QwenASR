@@ -233,3 +233,7 @@ GitHub Actions 配置在 `.github/workflows/tests.yml`，包括 Linux／macOS �
 工作流需在提交并推送后才能由 GitHub 实际执行。建议在远端规则中要求这五个检查（Python 两个平台各一个、Node、浏览器、Linux 节点）通过后合并；本轮没有修改分支保护或其他远端设置。
 
 调度器的优先级、公平性和取消行为由 `tests/test_phase1.py` 覆盖；实际课堂的下载、模型加载、排队、推理、精修和归档耗时从真实任务统计中评估，不再保留旧的睡眠模拟计时脚本。
+
+图文笔记的资料包、独立逐页审查、PDF 下载、Windows 课堂省电模式及部署回滚说明，见 [操作与部署指南](docs/ILLUSTRATED_NOTES_AND_WINDOWS.md)。
+
+任务中心按课堂集中显示当前步骤、错误与待核对内容，已完成和已恢复记录默认折叠；操作范围和恢复规则见 [任务中心说明](docs/TASK_CENTER.md)。

@@ -43,6 +43,7 @@ def course_tasks():
             })
         course_items.append({
             'id': ident,
+            'recording_id': entry.get('record_id') or entry.get('recording_id') or '',
             'title': item['group'].get('title', ident),
             'course': item['group'].get('course_name') or '',
             'start': item['group'].get('start') or '',
@@ -50,6 +51,7 @@ def course_tasks():
             'state': item.get('state', 'queued'),
             'progress': round(float(entry.get('progress', 0) or 0), 1),
             'message': entry.get('message') or '',
+            'updated_at': entry.get('updated_at') or '',
             'phases': phase_data,
         })
     details = [item['title'] + '：' + (item['message'] or item['state']) for item in course_items]

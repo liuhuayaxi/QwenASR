@@ -136,16 +136,23 @@ class KnowledgeService:
         vector_candidates: list[dict[str, Any]] = []
         if embedder and hasattr(embedder, "encode_query") and hasattr(embedder, "contract"):
             try:
-                q_vec = embedder.encode_query(query)
-                vector_candidates = self.store.search_vectors(
-                    category=category,
-                    query_vector=q_vec,
-                    embedding_contract=embedder.contract,
-                    limit=limit * 4,
-                    lesson_id=lesson_id,
-                    source_types=source_types,
-                    include_derived=include_derived,
-                )
+                from ..inference_providers import inference_settings
+                if inference_settings.for_task('knowledge').get('knowledge_provider') == 'remote_only' and not getattr(embedder,'remote',False):
+                    raise RuntimeError('课堂省电模式禁止本机向量检索')
+                if getattr(embedder,'remote',False):
+                    vector_candidates = embedder.search(self.store,self.course_id(category),query,limit=limit*4,
+                        lesson_id=lesson_id,source_types=source_types,include_derived=include_derived)
+                else:
+                    q_vec = embedder.encode_query(query)
+                    vector_candidates = self.store.search_vectors(
+                        category=category,
+                        query_vector=q_vec,
+                        embedding_contract=embedder.contract,
+                        limit=limit * 4,
+                        lesson_id=lesson_id,
+                        source_types=source_types,
+                        include_derived=include_derived,
+                    )
                 self.last_vector_success = True
                 self.last_retrieval_warning = ''
             except Exception as exc:
@@ -229,6 +236,8 @@ class KnowledgeService:
                 "open_url": cand.get("open_url", ""),
                 "stale": False,
                 "score": round(score, 6),
+                "vector_score": cand.get('vector_score'),
+                "remote_index_version": cand.get('remote_index_version'),
                 "neighbor_context": self.store.get_neighbor_context(
                     cand["source_id"], cand["revision"], cand["chunk_index"]
                 ),

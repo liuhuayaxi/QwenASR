@@ -17,6 +17,32 @@
 .task-history-tools summary { cursor: pointer; padding: 8px; }
 .task-bulk [hidden] { display: none; }
 
+/* Desktop recording is a viewport workspace. A long settings column must not
+   scroll the transcript and side rail out of view with the document. */
+@media (min-width: 1151px) {
+  html:has(> body.workbench-page:not(.library-page)) { height: 100%; overflow: hidden; }
+  body.workbench-page:not(.library-page) { height: 100dvh; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+  .workbench-page:not(.library-page) > .app-header { flex: 0 0 auto; }
+  .workbench-page:not(.library-page) .shell { flex: 1; min-height: 0; display: flex; flex-direction: column; padding-block: 20px; }
+  .workbench-page:not(.library-page) .workspace { flex: 1; min-height: 0; grid-template-rows: minmax(0, 1fr); align-items: stretch; overflow: hidden; }
+  .workbench-page:not(.library-page) .control-panel { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+  .workbench-page:not(.library-page) .classroom-workspace { height: 100%; min-height: 0; grid-template-rows: minmax(0, 1fr); }
+  .workbench-page:not(.library-page) .transcript-panel,
+  .workbench-page:not(.library-page) .classroom-side-rail { height: 100%; min-height: 0; }
+  .workbench-page:not(.library-page) .panel-heading { flex: 0 0 auto; }
+  .workbench-page:not(.library-page) #transcriptView { overflow: hidden; }
+  .workbench-page:not(.library-page) #transcript { flex: 1; min-height: 0; max-height: none; align-content: start; grid-auto-rows: max-content; overscroll-behavior: contain; }
+  .workbench-page:not(.library-page) .partial-card { flex: 0 0 auto; }
+}
+
+/* AI correction/translation uses the existing sanitized Markdown + KaTeX
+   renderer; raw recognition remains plain text. */
+.transcript-markdown { white-space: normal; font-size: inherit; line-height: inherit; }
+.transcript-markdown > :first-child { margin-top: 0; }
+.transcript-markdown > :last-child { margin-bottom: 0; }
+.transcript-markdown .katex-display { overflow-x: auto; overflow-y: hidden; max-width: 100%; }
+.batch-block { margin-bottom: 12px; }
+
 /* Course workspace: the course is the title, content is the primary surface. */
 .workspace-page { min-height: 100dvh; }
 .course-workspace { width: min(1320px, calc(100% - 64px)); margin: 42px auto 64px; }
@@ -125,39 +151,40 @@ body.workspace-embedded > .app-header { display: none; }
 }
 @media (max-width: 480px) { .workspace-side { grid-template-columns: minmax(0, 1fr); } }
 
-/* Dedicated full-window note reader. Ordinary library/workbench keep their layout. */
+/* Full-window note reader, persistent in the course iframe and temporary when
+   opened from the library/workbench. Closing restores the underlying page. */
 .note-mobile-pane-switch { display: none; }
-html.note-reader-mode, html.note-reader-mode body { width: 100%; height: 100%; min-height: 0; margin: 0; overflow: hidden; }
-html.note-reader-mode body > :not(dialog):not(#toast) { display: none !important; }
-.note-reader-mode .note-dialog { position: fixed; inset: 0; width: 100%; min-width: 0; height: 100%; max-height: 100%; overflow: hidden; }
-.note-reader-mode .note-dialog[open] { display: grid; grid-template-rows: auto minmax(0, 1fr); }
-.note-reader-mode .note-dialog-header { height: auto; min-height: 0; padding: 12px 18px; align-items: flex-start; }
-.note-reader-mode .note-dialog-header > div:first-child { min-width: 0; flex: 1; }
-.note-reader-mode .note-dialog-header b { white-space: normal; overflow: visible; overflow-wrap: anywhere; line-height: 1.4; }
-.note-reader-mode .note-dialog-header small { overflow-wrap: anywhere; line-height: 1.5; }
-.note-reader-mode .note-header-actions { display: flex; flex: 0 0 auto; gap: 8px; }
-.note-reader-mode .note-dialog-columns { height: auto; min-height: 0; max-height: 100%; min-width: 0; grid-template-rows: minmax(0, 1fr); grid-auto-rows: auto; overflow: hidden; }
-.note-reader-mode .note-dialog-columns > section { height: 100%; min-height: 0; max-height: 100%; overflow: hidden; }
-.note-reader-mode .note-dialog-columns > section > :not(.note-transcript):not(.reader-layout):not(.note-summary-editor) { flex-shrink: 0; }
-.note-reader-mode .note-pane-heading { min-height: 0; padding: 12px 16px; }
-.note-reader-mode .reader-layout { min-width: 0; min-height: 0; overflow: hidden; }
-.note-reader-mode .note-summary-reader, .note-reader-mode .note-transcript, .note-reader-mode .note-summary-editor { min-width: 0; min-height: 0; overflow: auto; overscroll-behavior: contain; }
-.note-reader-mode .note-toc { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+html:is(.note-reader-mode, .note-reader-open), html:is(.note-reader-mode, .note-reader-open) body { width: 100%; height: 100%; min-height: 0; margin: 0; overflow: hidden; }
+html:is(.note-reader-mode, .note-reader-open) body > :not(dialog):not(#toast) { display: none !important; }
+:is(.note-reader-mode, .note-reader-open) .note-dialog { position: fixed; inset: 0; width: 100%; min-width: 0; height: 100%; max-height: 100%; overflow: hidden; }
+:is(.note-reader-mode, .note-reader-open) .note-dialog[open] { display: grid; grid-template-rows: auto minmax(0, 1fr); }
+:is(.note-reader-mode, .note-reader-open) .note-dialog-header { height: auto; min-height: 0; padding: 12px 18px; align-items: flex-start; }
+:is(.note-reader-mode, .note-reader-open) .note-dialog-header > div:first-child { min-width: 0; flex: 1; }
+:is(.note-reader-mode, .note-reader-open) .note-dialog-header b { white-space: normal; overflow: visible; overflow-wrap: anywhere; line-height: 1.4; }
+:is(.note-reader-mode, .note-reader-open) .note-dialog-header small { overflow-wrap: anywhere; line-height: 1.5; }
+:is(.note-reader-mode, .note-reader-open) .note-header-actions { display: flex; flex: 0 0 auto; gap: 8px; }
+:is(.note-reader-mode, .note-reader-open) .note-dialog-columns { height: auto; min-height: 0; max-height: 100%; min-width: 0; grid-template-rows: minmax(0, 1fr); grid-auto-rows: auto; overflow: hidden; }
+:is(.note-reader-mode, .note-reader-open) .note-dialog-columns > section { height: 100%; min-height: 0; max-height: 100%; overflow: hidden; }
+:is(.note-reader-mode, .note-reader-open) .note-dialog-columns > section > :not(.note-transcript):not(.reader-layout):not(.note-summary-editor) { flex-shrink: 0; }
+:is(.note-reader-mode, .note-reader-open) .note-pane-heading { min-height: 0; padding: 12px 16px; }
+:is(.note-reader-mode, .note-reader-open) .reader-layout { min-width: 0; min-height: 0; overflow: hidden; }
+:is(.note-reader-mode, .note-reader-open) .note-summary-reader, :is(.note-reader-mode, .note-reader-open) .note-transcript, :is(.note-reader-mode, .note-reader-open) .note-summary-editor { min-width: 0; min-height: 0; overflow: auto; overscroll-behavior: contain; }
+:is(.note-reader-mode, .note-reader-open) .note-toc { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
 @media (max-width: 850px) {
-  .note-reader-mode .note-mobile-pane-switch { display: inline-flex; white-space: nowrap; }
-  .note-reader-mode .note-header-actions { gap: 4px; }
-  .note-reader-mode .note-dialog-header { gap: 8px; padding: 10px 12px; }
-  .note-reader-mode .note-dialog-columns { grid-template-columns: minmax(0, 1fr); }
-  .note-reader-mode .note-dialog-columns:not(.mobile-transcript) > .note-transcript-pane,
-  .note-reader-mode .note-dialog-columns.mobile-transcript > .note-summary-pane { display: none; }
-  .note-reader-mode .note-dialog-columns.mobile-transcript > .note-transcript-pane { display: flex; }
-  .note-reader-mode #toggleNoteFocus { display: none; }
-  .note-reader-mode .note-pane-heading { gap: 8px; padding: 8px 12px; }
-  .note-reader-mode .note-summary-actions { width: 100%; flex-wrap: nowrap; justify-content: flex-start; overflow-x: auto; padding-bottom: 4px; }
-  .note-reader-mode .note-summary-actions > * { flex-shrink: 0; white-space: nowrap; }
-  .note-reader-mode .reader-toolbar { flex-wrap: nowrap; overflow-x: auto; padding: 8px 12px; }
-  .note-reader-mode .reader-toolbar > button { flex-shrink: 0; white-space: nowrap; }
-  .note-reader-mode .markdown-toolbar { flex-wrap: nowrap; overflow-x: auto; }
-  .note-reader-mode .markdown-toolbar > button { flex-shrink: 0; }
-  .note-reader-mode .markdown-toolbar > span { display: none; }
+  :is(.note-reader-mode, .note-reader-open) .note-mobile-pane-switch { display: inline-flex; white-space: nowrap; }
+  :is(.note-reader-mode, .note-reader-open) .note-header-actions { gap: 4px; }
+  :is(.note-reader-mode, .note-reader-open) .note-dialog-header { gap: 8px; padding: 10px 12px; }
+  :is(.note-reader-mode, .note-reader-open) .note-dialog-columns { grid-template-columns: minmax(0, 1fr); }
+  :is(.note-reader-mode, .note-reader-open) .note-dialog-columns:not(.mobile-transcript) > .note-transcript-pane,
+  :is(.note-reader-mode, .note-reader-open) .note-dialog-columns.mobile-transcript > .note-summary-pane { display: none; }
+  :is(.note-reader-mode, .note-reader-open) .note-dialog-columns.mobile-transcript > .note-transcript-pane { display: flex; }
+  :is(.note-reader-mode, .note-reader-open) #toggleNoteFocus { display: none; }
+  :is(.note-reader-mode, .note-reader-open) .note-pane-heading { gap: 8px; padding: 8px 12px; }
+  :is(.note-reader-mode, .note-reader-open) .note-summary-actions { width: 100%; flex-wrap: nowrap; justify-content: flex-start; overflow-x: auto; padding-bottom: 4px; }
+  :is(.note-reader-mode, .note-reader-open) .note-summary-actions > * { flex-shrink: 0; white-space: nowrap; }
+  :is(.note-reader-mode, .note-reader-open) .reader-toolbar { flex-wrap: nowrap; overflow-x: auto; padding: 8px 12px; }
+  :is(.note-reader-mode, .note-reader-open) .reader-toolbar > button { flex-shrink: 0; white-space: nowrap; }
+  :is(.note-reader-mode, .note-reader-open) .markdown-toolbar { flex-wrap: nowrap; overflow-x: auto; }
+  :is(.note-reader-mode, .note-reader-open) .markdown-toolbar > button { flex-shrink: 0; }
+  :is(.note-reader-mode, .note-reader-open) .markdown-toolbar > span { display: none; }
 }

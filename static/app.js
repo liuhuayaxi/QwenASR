@@ -1,19 +1,20 @@
-import {renderCorrectionReview} from "./js/transcription-assist.js?v=20261014-knowledge";
-import "./js/knowledge-settings.js?v=20261014-knowledge";
+import {renderCorrectionReview} from "./js/transcription-assist.js?v=20261015-illustrated-windows";
+import "./js/knowledge-settings.js?v=20261015-illustrated-windows";
 import {cachedJson} from './js/cached-json.js';
-import { createBatchView } from "./js/batch-view.js?v=20261011-20260923";
+import { createBatchView } from "./js/batch-view.js?v=20261015-reader-math-scope-8";
 import { createLibraryTools } from "./js/library-tools.js?v=20261007-search-focus-1";
-import { createMarkdownReader, renderMarkdown } from "./js/markdown-reader.js?v=20261014-source-citations";
+import { createMarkdownReader, renderMarkdown } from "./js/markdown-reader.js?v=20261015-reader-math-scope-8";
 import { createNoteAutosave } from "./js/note-autosave.js?v=20260923-upgrade-1";
-import { DEFAULT_NOTE_SUMMARY_PROMPT } from "./js/default-prompts.js";
+import { DEFAULT_NOTE_SUMMARY_PROMPT } from "./js/default-prompts.js?v=20261015-learning-scope-1";
 import { resample } from "./js/audio.js";
-import { createSummaryView } from "./js/summary-view.js?v=20261014-source-citations";
-import { createTranscriptView } from "./js/transcript-view.js?v=20261011-20260923-upgrade-1";
+import { createSummaryView } from "./js/summary-view.js?v=20261015-reader-math-scope-8";
+import { createTranscriptView } from "./js/transcript-view.js?v=20261015-reader-math-scope-8";
+import { createRecordingDiscard } from "./js/recording-discard.js?v=20261015-reader-math-scope-8";
 import { IDEASHELL_SERVERS, normalizeIdeashellServer } from "./js/ideashell-config.js?v=20261007";
-import { createMineruSettings } from "./js/mineru-settings.js?v=20261010-routing-progress";
-import { createInferenceSettings } from "./js/inference-settings.js?v=20261010-routing-progress";
-import { createClassroomIntelligence } from "./js/classroom-intelligence.js?v=20261014-followups-1";
-import { createClassroomChat } from "./js/classroom-chat.js?v=20261014-source-citations";
+import { createMineruSettings } from "./js/mineru-settings.js?v=20261015-illustrated-windows";
+import { createInferenceSettings } from "./js/inference-settings.js?v=20261015-illustrated-windows";
+import { createClassroomIntelligence } from "./js/classroom-intelligence.js?v=20261015-reader-math-scope-8";
+import { createClassroomChat } from "./js/classroom-chat.js?v=20261015-reader-math-scope-8";
 import { createSettingsNavigation } from "./js/settings-navigation.js?v=20261011-ui-final";
 import { createLibraryBackup } from "./js/library-backup.js?v=20261014-daily";
 
@@ -138,6 +139,7 @@ const continuation = createContinuation({
   root: document, openRecord: openLibraryRecord, toast,
 });
 let summaryView = null;
+let recordingDiscard = null;
 let classroomChat = null;
 let classroomIntelligence = null;
 const {
@@ -273,17 +275,20 @@ function handleRecordCategoryChange() {
 }
 
 function updateButtons() {
-  const busy = state.pausing || state.ending || state.uploading;
+  const discarding = recordingDiscard?.isPending(state.activeSession?.id);
+  const busy = state.pausing || state.ending || state.uploading || discarding;
   els.recordButton.disabled = !state.modelReady || busy;
   els.recordButton.classList.toggle("recording", state.capturing);
-  if (state.ending) els.recordLabel.textContent = "正在生成 AAC 与打包…";
+  if (discarding) els.recordLabel.textContent = "正在停止并丢弃这条录音…";
+  else if (state.ending) els.recordLabel.textContent = "正在生成 AAC 与打包…";
   else if (state.pausing) els.recordLabel.textContent = "正在保存当前段…";
   else if (state.capturing) els.recordLabel.textContent = "暂停收音";
   else if (state.activeSession) els.recordLabel.textContent = "恢复转写";
   else if (state.modelReady) els.recordLabel.textContent = "新建并开始转写";
   else els.recordLabel.textContent = "模型加载中";
   els.endButton.classList.toggle("hidden", !state.activeSession);
-  els.endButton.disabled = state.ending || state.pausing || state.uploading;
+  els.endButton.disabled = state.ending || state.pausing || state.uploading || discarding;
+  recordingDiscard?.update();
   els.uploadButton.disabled = !state.modelReady || busy || Boolean(state.activeSession);
   els.recordName.disabled = Boolean(state.activeSession) || busy;
   els.recordCategory.disabled = Boolean(state.activeSession) || busy;
@@ -1080,7 +1085,7 @@ function renderLibrary() {
         <a href="${record.downloads.audio}">AAC</a>
         <a href="${record.downloads.raw_transcript || record.downloads.transcript}">原始转写 TXT</a>
         <a href="${record.downloads.corrected_transcript || record.downloads.transcript}">AI 修正 TXT</a>
-        <a class="${detailedSummary ? "" : "disabled-download"}" href="${record.downloads.ai_summary}">课后复习笔记</a>
+        <a data-review-pdf="${escapeHtml(record.id)}" data-reviewed="${record.ai_note_summary?.review_status === 'passed'}" class="${detailedSummary ? "" : "disabled-download"}" href="${record.downloads.ai_summary}">复习笔记 PDF</a>
         ${courseReplayLinks(record).map((link) => `<a class="library-replay-link" href="${link.url}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(link.title || "在南邮 Smart Class 打开对应回放")}">${escapeHtml(link.label)}</a>`).join("")}
         <button class="library-regenerate-summary" type="button" ${canGenerateSummary ? "" : "disabled"}>重新生成复习笔记</button>
       </div>` : ""}`;
@@ -1356,6 +1361,30 @@ async function loadLibrary() {
   }
 }
 
+let noteReaderSurface = null;
+function openNoteReaderSurface() {
+  if (!noteReaderSurface) noteReaderSurface = {
+    x: window.scrollX, y: window.scrollY, view: state.activeView,
+    toastParent: els.toast.parentNode, toastNext: els.toast.nextSibling,
+  };
+  // Every classroom-note dialog is a full-window reader, including direct
+  // library links. The course iframe already has its own persistent mode.
+  document.documentElement.classList.add('note-reader-open');
+  if (els.toast.parentElement !== els.noteDialog) els.noteDialog.append(els.toast);
+}
+function closeNoteReaderSurface() {
+  const previous = noteReaderSurface;
+  noteReaderSurface = null;
+  document.documentElement.classList.remove('note-reader-open');
+  if (!previous) return;
+  if (previous.toastParent?.isConnected) previous.toastParent.insertBefore(els.toast,
+    previous.toastNext?.parentNode === previous.toastParent ? previous.toastNext : null);
+  window.scrollTo(previous.x, previous.y);
+  requestAnimationFrame(() => {
+    if (!els.noteDialog.open && state.activeView === previous.view) window.scrollTo(previous.x, previous.y);
+  });
+}
+
 async function openLibraryRecord(sessionId, focus = null) {
   if (state.noteSession && state.noteSession.id !== sessionId && !await saveNoteSummary({quiet: true})) return;
   try {
@@ -1364,7 +1393,7 @@ async function openLibraryRecord(sessionId, focus = null) {
     if (!response.ok) throw new Error(payload.detail || "无法读取录音笔记");
     state.noteSession = payload.session;
     renderNoteDialog(payload.session);
-    if (document.documentElement.classList.contains('note-reader-mode') && els.toast.parentElement !== els.noteDialog) els.noteDialog.append(els.toast);
+    openNoteReaderSurface();
     if (!els.noteDialog.open) els.noteDialog.showModal();
     if (focus) requestAnimationFrame(() => libraryTools.focusSearch(focus));
     return payload.session;
@@ -1412,7 +1441,7 @@ function renderNoteTranscript(session) {
         <button class="transcript-time" type="button" data-seek="${Number(block.start) || 0}" title="定位并播放这段录音">${formatDuration(block.start)}<br>${formatDuration(block.end)}${refined && !block.refined ? "<br>未精修" : ""}</button>
         ${replay ? `<a class="transcript-smartclass-jump" href="${escapeHtml(replay)}" target="_blank" rel="noopener noreferrer" title="在新标签页登录并跳转到南邮 Smart Class 对应回放时间">跳转</a>` : ""}
       </div>
-      <div class="markdown-body">${renderMarkdown(block.text || "")}${refined && !block.refined && block.segment_ids?.length === 1 && failedIds.has(String(block.segment_ids[0]))
+      <div class="markdown-body">${refined ? renderMarkdown(block.text || "") : `<p>${escapeHtml(block.text || "")}</p>`}${refined && block.translation ? `<div class="translation-block"><small>${block.translation_target === "English" ? "ENGLISH" : "中文翻译"}</small><div class="translation-text transcript-markdown markdown-body">${renderMarkdown(block.translation)}</div></div>` : ""}${refined && !block.refined && block.segment_ids?.length === 1 && failedIds.has(String(block.segment_ids[0]))
         ? `<button class="segment-retry-button note-segment-retry" type="button" data-segment-id="${escapeHtml(block.segment_ids[0])}">重试该段</button>` : ""}</div>
     </article>`;
   }).join("") : '<div class="note-empty">尚无转写内容</div>';
@@ -1422,9 +1451,12 @@ function renderNoteTranscript(session) {
 }
 
 function renderNoteSummary(session) {
+  $('#previewNoteProposal').hidden = !session.ai_note_proposal;
   els.noteDialogTitle.textContent = session.title || "未命名录音";
   const summary = session.ai_note_summary || {};
   const markdown = summary.summary || "";
+  const reviewTask = String(summary.review_package || '').split('/').pop();
+  els.noteSummaryEditor.dataset.assetBase = reviewTask ? `/api/recordings/${encodeURIComponent(session.id)}/note-assets/${encodeURIComponent(reviewTask)}/` : '';
   const doc = noteAutosave.open(session.id, markdown, {preserve: els.noteSummaryEditor.dataset.noteId === session.id && noteReader.hasActive()});
   const preserveEditor = els.noteSummaryEditor.dataset.noteId === session.id
     && (noteReader.hasActive() || doc.pending || noteAutosave.isDirty(session.id));
@@ -1450,7 +1482,8 @@ function renderNoteSummary(session) {
       : session.ideashell_sync?.note_id ? " · 已关联 IdeaShell" : "";
     const abstractNotice = summary.abstract_error ? ` · 课堂记录短摘要失败：${summary.abstract_error}` : "";
     const titleNotice = summary.title_error ? " · 自动取名未完成，可在课堂记录点击“AI 取名”重试" : "";
-    els.noteSummaryHint.textContent = `Markdown 总结${edited}${syncState}${abstractNotice}${titleNotice}${summary.updated_at ? ` · ${new Date(summary.updated_at).toLocaleString()}` : ""}`;
+    const reviewNotice = summary.review_status === 'passed' ? ' · PDF 已逐页独立审查' : ' · 未完成当前版本的视觉审查，点击下载可继续导出与审查';
+    els.noteSummaryHint.textContent = `图文复习笔记${edited}${syncState}${abstractNotice}${titleNotice}${reviewNotice}${summary.updated_at ? ` · ${new Date(summary.updated_at).toLocaleString()}` : ""}`;
   } else {
     els.noteSummaryHint.textContent = summary.abstract_error
       ? `详细总结已保存，但课堂记录短摘要生成失败：${summary.abstract_error}`
@@ -1461,6 +1494,81 @@ function renderNoteSummary(session) {
     els.noteSummaryHint.textContent = `上次生成未完成：${session.summary_job.error || "任务中断"}；已有笔记保留，可重新生成`;
   }
 }
+
+els.downloadNoteSummary.addEventListener('click', async event => {
+  event.preventDefault();
+  const session = state.noteSession;
+  if (!session) return;
+  try {
+    if (!await saveNoteSummary({quiet:true})) return;
+    if (state.noteSession?.id !== session.id) return;
+    if (state.noteSession.ai_note_summary?.review_status === 'passed') {
+      window.location.assign(state.noteSession.downloads.ai_summary);
+      return;
+    }
+    const response = await fetch(`/api/recordings/${encodeURIComponent(session.id)}/review-pdf`, {method:'POST'});
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.detail || 'PDF 审查启动失败');
+    toast('正在后台导出并逐页独立审查，可在任务中心查看；通过后再次点击下载 PDF');
+  } catch (error) { toast(error.message); }
+});
+
+document.addEventListener('click', async event => {
+  const link = event.target.closest?.('a[data-review-pdf]');
+  if (!link || link.dataset.reviewed === 'true' || link.classList.contains('disabled-download')) return;
+  event.preventDefault();
+  try {
+    const response = await fetch(`/api/recordings/${encodeURIComponent(link.dataset.reviewPdf)}/review-pdf`,{method:'POST'});
+    const result = await response.json(); if (!response.ok) throw new Error(result.detail || '无法导出 PDF');
+    toast('已安排 PDF 导出与逐页审查，请在任务中心查看，通过后即可下载');
+  } catch (error) { toast(error.message); }
+});
+
+$('#chooseReviewMaterials')?.addEventListener('click', async () => {
+  const session = state.noteSession;
+  if (!session) return;
+  try {
+    const url = `/api/recordings/${encodeURIComponent(session.id)}/review-materials`;
+    const response = await fetch(url); const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || '无法读取课程资料');
+    const dialog = document.createElement('dialog');
+    dialog.className = 'review-material-picker';
+    const heading = document.createElement('h3'); heading.textContent = '本节使用的课件'; dialog.append(heading);
+    const hint = document.createElement('p'); hint.textContent = '只列出本课程原件。勾选后会保留已完成且输入未变的结果；可恢复自动匹配。'; dialog.append(hint);
+    for (const item of data.materials) {
+      const label = document.createElement('label'); label.style.display = 'block';
+      const input = document.createElement('input'); input.type = 'checkbox'; input.value = item.id;
+      input.checked = data.selected === null || data.selected === undefined || data.selected.includes(item.id);
+      label.append(input, document.createTextNode(` ${item.name}`)); dialog.append(label);
+    }
+    const save = document.createElement('button'); save.textContent = '保存选择';
+    const auto = document.createElement('button'); auto.textContent = '恢复自动匹配';
+    const close = document.createElement('button'); close.textContent = '关闭'; close.onclick = () => dialog.close();
+    const persist = async ids => {
+      const response = await fetch(url, {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({material_ids:ids})});
+      const result = await response.json(); if (!response.ok) throw new Error(result.detail || '保存失败');
+      toast(result.message); dialog.close();
+    };
+    save.onclick = () => void persist([...dialog.querySelectorAll('input:checked')].map(i => i.value)).catch(error=>toast(error.message));
+    auto.onclick = () => void persist(null).catch(error=>toast(error.message));
+    dialog.append(save,auto,close); dialog.addEventListener('close',()=>dialog.remove());document.body.append(dialog);dialog.showModal();
+  } catch (error) { toast(error.message); }
+});
+
+$('#previewNoteProposal')?.addEventListener('click', async () => {
+  const session=state.noteSession;if (!session) return;
+  try {
+    if (!await saveNoteSummary({quiet:true})) return;
+    const url=`/api/recordings/${encodeURIComponent(session.id)}/note-proposal`;
+    const response=await fetch(url);const data=await response.json();if(!response.ok)throw new Error(data.detail || '候选版本不可用');
+    const dialog=document.createElement('dialog');dialog.style.cssText='width:min(1000px,94vw);max-height:92vh;overflow:auto';
+    const heading=document.createElement('h3');heading.textContent=data.note.review_status==='passed'?'候选版本 · 已完成逐页审查':'候选版本 · 未完成视觉审查';
+    const text=document.createElement('div');text.className='markdown-body';text.innerHTML=renderMarkdown(data.note.summary,`/api/recordings/${encodeURIComponent(session.id)}/note-assets/${data.task_id}/`);
+    const adopt=document.createElement('button');adopt.textContent='采用此版本，原文保留在历史中';adopt.disabled=data.note.review_status!=='passed';
+    adopt.onclick=async()=>{try{const r=await fetch(url+'/adopt',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({task_id:data.task_id,expected_summary:data.current_summary})});const result=await r.json();if(!r.ok)throw new Error(result.detail);state.noteSession=result.session;renderNoteSummary(result.session);dialog.close();toast('已采用图文版本，原编辑保留在版本历史中');}catch(error){toast(error.message);}};
+    const close=document.createElement('button');close.textContent='保留原文并关闭';close.onclick=()=>dialog.close();dialog.append(heading,adopt,close,text);dialog.addEventListener('close',()=>dialog.remove());document.body.append(dialog);dialog.showModal();
+  } catch(error){toast(error.message);}
+});
 
 async function saveNoteSummary({ quiet = false, replaceConflict = false } = {}) {
   const session = state.noteSession;
@@ -1976,7 +2084,7 @@ function connectFor(command, commandPayload = {}) {
 }
 
 async function startCapture() {
-  if (!state.modelReady || state.capturing || state.pausing || state.ending) return;
+  if (!state.modelReady || state.capturing || state.pausing || state.ending || recordingDiscard?.isPending(state.activeSession?.id)) return;
   let stream;
   try {
     await inferenceSettingsPanel.load();
@@ -2096,11 +2204,13 @@ async function endSession() {
 }
 
 async function watchEndSession(sessionId) {
+  if (recordingDiscard?.isPending(sessionId) || recordingDiscard?.isSettled(sessionId)) return;
   if (state.endPolling.has(sessionId)) return;
   state.endPolling.add(sessionId);
   const started = Date.now();
   try {
     while (localStorage.getItem(PENDING_END_KEY) === sessionId) {
+      if (recordingDiscard?.isPending(sessionId) || recordingDiscard?.isSettled(sessionId)) return;
       const response = await fetch(`/api/recordings/${encodeURIComponent(sessionId)}`, { cache: "no-store" });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.detail || "无法读取录音保存进度");
@@ -2118,6 +2228,7 @@ async function watchEndSession(sessionId) {
       await new Promise((resolve) => setTimeout(resolve, 1500));
     }
   } catch (error) {
+    if (recordingDiscard?.isPending(sessionId) || recordingDiscard?.isSettled(sessionId)) return;
     if (state.activeSession?.id === sessionId) {
       state.ending = false;
       els.listeningLabel.textContent = "内容已保留 · 可重试结束保存";
@@ -2128,6 +2239,9 @@ async function watchEndSession(sessionId) {
 }
 
 function handleMessage(message) {
+  if (message.type === 'recording_discarding' || message.type === 'recording_discarded') { recordingDiscard?.receive(message); return; }
+  const completedId = message.session?.id;
+  if (message.type === 'ended' && (recordingDiscard?.isPending(completedId) || recordingDiscard?.isSettled(completedId))) return;
   switch (message.type) {
     case "ownership_lost":
       stopAudioNodes();
@@ -2171,6 +2285,9 @@ function handleMessage(message) {
     }, true); break;
     case "ai_review": renderPeriodicReview(message.review); break;
     case "ai_summary_pending": summaryView.renderPending(message); break;
+    case "processing_location":
+      els.modelStatus.textContent = message.message || (message.available ? 'Windows 正在处理' : 'Windows 等待恢复');
+      break;
     case "ai_summary": summaryView.renderResult(message.summary); break;
     case "discard": {
       const key = String(message.id);
@@ -2324,8 +2441,48 @@ els.confirmRegenerateSummary.addEventListener("click", async () => {
   }
 });
 els.closeNoteDialog.addEventListener("click", closeNoteDialog);
+recordingDiscard = createRecordingDiscard({
+  button: $('#discardRecordingButton'), dialog: $('#discardRecordingDialog'),
+  getSession: () => state.activeSession && !['upload', 'course'].includes(state.activeSession.kind) ? state.activeSession : null,
+  onChange: updateButtons, toast,
+  onAccepted: id => {
+    if (localStorage.getItem(PENDING_END_KEY) === id) localStorage.removeItem(PENDING_END_KEY);
+    if (state.activeSession?.id !== id) return;
+    clearTimeout(pauseCapture.timer); stopAudioNodes();
+    state.capturing = state.pausing = false;
+    if (state.ws) { const ws = state.ws; state.ws = null; ws.close(); }
+    els.listeningLabel.textContent = '正在停止任务并移入废纸篓…';
+  },
+  onDiscarded: id => {
+    if (localStorage.getItem(PENDING_END_KEY) === id) localStorage.removeItem(PENDING_END_KEY);
+    if (state.activeSession?.id === id) {
+      clearTimeout(pauseCapture.timer); stopAudioNodes();
+      if (state.ws) { const ws = state.ws; state.ws = null; ws.close(); }
+      state.activeSession = null; state.capturing = state.pausing = state.ending = false;
+      els.recordName.value = ''; els.listeningLabel.textContent = '录音已移入废纸篓';
+    }
+    if (state.shownSession?.id === id) {
+      state.shownSession = null; clearAll(); summaryView?.clear();
+      els.sessionBar.classList.add('hidden'); $('#openCompletedNote').classList.add('hidden');
+    }
+    updateButtons(); void loadLibrary();
+    toast('这条录音已停止并移入废纸篓，可恢复。', 6500);
+  },
+  onRestored: id => {
+    if (localStorage.getItem(PENDING_END_KEY) === id) localStorage.removeItem(PENDING_END_KEY);
+    if (state.activeSession?.id === id) {
+      clearTimeout(pauseCapture.timer); stopAudioNodes();
+      if (state.ws) { const ws = state.ws; state.ws = null; ws.close(); }
+      state.activeSession = null; state.capturing = state.pausing = state.ending = false;
+      els.recordName.value = ''; els.listeningLabel.textContent = '录音已从废纸篓恢复 · 可在课堂记录中查看';
+    }
+    if (state.shownSession?.id === id) els.sessionState.textContent = `${state.shownSession.title || '未命名录音'} · 已从废纸篓恢复`;
+    updateButtons(); void loadLibrary();
+  },
+  onFailed: id => { if (state.activeSession?.id === id) { state.ending = false; els.listeningLabel.textContent = '录音仍保留 · 请核对丢弃结果'; updateButtons(); } },
+});
 els.noteDialog.addEventListener("cancel", event => { event.preventDefault(); closeNoteDialog(); });
-els.noteDialog.addEventListener("close", () => { state.noteSession = null; });
+els.noteDialog.addEventListener("close", () => { closeNoteReaderSurface(); state.noteSession = null; });
 els.retryUnrefined.addEventListener("click", async () => {
   const record = state.noteSession;
   if (!record) return;
@@ -2483,6 +2640,7 @@ async function init() {
   drawIdleMeter();
   if (location.pathname === "/library") switchView("library");
   await Promise.all([loadConfig(), loadSession(), loadLibrary(), loadIdeashellStatus(), loadAiTasks()]);
+  recordingDiscard?.resume();
   if (!state.activeSession) {
     const course = continuation.lastCourse();
     if (course && state.categories.includes(course)) setRecordCategory(course);
@@ -2604,7 +2762,7 @@ $("#toggleNoteFocus").addEventListener("click", () => {
   $("#toggleNoteFocus").textContent = focus ? "显示原文" : "展开阅读";
 });
 $("#toggleNoteMobilePane").addEventListener("click", () => {
-  if (!document.documentElement.classList.contains('note-reader-mode')) return;
+  if (!els.noteDialog.open) return;
   noteReader.finish();
   const columns = $("#noteColumns");
   const transcript = columns.classList.toggle('mobile-transcript');

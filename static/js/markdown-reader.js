@@ -81,10 +81,11 @@ marked.use({ gfm: true, breaks: false, extensions: [
     }, renderer: (token) => mathHtml(token.text, token.display) },
 ] });
 
-export function renderMarkdown(markdown) {
-  return DOMPurify.sanitize(marked.parse(String(markdown || "")), {
+export function renderMarkdown(markdown, assetBase = '') {
+  const safe = DOMPurify.sanitize(marked.parse(String(markdown || "")), {
     FORBID_TAGS: ["style", "iframe", "form", "input"], FORBID_ATTR: ["autofocus"],
   });
+  return assetBase ? safe.replace(/src="assets\/(fig-[a-f0-9]{16}\.png)"/g, (_raw, name) => `src="${assetBase}${name}"`) : safe;
 }
 
 export function createMarkdownReader({ container, source, toc, onChange }) {
@@ -161,6 +162,10 @@ export function createMarkdownReader({ container, source, toc, onChange }) {
       block.setAttribute("aria-label", "笔记段落，按回车编辑");
       const subset = [token]; subset.links = tokens.links;
       block.innerHTML = DOMPurify.sanitize(marked.parser(subset), { FORBID_TAGS: ["style", "iframe", "form", "input"] });
+      if (source.dataset?.assetBase) for (const image of block.querySelectorAll('img')) {
+        const value = image.getAttribute('src');
+        if (/^assets\/fig-[a-f0-9]{16}\.png$/.test(value || '')) image.src = source.dataset.assetBase + value.slice(7);
+      }
       block.addEventListener("click", (event) => {
         if (event.target.closest("a,button,textarea") || window.getSelection()?.toString()) return;
         begin(token, block);

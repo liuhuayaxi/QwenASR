@@ -19,6 +19,127 @@ ACTIVE = {"running", "queued", "waiting_retry", "stopping"}
 ATTENTION = {"failed", "interrupted", "pending", "stale", "completed_with_errors"}
 
 
+def task_timestamp(task, field='updated_at'):
+    value = task.get(field) or task.get('updated_at', '')
+    try:
+        return float(value) if isinstance(value, (int, float)) else datetime.fromisoformat(value.replace('Z', '+00:00')).timestamp()
+    except (ValueError, TypeError, AttributeError):
+        return 0
+
+
+def needs_attention(task):
+    """Unstarted work and proven recovered receipts are not current errors."""
+    return (not task.get('recovered') and not task.get('is_context')
+            and task.get('status') in ATTENTION
+            and (task.get('status') != 'pending' or bool(task.get('error'))))
+
+
+def task_counts(tasks):
+    return {"all": len(tasks), "active": sum(t['status'] in ACTIVE for t in tasks),
+            "attention": sum(needs_attention(t) for t in tasks),
+            "pending": sum(t['status'] == 'pending' and not t.get('recovered') for t in tasks),
+            "review": sum(t.get('attention_kind') == 'review' and not t.get('recovered') for t in tasks),
+            "paused": sum(t['status'] == 'paused' for t in tasks),
+            "completed": sum(t['status'] == 'completed' for t in tasks),
+            "cancelled": sum(t['status'] == 'cancelled' for t in tasks),
+            "recovered": sum(bool(t.get('recovered')) for t in tasks)}
+
+
+def group_tasks(tasks):
+    """Project durable owners into lessons without changing their receipts.
+
+    Queue entries are contextual progress for a lesson, not another failed
+    lesson when its summary owner already exposes the same unfinished step.
+    Action IDs always remain those of the original durable owner.
+    """
+    groups = {}
+    expanded = []
+    for task in tasks:
+        if task.get('type') != 'course_queue' or not task.get('course_items'):
+            expanded.append(dict(task))
+            continue
+        for item in task['course_items']:
+            state = item.get('state') or 'queued'
+            if state == 'error':
+                state = 'failed'
+            phases = item.get('phases') or []
+            current = next((p for p in phases if p.get('state') in {'error', 'failed', 'interrupted'}), None)
+            current = current or next((p for p in phases if p.get('state') in ACTIVE), None)
+            stage = (current or {}).get('detail') or item.get('message') or task.get('stage') or ''
+            expanded.append({**task, 'recording_id': item.get('recording_id') or '',
+                             'course_item': item, 'title': item.get('title') or task['title'],
+                             'category': item.get('course') or '', 'status': state,
+                             'stage': stage, 'progress': item.get('progress', 0),
+                             'error': stage if state in {'failed', 'interrupted'} else '',
+                             'updated_at': item.get('updated_at') or task.get('updated_at') or '',
+                             'display_status': state})
+    for task in expanded:
+        record_id = task.get('recording_id')
+        if record_id:
+            ident = 'recording:' + record_id
+        elif task.get('type') == 'course_queue' and task.get('course_item'):
+            ident = 'course-lesson:' + task['course_item']['id']
+        elif task.get('type') == 'knowledge_index' and task.get('category'):
+            ident = 'course:' + task['category']
+        else:
+            ident = 'task:' + task['id']
+        group = groups.setdefault(ident, {'id': ident, 'title': task.get('title') or task.get('label') or '未命名任务',
+            'category': task.get('category') or '', 'recording_id': record_id or '', 'tasks': []})
+        group['tasks'].append(task)
+    result = []
+    for group in groups.values():
+        tasks = group['tasks']
+        owners = [t for t in tasks if t.get('type') != 'course_queue']
+        for task in tasks:
+            if task.get('type') == 'course_queue' and owners:
+                # Keep its controls and full phase evidence in details, while
+                # current AI owners supply the actionable state of that step.
+                unfinished = [p.get('key') for p in task['course_item'].get('phases', [])
+                              if p.get('state') != 'completed']
+                covered = {'summary': {'summary'}, 'correction': {'refinement'}, 'asr': {'remote_asr', 'upload'}}
+                if unfinished and all(any(o.get('type') in covered.get(key, set()) for o in owners) for key in unfinished):
+                    task['is_context'] = True
+        history = [t for t in tasks if t.get('recovered') or t['status'] in {'completed', 'cancelled'}]
+        current = [t for t in tasks if t not in history and not t.get('is_context')]
+        errors = [t for t in current if needs_attention(t)]
+        running = [t for t in current if t['status'] in ACTIVE]
+        pending = [t for t in current if t['status'] == 'pending']
+        paused = [t for t in current if t['status'] == 'paused']
+        if errors:
+            status = 'failed'
+            primary = max(errors, key=task_timestamp)
+        elif running:
+            status = next(state for state in ('running', 'stopping', 'waiting_retry', 'queued')
+                          if any(t['status'] == state for t in running))
+            primary = max(running, key=task_timestamp)
+        elif pending:
+            status, primary = 'pending', max(pending, key=task_timestamp)
+        elif paused:
+            status, primary = 'paused', max(paused, key=task_timestamp)
+        else:
+            status = 'cancelled' if tasks and all(t['status'] == 'cancelled' for t in tasks) else 'completed'
+            primary = max(tasks, key=task_timestamp)
+        group.update(status=status, current_stage=primary.get('stage') or primary.get('phase') or primary.get('label') or '',
+            updated_at=primary.get('updated_at') or '', result_url=next((t['result_url'] for t in owners if t.get('result_url')), primary.get('result_url') or ''),
+            current_tasks=current, history=history, context_tasks=[t for t in tasks if t.get('is_context')],
+            errors=[{'id': t['id'], 'label': t.get('label') or t.get('type') or '', 'error': t.get('error') or t.get('stage') or '上次处理未完成', 'status': t['status']} for t in errors],
+            remaining=[{'id': t['id'], 'label': t.get('label') or t.get('type') or '', 'status': t['status'], 'stage': t.get('stage') or t.get('phase') or ''} for t in current],
+            recovered_count=sum(bool(t.get('recovered')) for t in tasks),
+            active_count=len(running),
+            review_count=sum(t.get('attention_kind') == 'review' for t in current))
+        result.append(group)
+    order = {'failed': 0, 'running': 1, 'stopping': 1, 'waiting_retry': 2, 'queued': 3,
+             'pending': 4, 'paused': 5, 'completed': 6, 'cancelled': 7}
+    result.sort(key=lambda group: (order.get(group['status'], 9), -task_timestamp(group), group['id']))
+    counts = {'all': len(result), 'attention': sum(bool(g['errors']) for g in result),
+              'active': sum(bool(g['active_count']) for g in result),
+              'recovered': sum(bool(g['recovered_count']) for g in result),
+              'review': sum(bool(g['review_count']) for g in result)}
+    for status in ('pending', 'paused', 'completed', 'cancelled'):
+        counts[status] = sum(g['status'] == status for g in result)
+    return result, counts
+
+
 def inference_provenance(inference, operation=None):
     """Publish provenance fields without exposing private receipt contents."""
     inference = inference if isinstance(inference, dict) else {}
@@ -109,12 +230,12 @@ def task_center_router(ai_tasks, ai_action, courses, pdfs, uploads=None, intelli
     router = APIRouter(prefix="/api/tasks")
     history = TaskHistory()
 
-    def snapshot(include_archived=False):
+    def snapshot(include_archived=False, category_filter=''):
         discover_courses(courses.store.settings)
         tasks = [dict(task) for task in course_tasks()]
         warnings = []
         if intelligence_tasks is not None:
-            tasks.extend(intelligence_tasks.tasks())
+            tasks.extend(dict(task) for task in intelligence_tasks.tasks())
         for task in ai_tasks(include_history=True):
             tasks.append({**task, "family": "ai", "title": task["recording_title"],
                           "source": "录音工作台", "stage": task.get("phase", ""),
@@ -192,15 +313,9 @@ def task_center_router(ai_tasks, ai_action, courses, pdfs, uploads=None, intelli
                     "actions": actions_for(job["status"], job['config'].get('inference_settings', {}).get('asr_provider', 'local') != 'local'),
                     "result_url": "/library?" + urlencode({"recording": job["recording_id"]}) if job["recording_id"] else "/library"})
 
-        def timestamp(task, field='updated_at'):
-            value = task.get(field) or task.get('updated_at', '')
-            try:
-                return float(value) if isinstance(value, (int, float)) else datetime.fromisoformat(value).timestamp()
-            except (ValueError, TypeError):
-                return 0
-
         for task in tasks:
             task['status'] = display_status(task)
+            task.setdefault('display_status', task['status'])
             if task['status'] == 'completed':
                 task['actions'] = []
             task['history_generation'] = history_generation(task)
@@ -208,15 +323,22 @@ def task_center_router(ai_tasks, ai_action, courses, pdfs, uploads=None, intelli
             can_restore = False
         else:
             tasks, can_restore = history.visible(tasks)
+        if category_filter:
+            filtered = []
+            for task in tasks:
+                if task.get('type') == 'course_queue':
+                    items = [item for item in task.get('course_items', []) if item.get('course') == category_filter]
+                    if items:
+                        filtered.append({**task, 'course_items': items})
+                elif task.get('category') == category_filter:
+                    filtered.append(task)
+            tasks = filtered
         order = {"running": 0, "stopping": 1, "queued": 2, "waiting_retry": 3}
-        tasks.sort(key=lambda task: (order.get(task["status"], 4 if task["status"] in ATTENTION else 5),
-                                    timestamp(task, 'created_at') if task['status'] == 'queued' else -timestamp(task), task['id']))
-        return {"tasks": tasks, "warnings": warnings, "history": {'can_restore': can_restore}, "counts": {
-            "all": len(tasks), "active": sum(t["status"] in ACTIVE for t in tasks),
-            "attention": sum(t["status"] in ATTENTION for t in tasks),
-            "paused": sum(t["status"] == "paused" for t in tasks),
-            "completed": sum(t["status"] == "completed" for t in tasks),
-            "cancelled": sum(t["status"] == "cancelled" for t in tasks)}}
+        tasks.sort(key=lambda task: (order.get(task["status"], 4 if needs_attention(task) else 5),
+                                    task_timestamp(task, 'created_at') if task['status'] == 'queued' else -task_timestamp(task), task['id']))
+        groups, group_counts = group_tasks(tasks)
+        return {"tasks": tasks, "groups": groups, "group_counts": group_counts,
+                "warnings": warnings, "history": {'can_restore': can_restore}, "counts": task_counts(tasks)}
 
     def guard(request):
         if request.headers.get("X-QwenASR-Client") != "task-center":
@@ -252,9 +374,7 @@ def task_center_router(ai_tasks, ai_action, courses, pdfs, uploads=None, intelli
     @router.get("")
     async def listing(request: Request, category: str = ''):
         from .library_query import conditional
-        value = snapshot()
-        if category:
-            value['tasks'] = [task for task in value['tasks'] if task.get('category') == category]
+        value = snapshot(category_filter=category)
         return conditional(value, request)
 
     @router.post("/action")
@@ -351,31 +471,40 @@ def task_center_router(ai_tasks, ai_action, courses, pdfs, uploads=None, intelli
 
     @router.post("/retry-failed")
     async def retry_failed(request: Request):
-        """Queue every currently visible failed/pending AI task in one click.
+        """Retry only current failures, preserving reviews and recovered history.
 
-        The snapshot is taken once, then each operation is revalidated by
-        ``perform`` so a task that finished while this request was running is
-        reported rather than submitted a duplicate run.
+        Group projections remove duplicate queue context, while owner IDs and
+        capabilities remain authoritative for each action. Recheck failure
+        eligibility between mutations as well as the owner's capability.
         """
         guard(request)
-        candidates = []
-        for task in snapshot()["tasks"]:
-            if task.get("status") not in ATTENTION:
-                continue
-            action = "retry" if "retry" in (task.get("actions") or []) else (
-                "continue" if "continue" in (task.get("actions") or []) else ""
-            )
-            if action:
-                candidates.append((task, action))
+
+        def retry_targets(view):
+            current_errors = {task['id'] for group in view['groups'] for task in group['current_tasks']
+                              if needs_attention(task)}
+            targets = {}
+            for task in view['tasks']:
+                if task['id'] not in current_errors or not needs_attention(task):
+                    continue
+                allowed = task.get('actions') or []
+                action = 'retry' if 'retry' in allowed else 'continue' if 'continue' in allowed else ''
+                if action:
+                    targets[task['id']] = action
+            return targets
+
+        candidates = retry_targets(snapshot())
         if len(candidates) > 200:
             raise HTTPException(400, "失败任务超过 200 项，请按课程或类型分批重试")
         results = []
-        for task, action in candidates:
+        for ident, action in candidates.items():
             try:
-                await perform({"id": task["id"], "action": action}, snapshot()["tasks"])
-                results.append({"id": task["id"], "ok": True, "action": action})
+                current = snapshot()
+                if retry_targets(current).get(ident) != action:
+                    raise HTTPException(409, '任务状态已更新，当前无需重试')
+                await perform({"id": ident, "action": action}, current['tasks'])
+                results.append({"id": ident, "ok": True, "action": action})
             except HTTPException as exc:
-                results.append({"id": task["id"], "ok": False, "action": action, "error": str(exc.detail)})
+                results.append({"id": ident, "ok": False, "action": action, "error": str(exc.detail)})
         return {
             "requested": len(results),
             "accepted": sum(bool(item["ok"]) for item in results),

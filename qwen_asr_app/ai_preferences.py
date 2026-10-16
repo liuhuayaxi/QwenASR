@@ -18,6 +18,29 @@ SETTINGS_FIELDS = {'base_url', 'model', 'context_window', 'summary_interval', 's
                    'summary_context_window', 'summary_extra_params', 'classroom_chat_context'}
 
 
+def _saved_providers(settings):
+    """Read explicitly saved legacy fields without borrowing another model.
+
+    The old settings page stored sentence fields at the document root and
+    review/summary fields with a prefix. A newer partial function map must not
+    make those same saved choices disappear. An explicit canonical entry is
+    authoritative, including an invalid entry that needs to be fixed.
+    """
+    providers = settings.get('function_providers', {})
+    if not isinstance(providers, dict):
+        return providers
+    providers = copy.deepcopy(providers)
+    for mode in PROVIDER_MODES:
+        if mode in providers:
+            continue
+        prefix = '' if mode == 'sentence' else mode + '_'
+        legacy = {field: copy.deepcopy(settings[prefix + field]) for field in PROVIDER_FIELDS
+                  if prefix + field in settings}
+        if legacy.get('base_url') or legacy.get('model') or legacy.get('cli_model'):
+            providers[mode] = legacy
+    return providers
+
+
 class AIPreferences:
     def __init__(self, path=None):
         self.path = path or PRIVATE_ROOT / 'ai-settings.json'
@@ -29,6 +52,9 @@ class AIPreferences:
             return {}
         if not isinstance(value, dict):
             raise ValueError('本机 AI 配置格式无效，未用默认值覆盖')
+        providers = _saved_providers(value)
+        if providers:
+            value['function_providers'] = providers
         return value
 
     def save(self, settings, secrets):
@@ -36,8 +62,21 @@ class AIPreferences:
             raise ValueError('AI 配置格式无效')
         if len(json.dumps(settings, ensure_ascii=False)) > 512_000:
             raise ValueError('AI 配置过大，未保存')
-        clean = {key: value for key, value in settings.items() if key in SETTINGS_FIELDS}
-        providers, credentials = {}, {}
+        previous = self.read()
+        # A function-specific settings save updates only the submitted modes.
+        # DELETE /api/ai/settings remains the explicit way to clear all choices.
+        clean = {key: copy.deepcopy(value) for key, value in previous.items() if key in SETTINGS_FIELDS}
+        clean.update({key: copy.deepcopy(value) for key, value in settings.items() if key in SETTINGS_FIELDS})
+        previous_providers = previous.get('function_providers', {})
+        if not isinstance(previous_providers, dict):
+            raise ValueError('本机 AI 功能配置格式无效，原设置已保留')
+        if any(mode in PROVIDER_MODES and not isinstance(provider,dict)
+               and mode not in settings['function_providers'] for mode,provider in previous_providers.items()):
+            raise ValueError('本机 AI 功能配置格式无效，原设置已保留')
+        providers = {mode: {key: copy.deepcopy(value) for key, value in provider.items() if key in PROVIDER_FIELDS}
+                     for mode, provider in previous_providers.items()
+                     if mode in PROVIDER_MODES and isinstance(provider, dict)}
+        credentials = {}
         for mode, provider in settings['function_providers'].items():
             if mode not in PROVIDER_MODES or not isinstance(provider, dict):
                 raise ValueError('AI 功能配置无效')
@@ -46,6 +85,8 @@ class AIPreferences:
                 raise ValueError(f'{mode} AI 整理通道无效')
             if transport == 'api':
                 endpoint_identity(provider.get('base_url'))
+                if not str(provider.get('model') or '').strip():
+                    raise ValueError(f'{mode} AI 模型不能为空，原配置已保留')
             elif not str(provider.get('cli_model') or provider.get('model') or '').strip():
                 raise ValueError(f'{mode} AGY CLI 模型不能为空')
             providers[mode] = {key: value for key, value in provider.items() if key in PROVIDER_FIELDS}
@@ -53,13 +94,6 @@ class AIPreferences:
                 credentials[mode] = {'base_url': provider['base_url'], 'api_key': provider['api_key']}
         if not providers:
             raise ValueError('AI 功能配置不能为空')
-        # Older settings pages only submit the original five functions. Keep
-        # the independently edited classroom chat configuration when they save.
-        previous = self.read()
-        if 'chat' not in providers and isinstance(previous.get('function_providers', {}).get('chat'), dict):
-            providers['chat'] = copy.deepcopy(previous['function_providers']['chat'])
-        if 'classroom_chat_context' not in clean and 'classroom_chat_context' in previous:
-            clean['classroom_chat_context'] = copy.deepcopy(previous['classroom_chat_context'])
         clean['function_providers'] = providers
         if credentials:
             secrets.update(credentials)

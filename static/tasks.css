@@ -52,6 +52,9 @@
 @media (prefers-reduced-motion: reduce) { .task-progress-indeterminate::after { animation: none; } }
 .task-resource.error { color: var(--danger); }
 .task-estimate { margin: 8px 0 0; color: var(--muted); font-size: var(--text-xs); line-height: 1.7; font-variant-numeric: tabular-nums; }
+.task-queue-scope { margin: 12px 0 -7px; color: var(--muted); font-size: var(--text-xs); }
+.task-reprocess > label, .task-context-card > label { display: flex; align-items: center; gap: 8px; margin-top: 16px; font-size: var(--text-xs); color: var(--muted); }
+.task-reprocess > label .task-select, .task-context-card > label .task-select { margin: 0; }
 .task-actions { display: flex; flex-wrap: wrap; gap: 7px; margin: 14px 0 0; }
 .task-result-link { color: var(--green-dark); font-size: var(--text-sm); text-underline-offset: 3px; margin-right: 10px; }
 .task-error, .task-notice { padding: 10px 12px; border-radius: var(--radius-sm); background: var(--warning-soft); color: var(--warning); font-size: var(--text-sm); overflow-wrap: anywhere; white-space: pre-wrap; }
@@ -99,3 +102,47 @@
 @media (max-width: 1100px) { .tasks-layout { grid-template-columns: 180px minmax(0, 1fr); } .task-sidebar { padding-right: 16px; } .task-content { padding-left: 24px; } .task-filters { justify-content: flex-start; flex-basis: 100%; } .task-stats button { padding: 14px; } }
 @media (max-width: 760px) { .tasks-layout { width: calc(100% - 32px); display: block; } .task-sidebar { padding: 16px 0 0; border: 0; } .nav-label, .sidebar-note { display: none; } .task-nav { display: flex; overflow-x: auto; } .task-nav button { white-space: nowrap; flex: 0 0 auto; padding: 8px 10px; } .task-content { padding: 24px 0; } .task-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } .task-filters input { width: 100%; } .task-filters select { flex: 1; min-width: 0; max-width: none; } .task-card { padding: 16px; } .task-bulk > div { margin: 4px 0 0; flex-basis: 100%; } .task-title h3 { font-size: var(--text-body); } .task-status { margin-left: 0; } }
 @media (max-width: 760px) { .course-phases { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+/* One card is one lesson or source. Processing receipts are nested steps. */
+.task-intro { max-width: 680px; margin: 9px 0 0; font-size: var(--text-sm); line-height: 1.7; color: var(--muted); }
+.task-overview { margin: -12px 0 24px; color: var(--muted); font-size: var(--text-sm); }
+.task-list-section { display: grid; gap: 16px; min-width: 0; }
+.task-group-card { border: 1px solid var(--line); border-radius: var(--radius); background: var(--card); overflow: hidden; padding: 22px; }
+.task-group-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+.task-group-head h3 { margin: 3px 0 0; color: var(--ink); font-size: 19px; line-height: 1.6; overflow-wrap: anywhere; }
+.task-group-course { margin: 0; color: var(--muted); font-size: var(--text-xs); }
+.group-status { flex: 0 0 auto; border-radius: 99px; padding: 5px 10px; color: var(--muted); background: var(--surface); font-size: var(--text-xs); }
+.group-status[data-tone="active"] { color: var(--green-dark); background: var(--green-soft); }
+.group-status[data-tone="attention"] { color: var(--danger); background: var(--danger-soft); }
+.group-current { margin: 17px 0 13px; font-size: var(--text-sm); line-height: 1.7; overflow-wrap: anywhere; }
+.group-current > span { color: var(--muted); margin-right: 12px; }
+.group-stages { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 14px; }
+.group-stages > span { border: 1px solid var(--line); border-radius: 7px; padding: 5px 8px; color: var(--muted); font-size: var(--text-xs); }
+.group-stages b { margin-left: 7px; font-weight: 500; }
+.group-stages > [data-state="running"], .group-stages > [data-state="queued"] { color: var(--green-dark); border-color: var(--green-line); }
+.group-stages > [data-state="failed"], .group-stages > [data-state="interrupted"] { color: var(--danger); border-color: var(--danger-line); }
+.task-group-card .task-card { background: transparent; border: 0; border-top: 1px solid var(--line); border-radius: 0; padding: 15px 0; }
+.task-group-card .task-title h3 { font-size: 14px; }
+.task-group-card .task-meta { margin: 5px 0; font-size: var(--text-xs); }
+.task-group-card .task-stage { margin-top: 7px; }
+.task-group-card .task-details { border: 0; padding-top: 0; margin-top: 10px; }
+.task-group-card .task-status { font-size: 11px; padding: 2px 7px; }
+.task-group-card .task-actions { margin-top: 11px; }
+.task-group-card .task-actions .ui-button { padding: 6px 11px; min-height: 34px; font-size: var(--text-xs); }
+.task-group-card .task-error { margin-top: 9px; }
+.group-remaining { margin: 4px 0 0; color: var(--muted); font-size: var(--text-xs); line-height: 1.7; }
+.group-history { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
+.group-history > summary, .task-collection > summary { cursor: pointer; color: var(--muted); font-size: var(--text-sm); line-height: 1.7; }
+.group-history-note { margin: 10px 0; color: var(--muted); font-size: var(--text-xs); }
+.group-history .task-card { opacity: .9; }
+.group-waiting { padding: 12px 0; border-top: 1px solid var(--line); }
+.group-waiting > summary { color: var(--muted); cursor: pointer; font-size: var(--text-sm); line-height: 1.7; }
+.group-waiting > summary > span { margin-left: 8px; font-size: var(--text-xs); }
+.task-history-tools > summary { cursor: pointer; padding: 5px 0; }
+.task-history-tools[open] { display: flex; flex-wrap: wrap; gap: 8px; }
+.task-history-tools[open] > summary { margin-bottom: 8px; }
+.task-collection { margin-top: 5px; border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 20px; background: var(--surface); }
+.task-collection > summary { color: var(--ink); font-weight: 600; }
+.task-collection > summary > span { font-weight: 400; color: var(--muted); margin-left: 8px; }
+.task-collection[open] > .task-list-section { margin-top: 16px; }
+@media (max-width: 760px) { .task-group-card { padding: 16px; } .task-group-head { flex-wrap: wrap; gap: 9px; } .task-group-head h3 { font-size: 17px; } .group-status { margin-left: 0; } .task-intro { font-size: 13px; } .task-collection { padding: 14px; } }

@@ -90,6 +90,11 @@ class ModelManager:
         await await_owned_task(pending)
 
     async def load(self, force_local: bool = False, inference_config=None) -> None:
+        from .inference_providers import inference_settings
+        cfg = inference_settings.for_task('asr', inference_config)
+        if cfg['asr_provider'] == 'remote_only' or (cfg['asr_provider'] != 'local' and not force_local):
+            self.detail = 'Windows 语音识别 · 本机模型未加载'
+            return
         self.cancel_unload()
         async with self.load_lock:
             if self.worker is not None and self.worker.is_alive():
@@ -288,6 +293,12 @@ class ModelManager:
                 self.status = "error"
                 self.detail = "Qwen3-ASR 子进程尚未退出，暂不启动新模型"
 
+    async def release_if_idle(self):
+        async with self.infer_lock:
+            async with self.load_lock:
+                if not self.active_jobs and self.worker is not None:
+                    await self._unload_worker()
+
     async def close(self) -> None:
         self._closing = True
         timer = self.unload_task
@@ -318,7 +329,7 @@ class ModelManager:
     async def transcribe(self, audio, language, context, max_tokens=384, asr_params=None,
                          timeout_seconds=180.0, priority=10, metrics=None, is_current=None, inference_config=None, operation_dir=None):
         from .inference_providers import inference_settings, LocalASRProvider, RemoteASRProvider, normalize
-        cfg = inference_settings.for_task('asr', inference_config or {'asr_provider': 'local'})
+        cfg = inference_settings.for_task('asr', inference_config)
         mode = cfg["asr_provider"]
         async def local():
             return await self._transcribe_local(audio, language, context, max_tokens, asr_params,
@@ -396,7 +407,11 @@ class ModelManager:
                     async with self.infer_lock:
                         # Existing local tests and integrations call load() with
                         # no keyword arguments. Bypass only for actual fallback.
-                        await self.load()
+                        from .inference_providers import inference_settings
+                        if inference_settings.for_task('asr')['asr_provider'] != 'local':
+                            await self.load(force_local=True, inference_config={'asr_provider':'local'})
+                        else:
+                            await self.load()
                         loaded = time.monotonic()
                         if self.status != "ready" or self.worker is None or not self.worker.is_alive():
                             raise RuntimeError(self.detail)

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
+import time
+import uuid
 import wave
 from collections import deque
 from pathlib import Path
@@ -78,12 +81,40 @@ class TranscriptionSession:
         self.recording: RecordingRecord | None = None
         self.accepting_audio = False
         self.recovered = False
+        self.remote_lease_task = None
+        self.remote_lease_routing = None
+        self.remote_lease_id = None
 
     async def send(self, payload: dict[str, Any]) -> None:
         try:
             await self.ws.send_json(payload)
         except (RuntimeError, OSError, WebSocketDisconnect):
             pass
+
+    async def remote_lease_loop(self, recording):
+        from .remote_classroom import request
+        cfg=self.config.get('inference_settings') or {}
+        lease_id=recording.id+'-'+uuid.uuid4().hex[:12]
+        self.remote_lease_id=lease_id
+        try:
+            while self.accepting_audio and self.recording is recording:
+                try:
+                    result=await asyncio.to_thread(request,cfg,'/v1/classroom/begin',{'session_id':lease_id},10)
+                    await self.send({'type':'processing_location','provider':'remote','available':True,'message':result['message']})
+                except Exception:
+                    await self.send({'type':'processing_location','provider':'remote','available':False,'message':'Windows 暂不可用；录音继续保存，片段等待补转'})
+                await asyncio.sleep(20)
+        finally:
+            try:await asyncio.to_thread(request,cfg,'/v1/classroom/end',{'session_id':lease_id},5)
+            except Exception:pass
+
+    async def release_remote_compute(self):
+        if self.config.get('inference_settings',{}).get('asr_provider','local')=='local':return
+        from .remote_classroom import request
+        try:
+            await asyncio.to_thread(request,self.config['inference_settings'],'/v1/classroom/end',
+                {'session_id':self.remote_lease_id or self.recording.id},10)
+        except Exception:pass
 
     def track(self, coro: Any) -> None:
         task = asyncio.create_task(coro)
@@ -97,6 +128,8 @@ class TranscriptionSession:
 
     def schedule_periodic(self, kind: str, recording: RecordingRecord, config: dict[str, Any]) -> None:
         """Coalesce many completed ASR segments into one periodic worker."""
+        if (recording.metadata.get('discard_job') or {}).get('status') in {'discarding','discarded'}:
+            return
         self.periodic_dirty[kind] = True
         current = self.periodic_tasks.get(kind)
         if current is not None and not current.done():
@@ -123,17 +156,29 @@ class TranscriptionSession:
         clean = {key: value for key, value in values.items() if key not in {'type', '_remote_operation_dir'}}
         if 'inference_settings' in clean:
             from .inference_providers import inference_settings
-            clean['inference_settings'] = {'asr_provider':'local','mineru_provider':'local'}
+            clean['inference_settings'] = inference_settings.for_task('asr')
         if self.speaking and self.chunks:
             self.pending_config.update(clean)
             return True
         self.config.update(clean)
+        self.refresh_remote_lease()
         return False
 
     def apply_pending_config(self) -> None:
         if self.pending_config:
             self.config.update(self.pending_config)
             self.pending_config.clear()
+            self.refresh_remote_lease()
+
+    def refresh_remote_lease(self):
+        """Apply routing at audio boundaries without altering accepted clips."""
+        remote=self.config.get('inference_settings',{}).get('asr_provider','local')!='local'
+        routing=self.config.get('inference_settings') or {}
+        if self.remote_lease_task and (not remote or self.remote_lease_routing!=routing):
+            self.remote_lease_task.cancel();self.remote_lease_task=None
+        if remote and self.accepting_audio and self.recording and not (self.remote_lease_task and not self.remote_lease_task.done()):
+            self.remote_lease_routing=copy.deepcopy(routing)
+            self.remote_lease_task=asyncio.create_task(self.remote_lease_loop(self.recording))
 
     def add_preroll(self, chunk: np.ndarray) -> None:
         self.preroll.append(chunk)
@@ -322,6 +367,10 @@ class TranscriptionSession:
         segment_end: float,
     ) -> None:
         try:
+            pending=recording.metadata.get('pending_segments',{}).get(str(segment_id))
+            if pending is not None:
+                pending['state']='processing'
+                recording.save_metadata()
             metrics = {}
             raw, language, seconds = await self.model_manager.transcribe(
                 audio,
@@ -377,15 +426,31 @@ class TranscriptionSession:
             await self.send({"type": "final", **segment})
             # ASR durability is independent of optional AI enrichment. End-save
             # drains ASR only, then suspends unfinished AI with retryable state.
+            if (recording.metadata.get('discard_job') or {}).get('status') in {'discarding','discarded'}:
+                return
             from .classroom_intelligence.service import on_stable_transcript
             self.track_review(on_stable_transcript(recording))
             from .transcription_assist.service import refresh_live_terms
             self.track_review(refresh_live_terms(self, recording))
             self.track_review(self.enrich_final(segment, config, recording))
+        except asyncio.CancelledError:
+            pending=recording.metadata.get('pending_segments',{}).get(str(segment_id))
+            if pending is not None:
+                pending.update(state='pending',retry_after=time.time()+15,error_kind='CancelledError')
+                recording.save_metadata()
+            raise
         except Exception as exc:
+            pending=recording.metadata.get('pending_segments',{}).get(str(segment_id))
+            if pending is not None:
+                pending.update(state='pending',retry_after=time.time()+15,error_kind=type(exc).__name__)
+                recording.save_metadata()
             await self.send({"type": "error", "id": segment_id, "message": f"转写失败：{exc}"})
 
     async def enrich_final(self, segment, config, recording):
+        if (recording.metadata.get('discard_job') or {}).get('status') in {'discarding','discarded'}:
+            segment.update(ai_pending=False,ai_error='用户已确认丢弃，停止后续AI处理')
+            recording.upsert_segment(segment)
+            return
         raw, language, segment_id = segment['raw'], segment['language'], segment['id']
         if config.get("ai_correction") or config.get("translation", "off") != "off":
             try:
@@ -646,6 +711,8 @@ class TranscriptionSession:
                     break
 
     async def start_or_resume(self) -> None:
+        if self.recording and (self.recording.metadata.get('discard_job') or {}).get('status') in {'discarding','discarded'}:
+            raise ValueError('这条录音正在丢弃，不能恢复收音')
         if self.recording and (self.recording.metadata.get("finalization") or {}).get("status") == "running":
             raise ValueError("录音正在结束保存，请等待完成后新建录音")
         self.config["asr_params"] = normalize_asr_params(
@@ -677,15 +744,15 @@ class TranscriptionSession:
         # New audio follows today's saved choice, including resumed recordings.
         # Already submitted segments retain their own immutable snapshots.
         recording.metadata['configured_inference_settings'] = inference_settings.for_task('asr')
-        # Recording is the Mac main-system path. Optional remote acceleration
-        # remains available for durable replay jobs, while submitted old
-        # segments keep their receipt/config snapshots for safe reconciliation.
-        self.config['inference_settings'] = {'asr_provider':'local','mineru_provider':'local'}
+        # New capture follows the saved route; accepted old clips retain their
+        # own request and receipt snapshots for safe reconciliation.
+        self.config['inference_settings'] = inference_settings.for_task('asr')
         recording.metadata['inference_settings'] = self.config['inference_settings']
         recording.save_metadata()
         self.recording = recording
         await self.recover_pending()
         self.accepting_audio = True
+        self.refresh_remote_lease()
         self.segment_id = recording.next_segment_id
         await self.send(
             {
@@ -752,6 +819,9 @@ class TranscriptionSession:
         # Stop capture immediately. A slow ASR/AI request must not hold the
         # pause acknowledgement or prevent the user from resuming capture.
         self.accepting_audio = False
+        if self.remote_lease_task:
+            self.remote_lease_task.cancel()
+            self.remote_lease_task=None
         if self.speaking and self.chunks:
             await self.detach_and_process("pause")
         else:

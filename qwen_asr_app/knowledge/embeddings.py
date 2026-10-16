@@ -42,6 +42,9 @@ class LocalEmbedder:
         return value
 
     def _start(self):
+        from ..inference_providers import inference_settings
+        if inference_settings.for_task('knowledge').get('knowledge_provider') == 'remote_only':
+            raise RuntimeError('课堂省电模式禁止启动 Mac 向量模型')
         if self.process and self.process.poll() is None:
             return
         self.close()
@@ -158,11 +161,19 @@ _guard = threading.RLock()
 def get_embedder():
     global _instance
     cfg = knowledge_settings.read()
+    from ..inference_providers import inference_settings
+    routing = inference_settings.for_task('knowledge')
+    cfg = {**cfg}
     with _guard:
-        if _instance is None or _instance.config != cfg:
+        remote = routing.get('knowledge_provider', 'local') != 'local'
+        if _instance is None or _instance.config != cfg or bool(getattr(_instance,'remote',False)) != remote or (remote and _instance.routing != routing):
             if _instance:
                 _instance.close()
-            _instance = LocalEmbedder(cfg)
+            if remote:
+                from ..remote_classroom import RemoteEmbedder
+                _instance = RemoteEmbedder(cfg, routing)
+            else:
+                _instance = LocalEmbedder(cfg)
         return _instance
 
 

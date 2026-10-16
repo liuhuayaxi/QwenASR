@@ -1,4 +1,4 @@
-import { renderMarkdown } from "./markdown-reader.js?v=20261014-source-citations";
+import { renderMarkdown } from "./markdown-reader.js?v=20261015-reader-math-scope-8";
 
 export function createSummaryView({ els, escapeHtml, formatDuration }) {
   const cards = new Map();

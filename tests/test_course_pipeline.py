@@ -46,6 +46,56 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(service.catalog_job, 3)
         self.stack.close()
 
+    async def test_interrupted_stream_library_item_resumes_original_stream_protocol(self):
+        group = {'id': 'A', 'title': 'A', 'videos': [{'NewID': 'A'}],
+                 'course_name': '测试', 'duration': 600, 'start': '2026-10-15 13:45',
+                 'stop': '2026-10-15 15:20', 'periods': []}
+        record = {'id': 'existing-stream', 'status': 'interrupted',
+                  'source_filename': 'smartclass_A.flac', 'course_stream': True}
+        def handler(request):
+            self.assertEqual(request.url.path, '/api/library')
+            return httpx.Response(200, json={'records': [record], 'category_profiles': {}})
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        resumed = {**record, 'directory': '/synthetic'}
+        with patch.object(service.httpx, 'AsyncClient', return_value=client), \
+                patch.object(service, 'import_stream', AsyncMock(return_value=resumed)) as stream, \
+                patch.object(service, 'consume_stream', AsyncMock()) as old_file:
+            await service.import_group(group, {'generate_summary': False})
+        stream.assert_awaited_once()
+        old_file.assert_not_awaited()
+        self.assertEqual(service.imports['A']['record_id'], 'existing-stream')
+
+    async def test_completed_slim_record_resumes_only_missing_summary(self):
+        group = {'id': 'A', 'title': 'A', 'videos': [{'NewID': 'A'}],
+                 'course_name': '测试', 'duration': 600, 'start': '2026-10-15 13:45',
+                 'stop': '2026-10-15 15:20', 'periods': []}
+        slim = {'id': 'saved-class', 'status': 'completed', 'source_filename': 'smartclass_A.flac',
+                'course_stream': True}
+        seen = []
+        with tempfile.TemporaryDirectory() as directory:
+            def handler(request):
+                path = request.url.path
+                seen.append((request.method, path))
+                if path == '/api/library':
+                    return httpx.Response(200, json={'records': [slim], 'category_profiles': {}})
+                if path == '/api/recordings/saved-class':
+                    return httpx.Response(200, json={'session': {**slim, 'directory': directory}})
+                if path.endswith('/summary-jobs'):
+                    return httpx.Response(200, json={'accepted': True})
+                if path.endswith('/summary-status'):
+                    return httpx.Response(200, json={'running': False, 'status': 'completed'})
+                self.fail('Already transcribed audio must not be imported again: ' + path)
+            client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+            with patch.object(service.httpx, 'AsyncClient', return_value=client), \
+                 patch.object(service, 'import_stream', AsyncMock()) as stream, \
+                 patch.object(service, 'consume_stream', AsyncMock()) as file_resume:
+                await service.import_group(group, {'generate_summary': True, 'summary_provider': {'model': 'saved'}})
+            stream.assert_not_awaited()
+            file_resume.assert_not_awaited()
+            self.assertIn(('POST', '/api/recordings/saved-class/summary-jobs'), seen)
+            self.assertEqual(service.imports['A']['state'], 'completed')
+            self.assertEqual(service.imports['A']['directory'], directory)
+
     async def test_append_during_transcription_preserves_runner_options_and_bounds(self):
         downloaded, transcribing = asyncio.Event(), asyncio.Event()
         release = asyncio.Event()

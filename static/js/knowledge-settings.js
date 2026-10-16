@@ -17,6 +17,7 @@ export async function openKnowledgeSettings(mode='knowledge') {
   try {
     const response = await api(mode==='knowledge' ? '/api/knowledge/settings' : '/api/intelligence/settings');
     const cfg=mode==='knowledge' ? response.settings : response.provider;
+    const remote=mode==='knowledge' && response.compute_location==='Windows';
     const fields = mode==='knowledge' ? `
       <label style="display:grid;gap:6px">向量模型<select name="model_id">${response.models.map(m=>`<option value="${esc(m.id)}" ${m.id===cfg.model_id?'selected':''}>${esc(m.id)}</option>`).join('')}</select></label>
       <label style="display:grid;gap:6px">本机运行位置<select name="device"><option value="mps" ${cfg.device==='mps'?'selected':''}>Apple GPU</option><option value="cpu" ${cfg.device==='cpu'?'selected':''}>CPU</option></select></label>
@@ -34,10 +35,10 @@ export async function openKnowledgeSettings(mode='knowledge') {
       ${input('base_url','API 地址（API 通道）',cfg.base_url)}
       ${input('api_key','API 密钥（留空保留）','','password')}`;
     dialog.innerHTML=`<form><div style="display:flex;justify-content:space-between;align-items:center"><h2>${mode==='knowledge'?'课程知识检索设置':'速记增强设置'}</h2><button type="button" data-close class="ghost-button">关闭</button></div>
-      <p>${mode==='knowledge' ? '更换模型后需要更新课程索引。文档与查询使用同一版本、维度和提示契约。' : '课堂问答和课后精修沿用各自设置。这里仅调整随堂速记增强。'}</p>
+      <p>${mode==='knowledge' ? `当前计算位置：${remote?'Windows（文档、查询向量与相似度检索）':'Mac'}。文档与查询使用同一版本、维度和提示契约。${remote?'下方 Mac 位置与目录仅在改回本机后使用；Windows 模型须提前部署。':'更换模型后需要更新课程索引。'}` : '课堂问答和课后精修沿用各自设置。这里仅调整随堂速记增强。'}</p>
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px">${fields}</div>
-      <p role="status" data-status>${mode==='knowledge' ? (response.prepared?'当前模型已准备':'模型尚未准备，词法检索仍可使用') : '配置保存在 Mac 上'}</p>
-      <div style="display:flex;gap:12px;justify-content:flex-end">${mode==='knowledge'?'<button type="button" data-prepare class="ghost-button">准备所选模型</button>':''}<button type="submit" class="ui-button primary">保存设置</button></div></form>`;
+      <p role="status" data-status>${mode==='knowledge' ? (remote?(response.remote_warning || (response.prepared?'Windows 向量模型已准备；不可用时保留中文词法检索':'Windows 向量模型尚未准备；请提前部署，当前可使用中文词法检索')):response.prepared?'当前模型已准备':'模型尚未准备，词法检索仍可使用') : '配置保存在 Mac 上'}</p>
+      <div style="display:flex;gap:12px;justify-content:flex-end">${mode==='knowledge'&&!remote?'<button type="button" data-prepare class="ghost-button">准备所选模型</button>':''}<button type="submit" class="ui-button primary">保存设置</button></div></form>`;
     dialog.querySelector('[data-close]').onclick=()=>dialog.close();
     const form=dialog.querySelector('form'),status=dialog.querySelector('[data-status]');
     form.onsubmit=async event=>{

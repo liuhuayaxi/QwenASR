@@ -43,3 +43,4 @@ app-settings.json.recovery-*
 
 # Browser acceptance dependencies are installed independently from the app.
 tests/browser/node_modules/
+scripts/note-export/node_modules/

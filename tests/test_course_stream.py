@@ -34,6 +34,17 @@ async def until(predicate):
 
 
 class StreamTests(unittest.IsolatedAsyncioTestCase):
+    def test_library_item_keeps_resume_protocol_without_large_private_checkpoints(self):
+        with tempfile.TemporaryDirectory() as temp:
+            record = make_record(Path(temp))
+            record.metadata['course_stream']['chunks'] = [{'large_checkpoint': 'x' * 5000}]
+            record.metadata['course_stream']['inference_settings'] = {'token': 'private-fixture'}
+            value = record.list_item()
+            self.assertIs(value['course_stream'], True)
+            self.assertEqual(value['source_filename'], 'smartclass_test.flac')
+            self.assertNotIn('private-fixture', str(value))
+            self.assertNotIn('large_checkpoint', str(value))
+
     async def test_legacy_retranscription_preserves_aac_after_cleanup(self):
         with tempfile.TemporaryDirectory() as temp:
             record = make_record(Path(temp))

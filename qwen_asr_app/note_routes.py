@@ -63,7 +63,9 @@ def note_router(store, recording_operation):
             previous = note_history.read_version(record, version_id)
         except ValueError as exc:
             raise HTTPException(404, str(exc)) from exc
-        record.metadata['ai_note_summary'] = previous
+        # Restore the version's asset/provenance root with its text. History
+        # keeps the displaced current version through _persisted_note.
+        record.metadata['ai_note_summary'] = dict(previous)
         summary = record.update_note_summary(previous['summary'], source='restored')
         return {'summary': summary, 'session': record.public()}
 

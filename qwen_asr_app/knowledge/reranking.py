@@ -23,6 +23,21 @@ _guard = threading.Lock()
 def rank_candidates(query, results, *, timeout=45):
     """Return results + measured diagnostics, or an explicit budget error."""
     cfg = knowledge_settings.read()
+    from ..inference_providers import inference_settings
+    routing=inference_settings.for_task('knowledge')
+    if routing.get('knowledge_provider','local') != 'local':
+        from ..remote_classroom import capabilities, request
+        if not capabilities(routing).get('reranker'):
+            raise RuntimeError('Windows 节点未准备重排模型，保留排名融合；未启动 Mac 重排')
+        import uuid
+        selected=results[:8]
+        if not selected:return results, {'strategy':'empty'}
+        reply=request(routing,'/v1/classroom/compute',{'kind':'rerank','operation_id':'rerank-'+uuid.uuid4().hex,
+            'contract':CONTRACT,'query':query,'documents':[r['text'] for r in selected]},timeout=timeout)
+        if reply.get('contract')!=CONTRACT or len(reply.get('scores',[]))!=len(selected):raise RuntimeError('Windows 重排回执契约不一致')
+        ranked=[{**row,'rerank_score':score} for row,score in zip(selected,reply['scores'])]
+        ranked.sort(key=lambda r:-r['rerank_score'])
+        return ranked+results[8:],{k:v for k,v in reply.items() if k!='scores'}
     folder = Path(cfg['model_root']) / 'Qwen3-Reranker-4B'
     try:
         identity = json.loads((folder/'qwenasr-model-identity.json').read_text())

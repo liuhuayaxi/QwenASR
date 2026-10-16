@@ -5,6 +5,17 @@ let busy = false, submitting = false, loadingCourse = '', loadSerial = 0, accoun
 let replayLoginSubmitted = false;
 let sessionCheckInFlight = false, lastSessionCheck = 0;
 function notice(message = '', kind = 'error') { $('notice').textContent = message; $('notice').dataset.kind = kind; }
+function courseTimingText(metrics) {
+  const seconds = key => {
+    const value = metrics[key];
+    const observedZero = key === 'first_text_seconds' || metrics.asr_timing_observations?.[key] > 0;
+    return typeof value === 'number' && Number.isFinite(value) && value >= 0 && (value > 0 || observedZero)
+      ? value.toFixed(1) + ' 秒' : '未记录';
+  };
+  return '首段文字 ' + seconds('first_text_seconds') + ' · 已完成片段累计：ASR 排队 '
+    + seconds('asr_queue_seconds') + ' · 纯推理 ' + seconds('asr_inference_seconds')
+    + ' · 模型加载 ' + seconds('asr_load_seconds');
+}
 function pendingReplayURL() {
   const value = new URLSearchParams(location.search).get('returnTo');
   if (!value) return null;
@@ -185,7 +196,11 @@ function renderCourseState(s) {
     const title = document.createElement('strong'), badge = document.createElement('span'), message = document.createElement('p');
     title.textContent = j.title; badge.className = 'job-percent'; badge.textContent = j.state === 'queued' ? '排队中' : Math.round(Number(j.progress) || 0) + '%';
     message.textContent = j.message; head.append(title, badge); box.append(head, message);
-    if (j.metrics?.first_text_seconds != null) { const timing = document.createElement('p'); timing.textContent = '首段文字 ' + j.metrics.first_text_seconds.toFixed(1) + ' 秒 · ASR 排队 ' + (j.metrics.asr_queue_seconds || 0).toFixed(1) + ' 秒 · 推理 ' + (j.metrics.asr_inference_seconds || 0).toFixed(1) + ' 秒'; box.append(timing); }
+    if (j.metrics?.first_text_seconds != null) {
+      const timing = document.createElement('p'); timing.textContent = courseTimingText(j.metrics);
+      timing.title = '累计时间仅包含已保存的转写片段，不代表整个任务耗时；当前片段和失败重试不计入。';
+      box.append(timing);
+    }
     if (j.ai_errors) { const warning = document.createElement('p'); warning.textContent = j.ai_errors + ' 段精修未完成，原文已保留，可在顶部任务中心重试'; box.append(warning); }
     if (j.state === 'running') {
       const meter = document.createElement('progress'); meter.className = 'overall-progress'; meter.max = 100; meter.value = j.progress || 0; meter.setAttribute('aria-label', '课次总体进度'); box.append(meter);

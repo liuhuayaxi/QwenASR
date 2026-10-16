@@ -5,12 +5,17 @@ export function createInferenceSettings({root = document, fetcher = fetch} = {})
   const test = get('testInferenceConnection');
   const status = get('inferenceSettingsStatus');
   const current = () => ({...settings, mineru_provider: get('inferenceMineruProvider').value,
-    asr_provider: get('inferenceAsrProvider').value, base_url: get('inferenceRemoteUrl').value.trim()});
+    asr_provider: get('inferenceAsrProvider').value, knowledge_provider: get('inferenceKnowledgeProvider').value || 'local',
+    classroom_power_saving: get('inferencePowerSaving').value === 'on', base_url: get('inferenceRemoteUrl').value.trim()});
   const populate = value => {
     settings = value;
     get('inferenceMineruProvider').value = value.mineru_provider;
     get('inferenceAsrProvider').value = value.asr_provider;
+    get('inferenceKnowledgeProvider').value = value.knowledge_provider || 'local';
+    get('inferencePowerSaving').value = value.classroom_power_saving ? 'on' : 'off';
     get('inferenceRemoteUrl').value = value.base_url;
+    const upload = get('uploadUseMac');
+    if (upload) {upload.disabled = !!value.classroom_power_saving; if (value.classroom_power_saving) upload.checked = false;}
   };
   const load = () => {
     if (loading) return loading;
@@ -51,11 +56,11 @@ export function createInferenceSettings({root = document, fetcher = fetch} = {})
         headers: {'Content-Type': 'application/json'}, body: JSON.stringify({settings: current()})});
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || '连接失败');
-      status.textContent = '远程网关连接正常 · 检查未加载模型';
+      status.textContent = `远程网关连接正常 · ${data.capabilities?.version || '旧节点，尚无课堂向量能力'} · 检查未加载模型`;
     } catch (error) { status.textContent = `连接失败：${error.message}`; }
     finally { test.disabled = false; }
   });
-  for (const id of ['inferenceMineruProvider','inferenceAsrProvider','inferenceRemoteUrl']) {
+  for (const id of ['inferenceMineruProvider','inferenceAsrProvider','inferenceKnowledgeProvider','inferencePowerSaving','inferenceRemoteUrl']) {
     get(id).addEventListener('change', () => { if (ready) status.textContent = '有未保存的修改'; });
   }
   // Realtime and upload callers use the same server-owned snapshot.  Exposing
