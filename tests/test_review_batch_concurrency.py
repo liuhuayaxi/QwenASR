@@ -230,3 +230,20 @@ class ReviewBatchConcurrencyTests(unittest.IsolatedAsyncioTestCase):
 
 
 if __name__=='__main__':unittest.main()
+
+class ReviewStageProgressTests(unittest.TestCase):
+    def test_entering_review_does_not_reuse_writing_batch_or_other_pdf_counts(self):
+        from qwen_asr_app.review_notes import review_start_progress
+        export = {'pages': 38, 'pdf_sha256': 'a' * 64}
+        self.assertEqual(review_start_progress({'completed_parts': 6, 'total_parts': 6}, export),
+                         {'reviewed_pages': 0, 'review_total_pages': 38})
+        self.assertEqual(review_start_progress({'pdf_sha256': 'b' * 64, 'reviewed_pages': 28,
+                                               'review_total_pages': 28}, export)['reviewed_pages'], 0)
+
+    def test_same_review_resumes_saved_pages_and_rejects_invalid_checkpoint(self):
+        from qwen_asr_app.review_notes import review_start_progress
+        export = {'pages': 38, 'pdf_sha256': 'a' * 64}
+        task = {'pdf_sha256': export['pdf_sha256'], 'reviewed_pages': 8, 'review_total_pages': 38}
+        self.assertEqual(review_start_progress(task, export)['reviewed_pages'], 8)
+        for bad in [True, -1, 39, '8']:
+            self.assertEqual(review_start_progress({**task, 'reviewed_pages': bad}, export)['reviewed_pages'], 0)

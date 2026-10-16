@@ -152,6 +152,16 @@ def stage(record, manifest, folder, name, **values):
     record.save_metadata()
 
 
+def review_start_progress(task, export):
+    """The review begins in pages, including while waiting for its global slot."""
+    total = export['pages']
+    done = task.get('reviewed_pages')
+    same = (task.get('pdf_sha256') == export['pdf_sha256']
+            and task.get('review_total_pages') == total)
+    return {'reviewed_pages': done if same and type(done) is int and 0 <= done <= total else 0,
+            'review_total_pages': total}
+
+
 async def model_json(instructions, payload, config, output=12000):
     # Include source text, history, all evidence and protocol/output reserves.
     used=estimate_tokens(instructions)+estimate_tokens(json.dumps(payload,ensure_ascii=False))+output+16000
@@ -636,7 +646,8 @@ async def generate(record, config):
             (pdf,export),latex_manifest=await export_direct(markdown,folder,material_version,config,plan,package,images,feedback=feedback)
             latex_writers=latex_manifest.get('writer_session_ids') or ([latex_manifest['writer_session_id']] if latex_manifest.get('writer_session_id') else [])
             task['writer_session_ids']=list(dict.fromkeys([*task['writer_session_ids'],*latex_writers]))
-            stage(record,task,folder,'独立审查',pdf_sha256=export['pdf_sha256'])
+            stage(record,task,folder,'独立审查',pdf_sha256=export['pdf_sha256'],
+                  **review_start_progress(task,export))
             report=await visual_review(pdf,export,folder,provider,plan,package['relevant_pages'],generator_session_ids=task['writer_session_ids'],
                 progress=lambda done,total:stage(record,task,folder,f'独立审查 · 已查看 {done}/{total} 页',reviewed_pages=done,review_total_pages=total))
             if report['status']=='passed':break
