@@ -1,4 +1,4 @@
-import {renderCorrectionReview} from "./js/transcription-assist.js?v=20261015-illustrated-windows";
+import {renderCorrectionReview} from "./js/transcription-assist.js?v=20261016-decisions-1";
 import "./js/knowledge-settings.js?v=20261015-illustrated-windows";
 import {cachedJson} from './js/cached-json.js';
 import { createBatchView } from "./js/batch-view.js?v=20261015-reader-math-scope-8";
@@ -1410,7 +1410,6 @@ function renderNoteDialog(session) {
   libraryTools.attach(session);
   renderNoteTranscript(session);
   renderNoteSummary(session);
-  void renderCorrectionReview(session).catch(() => {});
   refreshSummaryStatus(session.id);
 }
 
@@ -1421,7 +1420,7 @@ function renderNoteTranscript(session) {
       refined: Boolean(segment.corrected) && !segment.ai_error }));
   const blocks = refined ? refinedBlocks :
     (session.segments || []).map((segment) => ({ ...segment, text: segment.raw, refined: false }));
-  const missing = refinedBlocks.filter((block) => !block.refined).length;
+  const missing = refinedBlocks.filter((block) => !block.refined && !block.correction_review).length;
   const task = state.aiTasks.find((item) => item.type === "refinement" && item.recording_id === session.id);
   const running = task && ["queued", "running"].includes(task.status);
   els.unrefinedActions.classList.toggle("hidden", missing === 0);
@@ -1438,7 +1437,7 @@ function renderNoteTranscript(session) {
     return `
     <article class="note-transcript-segment" data-start="${Number(block.start) || 0}" data-end="${Number(block.end) || 0}">
       <div class="transcript-source-actions">
-        <button class="transcript-time" type="button" data-seek="${Number(block.start) || 0}" title="定位并播放这段录音">${formatDuration(block.start)}<br>${formatDuration(block.end)}${refined && !block.refined ? "<br>未精修" : ""}</button>
+        <button class="transcript-time" type="button" data-seek="${Number(block.start) || 0}" title="定位并播放这段录音">${formatDuration(block.start)}<br>${formatDuration(block.end)}${refined && !block.refined ? block.correction_review ? "<br>待核对" : "<br>未精修" : ""}</button>
         ${replay ? `<a class="transcript-smartclass-jump" href="${escapeHtml(replay)}" target="_blank" rel="noopener noreferrer" title="在新标签页登录并跳转到南邮 Smart Class 对应回放时间">跳转</a>` : ""}
       </div>
       <div class="markdown-body">${refined ? renderMarkdown(block.text || "") : `<p>${escapeHtml(block.text || "")}</p>`}${refined && block.translation ? `<div class="translation-block"><small>${block.translation_target === "English" ? "ENGLISH" : "中文翻译"}</small><div class="translation-text transcript-markdown markdown-body">${renderMarkdown(block.translation)}</div></div>` : ""}${refined && !block.refined && block.segment_ids?.length === 1 && failedIds.has(String(block.segment_ids[0]))
@@ -1448,6 +1447,11 @@ function renderNoteTranscript(session) {
   els.noteTranscript.querySelectorAll(".note-segment-retry").forEach((button) => {
     button.addEventListener("click", () => retrySegmentAi(button.dataset.segmentId, button));
   });
+  void renderCorrectionReview(session,{onResolved:updated=>{
+    if(state.noteSession?.id!==updated.id)return;
+    state.noteSession=updated;
+    renderNoteTranscript(updated);
+  }}).catch(()=>{});
 }
 
 function renderNoteSummary(session) {

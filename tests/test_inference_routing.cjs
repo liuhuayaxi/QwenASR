@@ -28,7 +28,7 @@ test('saved provider survives draft changes; failed load blocks start', async ()
 test('task with unknown document progress stays indeterminate', () => {
   const source=fs.readFileSync(path.join(base,'js/tasks.js'),'utf8');
   const ctx={labels:{running:'处理中'},state:{selected:new Set(),busy:false},active:new Set(['running']),
-    esc:String,dateLabel:()=>'',friendlyError:()=>'',operationLabel:()=>'',actionLabels:{}};
+    taskProgressView:()=>({percent:null,count:''}),esc:String,dateLabel:()=>'',friendlyError:()=>'',operationLabel:()=>'',actionLabels:{}};
   vm.createContext(ctx);
   vm.runInContext(fs.readFileSync(path.join(base,'js/mineru-progress-view.js'),'utf8').replaceAll('export function','function'),ctx);
   vm.runInContext(fs.readFileSync(path.join(base,'js/resource-status.js'),'utf8').replaceAll('export function','function'),ctx);
@@ -44,7 +44,7 @@ test('task with unknown document progress stays indeterminate', () => {
 test('completed task has result links and no action buttons even from stale API', () => {
   const source=fs.readFileSync(path.join(base,'js/tasks.js'),'utf8');
   const ctx={labels:{completed:'已完成'},state:{selected:new Set(),busy:false},active:new Set(),
-    esc:String,dateLabel:()=>'',friendlyError:()=>'',operationLabel:()=>'',actionLabels:{retry:'重试'}};
+    taskProgressView:()=>({percent:null,count:''}),esc:String,dateLabel:()=>'',friendlyError:()=>'',operationLabel:()=>'',actionLabels:{retry:'重试'}};
   vm.createContext(ctx);
   vm.runInContext(fs.readFileSync(path.join(base,'js/mineru-progress-view.js'),'utf8').replaceAll('export function','function'),ctx);
   vm.runInContext(fs.readFileSync(path.join(base,'js/resource-status.js'),'utf8').replaceAll('export function','function'),ctx);

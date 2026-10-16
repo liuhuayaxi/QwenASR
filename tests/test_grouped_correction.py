@@ -56,13 +56,13 @@ class GroupedCorrectionTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await job.stop()
             self.assertEqual(record.metadata['status'], 'completed')
-            self.assertEqual([len(call.args[0]) for call in request.await_args_list], [5, 1])
+            self.assertEqual([len(call.args[0]) for call in request.await_args_list], [6])
             self.assertEqual(job.snapshot()['corrected_segments'], 6)
             self.assertTrue(all(part.get('corrected') == '精修课堂原文' for part in record.segments))
             self.assertTrue(record.audio_path.is_file())
             self.assertEqual(model.active_jobs, 0)
 
-    async def test_twelve_minutes_need_three_requests_with_exact_segment_timestamps(self):
+    async def test_twelve_minutes_share_one_request_with_exact_segment_timestamps(self):
         with tempfile.TemporaryDirectory() as raw:
             record = record_at(Path(raw))
             with patch('qwen_asr_app.batch_ai.polish_timestamped_segments_resilient', side_effect=correct) as request:
@@ -73,7 +73,7 @@ class GroupedCorrectionTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.wait_for(pipeline.finish(), 2)
                 finally:
                     await pipeline.close()
-            self.assertEqual([len(call.args[0]) for call in request.await_args_list], [5, 5, 2])
+            self.assertEqual([len(call.args[0]) for call in request.await_args_list], [12])
             self.assertEqual([part['raw'] for part in record.segments], [f'原文{i}' for i in range(1, 13)])
             self.assertEqual([part['corrected'] for part in record.segments], [f'精修原文{i}' for i in range(1, 13)])
             self.assertEqual([(s['start'], s['end']) for s in record.segments], [(i * 60, (i + 1) * 60) for i in range(12)])
@@ -98,6 +98,7 @@ class GroupedCorrectionTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as raw, patch('qwen_asr_app.batch_ai.polish_timestamped_segments_resilient', side_effect=slow):
             record = record_at(Path(raw))
             pipeline = SegmentCorrectionPipeline(record, high_config())
+            pipeline.batch_seconds=300
             try:
                 for index in range(1, 6):
                     await pipeline.submit(segment(index))
@@ -132,7 +133,7 @@ class GroupedCorrectionTests(unittest.IsolatedAsyncioTestCase):
             pipeline = SegmentCorrectionPipeline(record_at(Path(raw)), high_config())
             try:
                 for index in range(1, 6):
-                    await pipeline.submit(segment(index, '公式推导' * 450))
+                    await pipeline.submit(segment(index, '公式推导' * 1800))
                 await pipeline.finish()
                 self.assertGreater(request.await_count, 1)
                 for call in request.await_args_list:
@@ -172,6 +173,31 @@ class GroupedCorrectionTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(all(part.get('ai_error') for part in result))
             self.assertTrue(all(not part.get('corrected') for part in result))
             self.assertEqual([part['raw'] for part in result], ['原文1', '原文2'])
+
+    async def test_successful_half_survives_cancel_and_resubmit_skips_it(self):
+        from qwen_asr_app import ai
+        waiting=asyncio.Event()
+        async def split(parts,*args,**kwargs):
+            if len(parts)>1:raise AIRequestError('bad mapping',kind='invalid_segment_mapping')
+            if parts[0]['id']==2:
+                waiting.set();await asyncio.Event().wait()
+            return [{'segment_ids':[1],'corrected':'第一段已保存'}]
+        with tempfile.TemporaryDirectory() as raw:
+            record=record_at(Path(raw));parts=[segment(1),segment(2)]
+            for item in parts:record.upsert_segment(item)
+            with patch.object(ai,'polish_timestamped_segments',side_effect=split):
+                task=asyncio.create_task(correct_batch_segments(record,parts,high_config()))
+                await asyncio.wait_for(waiting.wait(),1);task.cancel()
+                with self.assertRaises(asyncio.CancelledError):await task
+            loaded=RecordingRecord.load(record.directory)
+            self.assertEqual(loaded.segments[0]['corrected'],'第一段已保存')
+            with patch('qwen_asr_app.batch_ai.polish_timestamped_segments_resilient',side_effect=correct) as request:
+                pipeline=SegmentCorrectionPipeline(loaded,high_config())
+                try:
+                    for part in loaded.segments:await pipeline.submit(part)
+                    await pipeline.finish()
+                finally:await pipeline.close()
+                self.assertEqual([s['id'] for s in request.await_args.args[0]],[2])
 
     async def test_successful_batch_clears_old_network_errors(self):
         with tempfile.TemporaryDirectory() as raw, patch('qwen_asr_app.batch_ai.polish_timestamped_segments_resilient', side_effect=correct):

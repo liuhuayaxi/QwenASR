@@ -72,10 +72,18 @@ async def evidence_config(record, config, text, limit=5):
     if not category:
         return result
     try:
-        if hasattr(_knowledge,'classroom_evidence'):
-            evidence=await asyncio.to_thread(_knowledge.classroom_evidence,record,str(text)[-2000:],limit=limit,include_derived=False)
-        else:
-            evidence=await asyncio.to_thread(_knowledge.search,category,str(text)[-2000:],limit=limit,include_derived=False)
+        # Larger recovery batches need evidence from the beginning and middle
+        # as well as the end. Search bounded representative windows serially.
+        body=str(text)
+        queries=[body[-2000:]] if limit<=5 or len(body)<=4000 else [body[:2000],body[max(0,len(body)//2-1000):len(body)//2+1000],body[-2000:]]
+        found={}
+        for query in dict.fromkeys(queries):
+            if hasattr(_knowledge,'classroom_evidence'):
+                rows=await asyncio.to_thread(_knowledge.classroom_evidence,record,query,limit=max(1,limit//len(queries)),include_derived=False)
+            else:
+                rows=await asyncio.to_thread(_knowledge.search,category,query,limit=max(1,limit//len(queries)),include_derived=False)
+            for row in rows:found.setdefault(row['citation_id'],row)
+        evidence=list(found.values())
         evidence = _knowledge.validate_evidence(evidence)
         evidence = [e for e in evidence if not e.get('stale')]
         result['_knowledge_evidence'] = evidence

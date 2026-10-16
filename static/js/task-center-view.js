@@ -67,3 +67,38 @@ export function completedTasks(groups, type = '') {
 export function actionableTasks(groups, type = '') {
   return [...new Map(groups.flatMap(group => [...group.current_tasks, ...(group.context_tasks || [])]).filter(task => !archived(task) && taskMatchesType(task, type) && (task.actions || []).length).map(task => [task.id, task])).values()];
 }
+
+export function leadingTask(group) {
+  const tasks=group.current_tasks || [];
+  return tasks.find(t=>['running','active','stopping'].includes(t.status))
+    || tasks.find(t=>activeStatuses.has(t.status)) || tasks.find(t=>errorStatuses.has(t.status))
+    || tasks.find(t=>t.attention_kind==='review') || tasks[0] || group.history?.at(-1) || {};
+}
+
+export function taskProgressView(task) {
+  const stage=String(task.stage || task.phase || '');
+  const done=task.status==='completed' || task.recovered;
+  if (task.status==='pending' && (task.attention_kind==='review' || Number(task.review_required_blocks)>0)) {
+    return {label:`${task.review_required_blocks || task.total || 0} 段待核对`,detail:'校对结果已保存，核对数字与公式后即可使用',count:'',percent:null};
+  }
+  if (task.type==='summary' && !done) {
+    const steps=['核对资料','梳理知识','编写图文','排版','逐页审查','保存'];
+    const index=/识别本节/.test(stage)?1:/准备配图|编写笔记/.test(stage)?2:/LaTeX|排版/.test(stage)?3:/独立审查|修订/.test(stage)?4:/摘要|取名|完成/.test(stage)?5:0;
+    const measured=/识别本节|LaTeX|排版|独立审查/.test(stage) && Number(task.total)>0;
+    const count=measured?`本阶段 ${task.completed || 0}/${task.total} ${task.progress_unit==='页'?'页':'批'}`:'';
+    return {label:(stage.split(' · ')[0] || '准备开始')+(task.review_round>1?` · 第 ${task.review_round} 轮`:''),count,detail:'',steps,index,percent:measured?Math.min(100,Math.round((task.completed||0)/task.total*100)):null};
+  }
+  const total=Number(task.total)||0,completed=Number(task.completed)||0;
+  const unit=task.progress_unit || (task.type==='course_queue'?'堂课':task.family==='mineru'?'个文件':'段');
+  const count=total?`${task.type==='refinement'?'已保存 ':''}${completed}/${total} ${unit}`:'';
+  const percent=done?100:Object.hasOwn(task,'progress')?(task.progress==null?null:Number(task.progress))
+    :total?Math.round(completed/total*100):null;
+  return {label:stage || (done?'处理完成':task.status==='queued'?'等待开始':task.status==='paused'?'已暂停':task.status==='cancelled'?'已取消，进度已保存':'处理中'),count,
+    detail:task.type==='refinement' && task.remaining_segments!=null?`剩余 ${task.remaining_segments} 段 · 继续时只补未完成部分`:'',
+    percent:percent===null?null:Math.max(0,Math.min(done?100:99,percent))};
+}
+
+export function progressGroups(groups) {
+  const running=group=>(group.current_tasks||[]).some(t=>activeStatuses.has(t.status));
+  return [...groups].sort((a,b)=>Number(running(b))-Number(running(a)));
+}
