@@ -23,11 +23,11 @@ from typing import Any
 from .ai import AIRequestError
 from .ai_activity import report_ai_activity
 from .paths import PRIVATE_ROOT
+from .context_budget import estimate_tokens, normalize_context_window
 
 
 DEFAULT_MODEL = "gemini-3.8-flash-medium"
 DEFAULT_TIMEOUT = 1800
-MAX_PROMPT_CHARS = 900_000
 
 
 def _text(value: Any) -> str:
@@ -187,11 +187,13 @@ def compose_prompt(instructions: str, payload: dict[str, Any]) -> str:
 
 def _request_arguments(instructions: str, payload: dict[str, Any], provider: dict[str, Any]):
     prompt = compose_prompt(instructions, payload)
-    if len(prompt) > MAX_PROMPT_CHARS:
+    window = normalize_context_window(provider.get('context_window'))
+    estimated = estimate_tokens(prompt) + 16_000
+    if estimated > window:
         raise AIRequestError(
-            f"发送给 AGY CLI 的整理片段过长（{len(prompt)} 字符），程序未发送请求",
+            f"发送给 AGY CLI 的输入及协议预计 {estimated:,} tokens，超过已保存上下文预算 {window:,}；程序未发送请求",
             kind="input_too_long",
-            retriable=True,
+            retriable=False,
         )
     cli = executable(provider)
     selected_model = model(provider)

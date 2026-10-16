@@ -198,7 +198,8 @@ knowledge_coordinator = KnowledgeCoordinator(knowledge_service)
 app.include_router(knowledge_router(knowledge_service))
 app.include_router(knowledge_config_router(knowledge_service))
 from qwen_asr_app.transcription_assist.routes import transcription_assist_router
-app.include_router(transcription_assist_router(recording_store))
+app.include_router(transcription_assist_router(recording_store,
+    require_available=lambda ident:require_recording_available(ident)))
 intelligence_router = classroom_intelligence_router(recording_store, knowledge_service, ai_preferences, ai_secret_store, live_sessions)
 app.include_router(intelligence_router)
 from qwen_asr_app.classroom_intelligence.service import configure_intelligence
@@ -260,6 +261,16 @@ SUMMARY_WORKFLOW_TIMEOUT_SECONDS = 7200
 SUMMARY_SMALL_OPERATION_TIMEOUT_SECONDS = 1800
 
 
+def schedule_memory_cleanup():
+    from qwen_asr_app.runtime_memory import schedule_idle_reclaim
+    def is_idle():
+        tasks=[*background_summary_tasks.values(),*background_ai_tasks.values(),*finalization_tasks.values()]
+        return (not record_operations and not running_batch_ids and not model_manager.active_jobs
+            and not any(not task.done() for task in tasks)
+            and not (recording_store.active and recording_store.active.metadata.get('status')=='active'))
+    schedule_idle_reclaim(is_idle,lambda:recording_store._read_cache.clear())
+
+
 def recording_operation(function):
     @wraps(function)
     async def guarded(session_id: str, *args, **kwargs):
@@ -293,6 +304,7 @@ def recording_operation(function):
             if is_summary:
                 summary_jobs.pop(session_id, None)
             record_operations.discard(session_id)
+            schedule_memory_cleanup()
     return guarded
 
 
@@ -693,12 +705,23 @@ def _task_error_kind(error: str) -> str:
     return "upstream"
 
 
+def _review_batch_activity(folder, task):
+    path=folder/str(task.get('review_report') or '.missing')
+    if not path.resolve().is_relative_to(folder.resolve()) or not path.is_file():return []
+    report=json.loads(path.read_text())
+    if report.get('pdf_sha256')!=task.get('pdf_sha256'):return []
+    return [{key:value[key] for key in ('pages','attempt','started_at','timeout_seconds','state') if key in value}
+            for value in report.get('active_batches',{}).values() if isinstance(value,dict)]
+
+
 def _summary_phase_progress(record, draft):
     """Show the actual current writing phase, never an earlier plan's 6/6."""
     value = {'phase': str(draft.get('phase') or ''),
              'completed_parts': len(draft.get('parts') or []),
              'total_parts': draft.get('total_parts') or 0}
     task_id = str(draft.get('review_task') or '')
+    if task_id and not value['phase'].startswith(('识别本节新内容','LaTeX 排版','独立审查')):
+        value.update(completed_parts=0,total_parts=0)
     if not re.fullmatch(r'[a-f0-9]{24}', task_id):
         return value
     try:
@@ -710,7 +733,9 @@ def _summary_phase_progress(record, draft):
                     and 0 <= completed <= total and task.get('id') == task_id
                     and re.fullmatch(r'[a-f0-9]{64}', str(task.get('pdf_sha256') or ''))):
                 return {'phase': f'独立审查 · 已查看 {completed}/{total} 页',
-                        'completed_parts': completed, 'total_parts': total, 'unit': '页'}
+                        'completed_parts': completed, 'total_parts': total, 'unit': '页',
+                        'review_round':int(task.get('revision') or 0)+1,
+                        'review_batches':_review_batch_activity(folder,task)}
             return value
         if not value['phase'].startswith('LaTeX 排版'):
             return value
@@ -845,6 +870,8 @@ def compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any]]:
                 "completed": summary_progress['completed_parts'],
                 "total": int(summary_progress['total_parts'] or 0),
                 "progress_unit": summary_progress.get('unit', '批'),
+                "review_round":summary_progress.get('review_round'),
+                "review_batches":summary_progress.get('review_batches',[]),
                 "phase": ("详细笔记已保存 · 短摘要待补齐" if abstract_pending and status == "completed_with_errors"
                           else "录音库短摘要" if abstract_pending else summary_progress['phase']),
                 "ai_activity": task_ai_activity(f"summary:{record.id}"),
@@ -859,6 +886,8 @@ def compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any]]:
         missing_blocks = [block for block in transcript_blocks(record) if not block["refined"]]
         review_blocks = sum(bool(block.get("correction_review")) for block in missing_blocks)
         unprocessed_blocks = len(missing_blocks) - review_blocks
+        from qwen_asr_app.refinement import saved_progress
+        refinement_progress=saved_progress(record)
         refinement_running = f"refinement:{record.id}" in background_ai_tasks
         live_session = live_sessions.get(record.id)
         if live_session and (
@@ -867,8 +896,7 @@ def compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any]]:
         ):
             refinement_running = True
         refinement_ready = record.metadata.get("status") not in {"active", "processing"}
-        refinement_cancelled = refinement_job.get("status") == "cancelled" and not refinement_running
-        if not refinement_cancelled and (refinement_running or refinement_job.get("status") in {"queued", "running", "waiting_retry", "paused", "failed", "interrupted"} or (refinement_ready and missing_blocks)):
+        if refinement_running or refinement_job.get("status") in {"queued", "running", "waiting_retry", "paused", "failed", "interrupted", "cancelled"} or (refinement_ready and missing_blocks):
             failed_errors = [
                 str(item.get("ai_error")) for item in [*record.segments, *(record.metadata.get("ai_reviews") or [])]
                 if isinstance(item, dict) and item.get("ai_error")
@@ -879,10 +907,13 @@ def compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any]]:
             )
             if status == "completed" and missing_blocks:
                 status = "pending"
+            if review_blocks and not unprocessed_blocks and not refinement_running:
+                status='pending'
             if status != "completed":
                 historical_error = failed_errors[-1] if failed_errors else ""
                 retrying = refinement_running and saved_status in {"queued", "running"}
                 task_error = str(refinement_job.get("error") or ("" if retrying else historical_error))
+                if review_blocks and not unprocessed_blocks and not refinement_running:task_error=''
                 review_only = bool(review_blocks and not unprocessed_blocks and not task_error
                                    and not refinement_running and status == "pending")
                 tasks.append({
@@ -896,8 +927,13 @@ def compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any]]:
                     "error_kind": str(refinement_job.get("error_kind") or _task_error_kind(task_error)) if task_error else "",
                     "previous_error": historical_error if retrying else "",
                     "ai_activity": task_ai_activity(f"refinement:{record.id}"),
-                    "completed": int(refinement_job.get("completed") or 0),
-                    "total": int(refinement_job.get("total") or len(missing_blocks)),
+                    "completed": refinement_progress['saved_segments'],
+                    "total": refinement_progress['total_segments'],
+                    "progress_unit": "段",
+                    "saved_segments": refinement_progress['saved_segments'],
+                    "remaining_segments": refinement_progress['remaining_segments'],
+                    "total_batches": int(refinement_job.get('total_batches') or 0),
+                    "completed_batches": int(refinement_job.get('completed_batches') or 0),
                     "missing_blocks": len(missing_blocks),
                     "review_required_blocks": review_blocks,
                     "unprocessed_blocks": unprocessed_blocks,
@@ -905,7 +941,7 @@ def compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any]]:
                     "phase": f"转写已完成 · {review_blocks} 段数字或公式改动待核对" if review_only else "",
                     "retry_in_seconds": int(refinement_job.get("retry_in_seconds") or 0),
                     "auto_retry_count": int(refinement_job.get("auto_retry_count") or 0),
-                    "actions": ["pause", "cancel"] if status in {"queued", "running", "waiting_retry"} else ["continue", "retry", "cancel"],
+                    "actions": [] if review_only else ["pause", "cancel"] if status in {"queued", "running", "waiting_retry"} else ["continue", "retry", "cancel"],
                     "updated_at": str(refinement_job.get("updated_at") or record.metadata.get("updated_at") or ""),
                 })
 
@@ -988,7 +1024,8 @@ def _start_aux_ai_job(record: RecordingRecord, kind: str, runner: Any) -> bool:
     cancel_requested_tasks.discard(task_id)
     _update_ai_job(
         record, kind, status="queued", error="", error_kind="", started_at=local_now(),
-        completed=0, auto_retry_count=0, retry_in_seconds=0, pause_requested=False,
+        **({} if kind == 'refinement' else {'completed':0}),
+        auto_retry_count=0, retry_in_seconds=0, pause_requested=False,
     )
 
     async def execute() -> None:
@@ -1037,6 +1074,7 @@ def _start_aux_ai_job(record: RecordingRecord, kind: str, runner: Any) -> bool:
             raise
         finally:
             background_ai_tasks.pop(task_id, None)
+            schedule_memory_cleanup()
 
     async def run() -> None:
         with track_ai_activity(task_id):
@@ -1067,19 +1105,18 @@ def _start_aux_ai_job(record: RecordingRecord, kind: str, runner: Any) -> bool:
 
 
 def _unrefined_segments(record: RecordingRecord) -> list[dict[str, Any]]:
-    ids = {
-        int(value)
-        for block in transcript_blocks(record)
-        if not block["refined"]
-        for value in block.get("segment_ids", [])
-    }
+    from qwen_asr_app.refinement import pending_ids
+    ids=pending_ids(record)
     return [segment for segment in record.segments if int(segment.get("id", 0)) in ids]
+
 
 
 _EMPTY_SPEECH_RE = re.compile(r"^[\s，。！？,.!?、]*(?:啊|哎|诶|嗯|呃|额|唔|那个|就是说)[\s，。！？,.!?、]*$")
 
 
 async def _run_refinement_job_unlocked(record: RecordingRecord, config: dict[str, Any]) -> None:
+    from qwen_asr_app.refinement import restore_checkpoints, commit_blocks, saved_progress, context_for
+    if not config.get('_force_refinement'):restore_checkpoints(record)
     targets = _unrefined_segments(record)
     suppressed = [
         segment for segment in targets
@@ -1094,6 +1131,9 @@ async def _run_refinement_job_unlocked(record: RecordingRecord, config: dict[str
         suppressed_ids = {int(segment.get("id", 0)) for segment in suppressed}
         targets = [segment for segment in targets if int(segment.get("id", 0)) not in suppressed_ids]
     if not targets:
+        progress=saved_progress(record)
+        _update_ai_job(record,"refinement",completed=progress['saved_segments'],total=progress['total_segments'],
+            progress_unit='段',saved_segments=progress['saved_segments'],remaining_segments=0)
         return
     context_window = context_window_for(config, "correction")
     output_budget = output_limit_for(config, "correction", 32_768)
@@ -1106,87 +1146,61 @@ async def _run_refinement_job_unlocked(record: RecordingRecord, config: dict[str
             context_safe_source_budget(context_window, fixed_overhead=1_800),
         ),
     )
-    if long_context and config.get("_parallel_refinement"):
-        # Recovery can fan out independent source ranges. Keep each faithful
-        # rewrite small enough to finish promptly, with preceding raw text as
-        # reference; successful ranges remain durable if a sibling fails.
-        token_budget = min(token_budget, max(512, token_budget // concurrency_for(config, "correction")))
     groups: list[list[dict[str, Any]]] = []
     current: list[dict[str, Any]] = []
     current_tokens = 0
-    previous_position = -2
-    positions = {int(segment.get("id", 0)): index for index, segment in enumerate(record.segments)}
     for segment in targets:
-        position = positions[int(segment.get("id", 0))]
         cost = estimate_tokens(str(segment.get("raw") or "")) + 24
         if current and (
-            position != previous_position + 1
-            or current_tokens + cost > token_budget
-            or (not long_context and len(current) >= 10)
+            current_tokens + cost > token_budget
         ):
             groups.append(current)
             current, current_tokens = [], 0
         current.append(segment)
         current_tokens += cost
-        previous_position = position
     if current:
         groups.append(current)
-    _update_ai_job(record, "refinement", total=len(groups), completed=0)
+    progress=saved_progress(record)
+    def update_progress():
+        progress=saved_progress(record)
+        _update_ai_job(record,"refinement",completed=progress['saved_segments'],total=progress['total_segments'],
+            progress_unit='段',saved_segments=progress['saved_segments'],remaining_segments=progress['remaining_segments'],
+            total_batches=len(groups),completed_batches=completed)
     semaphore = asyncio.Semaphore(concurrency_for(config, "correction"))
     completed = 0
+    update_progress()
     async def process_group(index, group):
         nonlocal completed
-        first_position = positions[int(group[0]["id"])]
-        history = "\n".join(
-            str(item.get("corrected") or item.get("raw") or "")
-            for item in record.segments[:first_position]
-        )
-        group_config = json.loads(json.dumps(config))
-        history_chars = int((group_config.get("ai") or {}).get("history_chars") or 4000)
-        group_config["_transcript_context"] = history[-max(0, min(history_chars, 20_000)):]
-        from qwen_asr_app.transcription_assist.service import evidence_config
-        group_config = await evidence_config(record, group_config, '\n'.join(str(s.get('raw') or '') for s in group))
         async with semaphore:
+            group_config = json.loads(json.dumps(config))
+            group_config['_preserve_segment_boundaries']=True
+            group_config['_transcript_context']=context_for(record,group,context_window)
+            from qwen_asr_app.transcription_assist.service import evidence_config
+            group_config = await evidence_config(record,group_config,'\n'.join(str(s.get('raw') or '') for s in group),limit=12)
+            installed=set()
+            def checkpoint(blocks):
+                fresh=[b for b in blocks if not set(b['segment_ids'])<=installed]
+                if not fresh:return
+                commit_blocks(record,fresh)
+                installed.update(i for b in fresh for i in b['segment_ids'])
+                update_progress()
             mapped = await polish_timestamped_segments_resilient(
-                group,
-                str(group[0].get("language") or ""),
-                group_config,
-                mode="correction",
-            )
-        group_ids = {int(item["id"]) for item in group}
-        reviews = [
-            item for item in record.metadata.get("ai_reviews") or []
-            if isinstance(item, dict) and not group_ids.intersection(int(value) for value in item.get("segment_ids", []))
-        ]
-        by_id = {int(item["id"]): item for item in group}
-        for part_index, part in enumerate(mapped):
-            members = [by_id[value] for value in part["segment_ids"]]
-            reviews.append({
-                "id": f"manual-{int(time.time())}-{index}-{part_index}",
-                "start": min(float(member.get("start", 0)) for member in members),
-                "end": max(float(member.get("end", 0)) for member in members),
-                "segment_ids": part["segment_ids"],
-                "raw": "\n\n".join(str(member.get("raw") or "") for member in members),
-                "corrected": part["corrected"],
-                **({'correction_review':part['correction_review']} if part.get('correction_review') else {}),
-                **({'correction_provenance':part['correction_provenance']} if part.get('correction_provenance') else {}),
-                "manual_refinement": True,
-            })
-        record.metadata["ai_reviews"] = reviews
-        for segment in record.segments:
-            if int(segment.get("id", 0)) in group_ids:
-                segment.pop("ai_error", None)
-                segment["ai_pending"] = False
-        record.save_all()
-        completed += 1
-        _update_ai_job(record, "refinement", completed=completed, total=len(groups))
+                group,str(group[0].get('language') or ''),group_config,mode='correction',on_checkpoint=checkpoint)
+            checkpoint(mapped)
+            completed += 1
+            update_progress()
     workers = [asyncio.create_task(process_group(index, group)) for index, group in enumerate(groups)]
     try:
-        await asyncio.gather(*workers)
+        # A sibling failure does not discard other independent requests.
+        results=await asyncio.gather(*workers,return_exceptions=True)
+        failures=[result for result in results if isinstance(result,BaseException)]
+        if failures:raise failures[0]
     finally:
         for worker in workers:
-            worker.cancel()
+            if not worker.done():worker.cancel()
         await asyncio.gather(*workers, return_exceptions=True)
+        update_progress()
+
 
 
 async def _run_refinement_job(record: RecordingRecord, config: dict[str, Any]) -> None:
@@ -1417,19 +1431,20 @@ async def ai_task_action(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
                 # Maintenance regeneration must actually use the selected
                 # provider for every segment. Keep raw ASR text and discard
                 # only derived correction/global-review outputs.
+                from qwen_asr_app.durable import atomic_json
+                atomic_json(record.directory/'.refinement-history'/('before-regenerate-'+str(time.time_ns())+'.json'),
+                    {'metadata':record.metadata,'segments':record.segments})
+                config['_force_refinement']=True
+                record.metadata['refinement_epoch']=str(time.time_ns())
                 record.metadata["ai_reviews"] = []
                 record.metadata.pop("ai_global_rewrite", None)
                 for segment in record.segments:
                     segment.pop("corrected", None)
                     segment.pop("translation", None)
+                    segment.pop("correction_review",None)
                     segment.pop("ai_error", None)
                     segment["ai_pending"] = True
-            else:
-                record.metadata["ai_reviews"] = [
-                    item
-                    for item in record.metadata.get("ai_reviews") or []
-                    if not isinstance(item, dict) or not item.get("manual_refinement")
-                ]
+            # Retry/continue preserve all validated results and candidates.
         record.save_all()
     if kind == "summary":
         summary_payload = {
@@ -1556,6 +1571,7 @@ async def service_stop_guard(action: str, request: Request):
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
     from qwen_asr_app.inference_providers import inference_settings
+    from qwen_asr_app.runtime_memory import rss_bytes,last_reclaim
     try:
         mode = inference_settings.for_task('asr')['asr_provider']
     except (OSError, ValueError):
@@ -1571,6 +1587,7 @@ async def health() -> dict[str, Any]:
         "model_path": str(MODEL_PATH),
         "asr_provider": mode,
         "local_model_loaded": bool(model_manager.worker and model_manager.worker.is_alive()),
+        "memory":{'rss_bytes':rss_bytes(),'last_reclaim':dict(last_reclaim)},
     }
 
 
@@ -2056,6 +2073,7 @@ def start_summary_job(record: RecordingRecord, payload: dict[str, Any], *, autom
             raise
         finally:
             background_summary_tasks.pop(session_id, None)
+            schedule_memory_cleanup()
 
     async def run() -> None:
         with track_ai_activity(f"summary:{session_id}"):

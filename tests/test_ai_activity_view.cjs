@@ -39,7 +39,7 @@ test('an active AI card shows an activity bar and keeps the previous error in de
   const {aiActivityView} = await modulePromise;
   const source = fs.readFileSync(path.join(__dirname, '../static/js/tasks.js'), 'utf8');
   const section = (start, end) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
-  const context = {aiActivityView, legacyMineruProgress: () => null, resourceStatus: () => null,
+  const context = {taskProgressView:()=>({percent:null,count:''}),aiActivityView, legacyMineruProgress: () => null, resourceStatus: () => null,
     mineruEstimateLabel: () => '', state: {busy: false, selected: new Set()},
     esc: text => String(text ?? ''), active: new Set(['running']),
     labels: {running: '进行中', completed: '已完成'}, actionLabels: {}, dateLabel: () => ''};
@@ -52,10 +52,10 @@ test('an active AI card shows an activity bar and keeps the previous error in de
     id: 'test', title: '课堂记录', label: '转写校对', completed: 0, total: 1,
     error: '', error_kind: 'provider_auth', previous_error: 'AI 没有返回精修文本'};
   const html = context.card(item);
-  assert.match(html, /task-progress-indeterminate/);
+  assert.match(html, /<progress[^>]*value="0"/);
   assert.match(html, /等待模型返回/);
   assert.match(html, /已完成 0\/1 批/);
-  assert.doesNotMatch(html, /0%|task-error/);
+  assert.doesNotMatch(html, /task-error/);
   assert.match(html, /上次处理失败：AI 没有返回精修文本/);
   const completed = context.card({...item, status: 'completed', completed: 1});
   assert.match(completed, /value="100"/);

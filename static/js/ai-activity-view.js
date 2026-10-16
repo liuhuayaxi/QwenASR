@@ -10,6 +10,15 @@ function duration(seconds) {
 
 export function aiActivityView(task) {
   if (task.family !== 'ai' || !['running', 'queued'].includes(task.status)) return null;
+  const batches=Array.isArray(task.review_batches)?task.review_batches:[];
+  if(batches.length) {
+    const current=batches.map(batch=>{
+      const pages=batch.pages || [],first=pages[0],last=pages.at(-1);
+      const age=Math.max(0,(Date.now()-Date.parse(batch.started_at))/1000);
+      return `第 ${first}${last!==first?`–${last}`:''} 页 · 已等待 ${duration(age)}${batch.attempt>1?` · 第 ${batch.attempt} 次请求`:''}`;
+    });
+    return {label:`正在审查 ${current.join('；')}`,detail:`本轮已保存 ${task.completed || 0}/${task.total || 0} 页。单次请求最多等待 ${duration(batches[0].timeout_seconds || 300)}，超时会有限重试；已审批次可继续复用。`};
+  }
   const activity = task.ai_activity;
   if (!activity) return {
     label: task.status === 'queued' ? '等待 AI 调用' : '等待模型返回',

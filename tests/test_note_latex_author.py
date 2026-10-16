@@ -196,9 +196,9 @@ class BatchedLatexAuthorTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(author,'request_ai_text',AsyncMock(side_effect=respond)) as request,patch.object(author,'context_window_for',return_value=256000):
                 manifest=await author.ensure_source(reference,folder,{'source':'original'}, {},ledger,package,images)
                 repeated=await author.ensure_source(reference,folder,{'source':'original'}, {},ledger,package,images)
-            self.assertEqual(manifest,repeated);self.assertEqual(request.await_count,3)
+            self.assertEqual(manifest,repeated);self.assertEqual(request.await_count,2)
             self.assertEqual(manifest['version'],author.BATCH_VERSION)
-            self.assertEqual([len(payload['required_knowledge_ids']) for payload in payloads],[10,10,3])
+            self.assertEqual([len(payload['required_knowledge_ids']) for payload in payloads],[21,2])
             for payload in payloads:
                 self.assertEqual(payload['content_reference'],reference)
                 self.assertEqual([item['id'] for item in payload['complete_coverage_context']],[item['id'] for item in ledger['knowledge']])
@@ -213,7 +213,7 @@ class BatchedLatexAuthorTests(unittest.IsolatedAsyncioTestCase):
             from qwen_asr_app.note_latex import prepare_document
             self.assertEqual(len(prepare_document(body,folder,images=images)['assets']),3)
             progress=json.loads((folder/'latex'/'batch-progress.json').read_text())
-            self.assertEqual(progress['total_batches'],3);self.assertEqual(progress['completed_batches'],3)
+            self.assertEqual(progress['total_batches'],2);self.assertEqual(progress['completed_batches'],2)
             self.assertEqual(progress['state'],'completed')
 
     async def test_interrupted_batch_resumes_without_rewriting_accepted_batches(self):
@@ -232,9 +232,9 @@ class BatchedLatexAuthorTests(unittest.IsolatedAsyncioTestCase):
                 progress=json.loads((folder/'latex'/'batch-progress.json').read_text())
                 self.assertEqual(progress['completed_batches'],1);self.assertEqual(progress['current_batch'],2)
                 manifest=await author.ensure_source('ref',folder,{}, {},ledger,package,images)
-                self.assertEqual(request.await_count,4)
+                self.assertEqual(request.await_count,3)
                 self.assertEqual(accepted.read_bytes(),before)
-                self.assertEqual(manifest['batch_count'],3)
+                self.assertEqual(manifest['batch_count'],2)
                 state=json.loads((batch_root/'batch-002'/'attempts-source.json').read_text())
                 self.assertEqual(state['attempts'],2);self.assertEqual(state['completed_proposals'],1)
                 self.assertEqual(state['request_errors'][0]['type'],'CancelledError')

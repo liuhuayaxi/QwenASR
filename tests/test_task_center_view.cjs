@@ -74,7 +74,7 @@ test('context queue controls retain their original action identity and are dedup
 });
 test('review-only cards show a check link and count, with compute actions under explicit reprocessing', () => {
  const vm=require('node:vm'),source=fs.readFileSync(path.join(__dirname,'../static/js/tasks.js'),'utf8');
- const context={labels:{pending:'待处理'},actionLabels:{continue:'继续',retry:'重试',cancel:'取消'},state:{selected:new Set(),busy:false},active:new Set(),esc:text=>String(text??''),dateLabel:()=>'',friendlyError:()=>'',operationLabel:()=>'',aiActivityView:()=>null,legacyMineruProgress:()=>null,mineruEstimateLabel:()=>'',resourceStatus:()=>null};
+ const context={labels:{pending:'待处理'},actionLabels:{continue:'继续',retry:'重试',cancel:'取消'},state:{selected:new Set(),busy:false},active:new Set(),esc:text=>String(text??''),dateLabel:()=>'',friendlyError:()=>'',operationLabel:()=>'',taskProgressView:()=>({percent:null,count:''}),aiActivityView:()=>null,legacyMineruProgress:()=>null,mineruEstimateLabel:()=>'',resourceStatus:()=>null};
  vm.createContext(context);vm.runInContext(source.slice(source.indexOf('function taskStatus('),source.indexOf('function selectionControls(')),context);
  const review=task('refinement:r','pending',{attention_kind:'review',review_required_blocks:45,total:45,completed:0,progress:0,stage:'转写已完成，数字或公式待核对',result_url:'/library?recording=r',actions:['continue','retry','cancel']});
  const html=context.card(review);
@@ -91,4 +91,30 @@ test('completed and cancelled history stays available without becoming daily err
  assert.equal(filterTaskGroups(groups,{filter:'daily'}).length,0);
  assert.equal(filterTaskGroups(groups,{filter:'all'}).length,2);
  assert.equal(filterTaskGroups(groups,{filter:'completed'}).length,1);
+});
+
+test('summary preparation never displays the previous completed batch count', async()=>{
+ const {taskProgressView}=await modulePromise;
+ const view=taskProgressView({type:'summary',status:'running',stage:'准备配图',completed:2,total:2,progress_unit:'批'});
+ assert.equal(view.percent,null);assert.equal(view.count,'');assert.equal(view.index,2);
+ const review=taskProgressView({type:'summary',status:'running',stage:'独立审查',completed:12,total:38,progress_unit:'页'});
+ assert.equal(review.count,'本阶段 12/38 页');assert.equal(review.percent,32);
+});
+test('saved correction segments and human review are different progress states',async()=>{
+ const {taskProgressView}=await modulePromise;
+ const view=taskProgressView({type:'refinement',status:'paused',completed:35,total:64,progress_unit:'段',remaining_segments:29});
+ assert.equal(view.count,'已保存 35/64 段');assert.match(view.detail,/只补未完成/);
+ const manual=taskProgressView({type:'refinement',status:'pending',attention_kind:'review',review_required_blocks:7});
+ assert.equal(manual.percent,null);assert.equal(manual.label,'7 段待核对');
+});
+test('active work leads the page even if another step has an error',async()=>{
+ const {progressGroups,leadingTask}=await modulePromise;
+ const bad={id:'bad',current_tasks:[task('fail','failed')]};
+ const mixed={id:'mixed',current_tasks:[task('other','failed'),task('live','running')]};
+ assert.equal(progressGroups([bad,mixed])[0].id,'mixed');assert.equal(leadingTask(mixed).id,'live');
+});
+test('an explicitly unknown PDF progress is not inferred from file totals',async()=>{
+ const {taskProgressView}=await modulePromise;
+ const unknown=taskProgressView({type:'course_pdf',family:'mineru',status:'running',progress:null,total:1,completed:0});
+ assert.equal(unknown.percent,null);
 });

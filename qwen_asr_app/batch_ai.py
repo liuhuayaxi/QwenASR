@@ -92,27 +92,46 @@ async def correct_batch_segments(
     ai_config["_batch_segment_mode"] = True
     from .transcription_assist.service import evidence_config
     ai_config = await evidence_config(record, ai_config, '\n'.join(str(s.get('raw') or '') for s in segments))
-    first_id = int(segments[0]["id"])
-    previous = [str(item.get("corrected") or item.get("raw") or "")
-                for item in record.segments if int(item.get("id", 0)) < first_id]
-    try:
-        history_chars = max(0, int((ai_config.get("ai") or {}).get("history_chars", 2000)))
-    except (ValueError, TypeError):
-        history_chars = 2000
-    ai_config["_transcript_context"] = "\n".join(previous)[-history_chars:] if history_chars else ""
+    from .refinement import context_for,commit_blocks
+    ai_config["_transcript_context"] = context_for(record,segments,context_window_for(config,'correction'))
     corrected = {}
     candidate_by_id = {}
     provenance_by_id = {}
     error = None
+    installed=set()
+    saved_blocks={}
+    def checkpoint(blocks):
+        expected={int(s['id']) for s in segments}
+        if (any(len(b.get('segment_ids',[]))!=1 or b['segment_ids'][0] not in expected
+                or not str(b.get('corrected') or '').strip() for b in blocks)
+                or len({b['segment_ids'][0] for b in blocks})!=len(blocks)):
+            raise AIRequestError('批量精修的段落编号不完整，原文已保留',kind='invalid_segment_mapping')
+        fresh=[b for b in blocks if b['segment_ids'][0] not in installed]
+        if not fresh:return
+        commit_blocks(record,fresh,destination='segments')
+        for block in fresh:
+            ident=block['segment_ids'][0]
+            saved_blocks[ident]=block
+            installed.add(ident)
     try:
-        blocks = await retry_transient_ai(lambda: polish_timestamped_segments_resilient(
-            segments, str(segments[0].get("language") or ""), ai_config, mode="correction",
-        ))
+        async def correct_remaining():
+            remaining=[s for s in segments if int(s['id']) not in installed]
+            if remaining:
+                result=await polish_timestamped_segments_resilient(remaining,str(segments[0].get('language') or ''),
+                    ai_config,mode='correction',on_checkpoint=checkpoint)
+                # Validate mock/legacy adapters before accepting their response.
+                expected=[int(s['id']) for s in remaining]
+                actual=[int(b['segment_ids'][0]) for b in result if len(b.get('segment_ids',[]))==1]
+                if actual!=expected:raise AIRequestError('批量精修的段落编号不完整，原文已保留',kind='invalid_segment_mapping')
+                checkpoint(result)
+            return [saved_blocks[int(s['id'])] for s in segments]
+        blocks = await retry_transient_ai(correct_remaining)
         expected = [int(segment["id"]) for segment in segments]
         actual = [int(block["segment_ids"][0]) for block in blocks
                   if len(block.get("segment_ids", [])) == 1 and str(block.get("corrected") or "").strip()]
         if actual != expected or len(blocks) != len(expected):
             raise AIRequestError("批量精修的段落编号不完整，原文已保留", kind="invalid_segment_mapping")
+        checkpoint(blocks)
         corrected = {int(block["segment_ids"][0]): str(block["corrected"]).strip() for block in blocks}
         candidate_by_id = {int(block['segment_ids'][0]):{**block['correction_review'],'segment_ids':block['segment_ids']} for block in blocks if block.get('correction_review')}
         provenance_by_id = {int(block['segment_ids'][0]):block['correction_provenance'] for block in blocks if block.get('correction_provenance')}
@@ -123,6 +142,9 @@ async def correct_batch_segments(
     for current in record.segments:
         ident = int(current.get("id", 0))
         if ident not in source_by_id:
+            continue
+        if ident in installed:
+            updated.append(current)
             continue
         current.update(source_by_id[ident], ai_pending=False)
         if error is not None:
@@ -285,11 +307,11 @@ def note_summary_chunks(blocks: list[str], config: dict[str, Any]) -> list[str]:
     def fits_cli_input(text: str, *, full: bool) -> bool:
         if not uses_agy_gemini(config, "summary"):
             return True
-        from .agy_cli import MAX_PROMPT_CHARS, compose_prompt
+        from .agy_cli import compose_prompt
         options = {**config, "_full_note": full, "_detailed_chunk": not full}
-        return len(compose_prompt(summary_instructions(options), {
+        return estimate_tokens(compose_prompt(summary_instructions(options), {
             "previous_cumulative_summary": None, "new_transcript": text,
-        })) <= MAX_PROMPT_CHARS
+        })) + 16000 <= window
 
     # Match the actual request serialization rather than counting only raw text.
     # Full-context input remains preferred, but do not choose it when a

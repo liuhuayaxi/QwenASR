@@ -220,7 +220,7 @@ class ParallelRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 nonlocal running, peak
                 running += 1
                 peak = max(peak, running)
-                if running == 6:
+                if running == 2:
                     six_started.set()
                 try:
                     await finish.wait()
@@ -233,7 +233,7 @@ class ParallelRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 task = asyncio.create_task(app._run_refinement_job_unlocked(record, config))
                 try:
                     await asyncio.wait_for(six_started.wait(), 1)
-                    self.assertEqual(peak, 6)
+                    self.assertEqual(peak, 2)
                     finish.set()
                     await asyncio.wait_for(task, 2)
                 finally:
@@ -242,5 +242,6 @@ class ParallelRecoveryTests(unittest.IsolatedAsyncioTestCase):
             blocks = transcript_blocks(record)
             self.assertEqual([b['text'] for b in blocks], [f'精修{i}' for i in range(1, 31)])
             self.assertTrue(all(b['refined'] for b in blocks))
-            self.assertEqual(record.metadata['ai_jobs']['refinement']['completed'], 10)
-            self.assertEqual(record.metadata['ai_jobs']['refinement']['total'], 10)
+            self.assertEqual(record.metadata['ai_jobs']['refinement']['completed'], 30)
+            self.assertEqual(record.metadata['ai_jobs']['refinement']['total'], 30)
+            self.assertEqual(record.metadata['ai_jobs']['refinement']['total_batches'],2)
