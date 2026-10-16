@@ -59,6 +59,7 @@ jobs:
         working-directory: tests/browser
       - run: npx playwright install --with-deps chromium
         working-directory: tests/browser
+      - run: node tests/browser/deep-ui/run.cjs . output/playwright/deep-ui
       - run: node tests/browser/workspace-smoke.cjs
         env:
           QWEN_ASR_BROWSER_CHANNEL: chromium

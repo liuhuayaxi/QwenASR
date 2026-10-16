@@ -73,6 +73,15 @@ def transcription_assist_router(store, require_available=None):
         previous=next((item for item in record.metadata.get('correction_decisions',[]) if item.get('candidate_id')==candidate_id),None)
         if previous:
             if previous.get('request_sha256')!=request_hash:raise HTTPException(409,'这条建议已经核对，请刷新后查看最新内容')
+            pending=next((item for item in active_candidates(record) if item['candidate_id']==candidate_id),None)
+            if pending is not None:
+                journal=json.loads((record.directory/'.correction-decisions'/(candidate_id+'.json')).read_text())
+                if journal.get('request_sha256')!=request_hash:raise HTTPException(409,'核对检查点不匹配，原内容已保留')
+                _,holder=next((level,holder) for level,holder in _holders(record)
+                    if _identity(level,holder,holder['correction_review'])==candidate_id)
+                holder.update(corrected=journal['chosen'],ai_pending=False,human_reviewed_at=journal['created_at'],human_review_decision=decision)
+                holder.pop('correction_review',None);holder.pop('ai_error',None)
+                record.save_all()
             return {'saved':True,'reused':True,'remaining':len(active_candidates(record)),'session':record.public()}
         candidate=next((item for item in active_candidates(record) if item['candidate_id']==candidate_id),None)
         if candidate is None:raise HTTPException(409,'原文或建议已经更新，本次未覆盖新内容，请刷新后核对')
