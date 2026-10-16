@@ -1167,6 +1167,15 @@ class RecordingStore:
                 print(f"忽略无法读取的录音会话 {meta_path}: {exc}", flush=True)
         live_paths = set(self.paths.values())
         self._read_cache = {path: cached for path, cached in self._read_cache.items() if path.parent in live_paths}
+        # Retain only a small recent read window. Complete transcripts include
+        # retrieval evidence and must not grow into an unbounded service cache.
+        retained={};size=0
+        for path,cached in sorted(self._read_cache.items(),
+                key=lambda pair:str(pair[1][1].metadata.get('updated_at') or ''),reverse=True):
+            cost=sum(stamp[1] for stamp in cached[0] if stamp is not None)
+            if cached[1] is self.active or (len(retained)<4 and size+cost<=8*1024*1024):
+                retained[path]=cached;size+=cost
+        self._read_cache=retained
         if active_records:
             active_records.sort(key=lambda item: str(item.metadata.get("started_at", "")))
             latest = active_records[-1]

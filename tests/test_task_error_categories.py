@@ -185,7 +185,7 @@ class WrappedProviderErrorTests(unittest.IsolatedAsyncioTestCase):
             (folder / 'task.json').write_text(json.dumps(checkpoint))
             self.assertEqual(app._summary_phase_progress(record, draft),
                              {'phase': '独立审查 · 已查看 6/38 页', 'completed_parts': 6,
-                              'total_parts': 38, 'unit': '页'})
+                              'total_parts': 38, 'unit': '页','review_round':1,'review_batches':[]})
             checkpoint['reviewed_pages'] = 39
             (folder / 'task.json').write_text(json.dumps(checkpoint))
             self.assertEqual(app._summary_phase_progress(record, draft)['total_parts'], 1)

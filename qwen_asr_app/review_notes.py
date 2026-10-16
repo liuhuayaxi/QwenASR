@@ -17,6 +17,8 @@ from .note_pdf import export_pdf, digest
 from .review_materials import collect, extract_image, safe_path, tokens, PDF_LOCK, bind_markdown_images, history_signature
 from .storage import local_now
 from .async_tasks import await_owned_task
+from .note_budget import BATCH_POLICY, pack_complete_items, require_budget, request_budget
+from .runtime_memory import release_pdf_cache
 
 
 async def owned_thread(function, *args):
@@ -81,6 +83,30 @@ def summary_signature(config):
     return {'provider':without_secrets(effective),
             'system_prompt':str(config.get('_note_summary_system_prompt') or ''),
             'custom_prompt':str(config.get('_note_summary_custom_prompt') or '')}
+
+
+def budget_compatible_identity(root, identity_inputs, config):
+    """Reuse an exact historical input identity after a budget-only increase.
+
+    Recompute the old hash with the saved limits; never select by title/date
+    or reuse a task whose sources, prompts, model or sampling settings changed.
+    """
+    signature=summary_signature(config)
+    def identity(value):
+        return hashlib.sha256(json.dumps([*identity_inputs,value],sort_keys=True,ensure_ascii=False,default=str).encode()).hexdigest()[:24]
+    current=identity(signature)
+    if (Path(root)/current/'task.json').is_file():return current
+    for path in sorted(Path(root).glob('*/task.json')):
+        try:
+            task=json.loads(path.read_text())
+            saved=task.get('identity_generation_config',task.get('generation_config',{}))
+        except (OSError,ValueError):continue
+        limits={key:saved[key] for key in ('context_window','max_output_tokens') if key in saved}
+        if not limits:continue
+        previous=copy.deepcopy(signature);previous['provider'].update(limits)
+        candidate=identity(previous)
+        if candidate==path.parent.name:return candidate
+    return current
 
 
 def _resume_revision_checkpoint(folder, task):
@@ -162,15 +188,71 @@ def review_start_progress(task, export):
             'review_total_pages': total}
 
 
-async def model_json(instructions, payload, config, output=12000):
+class PlanResponseError(ValueError):
+    def __init__(self, raw, detail):
+        super().__init__('知识清单返回的 JSON 格式无效：'+detail)
+        self.raw=raw
+
+
+async def model_json(instructions, payload, config, output=32768, *, response_path=None):
     # Include source text, history, all evidence and protocol/output reserves.
-    used=estimate_tokens(instructions)+estimate_tokens(json.dumps(payload,ensure_ascii=False))+output+16000
-    if used>context_window_for(config,'summary'):raise ValueError('资料和输出超过当前已保存上下文预算；成果已保留，请补选更相关的课件或提高窗口')
+    require_budget(instructions,payload,config,output,label='知识清单资料',window=context_window_for(config,'summary'))
     response=await request_ai_text(instructions=instructions,payload=payload,config=config,mode='summary',max_output_tokens=output)
-    result=parse_json(response)
+    if response_path is not None:atomic_bytes(Path(response_path),response.encode())
+    try:
+        result=parse_json(response)
+        if not isinstance(result,dict):raise ValueError('顶层必须是JSON对象')
+    except ValueError as exc:
+        raise PlanResponseError(response,str(exc)) from exc
     from .agy_cli import last_session_id
     if last_session_id.get():result['_provider_session_id']=last_session_id.get()
     return result
+
+
+def coverage_payload(group, payload, package, history_evidence):
+    terms=tokens(' '.join(b['text'] for b in group))
+    ranked=sorted(history_evidence,key=lambda b:-len(terms&tokens(b['text']))/max(1,len(tokens(b['text']))**.5))
+    chosen_history=[];history_budget=0
+    for block in ranked:
+        count=estimate_tokens(block['text'])
+        if history_budget+count>9000:continue
+        chosen_history.append(block);history_budget+=count
+        if len(chosen_history)>=20:break
+    ids={b['source'] for b in group}
+    matched={(p['source_id'],p['page']) for a in package['associations'] if a['source'] in ids for p in a['pages']}
+    nearby={(sid,p+d) for sid,p in matched for d in (-1,0,1)}
+    selected_pages=[p for p in package['relevant_pages'] if (p['source_id'],p['page']) in nearby]
+    return {**payload,'transcript':group,'history':chosen_history,'pages':selected_pages,
+        'page_matches':[a for a in package['associations'] if a['source'] in ids],
+        'history_scope':package['history_scope']+f'；本批只提供相关的 {len(chosen_history)} 个历史片段，其余 {len(history_evidence)-len(chosen_history)} 个未参与判断，不代表未讲过'}
+
+
+def coverage_batches(folder, source_blocks, payload_for, instructions, config):
+    path=Path(folder)/'coverage-batch-plan.json'
+    if path.exists():
+        groups=json.loads(path.read_text())['batches']
+        if (not groups or any(not ids for ids in groups)
+                or [ident for ids in groups for ident in ids]!=[b['source'] for b in source_blocks]):
+            raise ValueError('已保存知识识别计划与完整转写不一致，未覆盖检查点')
+        by_id={b['source']:b for b in source_blocks}
+        return [[by_id[ident] for ident in ids] for ids in groups]
+    if any(Path(folder).glob('coverage-part-*.json')) or any(Path(folder).glob('coverage-validation-*.json')):
+        # Do not reinterpret numbered legacy checkpoints with larger groups.
+        parts=[];part=[];size=0
+        for block in source_blocks:
+            count=estimate_tokens(block['text'])
+            if part and (size+count>5000 or len(part)>=18):parts.append(part);part=[];size=0
+            part.append(block);size+=count
+        if part:parts.append(part)
+        policy='legacy-checkpoint-groups'
+    else:
+        parts=pack_complete_items(source_blocks,payload_for,instructions,config,
+            lambda group:sum(max(160,estimate_tokens(b['text'])*2.5) for b in group),
+            window=context_window_for(config,'summary'))
+        policy=BATCH_POLICY
+    atomic_json(path,{'policy':policy,'batches':[[b['source'] for b in part] for part in parts],
+        'budgets':[request_budget(instructions,payload_for(part),config,window=context_window_for(config,'summary')) for part in parts]})
+    return parts
 
 
 def validate_plan(plan, source_ids, package):
@@ -201,16 +283,27 @@ async def validated_plan_part(instructions, payload, config, source_ids, package
         if start>max_repairs:
             raise ValueError('知识清单已达到自动修复上限，全部提案与校验依据已保留：'+error)
     for attempt in range(start,max_repairs+1):
-        if previous is None:
-            result=await model_json(instructions,payload,config)
-        else:
-            repair_instructions=instructions+'''
+        try:
+            response_path=folder/f'coverage-response-{index}-attempt-{attempt}.txt'
+            if previous is None:
+                result=await model_json(instructions,payload,config,response_path=response_path)
+            else:
+                repair_instructions=instructions+'''
 修复此前完整提案中未通过程序校验的字段，返回完整JSON，保留已经正确的知识项、分类、选图及覆盖结果。
+如果invalid_proposal含unparsed_json，那是完整原始返回文本；先修复JSON语法和转义，再核对内容。必须返回一个完整、有效的JSON对象，不要解释或代码围栏。
 原始source_input是唯一证据。evidence_quote必须从sources列出的某一个S来源直接复制连续原文，逐字一致；不能用同义概括、拼接多个来源或把课件要求当转写原话。
 如果当前来源没有证据，重新核实该要求与本批课堂的相关性并诚实写明，不能为通过校验把真实相关的掌握要求随意改成not_this_part，不能编造来源。
 严格执行原课件掌握/理解/了解层级，修复validation_diagnostics所指条目并复核其他条目；不要删除有效内容或修改原始输入。'''
-            result=await model_json(repair_instructions,{'source_input':payload,'invalid_proposal':previous,
-                'validation_error':error,'validation_diagnostics':diagnostics,'repair_attempt':attempt},config)
+                result=await model_json(repair_instructions,{'source_input':payload,'invalid_proposal':previous,
+                    'validation_error':error,'validation_diagnostics':diagnostics,'repair_attempt':attempt},config,response_path=response_path)
+        except PlanResponseError as exc:
+            error=str(exc);previous={'unparsed_json':exc.raw};diagnostics={'response_format':'invalid_json'}
+            atomic_json(folder/f'coverage-validation-{index}-attempt-{attempt}.json',{
+                'attempt':attempt,'max_repairs':max_repairs,'validation_error':error,
+                'diagnostics':diagnostics,'proposal':previous,'created_at':local_now()})
+            if attempt==max_repairs:
+                raise ValueError('知识清单自动修复后仍未通过校验，全部原始返回与诊断已保留：'+error) from exc
+            continue
         try:
             result=review_scope.canonical_metadata(result,package.get('learning_scope',{}))
             validate_plan(result,source_ids,package)
@@ -232,8 +325,10 @@ async def visual_review(pdf, export, folder, provider, ledger, evidence, *, gene
     # Keep the slot until the inner coordinator drains its owned reviewers,
     # including repeated cancellation. A cancelled waiter owns no review work.
     async with _visual_review_gate():
-        return await _visual_review_owned(pdf,export,folder,provider,ledger,evidence,
-            generator_session_ids=generator_session_ids,progress=progress)
+        try:
+            return await _visual_review_owned(pdf,export,folder,provider,ledger,evidence,
+                generator_session_ids=generator_session_ids,progress=progress)
+        finally:release_pdf_cache()
 
 
 async def _visual_review_owned(pdf, export, folder, provider, ledger, evidence, *, generator_session_ids=(), progress=None):
@@ -279,6 +374,7 @@ async def _visual_review_owned(pdf, export, folder, provider, ledger, evidence, 
                 for image_id in image_ids_by_digest.get(embedded['digest'],[]):
                     if number not in figure_pdf_locations[image_id]:figure_pdf_locations[image_id].append(number)
     report['figure_pdf_locations']=figure_pdf_locations
+    release_pdf_cache()
     # Text-only legacy notes have no original-image slots to reserve. Keep
     # their established batch size on resume; never exceed four actual images.
     batch_size=report.get('batch_size') or max((len(b.get('pages',[])) for b in report['batches']),default=2 if figures else 4)
@@ -291,6 +387,9 @@ async def _visual_review_owned(pdf, export, folder, provider, ledger, evidence, 
     completed={tuple(batch['pages']):batch for batch in report['batches']
         if tuple(batch.get('pages',[])) in expected_batches and batch.get('receipt',{}).get('session_id')
         and batch.get('result',{}).get('viewed_pages')==batch['pages']}
+    report['active_batches']={}
+    request_timeout=max(30,min(300,int(provider.get('cli_timeout_seconds') or 300)))
+    review_provider={**provider,'cli_timeout_seconds':request_timeout}
 
     def merge_completed(*,notify=True):
         # No await in the merge/save: successful siblings cannot overwrite a
@@ -355,17 +454,29 @@ async def _visual_review_owned(pdf, export, folder, provider, ledger, evidence, 
             'source_evidence':relevant_evidence,'original_figures':refs,'source_scope':'本批相关原页，含不作正文配图的原公式页；OCR仅用于导航，公式以实际原图为准。全文知识清单另附',
             'pdf':str(pdf),'pdf_sha256':export['pdf_sha256'],'learning_scope':scope,'required_scope_ids':required_scope_ids},ensure_ascii=False)
         for attempt in range(3):
+            key='-'.join(map(str,numbers))
+            report['active_batches'][key]={'pages':numbers,'attempt':attempt+1,
+                'started_at':local_now(),'timeout_seconds':request_timeout,'state':'waiting'}
+            atomic_json(report_path,report)
             try:
-                response,receipt=await request_materials(prompt,folder,provider,read_paths=[pdf,*required],require_images=required,label='review',schema=({**REVIEW_SCHEMA,'required':[*REVIEW_SCHEMA['required'],'scope_policy_checked','scope_findings'],'properties':{**REVIEW_SCHEMA['properties'],'scope_policy_checked':{'type':'boolean'},'scope_findings':{'type':'array','items':{'type':'object'}}}} if scope.get('enabled') else REVIEW_SCHEMA))
+                release_pdf_cache()
+                async with asyncio.timeout(request_timeout+5):
+                    response,receipt=await request_materials(prompt,folder,review_provider,read_paths=[pdf,*required],require_images=required,label='review',schema=({**REVIEW_SCHEMA,'required':[*REVIEW_SCHEMA['required'],'scope_policy_checked','scope_findings'],'properties':{**REVIEW_SCHEMA['properties'],'scope_policy_checked':{'type':'boolean'},'scope_findings':{'type':'array','items':{'type':'object'}}}} if scope.get('enabled') else REVIEW_SCHEMA))
                 result=parse_json(response)
                 review_scope.validate_review(result,scope,required_scope_ids)
                 break
             except MaterialSessionError as exc:
-                if not exc.retriable or attempt==2:raise
+                if not exc.retriable:raise
+                if attempt==2:raise MaterialSessionError('本批审查三次请求未完成；已审批次保留，请稍后继续',kind='review_batch_exhausted') from exc
                 await asyncio.sleep(2*(attempt+1))
+            except TimeoutError:
+                if attempt==2:raise MaterialSessionError('本批审查已达到等待上限；已审批次保留，请稍后继续',kind='review_batch_exhausted') from None
             except json.JSONDecodeError:
                 if attempt==2:raise ValueError('独立审查未返回合法结构化结果，已保留已审批次；未判为通过') from None
                 prompt+='\n上次结果含非法 JSON 转义。证据字段可使用普通文字表达变量，避免在 JSON 字符串中手写未转义 LaTeX。'
+            finally:
+                report['active_batches'].pop(key,None)
+                atomic_json(report_path,report)
         if receipt['session_id'] in generator_session_ids:raise ValueError('审查会话与生成会话相同')
         if sorted(result.get('viewed_pages',[]))!=numbers or result.get('status') not in {'passed','needs_revision'} or not isinstance(result.get('issues'),list):raise ValueError('审查回执缺少实际页码、问题或结论')
         for issue in result['issues']:
@@ -430,7 +541,8 @@ async def generate(record, config):
     corpus=[(s['id'],s['sha256']) for s in CourseFiles(app_settings).list(record.metadata['category'])]
     historical_versions=history_signature(record,app_settings)
     pipeline_version=SCOPE_VERSION if review_scope.enabled_for(record.metadata) else VERSION
-    identity=hashlib.sha256(json.dumps([pipeline_version,record.id,blocks,selection,corpus,historical_versions,saved_notes_markdown(record),summary_signature(config)],sort_keys=True,ensure_ascii=False,default=str).encode()).hexdigest()[:24]
+    identity=budget_compatible_identity(record.directory/'.review-notes',
+        [pipeline_version,record.id,blocks,selection,corpus,historical_versions,saved_notes_markdown(record)],config)
     relative=f'.review-notes/{identity}';folder=record.directory/relative;folder.mkdir(parents=True,exist_ok=True,mode=0o700)
     task_path=folder/'task.json'
     task=json.loads(task_path.read_text()) if task_path.exists() else {'id':identity,'version':pipeline_version,'created_at':local_now(),'base_body_sha256':initial}
@@ -439,6 +551,8 @@ async def generate(record, config):
     if task.get('status')=='completed' and existing.get('review_package')==relative and (folder/'note.md').is_file() and body_hash(existing)==hashlib.sha256((folder/'note.md').read_bytes()).hexdigest():
         return existing
     provider=provider_for_mode(config.get('ai',{}),'summary')
+    if 'generation_config' in task:
+        task.setdefault('identity_generation_config',copy.deepcopy(task['generation_config']))
     task['generation_config']={k:provider[k] for k in ('transport','model','cli_model','cli_effort','context_window','max_output_tokens') if k in provider}
     try:
         stage(record,task,folder,'匹配课件',status='running')
@@ -482,12 +596,8 @@ async def generate(record, config):
 返回 JSON {"knowledge":[{"id":"k1","topic":"...","kind":"...","sources":["S1"],"history_evidence":"此前课次时间或范围不足","explanation_needed":"...","teacher_emphasis":"explicit|inferred|none","source_quote":"真实支持语句","target_section":"..."}],"figures_required":true或false,"figures":[{"source_id":"...","page":原始页码,"bbox":[0,0,1,1],"concept":"...","reason":"教学用途"}],"omitted_sources":[{"source":"S编号","reason":"无关闲聊等具体理由"}],"warnings":[]}。
 图片以原课件重要教学图为依据，优先新概念、老师强调、推导例题。按图文学习材料组织，主动补足关键机理、器件结构、能带、光路和曲线原图；相关前章原图可作必要复习连接并明确来源。不能因为已有少量插图就漏掉理解本节重要概念所需的原图。图应贴近对应解释，避免无图的连续文字大段；不要用装饰图片或整张纯公式文字页凑数。bbox 是归一化区域，应保留完整标签图例。不能确定裁切就整页。每个输入 S 片段必须归入知识来源或有理由的 omitted_sources。'''+review_scope.instructions(scope,planning=True)
             plan={'knowledge':[],'figures':[],'omitted_sources':[],'warnings':[],'figures_required':False,'history_selection':[]}
-            parts=[];part=[];size=0
-            for block in source_blocks:
-                count=estimate_tokens(block['text'])
-                if part and (size+count>5000 or len(part)>=18):parts.append(part);part=[];size=0
-                part.append(block);size+=count
-            if part:parts.append(part)
+            payload_for=lambda group:coverage_payload(group,payload,package,history_evidence)
+            parts=coverage_batches(folder,source_blocks,payload_for,plan_instructions,config)
             task['total_parts']=len(parts)
             stage(record,task,folder,'识别本节新内容')
             # Bounded textual calls can overlap; all native PDF operations remain serial.
@@ -495,20 +605,9 @@ async def generate(record, config):
             async def plan_part(index, group):
                 path=folder/f'coverage-part-{index}.json'
                 if path.exists():return json.loads(path.read_text())
-                terms=tokens(' '.join(b['text'] for b in group))
-                ranked=sorted(history_evidence,key=lambda b:-len(terms&tokens(b['text']))/max(1,len(tokens(b['text']))**.5))
-                chosen_history=[];history_budget=0
-                for b in ranked:
-                    count=estimate_tokens(b['text'])
-                    if history_budget+count>9000:continue
-                    chosen_history.append(b);history_budget+=count
-                    if len(chosen_history)>=20:break
-                ids={b['source'] for b in group};matched={(p['source_id'],p['page']) for a in package['associations'] if a['source'] in ids for p in a['pages']}
-                nearby={(sid,p+d) for sid,p in matched for d in (-1,0,1)}
-                selected_pages=[p for p in package['relevant_pages'] if (p['source_id'],p['page']) in nearby]
-                local={**payload,'transcript':group,'history':chosen_history,'pages':selected_pages,
-                    'page_matches':[a for a in package['associations'] if a['source'] in ids],
-                    'history_scope':package['history_scope']+f'；本批只提供相关的 {len(chosen_history)} 个历史片段，其余 {len(history_evidence)-len(chosen_history)} 个未参与判断，不代表未讲过'}
+                local=payload_for(group)
+                ids={b['source'] for b in group}
+                chosen_history=local['history'];selected_pages=local['pages']
                 cache_key=hashlib.sha256(json.dumps([plan_instructions,local,summary_signature(config)['provider']],sort_keys=True,ensure_ascii=False).encode()).hexdigest()
                 stage_cache=record.directory/'.review-notes/.stage-cache'/(cache_key+'.plan.json')
                 if stage_cache.is_file():
@@ -517,7 +616,7 @@ async def generate(record, config):
                     'pages':[{'source_id':p['source_id'],'page':p['page'],'text_sha256':hashlib.sha256(p['text'].encode()).hexdigest()} for p in selected_pages],
                     'history':[{'lesson_id':h['lesson_id'],'start':h['start'],'end':h['end']} for h in chosen_history],
                     'history_omitted_count':len(history_evidence)-len(chosen_history),
-                    'estimated_tokens_with_protocol_and_output':estimate_tokens(plan_instructions)+estimate_tokens(json.dumps(local,ensure_ascii=False))+28000})
+                    'estimated_tokens_with_protocol_and_output':request_budget(plan_instructions,local,config)['estimated_total']})
                 async with semaphore:
                     result=await validated_plan_part(plan_instructions,local,config,ids,package,folder,index)
                 result['history_scope']={'selected_blocks':len(chosen_history),'unselected_blocks':len(history_evidence)-len(chosen_history),
@@ -605,8 +704,8 @@ async def generate(record, config):
         instructions=TEACHING+'\n'+str(config.get('_note_summary_system_prompt') or '')+'\n'+str(config.get('_note_summary_custom_prompt') or '')+review_scope.instructions(scope)
         if draft_path.exists():markdown=draft_path.read_text()
         else:
-            used=estimate_tokens(instructions)+estimate_tokens(json.dumps(payload,ensure_ascii=False))+32768+16000
-            if used>context_window_for(config,'summary'):raise ValueError('完整图文写作超过已保存上下文预算，请缩小补选范围；未截断课程资料')
+            budget=require_budget(instructions,payload,config,label='完整图文写作',window=context_window_for(config,'summary'))
+            atomic_json(folder/'writing-budget.json',budget)
             markdown=await request_ai_text(instructions=instructions,payload=payload,config=config,mode='summary',max_output_tokens=32768)
             from .agy_cli import last_session_id
             task['writer_session_id']=last_session_id.get()
@@ -647,6 +746,7 @@ async def generate(record, config):
             latex_writers=latex_manifest.get('writer_session_ids') or ([latex_manifest['writer_session_id']] if latex_manifest.get('writer_session_id') else [])
             task['writer_session_ids']=list(dict.fromkeys([*task['writer_session_ids'],*latex_writers]))
             stage(record,task,folder,'独立审查',pdf_sha256=export['pdf_sha256'],
+                  review_report=str((pdf.parent/'review.json').relative_to(folder)),
                   **review_start_progress(task,export))
             report=await visual_review(pdf,export,folder,provider,plan,package['relevant_pages'],generator_session_ids=task['writer_session_ids'],
                 progress=lambda done,total:stage(record,task,folder,f'独立审查 · 已查看 {done}/{total} 页',reviewed_pages=done,review_total_pages=total))
@@ -659,9 +759,10 @@ async def generate(record, config):
             if corrections.is_file():feedback['source_comparison']=json.loads(corrections.read_text())
             revision_payload={'draft':markdown,'review':feedback,'evidence':payload,
                 'latex_draft':(folder/'latex/body.tex').read_text()}
-            if estimate_tokens(TEACHING+review_scope.instructions(scope))+estimate_tokens(json.dumps(revision_payload,ensure_ascii=False))+32768+16000>context_window_for(config,'summary'):
-                raise ValueError('审查修订材料超过已保存上下文预算；草稿与逐页审查已保留，未静默截断')
-            revised=await request_ai_text(instructions=TEACHING+review_scope.instructions(scope)+'\n根据独立审查修订完整笔记，保留全部正确内容及图片引用。',
+            revision_instructions=TEACHING+review_scope.instructions(scope)+'\n根据独立审查修订完整笔记，保留全部正确内容及图片引用。'
+            atomic_json(folder/'revision-budget.json',request_budget(revision_instructions,revision_payload,config))
+            require_budget(revision_instructions,revision_payload,config,label='审查修订材料',window=context_window_for(config,'summary'))
+            revised=await request_ai_text(instructions=revision_instructions,
                 payload=revision_payload,config=config,mode='summary',max_output_tokens=32768)
             from .agy_cli import last_session_id
             _checkpoint_revision(folder,task,markdown,revised,revision,last_session_id.get())

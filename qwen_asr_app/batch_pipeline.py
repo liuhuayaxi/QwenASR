@@ -5,11 +5,10 @@ import time
 from typing import Any
 
 from .batch_ai import correct_batch_segment, correct_batch_segments
-from .ai import concurrency_for, context_window_for, uses_agy_gemini
+from .ai import concurrency_for, context_window_for, uses_agy_gemini, agy_rewrite_source_budget
 from .context_budget import estimate_tokens
 
-CORRECTION_BATCH_SECONDS = 300
-CORRECTION_BATCH_TOKENS = 6000
+CORRECTION_BATCH_SECONDS = 1800
 
 
 class SegmentCorrectionPipeline:
@@ -21,10 +20,13 @@ class SegmentCorrectionPipeline:
 
     def __init__(self, record: Any, config: dict[str, Any]) -> None:
         self.record, self.config = record, config
+        if record is not None:
+            from .refinement import restore_checkpoints
+            restore_checkpoints(record)
         self.concurrency = concurrency_for(config, "correction")
         self.grouped = bool(config.get("ai_correction")) and str(config.get("translation", "off")) == "off" and uses_agy_gemini(config, "correction")
         self.batch_seconds = CORRECTION_BATCH_SECONDS
-        self.batch_tokens = max(128, min(CORRECTION_BATCH_TOKENS, (context_window_for(config, "correction") - 1800) // 2))
+        self.batch_tokens = agy_rewrite_source_budget(config,'correction')
         self.buffer: list[dict[str, Any]] = []
         self.buffer_tokens = 0
         self.submit_lock = asyncio.Lock()
@@ -70,7 +72,7 @@ class SegmentCorrectionPipeline:
                                                "message": updated["ai_error"], "scope": "segment"})
                     else:
                         self.events.put_nowait({"type": "ai_segment", "segment": updated,
-                                               "stage": f"AI 已精修段 {updated['id']} · 每批约 5 分钟" if self.grouped else f"AI 已精修段 {updated['id']} · 本地转写同时进行"})
+                                               "stage": f"AI 已保存校对段 {updated['id']}" if self.grouped else f"AI 已精修段 {updated['id']} · 本地转写同时进行"})
                 if self.grouped and self.record is not None:
                     self.record.save_all()
             finally:
@@ -108,6 +110,12 @@ class SegmentCorrectionPipeline:
                 await self.task
             if self.grouped and segment["id"] in self.seen_ids:
                 return
+            if self.record is not None:
+                from .refinement import pending_ids
+                existing=next((s for s in self.record.segments if s['id']==segment['id']),None)
+                if existing is not None and segment['id'] not in pending_ids(self.record):
+                    self.seen_ids.add(segment['id'])
+                    return
             segment.setdefault("metrics", {})["ai_queued_at"] = time.time()
             segment["ai_pending"] = True
             if self.record is not None:

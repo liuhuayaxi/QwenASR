@@ -95,7 +95,7 @@ export function createContinuation({root = document, openRecord, toast, fetcher 
     if (!task || !(task.actions || []).includes(button.dataset.action)) return;
     busy = true; render();
     try {
-      const response = await fetcher('/api/tasks/action', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(aiTaskPayload(task,button.dataset.action))});
+      const response = await fetcher('/api/tasks/action', {method:'POST',headers:{'Content-Type':'application/json','X-QwenASR-Client':'task-center'},signal:AbortSignal.timeout(30000),body:JSON.stringify(aiTaskPayload(task,button.dataset.action))});
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || '无法继续任务');
       toast('已提交后台处理');

@@ -41,7 +41,10 @@ export function createNoteAutosave({onStatus, onSaved}) {
   function change(id, text) {
     const doc = documents.get(id); if (!doc) return;
     doc.text = text; doc.retries = 0; persist(doc);
-    if (dirty(doc)) {
+    // Returning to savedInput does not undo a PUT already in flight. Its
+    // response may still commit another value, or be lost after committing.
+    // Keep reconciliation scheduled until the server state is acknowledged.
+    if (dirty(doc) || doc.pending || doc.uncertain) {
       status(doc, 'pending', doc.localSafe ? '草稿已保留，稍后自动保存…' : '正在编辑，等待自动保存…');
       schedule(doc);
     } else { clearTimeout(doc.timer); status(doc, 'saved', '已自动保存'); }
@@ -96,5 +99,5 @@ export function createNoteAutosave({onStatus, onSaved}) {
     return await doc.pending;
   }
   return {open, change, flush, get: id => documents.get(id),
-    isDirty: id => { const doc = documents.get(id); return !!doc && (dirty(doc) || doc.uncertain); }};
+    isDirty: id => { const doc = documents.get(id); return Boolean(doc && (dirty(doc) || doc.pending || doc.uncertain)); }};
 }

@@ -1148,6 +1148,7 @@ async def polish_timestamped_segments_resilient(
     config: dict[str, Any],
     *,
     mode: str = "correction",
+    on_checkpoint=None,
 ) -> list[dict[str, Any]]:
     """Refine a block, bisecting only when its structured result is unsafe.
 
@@ -1156,7 +1157,7 @@ async def polish_timestamped_segments_resilient(
     ranges are attempted so one bad response does not fail the whole lesson.
     """
     try:
-        return await polish_timestamped_segments(
+        mapped = await polish_timestamped_segments(
             segments, detected_language, config, mode=mode
         )
     except (AIRequestError, ValueError) as exc:
@@ -1173,10 +1174,10 @@ async def polish_timestamped_segments_resilient(
         if len(segments) > 1:
             midpoint = len(segments) // 2
             left = await polish_timestamped_segments_resilient(
-                segments[:midpoint], detected_language, config, mode=mode
+                segments[:midpoint], detected_language, config, mode=mode, on_checkpoint=on_checkpoint
             )
             right = await polish_timestamped_segments_resilient(
-                segments[midpoint:], detected_language, config, mode=mode
+                segments[midpoint:], detected_language, config, mode=mode, on_checkpoint=on_checkpoint
             )
             return [*left, *right]
 
@@ -1229,7 +1230,13 @@ async def polish_timestamped_segments_resilient(
             block['correction_provenance']=correction_provenance(raw,proposed,config,[int(segment['id'])],provider.get('cli_model') or provider.get('model'))
         if candidate:
             block['correction_review'] = candidate
+        if on_checkpoint is not None:on_checkpoint([block])
         return [block]
+    else:
+        # A valid half is durable before attempting its sibling. Cancellation
+        # never discards a complete, validated response from an earlier half.
+        if on_checkpoint is not None:on_checkpoint(mapped)
+        return mapped
 
 
 def summary_instructions(config: dict[str, Any], *, live: bool = False) -> str:

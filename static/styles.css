@@ -514,3 +514,9 @@ footer { min-height: 76px; display: flex; justify-content: space-between; align-
   .workbench-page:not(.library-page) .workspace { grid-template-columns: minmax(0, 1fr); }
   .workbench-page:not(.library-page) .shell { width: calc(100% - 32px); }
 }
+
+.correction-candidate { padding: 16px 0; border-bottom: 1px solid var(--line); }
+.correction-candidate p { white-space: pre-wrap; overflow-wrap: anywhere; }
+.correction-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
+.correction-edit { width:100%; min-height:100px; margin-top:10px; resize:vertical; }
+.correction-error { color:var(--danger); }
