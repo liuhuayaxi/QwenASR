@@ -522,7 +522,7 @@ class CourseIngestor:
             batch_size = 16
             if hasattr(embedder, "config") and isinstance(embedder.config, dict):
                 batch_size = max(1, embedder.config.get("batch_size", 16))
-            cached = self.store.cached_vectors([c['content_hash'] for c in chunks_data], active_contract)
+            cached = self.store.cached_vectors([c['content_hash'] for c in chunks_data], active_contract,compact=True)
             vectors = [cached.get(c['content_hash']) for c in chunks_data]
             missing=[i for i,value in enumerate(vectors) if value is None]
             if bounded_version:
@@ -550,8 +550,9 @@ class CourseIngestor:
                                     raise
                                 batch_vecs.append(None)
                                 vector_warning='部分完整结构块超过模型输入预算，保留全文供词法查询；其余分块已向量化'
+                    from array import array
                     for i,vector in zip(indexes,batch_vecs):
-                        vectors[i]=vector
+                        vectors[i]=array('f',vector) if vector is not None else None
             except Exception as exc:
                 if "尚未准备" in str(exc) or "not prepared" in str(exc).lower() or _is_embedding_budget_error(exc):
                     vectors = None

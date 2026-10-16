@@ -381,7 +381,7 @@ class KnowledgeStore:
                 conn.execute("UPDATE chunks SET is_active=0 WHERE source_id=?", (source_id,))
                 conn.execute("DELETE FROM chunks_fts WHERE chunk_id IN (SELECT chunk_id FROM chunks WHERE source_id=?)", (source_id,))
 
-    def cached_vectors(self, hashes, contract):
+    def cached_vectors(self, hashes, contract, *, compact=False):
         key=json.dumps(contract, sort_keys=True) if isinstance(contract,dict) else str(contract or '')
         found={}
         with self._connect() as conn:
@@ -395,7 +395,7 @@ class KnowledgeStore:
                     from array import array
                     values=array('f');values.frombytes(row['vector'])
                     if len(values)==row['dimension']:
-                        found[row['content_hash']]=values.tolist()
+                        found[row['content_hash']]=values if compact else values.tolist()
         return found
 
     # ---------------- Transactional Old/New Switch ----------------

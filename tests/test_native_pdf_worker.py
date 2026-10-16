@@ -32,6 +32,10 @@ store=KnowledgeStore(sys.argv[1]);store.upsert_course('course','synthetic','/syn
 source={'source_id':'source','course_id':'course','category':'synthetic','title':'test','kind':'material','origin':'original','source_type':'file','open_url':'/synthetic'}
 store.commit_source_revision(source_meta=source,revision='revision',content_hash='hash',parser_version='parser',chunker_version='chunker',embedding_contract={'dimension':3},chunks_data=[{'chunk_id':'chunk','content_hash':'chunk-hash','text':'synthetic'}],vectors=[[0.1,-2.0,3.5]])
 assert store.cached_vectors(['chunk-hash'],{'dimension':3})['chunk-hash']==list(struct.unpack('=3f',struct.pack('=3f',0.1,-2.0,3.5)))
+from array import array
+compact=store.cached_vectors(['chunk-hash'],{'dimension':3},compact=True)['chunk-hash']
+assert isinstance(compact,array) and compact.itemsize==4
+assert compact.tolist()==store.cached_vectors(['chunk-hash'],{'dimension':3})['chunk-hash']
 hits=store.search_vectors('synthetic',[0.1,-2.0,3.5],{'dimension':3})
 assert len(hits)==1 and hits[0]['chunk_id']=='chunk' and abs(hits[0]['vector_score']-1)<1e-6
 assert 'numpy' not in sys.modules

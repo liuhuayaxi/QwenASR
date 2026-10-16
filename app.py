@@ -1660,10 +1660,9 @@ async def recording_library(request: Request = None, category: str = '', date: s
     if offset < 0 or not 0 <= limit <= 100 or (date and not re.fullmatch(r'\d{4}-\d{2}-\d{2}', date)):
         raise HTTPException(400, '分页或日期参数无效')
     discover_courses(app_settings)
-    records = recording_store.list_records()
-    restored = [recording_discard.reconcile_restored(record.id) for record in records]
-    if any(restored):
-        records = recording_store.list_records()
+    visit=getattr(recording_store,'iter_records',recording_store.list_records)
+    for record in visit():recording_discard.reconcile_restored(record.id)
+    records=visit()
     if ids:
         wanted = ids.split(',')
         if len(wanted) > 100 or any(not re.fullmatch(r'[A-Za-z0-9_-]{6,80}', value) for value in wanted):

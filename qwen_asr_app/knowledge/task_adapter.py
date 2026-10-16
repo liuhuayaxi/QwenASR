@@ -26,8 +26,8 @@ class IntelligenceTasks:
     def tasks(self):
         result=[]
         jobs = self.knowledge.jobs()
-        records = list(self.recordings.list_records())
-        by_record = {record.id: record for record in records}
+        visit=getattr(self.recordings,'iter_records',self.recordings.list_records)
+        record_titles = {record.id:record.metadata.get('title') for record in visit()}
         for job in jobs:
             status=job['status']
             task = {'id':'knowledge:'+job['job_id'],'type':'knowledge_index','family':'knowledge',
@@ -50,9 +50,8 @@ class IntelligenceTasks:
                     record_id = source.get('lesson_id')
                     if record_id:
                         task['recording_id'] = record_id
-                        record = by_record.get(record_id)
-                        if record:
-                            task['title'] = record.metadata.get('title') or task['title']
+                        if record_id in record_titles:
+                            task['title'] = record_titles[record_id] or task['title']
                             task['result_url'] = '/library?' + urlencode({'recording': record_id})
                     recovery = self._recovered_index(job, source, jobs)
                     if recovery:
@@ -60,7 +59,7 @@ class IntelligenceTasks:
                                     recovery_reason='该来源已在后续任务中完成索引，旧错误保留在历史中',
                                     recovery=recovery)
             result.append(task)
-        for record in records:
+        for record in visit():
             try:
                 notes=read_notes_doc(record).get('notes',[])
             except (OSError,ValueError):

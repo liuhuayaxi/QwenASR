@@ -55,6 +55,8 @@ A real 34-page course note passed complete visual review during this change. Its
 
 Idle backlog polling reads changed metadata headers and does not import the audio decoder or NumPy. Task polling visits recording objects sequentially, and the read cache stays bounded during the scan as well as afterward. Cache limits are four recent records and an estimated 8 MiB of serialized input, plus the active recording; the serialized size is not a claim about exact Python heap size.
 
+The knowledge task adapter keeps only recording titles between passes. Library pagination builds small list DTOs as it visits each record, preserving course totals, calendar filters and ordering without holding all transcripts through response construction. Synthetic object-lifetime checks cover both paths. Indexing reuses compact float32 arrays and compacts each new embedding batch before retaining it for the revision commit.
+
 Native PDF text extraction, selected-page rendering, image matching and completion inspection run in short-lived workers. One shared parent lock serializes those operations; each render request accepts at most four selected pages. Worker exit releases its native image cache. This does not change the original courseware or lower the quality of the released PDF.
 
 Knowledge-store connections close at each transaction boundary. Vector serialization retains the existing float32 format. Exact cosine ranking streams database rows into a bounded top-k heap using the standard library, so retrieval does not load a permanent NumPy runtime or allocate a full matrix in the web service. Actual local inference remains a separate, on-demand process.
