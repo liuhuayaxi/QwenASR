@@ -19,12 +19,18 @@ def _identity(level, holder, candidate):
 
 
 def _holders(record):
+    # Match transcript_blocks precedence exactly, including identical proposals
+    # repeated in older layers. Resolving a shadowed holder leaves the visible
+    # candidate pending forever.
+    global_result=record.metadata.get('ai_global_rewrite') or {}
+    groups=[('全局精修',global_result.get('parts') or [])] if global_result.get('complete') else []
+    groups.append(('阶段精修',record.metadata.get('ai_reviews') or []))
+    for level,parts in groups:
+        for part in parts:
+            if part.get('correction_review') and not part.get('ai_error') and str(part.get('corrected') or '').strip():
+                yield level,part
     for segment in record.segments:
         if segment.get('correction_review'):yield '片段精修',segment
-    for level,parts in [('阶段精修',record.metadata.get('ai_reviews') or []),
-                        ('全局精修',(record.metadata.get('ai_global_rewrite') or {}).get('parts') or [])]:
-        for part in parts:
-            if part.get('correction_review'):yield level,part
 
 
 def active_candidates(record):

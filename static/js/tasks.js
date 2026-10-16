@@ -186,7 +186,7 @@ function groupCard(group) {
     ${error}${running && group.review_count?`<p class="group-secondary">另有 ${group.review_count} 个校对步骤待核对，不影响当前处理</p>`:''}
     <details class="group-details" data-detail-key="steps"><summary>任务详情<span>${current.length} 个当前步骤${history.length?` · ${history.length} 条历史`:''}</span></summary>
       ${current.map(t=>card(t)).join('')}
-      ${group.context_tasks?.length?`<details class="task-details" data-detail-key="queue-context"><summary>课程队列控制</summary>${group.context_tasks.map(contextQueueCard).join('')}</details>`:''}
+      ${group.context_tasks?.length?`<details class="task-details group-context" data-detail-key="queue-context"><summary>课程队列控制</summary>${group.context_tasks.map(contextQueueCard).join('')}</details>`:''}
       ${history.length?`<details class="group-history" data-detail-key="history"><summary>已完成与历史 · ${history.length} 条记录</summary>${history.map(t=>card(t,true)).join('')}</details>`:''}
     </details></section>`;
 
