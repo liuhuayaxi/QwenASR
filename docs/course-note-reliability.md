@@ -9,6 +9,10 @@ Course notes use one shared authoring, validation, compilation and visual-review
 | One AI request contains several transcript segments | Every result retains exactly one original segment ID, its real times and its own correction candidate. This also applies to uploaded-audio global editing and translation. |
 | AI merges, omits or reorders IDs | Reject that mapping and use the existing bounded split recovery. Persist completed ranges before processing their siblings. |
 | An old global result is replaced by a different request fingerprint | Preserve the displaced result in refinement history. |
+| A rewrite changes a number, unit, negation or formula condition | A fresh AI request checks every candidate against acoustic ASR text, nearby segments and available original course evidence. Adopt supported corrections; keep the previous text for rejected or uncertain changes. Uncertainty is an inline note and does not require individual approval. |
+| A verifier returns missing, reordered or duplicate IDs, or unknown evidence | Retry the structured verdict once; an invalid batch changes no text. Retain the proposals and show a recoverable task failure. |
+| A verifier finishes but the process stops before saving the recording | Replay the hashed receipt and per-candidate journals, provided the candidate and its original source still match. A changed source is never overwritten. |
+| A service restarts with saved correction candidates | Resume independent verification using server-saved settings. Explicitly paused or cancelled tasks stay stopped. New batch, global, periodic and note-generation paths also invoke the verifier. |
 | A reader confirms one global correction | Update that segment and rebuild its aggregate export text. Neighboring segments retain their own text and decisions. |
 | The writer emits a simple table float | Convert its wrapper to an in-place table and its caption to `captionof{table}`. Keep all cells; validate the resulting body with the normal command allowlist. |
 | Text contains Latin accents | Normalize simple text accents to plain Latin letters. Mathematical commands such as `hat`, `bar` and `tilde` retain their meaning. |
@@ -46,3 +50,13 @@ The browser regression runs in GitHub Actions. For a manual check of its isolate
 Verify the published PDF's hash against its completed visual-review record and its download response. Keep original audio and transcript hashes across a service restart. Load updated service code only after active jobs have saved their checkpoints; restore any deliberately deferred indexing after the restart.
 
 A real 34-page course note passed complete visual review during this change. Its download returned HTTP 200 and matched the reviewed PDF hash. A real latest recording retained 64 independent transcript ranges after restoring four legacy merged pairs; playback opened at the selected segment time. These runtime checks complement the synthetic recovery tests.
+
+## Memory controls
+
+Idle backlog polling reads changed metadata headers and does not import the audio decoder or NumPy. Task polling visits recording objects sequentially, and the read cache stays bounded during the scan as well as afterward. Cache limits are four recent records and an estimated 8 MiB of serialized input, plus the active recording; the serialized size is not a claim about exact Python heap size.
+
+Native PDF text extraction, selected-page rendering, image matching and completion inspection run in short-lived workers. One shared parent lock serializes those operations; each render request accepts at most four selected pages. Worker exit releases its native image cache. This does not change the original courseware or lower the quality of the released PDF.
+
+Knowledge-store connections close at each transaction boundary. Vector serialization retains the existing float32 format. Exact cosine ranking streams database rows into a bounded top-k heap using the standard library, so retrieval does not load a permanent NumPy runtime or allocate a full matrix in the web service. Actual local inference remains a separate, on-demand process.
+
+Measure an idle service with no recording, AI, indexing or export work. On macOS compare physical footprint (including the process's compressed/swapped allocation), not just RSS; record active worker processes separately. A cold process, an indexing process and a service after real requests are different measurements.

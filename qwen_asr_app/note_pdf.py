@@ -132,10 +132,10 @@ def _export_markdown_pdf(markdown, folder, provenance=None):
         if result.returncode:
             part.unlink(missing_ok=True)
             raise RuntimeError('PDF 导出未完成：'+result.stderr[-400:])
-        import fitz
-        with PDF_LOCK,fitz.open(part) as doc:
-            if not len(doc) or any(not p.get_text().strip() and not p.get_images() for p in doc):raise ValueError('PDF 包含空白页面，未发布')
-            pages=len(doc)
+        from .native_pdf import pdf_operation
+        with PDF_LOCK:inspection=pdf_operation('inspect',path=str(part))
+        if not inspection['pages'] or inspection['blank_pages']:raise ValueError('PDF 包含空白页面，未发布')
+        pages=inspection['pages']
         with part.open('rb') as stream:os.fsync(stream.fileno())
         os.replace(part,pdf)
         value={'fingerprint':ident,'pdf_sha256':digest(pdf),'pages':pages,'renderer':RENDERER,
@@ -171,11 +171,10 @@ def _export_latex_pdf(markdown, folder, provenance):
             generated,details=compile_document(body,folder,output/'tex-build',transcript=transcript,images=images)
         part=output/'candidate.part.pdf';shutil.copyfile(generated,part)
         with part.open('rb') as stream:os.fsync(stream.fileno())
-        import fitz
-        with PDF_LOCK,fitz.open(part) as document:
-            if not len(document) or any(not p.get_text().strip() and not p.get_images() for p in document):
-                raise ValueError('LaTeX PDF存在空白页；候选已保留，未发布')
-            pages=len(document)
+        from .native_pdf import pdf_operation
+        with PDF_LOCK:inspection=pdf_operation('inspect',path=str(part))
+        if not inspection['pages'] or inspection['blank_pages']:raise ValueError('LaTeX PDF存在空白页；候选已保留，未发布')
+        pages=inspection['pages']
         os.replace(part,pdf)
         value={'fingerprint':ident,'pdf_sha256':digest(pdf),'pages':pages,'renderer':'xelatex-course-v1',
             'body_sha256':hashlib.sha256(markdown.encode()).hexdigest(),'source_format':'latex',

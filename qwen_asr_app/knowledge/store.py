@@ -1,8 +1,10 @@
-"""SQLite WAL storage, FTS char ngrams, NumPy vector search, and transactional revision switching."""
+"""SQLite WAL storage, FTS, bounded cosine search and atomic revision switching."""
 from __future__ import annotations
 
 import hashlib
+import heapq
 import json
+import math
 import os
 import re
 import sqlite3
@@ -10,9 +12,12 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ..lazy import lazy_module
 
-np = lazy_module("numpy")
+class _ClosingConnection(sqlite3.Connection):
+    """Finish the transaction and release native page caches immediately."""
+    def __exit__(self,*args):
+        try:return super().__exit__(*args)
+        finally:self.close()
 
 SCHEMA_SQL = """
 PRAGMA journal_mode=WAL;
@@ -165,7 +170,7 @@ class KnowledgeStore:
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path), timeout=30.0)
+        conn = sqlite3.connect(str(self.db_path), timeout=30.0, factory=_ClosingConnection)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA synchronous=NORMAL;")
@@ -387,7 +392,8 @@ class KnowledgeStore:
                 marks=','.join('?' for _ in batch)
                 rows=conn.execute(f'SELECT c.content_hash,cv.vector,cv.dimension FROM chunks c JOIN chunk_vectors cv USING(chunk_id) WHERE c.content_hash IN ({marks}) AND cv.embedding_contract=?', [*batch,key]).fetchall()
                 for row in rows:
-                    values=np.frombuffer(row['vector'],dtype=np.float32)
+                    from array import array
+                    values=array('f');values.frombytes(row['vector'])
                     if len(values)==row['dimension']:
                         found[row['content_hash']]=values.tolist()
         return found
@@ -567,7 +573,8 @@ class KnowledgeStore:
 
                     # Insert vector if present
                     if vectors is not None and idx < len(vectors) and vectors[idx] is not None:
-                        v_arr = np.array(vectors[idx], dtype=np.float32)
+                        from array import array
+                        v_arr = array('f',vectors[idx])
                         v_blob = v_arr.tobytes()
                         cursor.execute(
                             """
@@ -657,7 +664,7 @@ class KnowledgeStore:
         source_types: list[str] | None = None,
         include_derived: bool = False,
     ) -> list[dict[str, Any]]:
-        """NumPy exact cosine similarity vector search."""
+        """Exact cosine search without retaining a native matrix or runtime."""
         contract_str = (
             json.dumps(embedding_contract, sort_keys=True)
             if isinstance(embedding_contract, dict)
@@ -688,46 +695,29 @@ class KnowledgeStore:
             sql += f" AND s.source_type IN ({placeholders})"
             params.extend(source_types)
 
+        from array import array
+        query=array('f',query_vector)
+        product=getattr(math,'sumprod',lambda a,b:math.fsum(x*y for x,y in zip(a,b)))
+        q_norm=math.sqrt(product(query,query))
+        if not math.isfinite(q_norm) or q_norm<1e-9 or limit<=0:return []
+        best=[]
         with self._connect() as conn:
-            rows = conn.execute(sql, params).fetchall()
-
-        if not rows:
-            return []
-
-        q_arr = np.array(query_vector, dtype=np.float32)
-        q_norm = np.linalg.norm(q_arr)
-        if q_norm < 1e-9:
-            return []
-        q_arr = q_arr / q_norm
-
-        vectors_list = []
-        valid_rows = []
-        for r in rows:
-            dim = r["dimension"]
-            v_arr = np.frombuffer(r["vector"], dtype=np.float32)
-            if len(v_arr) == dim and len(v_arr) == len(q_arr):
-                v_norm = np.linalg.norm(v_arr)
-                if v_norm > 1e-9:
-                    vectors_list.append(v_arr / v_norm)
-                    valid_rows.append(r)
-
-        if not vectors_list:
-            return []
-
-        matrix = np.vstack(vectors_list)
-        sims = np.dot(matrix, q_arr)
-
-        top_indices = np.argsort(-sims)[:limit]
-        results = []
-        for idx in top_indices:
-            if float(sims[idx]) < 0.35:
-                continue
-            row_dict = dict(valid_rows[idx])
-            row_dict.pop("vector", None)
-            row_dict["vector_score"] = float(sims[idx])
-            results.append(row_dict)
-
-        return results
+            for index,row in enumerate(conn.execute(sql,params)):
+                vector=array('f')
+                if len(row['vector'])%vector.itemsize:continue
+                vector.frombytes(row['vector'])
+                if len(vector)!=row['dimension'] or len(vector)!=len(query):continue
+                norm=math.sqrt(product(vector,vector))
+                if not math.isfinite(norm) or norm<1e-9:continue
+                score=product(query,vector)/(q_norm*norm)
+                if not math.isfinite(score) or score<.35:continue
+                # The unique index makes equal-score ordering deterministic.
+                if len(best)>=limit and (score,-index)<=best[0][:2]:continue
+                result=dict(row);result.pop('vector',None);result['vector_score']=score
+                entry=(score,-index,result)
+                if len(best)<limit:heapq.heappush(best,entry)
+                else:heapq.heapreplace(best,entry)
+        return [entry[2] for entry in sorted(best,reverse=True)]
 
     def get_neighbor_context(self, source_id: str, revision: str, chunk_index: int) -> dict[str, Any]:
         """Fetch immediate predecessor and successor chunks for context expansion."""

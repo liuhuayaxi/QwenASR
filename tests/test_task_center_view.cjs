@@ -5,6 +5,13 @@ const path = require('node:path');
 const code = fs.readFileSync(path.join(__dirname, '../static/js/task-center-view.js'), 'utf8');
 const modulePromise = import(`data:text/javascript;base64,${Buffer.from(code).toString('base64')}`);
 const task = (id, status, extra = {}) => ({id, status, title: '同名课堂', label: '课后笔记', actions: ['continue'], ...extra});
+test('automatic correction verification never asks for individual human approval',async()=>{
+ const {taskGroups,groupCounts,taskProgressView}=await modulePromise;
+ const item=task('auto','pending',{type:'refinement',attention_kind:'auto_review',review_required_blocks:42,stage:'AI 自动复核 · 42 段改动待检查'});
+ assert.equal(groupCounts(taskGroups({tasks:[item]})).review,0);
+ const view=taskProgressView(item);assert.equal(view.percent,null);assert.match(view.detail,/无需逐条确认/);
+ assert.doesNotMatch(view.label,/待核对/);
+});
 test('legacy groups use record identity and never combine independent PDFs by course name', async () => {
  const {taskGroups} = await modulePromise;
  const groups = taskGroups({tasks: [task('a','running',{recording_id:'r1'}),task('b','pending',{result_url:'/library?recording=r1'}),task('c','failed',{recording_id:'r2'}),task('pdf1','failed',{category:'课程'}),task('pdf2','completed',{category:'课程'})]});

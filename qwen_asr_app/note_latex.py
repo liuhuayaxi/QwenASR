@@ -375,10 +375,9 @@ def compile_document(body,folder,outdir,*,transcript=None,images=None):
                 raise LatexCompileError('LaTeX 编译未完成（退出码 '+str(result.returncode)+'）：'+'\n'.join(diagnostic.splitlines()[-14:]),repairable=repairable)
         pdf=build/'document.pdf'
         if not pdf.is_file():raise RuntimeError('LaTeX 编译没有生成 PDF')
-        import fitz
-        with fitz.open(pdf) as document:
-            if not len(document):raise RuntimeError('LaTeX 导出为空')
-            pages=len(document)
+        from .native_pdf import pdf_operation
+        pages=pdf_operation('inspect',path=str(pdf))['pages']
+        if not pages:raise RuntimeError('LaTeX 导出为空')
     metadata={key:value for key,value in prepared.items() if key!='source'}
     metadata.update({'renderer':VERSION,'toolchain':tools,'toolchain_sha256':hashlib.sha256(json.dumps(tools,sort_keys=True).encode()).hexdigest(),
         'pdf_sha256':_sha(pdf),'pages':pages,'shell_escape':False,'sandbox':'macos-task-build-only-no-network'})

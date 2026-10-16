@@ -1111,6 +1111,13 @@ class RecordingStore:
         if not hasattr(self, "_read_cache"):
             self._read_cache = {}
         active_records: list[RecordingRecord] = []
+        def trim_cache():
+            retained={};size=0
+            for path,cached in sorted(self._read_cache.items(),key=lambda pair:str(pair[1][1].metadata.get('updated_at') or ''),reverse=True):
+                cost=sum(stamp[1] for stamp in cached[0] if stamp is not None)
+                if cached[1] is self.active or (len(retained)<4 and size+cost<=8*1024*1024):
+                    retained[path]=cached;size+=cost
+            self._read_cache=retained
         self.paths = {}
         for meta_path in self._metadata_paths():
             try:
@@ -1118,6 +1125,9 @@ class RecordingStore:
                 cached = self._read_cache.get(meta_path)
                 record = cached[1] if cached and cached[0] == stamp else RecordingRecord.load(meta_path.parent)
                 self._read_cache[meta_path] = (stamp, record)
+                # Bound the peak as well as the final cache. Keeping every
+                # decoded transcript until the sweep ends inflated idle RSS.
+                trim_cache()
                 if mark_interrupted and shared(app_settings) and record.directory.is_relative_to(app_settings.storage_root):
                     category = record.directory.relative_to(app_settings.storage_root).parts[0]
                     if record.metadata.get('category') != category:
@@ -1169,13 +1179,7 @@ class RecordingStore:
         self._read_cache = {path: cached for path, cached in self._read_cache.items() if path.parent in live_paths}
         # Retain only a small recent read window. Complete transcripts include
         # retrieval evidence and must not grow into an unbounded service cache.
-        retained={};size=0
-        for path,cached in sorted(self._read_cache.items(),
-                key=lambda pair:str(pair[1][1].metadata.get('updated_at') or ''),reverse=True):
-            cost=sum(stamp[1] for stamp in cached[0] if stamp is not None)
-            if cached[1] is self.active or (len(retained)<4 and size+cost<=8*1024*1024):
-                retained[path]=cached;size+=cost
-        self._read_cache=retained
+        trim_cache()
         if active_records:
             active_records.sort(key=lambda item: str(item.metadata.get("started_at", "")))
             latest = active_records[-1]
@@ -1225,6 +1229,28 @@ class RecordingStore:
         except Exception:
             return None
 
+    def remote_backlog_ids(self) -> list[str]:
+        """Scan pending headers without retaining complete recordings."""
+        def eligible(metadata):
+            if (metadata.get('remote_backlog') or {}).get('status') in {'paused','cancelled'}:return False
+            return any((item.get('config_snapshot') or {}).get('inference_settings',{}).get('asr_provider')=='remote_only'
+                and (item.get('config_snapshot') or {}).get('_remote_operation_dir')
+                for item in (metadata.get('pending_segments') or {}).values())
+        cache=getattr(self,'_remote_backlog_cache',{});retained={};identities=[]
+        for path in self._metadata_paths():
+            try:
+                stat=path.stat();stamp=(stat.st_mtime_ns,stat.st_size);saved=cache.get(path)
+                if saved and saved[0]==stamp:entry=saved
+                else:
+                    metadata=json.loads(path.read_text());entry=(stamp,str(metadata['id']),bool(eligible(metadata)))
+                retained[path]=entry
+                if entry[2]:
+                    self.paths[entry[1]]=path.parent;identities.append(entry[1])
+            except (OSError,ValueError,KeyError,TypeError,AttributeError):continue
+        self._remote_backlog_cache=retained
+        if self.active and eligible(self.active.metadata) and self.active.id not in identities:identities.append(self.active.id)
+        return identities
+
     def list_records(self) -> list[RecordingRecord]:
         self.refresh()
         records: list[RecordingRecord] = []
@@ -1235,6 +1261,13 @@ class RecordingStore:
                 records.append(record)
         records.sort(key=lambda item: str(item.metadata.get("started_at") or ""), reverse=True)
         return records
+
+    def iter_records(self):
+        """Visit records without retaining all decoded transcripts at once."""
+        self.refresh()
+        for session_id in tuple(self.paths):
+            record=self.find(session_id)
+            if record is not None:yield record
 
     def update(self, session_id: str, title: str, category: str) -> RecordingRecord:
         record = self.find(session_id)

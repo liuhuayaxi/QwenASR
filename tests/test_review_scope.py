@@ -224,7 +224,13 @@ class ScopeVisualGateTests(unittest.IsolatedAsyncioTestCase):
             response={'viewed_pages':[1],'status':'passed','issues':[],'scope_policy_checked':True,
                       'scope_findings':[{'objective_id':i,'status':'appropriate','page':1,'evidence':'本页相应知识内容'} for i in ('gain','gamma')]}
             request=AsyncMock(return_value=(json.dumps(response),{'session_id':'independent-new-session'}))
-            with patch('fitz.open',side_effect=lambda *a:nullcontext([page])),patch('qwen_asr_app.review_notes.request_materials',request):
+            def pdf_worker(operation,**kwargs):
+                if operation=='image_locations':return {}
+                if operation=='render':
+                    for selection in kwargs['pages']:page.get_pixmap().save(selection['output'])
+                    return [{'page':selection['page'],'text':page.get_text()} for selection in kwargs['pages']]
+                raise AssertionError(operation)
+            with patch('qwen_asr_app.native_pdf.pdf_operation',side_effect=pdf_worker),patch('qwen_asr_app.review_notes.request_materials',request):
                 report=await visual_review(pdf,{'pages':1,'pdf_sha256':digest,'renderer':'fake'},root,{},plan(),[],generator_session_ids=['writer'])
             request.assert_awaited_once()
             self.assertEqual(report['policy'],scope.REVIEW_POLICY)

@@ -95,7 +95,7 @@ class RefinementCheckpointTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(result['accepted'])
             self.assertEqual(record.metadata['ai_reviews'],before)
             record.metadata.setdefault('ai_jobs',{})['refinement']={'status':'cancelled','completed':1,'total':4}
-            with patch.object(app.recording_store,'list_records',return_value=[record]):
+            with patch.object(app.recording_store,'iter_records',return_value=iter([record])):
                 tasks=app.compact_ai_tasks()
             item=next(t for t in tasks if t['type']=='refinement')
             self.assertEqual(item['completed'],1);self.assertEqual(item['total'],4)

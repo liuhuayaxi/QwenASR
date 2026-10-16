@@ -318,6 +318,9 @@ async def global_rewrite_events(
     global_result["complete"] = all(not part.get("ai_error") for part in global_result["parts"])
     record.metadata["ai_global_rewrite"] = global_result
     record.save_all()
+    if global_result['complete']:
+        from .transcription_assist.verification import verify_corrections
+        await verify_corrections(record,config)
     yield {"type": "ai_global_complete", "global_rewrite": global_result}
 
 
@@ -381,6 +384,8 @@ async def build_note_summary(
     record: RecordingRecord,
     config: dict[str, Any],
 ) -> dict[str, Any]:
+    from .transcription_assist.verification import verify_corrections
+    await verify_corrections(record,config)
     from .ai import provider_for_mode
     provider = provider_for_mode(config.get('ai', {}), 'summary')
     if provider.get('transport') == 'agy_cli':

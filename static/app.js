@@ -1440,11 +1440,11 @@ function renderNoteTranscript(session) {
     return `
     <article class="note-transcript-segment" data-segment-ids="${escapeHtml((block.segment_ids || [block.id]).join(','))}" data-start="${Number(block.start) || 0}" data-end="${Number(block.end) || 0}">
       <div class="transcript-source-actions">
-        <button class="transcript-time" type="button" data-seek="${Number(block.start) || 0}" title="定位并播放这段录音">${formatDuration(block.start)}<br>${formatDuration(block.end)}${refined && !block.refined ? block.correction_review ? "<br>待核对" : "<br>未精修" : ""}</button>
+        <button class="transcript-time" type="button" data-seek="${Number(block.start) || 0}" title="定位并播放这段录音">${formatDuration(block.start)}<br>${formatDuration(block.end)}${refined && !block.refined ? block.correction_review ? "<br>AI 待复核" : "<br>未精修" : ""}</button>
         ${replay ? `<a class="transcript-smartclass-jump" href="${escapeHtml(replay)}" target="_blank" rel="noopener noreferrer" title="在新标签页登录并跳转到南邮 Smart Class 对应回放时间">跳转</a>` : ""}
       </div>
       <div class="markdown-body">${refined ? renderMarkdown(block.text || "") : `<p>${escapeHtml(block.text || "")}</p>`}${refined && block.translation ? `<div class="translation-block"><small>${block.translation_target === "English" ? "ENGLISH" : "中文翻译"}</small><div class="translation-text transcript-markdown markdown-body">${renderMarkdown(block.translation)}</div></div>` : ""}${refined && !block.refined && block.segment_ids?.length === 1 && failedIds.has(String(block.segment_ids[0]))
-        ? `<button class="segment-retry-button note-segment-retry" type="button" data-segment-id="${escapeHtml(block.segment_ids[0])}">重试该段</button>` : ""}</div>
+        ? `<button class="segment-retry-button note-segment-retry" type="button" data-segment-id="${escapeHtml(block.segment_ids[0])}">重试该段</button>` : ""}${refined && block.ai_verification?.decision==='uncertain' ? `<p class="transcript-review-notice">AI 已复核，保留原文：${escapeHtml(block.ai_verification.reason)}</p>` : ""}</div>
     </article>`;
   }).join("") : '<div class="note-empty">尚无转写内容</div>';
   els.noteTranscript.querySelectorAll(".note-segment-retry").forEach((button) => {

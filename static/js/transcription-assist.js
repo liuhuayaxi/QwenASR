@@ -15,7 +15,7 @@ export async function renderCorrectionReview(session,{onResolved=()=>{}}={}) {
   parent.querySelectorAll('[data-correction-review]').forEach(node=>node.remove());
   if (!payload.candidates?.length) return;
   const notice=document.createElement('p');notice.dataset.correctionReview='';notice.className='transcript-review-notice';
-  const updateCount=remaining=>{notice.textContent=`${remaining} 处精修改动待核对，已放在对应时间段下方。`;if(!remaining)notice.remove();};
+  const updateCount=remaining=>{notice.textContent=`${remaining} 处改动等待 AI 自动复核，无需逐条确认；可展开查看。`;if(!remaining)notice.remove();};
   updateCount(payload.candidates.length);parent.prepend(notice);
   const time=value=>{const seconds=Math.max(0,Math.round(Number(value)||0));return [Math.floor(seconds/3600),Math.floor(seconds/60)%60,seconds%60].map(n=>String(n).padStart(2,'0')).join(':');};
   for (const candidate of payload.candidates) {
@@ -24,7 +24,7 @@ export async function renderCorrectionReview(session,{onResolved=()=>{}}={}) {
     if(!state){state={open:false,editing:false,text:candidate.after || candidate.before || '',saving:false,error:''};reviewStates.set(stateKey,state);}
     const details=document.createElement('details');details.dataset.correctionReview='';details.className='transcript-review-disclosure';
     details.open=state.open;details.addEventListener('toggle',()=>{if(current())state.open=details.open;});
-    const summary=document.createElement('summary');summary.textContent=`核对本段 · ${time(candidate.start)}–${time(candidate.end)}`;details.append(summary);
+    const summary=document.createElement('summary');summary.textContent=`AI 待复核 · ${time(candidate.start)}–${time(candidate.end)}`;details.append(summary);
     const card=document.createElement('article');card.className='correction-candidate';
     const title=document.createElement('b');title.textContent=[candidate.level,...(candidate.risks || [])].join(' · ');card.append(title);
     for (const [label,text] of [['原内容',candidate.before],['待核对建议',candidate.after]]) {

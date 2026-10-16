@@ -32,6 +32,7 @@ def transcript_blocks(record: Any) -> list[dict[str, Any]]:
                        "end": max(float(s.get("end", 0)) for s in members),
                        "text": text, "refined": not bool(part.get("correction_review")), "segment_ids": ids,
                        **({key:part[key] for key in ('translation','translation_target') if part.get(key)}),
+                       **({'ai_verification':part['ai_verification']} if part.get('ai_verification') else {}),
                        **({"correction_review":part["correction_review"]} if part.get("correction_review") else {})})
         covered.update(ids)
     for segment in segments:
@@ -44,6 +45,7 @@ def transcript_blocks(record: Any) -> list[dict[str, Any]]:
             blocks.append({"start": float(segment.get("start", 0)), "end": float(segment.get("end", 0)),
                            "text": text, "refined": bool(segment.get("corrected")) and not segment.get("ai_error") and not segment.get("correction_review"),
                            **({"correction_review":segment["correction_review"]} if segment.get("correction_review") else {}),
+                           **({'ai_verification':segment['ai_verification']} if segment.get('ai_verification') else {}),
                            "segment_ids": [int(segment.get("id", 0))]})
     return sorted(blocks, key=lambda block: block["start"])
 

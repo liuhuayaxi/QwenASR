@@ -70,7 +70,7 @@ def transcription_assist_router(store, require_available=None):
     async def candidates(recording_id:str):
         record=record_for(recording_id)
         return {'recording_id':record.id,'candidates':active_candidates(record),
-            'notice':'对照原录音选择采用建议、保留原文或手动修改；每次确认会保存决定，并更新待核对数量。'}
+            'notice':'AI 会自动复核这些改动；无法确认时保留原文并标注疑点。你也可以随时手动修改。'}
 
     @router.post('/api/recordings/{recording_id}/correction-review')
     async def resolve(recording_id:str,payload:dict=Body(...)):

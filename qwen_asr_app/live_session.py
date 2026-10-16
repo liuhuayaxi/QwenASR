@@ -602,6 +602,7 @@ class TranscriptionSession:
                             "segment_ids": mapped["segment_ids"],
                             "raw": "\n\n".join(str(member.get("corrected") or member.get("raw") or "") for member in members),
                             "corrected": mapped["corrected"],
+                            **{key:mapped[key] for key in ('correction_review','correction_provenance') if mapped.get(key)},
                         }
                         window_reviews.append(item)
                     reviews.extend(window_reviews)
@@ -612,6 +613,9 @@ class TranscriptionSession:
                 recording.metadata["ai_reviews"] = reviews
                 recording.metadata["last_ai_review_at"] = window_end
                 recording.save_all()
+                if not review.get('ai_error'):
+                    from .transcription_assist.verification import verify_corrections
+                    await verify_corrections(recording,config)
                 if review.get("ai_error"):
                     await self.send({"type": "ai_review", "review": review})
                 else:

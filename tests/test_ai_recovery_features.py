@@ -59,7 +59,7 @@ class RetryStormTests(unittest.TestCase):
                 ],
             },
         )
-        with patch.object(app.recording_store, "list_records", return_value=[record]):
+        with patch.object(app.recording_store, "iter_records", return_value=iter([record])):
             tasks = app.compact_ai_tasks()
         live = [item for item in tasks if item["type"] == "live_summary"]
         self.assertEqual(len(live), 1)

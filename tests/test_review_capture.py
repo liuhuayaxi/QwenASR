@@ -90,6 +90,10 @@ class ProductionCaptureTests(unittest.TestCase):
                            ('live_sessions',{}),('finalization_tasks',{}),('background_summary_tasks',{})]:
             self.stack.enter_context(patch.object(app,name,value))
         self.stack.enter_context(patch.object(inference_settings,'path',self.root/'inference.json'))
+        # These capture lifecycle tests own an isolated recording store. A
+        # knowledge service retained by another test belongs to a different
+        # root and must not intercept the synthetic sentence-level AI call.
+        self.stack.enter_context(patch('qwen_asr_app.transcription_assist.service._knowledge',None))
         # Audio encoding uses only the synthetic samples created below.
         @asynccontextmanager
         async def no_compute_lifespan(_app):
