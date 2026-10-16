@@ -1,4 +1,5 @@
-import {taskGroups, filterTaskGroups, groupCounts, actionableTasks, activeStatuses, errorStatuses} from './task-center-view.js?v=20261016-unified-1';
+import {taskGroups, filterTaskGroups, groupCounts, actionableTasks, completedTasks, taskMatchesType, activeStatuses, errorStatuses} from './task-center-view.js?v=20261016-unified-1';
+import {createTaskPdfDialog} from './task-pdf-dialog.js?v=20261016-operations-1';
 import {aiTaskPayload} from './task-config.js?v=20260913-tasks-1';
 import {mergeLiveCourseProgress} from './course-progress.js?v=20261011-live-1';
 import {mineruEstimateLabel, legacyMineruProgress} from './mineru-progress-view.js?v=20261013-time-2';
@@ -27,9 +28,24 @@ async function api(path, body) {
   return data;
 }
 function filteredGroups(filter = state.filter) {
-  return filterTaskGroups(state.groups, {filter, type: $('typeFilter').value, category: $('categoryFilter').value, query: $('taskSearch').value});
+  const type = $('typeFilter').value;
+  let groups = filterTaskGroups(state.groups, {filter:'all', type,
+    category:$('categoryFilter').value, query:$('taskSearch').value});
+  if (type) groups = taskGroups({groups:groups.map(group => ({...group,
+    tasks:group.tasks.filter(task => taskMatchesType(task, type)),
+    current_tasks:group.current_tasks.filter(task => taskMatchesType(task, type)),
+    history:group.history.filter(task => taskMatchesType(task, type)),
+    context_tasks:(group.context_tasks || []).filter(task => taskMatchesType(task, type)),
+    status:undefined, errors:undefined, current_stage:'', review_count:undefined, recovered_count:undefined,
+  }))});
+  return filterTaskGroups(groups, {filter});
 }
-function filteredTasks() { return actionableTasks(filteredGroups()); }
+function filteredTasks() { return actionableTasks(filteredGroups(), $('typeFilter').value); }
+function filteredCompleted() { return completedTasks(filteredGroups(), $('typeFilter').value); }
+function failedTargets() {
+  return filteredTasks().filter(task => !task.is_context && attention.has(task.status) &&
+    (task.actions || []).some(action => ['retry', 'continue'].includes(action)));
+}
 function dateLabel(value) {
   if (!value) return '';
   const date = new Date(typeof value === 'number' ? value * 1000 : value);
@@ -144,8 +160,10 @@ function contextQueueCard(task) {
   return `<article class="task-card task-context-card" data-id="${esc(task.id)}">${task.actions?.length ? `<p class="task-queue-scope">队列操作会影响全部课次。</p><label><input class="task-select" type="checkbox" aria-label="选择整个课程队列" ${state.selected.has(task.id) ? 'checked' : ''} ${state.busy ? 'disabled' : ''}> 选择整个课程队列参与批量处理</label><div class="task-actions">${task.actions.map(action => `<button data-action="${action}" class="ui-button ${action === 'cancel' ? 'danger' : ''}" ${state.busy ? 'disabled' : ''}>${taskActionLabel(task, action)}</button>`).join('')}</div>` : ''}${courseQueueDetails(task)}</article>`;
 }
 function groupCard(group) {
-  const current = group.current_tasks;
-  const history = group.history;
+  const type = $('typeFilter').value;
+  const current = group.current_tasks.filter(task => taskMatchesType(task, type));
+  const history = group.history.filter(task => taskMatchesType(task, type));
+  const context = (group.context_tasks || []).filter(task => taskMatchesType(task, type));
   const stages = [...new Map([...history, ...current].map(task => [task.label || task.type || task.id, task])).values()].slice(0, 6);
   const waiting = current.filter(task => task.status === 'pending' && !task.error && task.attention_kind !== 'review' && !Number(task.review_required_blocks));
   const visible = current.filter(task => !waiting.includes(task));
@@ -157,7 +175,7 @@ function groupCard(group) {
     ${visible.length ? `<div class="group-current-tasks">${visible.map(task => card(task)).join('')}</div>` : ''}
     ${waiting.length ? `<details class="group-waiting" data-detail-key="waiting"><summary>尚未开始 · ${waiting.length} 个步骤 <span>${waiting.map(task => esc(task.label || '等待处理')).join('、')}</span></summary>${waiting.map(task => card(task)).join('')}</details>` : ''}
     ${!current.length && group.result_url ? `<a class="ui-button group-result" href="${esc(group.result_url)}">${group.recording_id ? '打开课堂笔记' : '查看处理结果'}</a>` : ''}
-    ${group.context_tasks?.length ? `<details class="task-details group-context" data-detail-key="queue-context"><summary>课程队列控制与本课进度</summary>${group.context_tasks.map(contextQueueCard).join('')}</details>` : ''}
+    ${context.length ? `<details class="task-details group-context" data-detail-key="queue-context"><summary>课程队列控制与本课进度</summary>${context.map(contextQueueCard).join('')}</details>` : ''}
     ${history.length ? `<details class="group-history" data-detail-key="history"><summary>已完成与历史 · ${historyLabel}</summary><p class="group-history-note">已恢复的错误已由后续结果核实，原始记录仍保留在这里。</p>${history.map(task => card(task, true)).join('')}</details>` : ''}
     </section>`;
 }
@@ -187,11 +205,11 @@ function selectionControls() {
     button.disabled = state.busy || !count;
     button.textContent = `${actionLabels[button.dataset.bulk]}${count ? ` (${count})` : ''}`;
   });
-  const completed = state.tasks.filter(task => task.status === 'completed');
+  const completed = filteredCompleted();
   $('clearCompleted').disabled = state.busy || !completed.length;
   $('restoreCompleted').hidden = state.busy || !state.history.can_restore;
   $('restoreCompleted').disabled = state.busy;
-  $('retryFailed').disabled = state.busy || !actionableTasks(state.groups).some(task => !task.is_context && attention.has(task.status) && (task.actions || []).some(action => ['retry', 'continue'].includes(action)));
+  $('retryFailed').disabled = state.busy || !failedTargets().length;
 }
 function detailKey(node) {
   return `${node.closest('[data-group-id]')?.dataset.groupId || ''}|${node.closest('[data-id]')?.dataset.id || ''}|${node.dataset.detailKey || ''}`;
@@ -202,6 +220,7 @@ function render() {
   const focusedDetail = focused?.matches('summary') ? detailKey(focused.parentElement) : null;
   const focusedGroup = focused?.closest('[data-group-id]')?.dataset.groupId;
   const focusedId = focused?.closest('#taskList [data-id]')?.dataset.id;
+  const focusedHref = focused?.matches('a[href]') ? focused.getAttribute('href') : null;
   const focusSelector = focused?.matches('.task-select') ? '.task-select' : focused?.matches('summary') ? 'summary' : focused?.dataset.action ? `[data-action="${focused.dataset.action}"]` : null;
   const groups = filteredGroups();
   $('listTitle').textContent = `${filterLabels[state.filter]} · ${groups.length} 项`;
@@ -219,6 +238,11 @@ function render() {
     const candidates = [...$('taskList').querySelectorAll('[data-id]')];
     candidates.find(node => node.dataset.id === focusedId && node.closest('[data-group-id]')?.dataset.groupId === focusedGroup)?.querySelector(focusSelector)?.focus({preventScroll:true});
   }
+  if (focusedHref !== null && focusedGroup) {
+    const group = [...$('taskList').querySelectorAll('[data-group-id]')].find(node => node.dataset.groupId === focusedGroup);
+    const owner = focusedId ? [...(group?.querySelectorAll('[data-id]') || [])].find(node => node.dataset.id === focusedId) : group;
+    [...(owner?.querySelectorAll('a[href]') || [])].find(node => node.getAttribute('href') === focusedHref)?.focus({preventScroll:true});
+  }
   document.querySelectorAll('[data-count]').forEach(node => node.textContent = state.counts[node.dataset.count] || 0);
   document.querySelectorAll('#statusFilters [data-status]').forEach(node => node.setAttribute('aria-current', node.dataset.status === state.filter ? 'page' : 'false'));
   document.querySelectorAll('[data-summary]').forEach(node => node.setAttribute('aria-pressed', String(node.dataset.summary === state.filter)));
@@ -233,6 +257,7 @@ async function load() {
   clearTimeout(timer); state.loading = true; const revision = state.revision, hadReady = state.ready;
   try {
     let data = await api('/api/tasks');
+    if (!Array.isArray(data.tasks) && !Array.isArray(data.groups)) throw new Error('任务列表响应不完整');
     let courseWarning = '';
     if (!Array.isArray(data.groups) && (data.tasks || []).some(task => task.type === 'course_queue')) {
       try {
@@ -247,8 +272,8 @@ async function load() {
     state.tasks = data.tasks || []; state.groups = taskGroups(data); state.counts = groupCounts(state.groups); state.history = data.history || {}; state.ready = true;
     const actionable = new Set(actionableTasks(state.groups).map(task => task.id));
     state.selected = new Set([...state.selected].filter(id => actionable.has(id)));
-    const categories = [...new Set([...state.groups.map(group => group.category), new URLSearchParams(location.search).get('category')].filter(Boolean))].sort((a,b) => a.localeCompare(b,'zh-CN'));
     const categoryValue = hadReady ? $('categoryFilter').value : new URLSearchParams(location.search).get('category') || '';
+    const categories = [...new Set([...state.groups.map(group => group.category), categoryValue === '__local__' ? '' : categoryValue].filter(Boolean))].sort((a,b) => a.localeCompare(b,'zh-CN'));
     const categoryOptions = '<option value="">全部课程</option>' + categories.map(value => `<option value="${esc(value)}">${esc(value)}</option>`).join('') + '<option value="__local__">本地 PDF</option>';
     if ($('categoryFilter').innerHTML !== categoryOptions) $('categoryFilter').innerHTML = categoryOptions;
     if ([...$('categoryFilter').options].some(option => option.value === categoryValue)) $('categoryFilter').value = categoryValue;
@@ -278,13 +303,14 @@ async function perform(targets, action, bulk = false) {
     const items = targets.map(task => ({...aiTaskPayload(task, action, {}, {}), ...(newOperation ? {acknowledge_duplicate:true} : {})}));
     if (bulk) {
       const result = await api('/api/tasks/bulk-action', {action, items});
+      for (const item of result.results || []) if (item.ok) state.selected.delete(item.id);
       const failures = result.results.filter(item => !item.ok).map(item => `${targets.find(task => task.id === item.id)?.title || '任务'}：${item.error}`);
       notice('actionResult', `已提交${actionLabels[action]} ${result.accepted}/${result.requested} 项任务${failures.length ? '\n' + failures.join('\n') : ''}`);
     } else {
       await api('/api/tasks/action', items[0]);
       toast(action === 'pause' || action === 'cancel' ? `已请求${actionLabels[action]}，正在保存进度` : '任务已加入后台队列');
+      state.selected.delete(targets[0].id);
     }
-    state.selected.clear();
   } catch (error) { notice('actionResult', error.message); }
   finally { state.busy = false; lastPayload = ''; await load(); render(); }
 }
@@ -302,18 +328,30 @@ document.querySelectorAll('[data-bulk]').forEach(button => button.addEventListen
 }));
 $('refreshTasks').addEventListener('click', load);
 $('retryFailed').addEventListener('click', async () => {
-  if (state.busy) return;
+  const targets = failedTargets();
+  if (state.busy || !targets.length) return;
+  if (targets.length > 200) { toast('每次最多操作 200 项任务，请缩小筛选范围'); return; }
   state.busy = true; state.revision += 1; render(); notice('actionResult', '');
+  const results = [];
   try {
-    const result = await api('/api/tasks/retry-failed', {});
-    const failures = (result.results || []).filter(item => !item.ok).map(item => `${item.id}：${item.error}`);
-    notice('actionResult', `已提交失败任务重试 ${result.accepted}/${result.requested} 项${failures.length ? '\n' + failures.join('\n') : ''}`);
-    state.selected.clear(); lastPayload = '';
-  } catch (error) { notice('actionResult', error.message); }
-  finally { state.busy = false; await load(); render(); }
+    // Explicit owners, frozen at the click, not the global retry endpoint.
+    // A step may support only continue, so keep that server-declared action.
+    for (const action of ['retry', 'continue']) {
+      const batch = targets.filter(task => (task.actions.includes('retry') ? 'retry' : 'continue') === action);
+      if (!batch.length) continue;
+      const response = await api('/api/tasks/bulk-action', {action, items:batch.map(task => aiTaskPayload(task, action))});
+      for (const item of response.results || []) {
+        results.push(item); if (item.ok) state.selected.delete(item.id);
+      }
+    }
+    const failures = results.filter(item => !item.ok).map(item => `${item.id}：${item.error}`);
+    notice('actionResult', `已提交当前筛选内失败步骤 ${results.filter(item => item.ok).length}/${targets.length} 项${failures.length ? '\n' + failures.join('\n') : ''}`);
+  } catch (error) {
+    notice('actionResult', `已确认提交 ${results.filter(item => item.ok).length} 项。${error.message}；请刷新核对其余任务，避免重复提交。`);
+  } finally { state.busy = false; lastPayload = ''; await load(); render(); }
 });
 $('clearCompleted').addEventListener('click', async () => {
-  const completed = state.tasks.filter(task => task.status === 'completed');
+  const completed = filteredCompleted();
   if (!completed.length || state.busy) return;
   state.busy = true; state.revision += 1; render(); notice('actionResult', '');
   try {
@@ -333,26 +371,18 @@ $('restoreCompleted').addEventListener('click', async () => {
   } catch (error) { notice('actionResult', error.message); }
   finally { state.busy = false; await load(); render(); }
 });
-$('newPdf').addEventListener('click', () => $('pdfDialog').showModal());
-$('closePdf').addEventListener('click', () => $('pdfDialog').close());
-$('choosePdf').addEventListener('click', async () => {
-  $('choosePdf').disabled = true; notice('pdfError', '');
-  try { const result = await api('/api/pdf-ai/choose-files'); if (!result.cancelled) $('pdfPaths').value = result.paths.join('\n'); }
-  catch (error) { notice('pdfError', error.message); }
-  finally { $('choosePdf').disabled = false; }
-});
-$('pdfForm').addEventListener('submit', async event => {
-  event.preventDefault(); $('submitPdf').disabled = true; notice('pdfError', '');
-  try {
-    await api('/api/tasks/pdf', {paths: $('pdfPaths').value.split('\n').map(path => path.trim()).filter(Boolean)});
-    $('pdfDialog').close(); $('pdfPaths').value = ''; setFilter('active'); $('typeFilter').value = ''; $('categoryFilter').value = ''; $('taskSearch').value = '';
-    toast('PDF 识别任务已加入队列'); lastPayload = ''; await load(); render();
-  } catch (error) { notice('pdfError', error.message); }
-  finally { $('submitPdf').disabled = false; }
-});
+const pdfDialog = createTaskPdfDialog({api, toast, onCreated: async ({showCreated}) => {
+  if (showCreated) {
+    state.filter = 'active'; $('typeFilter').value = ''; $('categoryFilter').value = ''; $('taskSearch').value = '';
+    state.selected.clear();
+  }
+  lastPayload = ''; await load(); render();
+}});
 document.addEventListener('visibilitychange', () => { clearTimeout(timer); if (!document.hidden) load(); });
 window.addEventListener('online', load);
 load();
 if (new URLSearchParams(location.search).get('new') === 'pdf') {
-  $('pdfDialog').showModal(); history.replaceState(null, '', '/tasks');
+  pdfDialog.open();
+  const url = new URL(location.href); url.searchParams.delete('new');
+  history.replaceState(history.state, '', url.pathname + url.search + url.hash);
 }
