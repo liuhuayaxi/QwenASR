@@ -6,7 +6,6 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
-import threading
 from datetime import datetime
 import zipfile
 from xml.etree import ElementTree as ET
@@ -17,7 +16,7 @@ from .storage import RecordingRecord, app_settings
 from .course_files import CourseFiles, digest_file
 from .paths import PRIVATE_ROOT
 
-PDF_LOCK=threading.RLock()  # All new PDF rendering is centrally serialized.
+from .native_pdf import PDF_LOCK  # Native worker operations remain centrally serialized.
 FORMAT='review-materials-v1'
 
 
@@ -123,10 +122,10 @@ def tokens(text):
 
 def native_pages(path):
     if path.suffix.lower()=='.pdf':
-        import fitz
-        with PDF_LOCK,fitz.open(path) as doc:
-            return [{'page':i+1,'text':page.get_text(sort=True),'visual_source':True,
-                     'image_primary':len(substantive_page_text(page.get_text()))<40} for i,page in enumerate(doc)]
+        from .native_pdf import pdf_operation
+        with PDF_LOCK:pages=pdf_operation('text',path=str(path),sort=True)
+        return [{'page':p['page'],'text':p['text'],'visual_source':True,
+            'image_primary':len(substantive_page_text(p['plain_text']))<40} for p in pages]
     if path.suffix.lower()=='.pptx':
         with zipfile.ZipFile(path) as z:
             names=sorted((n for n in z.namelist() if re.fullmatch(r'ppt/slides/slide\d+.xml',n)),key=lambda n:int(re.search(r'(\d+)\.xml',n)[1]))
@@ -185,10 +184,10 @@ def collect(record, folder, selected=None, settings=None):
                 try:
                     _,derived=files.file(category,item['id'],'pdf')
                     derived_digest=digest_file(derived)
-                    import fitz
-                    with PDF_LOCK,fitz.open(derived) as converted:
-                        for converted_page in converted:
-                            text=converted_page.get_text()
+                    from .native_pdf import pdf_operation
+                    with PDF_LOCK:
+                        for converted_page in pdf_operation('text',path=str(derived)):
+                            text=converted_page['text']
                             marker=re.search(r'\[\[AI_TRANSCRIPT_PAGE:(\d+)\]\]',text)
                             if marker and 1<=int(marker[1])<=len(pages):
                                 original_page=pages[int(marker[1])-1]
@@ -242,7 +241,7 @@ def collect(record, folder, selected=None, settings=None):
 
 
 def extract_image(folder, package, request):
-    import fitz
+    from .native_pdf import pdf_operation
     sid=request['source_id'];page=request['page'];bbox=request.get('bbox',[0,0,1,1])
     source=next((s for s in package['sources'] if s['source_id']==sid),None)
     if not source or source['course_id']!=package['course_id']:raise ValueError('图片来源不属于本课程')
@@ -257,17 +256,13 @@ def extract_image(folder, package, request):
     ident='fig-'+sha(json.dumps([sid,source['sha256'],page,bbox]).encode())[:16]
     relative=f'assets/{ident}.png';target=safe_path(folder,relative);target.parent.mkdir(exist_ok=True)
     cached_image=PRIVATE_ROOT/'review-materials-cache'/'images-v1'/f'{ident}.png'
-    with PDF_LOCK,fitz.open(rendered_original) as doc:
-        if len(doc)!=len(source['pages']):raise ValueError('原件页码与渲染画面页码不一致，未抽图')
-        p=doc[page-1];r=p.rect
-        clip=fitz.Rect(r.width*bbox[0],r.height*bbox[1],r.width*bbox[2],r.height*bbox[3])
-        if clip.width<60 or clip.height<40:raise ValueError('裁切区域过小，无法保留可读标签')
-        if not target.exists():
-            if cached_image.is_file():shutil.copy2(cached_image,target)
-            else:
-                p.get_pixmap(matrix=fitz.Matrix(1.6,1.6),clip=clip,alpha=False).save(target)
-                cached_image.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
-                temporary=cached_image.with_suffix('.part.png');shutil.copy2(target,temporary);temporary.replace(cached_image)
+    with PDF_LOCK:
+        if not target.exists() and cached_image.is_file():shutil.copy2(cached_image,target)
+        pdf_operation('render',path=str(rendered_original),expected_pages=len(source['pages']),
+            pages=[{'page':page,'output':str(target),'bbox':bbox,'scale':1.6}])
+        if not cached_image.is_file():
+            cached_image.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+            temporary=cached_image.with_suffix('.part.png');shutil.copy2(target,temporary);temporary.replace(cached_image)
     return {'image_id':ident,'path':relative,'source_id':sid,'source_name':source['name'],'source_sha256':source['sha256'],
         'page':page,'bbox':bbox,'concept':request.get('concept',''),'reason':request.get('reason',''), 'sha256':digest_file(target)}
 

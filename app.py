@@ -135,12 +135,14 @@ async def lifespan(_: FastAPI):
             from qwen_asr_app.remote_backlog import recovery_loop
             backlog=asyncio.create_task(recovery_loop(recording_store,model_manager,live_sessions,
                 lambda ident: ident in record_operations or ident in finalization_tasks or ident in running_batch_ids or recording_discard.busy(ident),
-                claim=backlog_record_claim,on_completed=backlog_completed))
+                claim=backlog_record_claim,on_completed=backlog_completed,on_idle=schedule_memory_cleanup))
+            correction_recovery=asyncio.create_task(resume_correction_verifications())
             try:
                 yield
             finally:
                 backlog.cancel()
-                await asyncio.gather(backlog,return_exceptions=True)
+                correction_recovery.cancel()
+                await asyncio.gather(backlog,correction_recovery,return_exceptions=True)
                 await recording_discard.close()
                 intelligence_service = getattr(intelligence_router, 'intelligence_service', None)
                 if intelligence_service and hasattr(intelligence_service, 'close'):
@@ -266,6 +268,7 @@ def schedule_memory_cleanup():
     def is_idle():
         tasks=[*background_summary_tasks.values(),*background_ai_tasks.values(),*finalization_tasks.values()]
         return (not record_operations and not running_batch_ids and not model_manager.active_jobs
+            and not knowledge_service.job_manager._active_job_id and not knowledge_service.job_manager._queue.qsize()
             and not any(not task.done() for task in tasks)
             and not (recording_store.active and recording_store.active.metadata.get('status')=='active'))
     schedule_idle_reclaim(is_idle,lambda:recording_store._read_cache.clear())
@@ -835,7 +838,7 @@ def compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any]]:
             "configured_ai_effort": str(provider.get("cli_effort") or ""),
         }
 
-    for record in recording_store.list_records():
+    for record in getattr(recording_store,'iter_records',recording_store.list_records)():
         base = {
             "recording_id": record.id,
             "recording_title": str(record.metadata.get("title") or "未命名录音"),
@@ -907,7 +910,7 @@ def compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any]]:
             )
             if status == "completed" and missing_blocks:
                 status = "pending"
-            if review_blocks and not unprocessed_blocks and not refinement_running:
+            if review_blocks and not unprocessed_blocks and not refinement_running and status in {'completed','pending'}:
                 status='pending'
             if status != "completed":
                 historical_error = failed_errors[-1] if failed_errors else ""
@@ -921,7 +924,7 @@ def compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any]]:
                     **ai_provider_snapshot("refinement"),
                     "id": f"refinement:{record.id}",
                     "type": "refinement",
-                    "label": "转写待核对" if review_only else AI_TASK_LABELS["refinement"],
+                    "label": "AI 自动复核" if review_only else AI_TASK_LABELS["refinement"],
                     "status": status,
                     "error": task_error,
                     "error_kind": str(refinement_job.get("error_kind") or _task_error_kind(task_error)) if task_error else "",
@@ -937,11 +940,11 @@ def compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any]]:
                     "missing_blocks": len(missing_blocks),
                     "review_required_blocks": review_blocks,
                     "unprocessed_blocks": unprocessed_blocks,
-                    "attention_kind": "review" if review_only else "error" if task_error else "pending",
-                    "phase": f"转写已完成 · {review_blocks} 段数字或公式改动待核对" if review_only else "",
+                    "attention_kind": "auto_review" if review_only else "error" if task_error else "pending",
+                    "phase": f"AI 自动复核 · {review_blocks} 段改动待检查" if review_only else str(refinement_job.get('phase') or ''),
                     "retry_in_seconds": int(refinement_job.get("retry_in_seconds") or 0),
                     "auto_retry_count": int(refinement_job.get("auto_retry_count") or 0),
-                    "actions": [] if review_only else ["pause", "cancel"] if status in {"queued", "running", "waiting_retry"} else ["continue", "retry", "cancel"],
+                    "actions": ["pause", "cancel"] if status in {"queued", "running", "waiting_retry"} else ["continue", "retry", "cancel"],
                     "updated_at": str(refinement_job.get("updated_at") or record.metadata.get("updated_at") or ""),
                 })
 
@@ -1131,6 +1134,7 @@ async def _run_refinement_job_unlocked(record: RecordingRecord, config: dict[str
         suppressed_ids = {int(segment.get("id", 0)) for segment in suppressed}
         targets = [segment for segment in targets if int(segment.get("id", 0)) not in suppressed_ids]
     if not targets:
+        await _verify_refinement_candidates(record,config)
         progress=saved_progress(record)
         _update_ai_job(record,"refinement",completed=progress['saved_segments'],total=progress['total_segments'],
             progress_unit='段',saved_segments=progress['saved_segments'],remaining_segments=0)
@@ -1200,6 +1204,37 @@ async def _run_refinement_job_unlocked(record: RecordingRecord, config: dict[str
             if not worker.done():worker.cancel()
         await asyncio.gather(*workers, return_exceptions=True)
         update_progress()
+
+    await _verify_refinement_candidates(record,config)
+
+
+async def _verify_refinement_candidates(record,config):
+    from qwen_asr_app.transcription_assist.verification import verify_corrections
+    await verify_corrections(record,config,on_progress=lambda done,total:
+        _update_ai_job(record,'refinement',phase=f'AI 自动复核 · {done}/{total} 段'))
+
+
+async def resume_correction_verifications():
+    """Resume protected edits once on startup, respecting explicit stops."""
+    from qwen_asr_app.transcription_assist.routes import active_candidates
+    ids=[r.id for r in getattr(recording_store,'iter_records',recording_store.list_records)()
+         if r.metadata.get('status')=='completed' and active_candidates(r)]
+    for ident in ids:
+        await queue_correction_verification(ident)
+
+
+async def queue_correction_verification(ident):
+    record=recording_store.find(ident)
+    if record is None:return
+    from qwen_asr_app.transcription_assist.routes import active_candidates
+    if not active_candidates(record):return
+    if _saved_ai_job(record,'refinement').get('status') in {'paused','cancelled'}:return
+    # Summary generation checks the same candidates while owning the record.
+    if ident in background_summary_tasks:return
+    try:
+        await ai_task_action({'recording_id':ident,'type':'refinement','action':'continue'})
+    except HTTPException as exc:
+        _update_ai_job(record,'refinement',status='failed',error=str(exc.detail),error_kind='configuration')
 
 
 
@@ -1625,10 +1660,9 @@ async def recording_library(request: Request = None, category: str = '', date: s
     if offset < 0 or not 0 <= limit <= 100 or (date and not re.fullmatch(r'\d{4}-\d{2}-\d{2}', date)):
         raise HTTPException(400, '分页或日期参数无效')
     discover_courses(app_settings)
-    records = recording_store.list_records()
-    restored = [recording_discard.reconcile_restored(record.id) for record in records]
-    if any(restored):
-        records = recording_store.list_records()
+    visit=getattr(recording_store,'iter_records',recording_store.list_records)
+    for record in visit():recording_discard.reconcile_restored(record.id)
+    records=visit()
     if ids:
         wanted = ids.split(',')
         if len(wanted) > 100 or any(not re.fullmatch(r'[A-Za-z0-9_-]{6,80}', value) for value in wanted):
@@ -2200,6 +2234,9 @@ async def begin_recording_end(session: TranscriptionSession, summary_payload: di
                         'error_kind': 'configuration', 'updated_at': local_now(),
                     }
                     record.save_metadata()
+            else:
+                asyncio.get_running_loop().call_soon(
+                    lambda: asyncio.create_task(queue_correction_verification(record.id)))
         except asyncio.CancelledError:
             record.metadata["finalization"].update(status="interrupted", error="服务已关闭，请继续结束保存")
             record.save_metadata()

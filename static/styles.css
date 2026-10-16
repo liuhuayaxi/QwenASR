@@ -516,6 +516,10 @@ footer { min-height: 76px; display: flex; justify-content: space-between; align-
 }
 
 .correction-candidate { padding: 16px 0; border-bottom: 1px solid var(--line); }
+.transcript-review-notice { margin:0; padding:12px; color:var(--muted); }
+.note-transcript-segment > .transcript-review-disclosure { grid-column:2; min-width:0; }
+.transcript-review-disclosure > summary { cursor:pointer; color:var(--accent); padding:8px 0; }
+@media (max-width: 680px) { .note-transcript-segment > .transcript-review-disclosure { grid-column:1 / -1; } }
 .correction-candidate p { white-space: pre-wrap; overflow-wrap: anywhere; }
 .correction-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
 .correction-edit { width:100%; min-height:100px; margin-top:10px; resize:vertical; }

@@ -93,12 +93,13 @@ class WrappedProviderErrorTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(app, 'recording_store', store_for(record)):
                 task = next(x for x in app.compact_ai_tasks() if x['type'] == 'refinement')
             self.assertEqual(task['status'], 'pending')
-            self.assertEqual(task['attention_kind'], 'review')
+            self.assertEqual(task['attention_kind'], 'auto_review')
             self.assertEqual(task['review_required_blocks'], 1)
             self.assertEqual(task['unprocessed_blocks'], 0)
-            self.assertEqual(task['label'], '转写待核对')
+            self.assertEqual(task['label'], 'AI 自动复核')
             self.assertEqual(task['error'], '')
-            self.assertIn('转写已完成', task['phase'])
+            self.assertIn('AI 自动复核', task['phase'])
+            self.assertIn('continue',task['actions'])
 
     async def test_full_workflow_outlives_small_operation_deadline_and_keeps_prior_error(self):
         with tempfile.TemporaryDirectory() as directory:

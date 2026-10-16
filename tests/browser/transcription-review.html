@@ -1,0 +1,36 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8">
+<title>分段核对隔离验收</title>
+<link rel="stylesheet" href="/static/styles.css">
+<style>body{padding:24px;background:#15191b;color:#eee}button{padding:8px;margin:6px}#noteTranscript{max-width:900px}textarea{display:block}textarea[hidden]{display:none}output{display:block;padding:12px}</style>
+<h1>分段核对隔离验收</h1><p>使用正式核对组件，全部录音、建议与保存接口均为合成数据。</p>
+<button id="redraw">模拟段落更新</button><button id="finish">完成延迟保存</button>
+<button id="fail">返回保存失败</button><output id="result"></output>
+<textarea id="noteSummaryEditor" data-note-id="synthetic-review" hidden></textarea><div id="noteTranscript"></div>
+<script type="module">
+import {renderCorrectionReview} from '/static/js/transcription-assist.js';
+const session={id:'synthetic-review'};
+let pending,posts=0;
+let candidates=[1,2].map(id=>({candidate_id:String(id).repeat(64),segment_ids:[id],start:(id-1)*60,end:id*60,
+  before:`第${id}段原文`,after:`第${id}段建议`,risks:['数字待核对'],level:'片段精修',evidence:[]}));
+const texts={1:'第1段原文',2:'第2段原文'};
+const response=value=>({ok:true,json:async()=>value});
+window.fetch=async(url,options={})=>{
+  if(!String(url).startsWith('/api/recordings/synthetic-review/correction-review'))throw Error('unexpected test URL');
+  if(options.method!=='POST')return response({candidates:structuredClone(candidates)});
+  posts++;document.querySelector('#result').textContent=`保存请求 ${posts} 次，等待回执`;
+  return new Promise(resolve=>{pending={resolve,body:JSON.parse(options.body)};});
+};
+async function render(){
+  document.querySelector('#noteTranscript').innerHTML=[1,2].map(id=>`<article class="note-transcript-segment" data-segment-ids="${id}"><b>第${id}段 · ${(id-1)*60}–${id*60}秒</b><p>${texts[id]}</p></article>`).join('');
+  await renderCorrectionReview(session,{onResolved:async()=>{await render();document.querySelector('#result').textContent=`保存完成；仍有2个独立时间段；剩余${candidates.length}条核对；请求${posts}次`;}});
+}
+document.querySelector('#redraw').onclick=render;
+document.querySelector('#finish').onclick=()=>{
+  if(!pending)return;const {body,resolve}=pending;pending=null;
+  const candidate=candidates.find(c=>c.candidate_id===body.candidate_id);
+  texts[candidate.segment_ids[0]]=body.decision==='edit'?body.text:body.decision==='accept'?candidate.after:candidate.before;
+  candidates=candidates.filter(c=>c!==candidate);resolve(response({session,remaining:candidates.length}));
+};
+document.querySelector('#fail').onclick=()=>{if(!pending)return;pending.resolve({ok:false,json:async()=>({detail:'模拟网络失败'})});pending=null;};
+await render();
+</script></html>

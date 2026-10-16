@@ -16,6 +16,7 @@ import re
 import shutil
 import subprocess
 import sys
+import unicodedata
 
 from .note_content import clock
 from .review_materials import PDF_LOCK, safe_path
@@ -172,6 +173,59 @@ def _argument(text, position):
     raise ValueError('LaTeX 花括号未闭合')
 
 
+def normalize_table_floats(body):
+    """Keep generated tables beside their teaching block without float syntax.
+
+    Only the table wrapper, its placement hint and its caption command change.
+    The complete cells still pass the normal allowlist; unsafe TeX is never
+    discarded to make a proposal appear valid. Raw proposals stay immutable.
+    """
+    if not isinstance(body,str) or not body.strip() or len(body)>800_000:
+        raise ValueError('LaTeX 正文为空或过大')
+    mask=''.join(_without_comments(line)+''.join(char if char in '\r\n' else ' '
+        for char in line[len(_without_comments(line)):]) for line in body.splitlines(keepends=True))
+    patches=[];environments=[]
+    for match in _TOKENS.finditer(mask):
+        command=match.group(1)
+        if command in {'begin','end'}:
+            environment,end=_argument(mask,match.end())
+            if environment=='verbatim':raise ValueError('LaTeX verbatim 需要先规范化为字面代码')
+            if command=='begin':
+                if environment=='table':
+                    if 'table' in environments:raise ValueError('LaTeX table 不允许嵌套')
+                    patches.append((match.start(),end,r'\begin{center}'))
+                    after=end
+                    while after<len(mask) and mask[after].isspace():after+=1
+                    if after<len(mask) and mask[after]=='[':
+                        placement=re.match(r'\[[htbp!\s]+\]',mask[after:])
+                        if not placement:raise ValueError('LaTeX table 位置参数无效')
+                        patches.append((after,after+placement.end(),''))
+                environments.append(environment)
+            else:
+                if not environments or environments.pop()!=environment:
+                    raise ValueError('LaTeX 环境未成对闭合')
+                if environment=='table':patches.append((match.start(),end,r'\end{center}'))
+        elif command=='caption' and 'table' in environments:
+            patches.append((match.start(),match.end(),r'\captionof{table}'))
+    if environments:raise ValueError('LaTeX 环境未闭合')
+    for start,end,replacement in reversed(patches):body=body[:start]+replacement+body[end:]
+    return body
+
+
+def normalize_course_names(body):
+    """Use plain Latin spelling without modifying mathematical accent macros.
+
+    Latin text accents are deterministic typography, not new teaching content.
+    Match only a single complete letter argument; malformed or executable TeX
+    remains in the body and is rejected by the normal validator.
+    """
+    body=re.sub(r'''\\["'`^~=](?:\{([A-Za-z])\}|([A-Za-z]))''',lambda match:match[1] or match[2],body)
+    def plain(match):
+        value=unicodedata.normalize('NFKD',match[0])
+        return ''.join(char for char in value if not unicodedata.combining(char))
+    return re.sub(r'[À-ÖØ-öø-ÿ]',plain,body)
+
+
 def _validate_body(body):
     if not isinstance(body,str) or not body.strip() or len(body)>800_000:raise ValueError('LaTeX 正文为空或过大')
     if any(ord(c)<32 and c not in '\n\r\t' for c in body) or '^^' in body:raise ValueError('LaTeX 正文包含不允许的控制字符')
@@ -321,10 +375,9 @@ def compile_document(body,folder,outdir,*,transcript=None,images=None):
                 raise LatexCompileError('LaTeX 编译未完成（退出码 '+str(result.returncode)+'）：'+'\n'.join(diagnostic.splitlines()[-14:]),repairable=repairable)
         pdf=build/'document.pdf'
         if not pdf.is_file():raise RuntimeError('LaTeX 编译没有生成 PDF')
-        import fitz
-        with fitz.open(pdf) as document:
-            if not len(document):raise RuntimeError('LaTeX 导出为空')
-            pages=len(document)
+        from .native_pdf import pdf_operation
+        pages=pdf_operation('inspect',path=str(pdf))['pages']
+        if not pages:raise RuntimeError('LaTeX 导出为空')
     metadata={key:value for key,value in prepared.items() if key!='source'}
     metadata.update({'renderer':VERSION,'toolchain':tools,'toolchain_sha256':hashlib.sha256(json.dumps(tools,sort_keys=True).encode()).hexdigest(),
         'pdf_sha256':_sha(pdf),'pages':pages,'shell_escape':False,'sandbox':'macos-task-build-only-no-network'})

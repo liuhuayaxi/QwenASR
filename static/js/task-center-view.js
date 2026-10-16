@@ -31,7 +31,7 @@ export function taskGroups(payload = {}) {
       title: group.title || leading?.title || '未命名任务', category: group.category || '',
       current_stage: group.current_stage || leading?.stage || (status === 'completed' ? '处理已完成' : ''),
       result_url: group.result_url || tasks.find(task => task.result_url)?.result_url || '',
-      review_count: group.review_count ?? current.filter(task => task.status === 'pending' && (task.attention_kind === 'review' || Number(task.review_required_blocks) > 0)).length,
+      review_count: group.review_count ?? current.filter(task => task.status === 'pending' && task.attention_kind !== 'auto_review' && (task.attention_kind === 'review' || Number(task.review_required_blocks) > 0)).length,
       recovered_count: group.recovered_count ?? history.filter(task => task.recovered || task.display_status === 'recovered').length};
   });
 }
@@ -78,6 +78,9 @@ export function leadingTask(group) {
 export function taskProgressView(task) {
   const stage=String(task.stage || task.phase || '');
   const done=task.status==='completed' || task.recovered;
+  if (task.attention_kind==='auto_review' || (task.type==='refinement' && stage.startsWith('AI 自动复核'))) {
+    return {label:stage || 'AI 自动复核',detail:'AI 逐项检查改动；无法确认时保留原文，无需逐条确认',count:'',percent:null};
+  }
   if (task.status==='pending' && (task.attention_kind==='review' || Number(task.review_required_blocks)>0)) {
     return {label:`${task.review_required_blocks || task.total || 0} 段待核对`,detail:'校对结果已保存，核对数字与公式后即可使用',count:'',percent:null};
   }

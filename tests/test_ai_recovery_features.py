@@ -59,7 +59,7 @@ class RetryStormTests(unittest.TestCase):
                 ],
             },
         )
-        with patch.object(app.recording_store, "list_records", return_value=[record]):
+        with patch.object(app.recording_store, "iter_records", return_value=iter([record])):
             tasks = app.compact_ai_tasks()
         live = [item for item in tasks if item["type"] == "live_summary"]
         self.assertEqual(len(live), 1)
@@ -134,20 +134,35 @@ class SummaryFallbackTests(unittest.IsolatedAsyncioTestCase):
 
 
 class TimestampMappingTests(unittest.IsolatedAsyncioTestCase):
-    async def test_adjacent_paragraphs_can_merge_with_exact_source_ids(self) -> None:
+    async def test_global_translation_keeps_one_translation_per_original_id(self):
+        segments=[{'id':1,'raw':'甲'},{'id':2,'raw':'乙'}]
+        response={'blocks':[{'segment_ids':[1],'corrected':'甲','translation':'A'},
+                            {'segment_ids':[2],'corrected':'乙','translation':'B'}]}
+        with patch('qwen_asr_app.ai.request_ai_json',new=AsyncMock(return_value=response)) as request:
+            result=await polish_timestamped_segments(segments,'Chinese',{'translation':'en','ai':{}},mode='global')
+        self.assertEqual([b['translation'] for b in result],['A','B'])
+        self.assertTrue(all(b['translation_target']=='English' for b in result))
+        self.assertIn('translation',request.await_args.kwargs['instructions'])
+        response['blocks'][1].pop('translation')
+        with patch('qwen_asr_app.ai.request_ai_json',new=AsyncMock(return_value=response)):
+            with self.assertRaisesRegex(AIRequestError,'译文'):
+                await polish_timestamped_segments(segments,'Chinese',{'translation':'en','ai':{}},mode='global')
+
+    async def test_adjacent_paragraphs_keep_exact_source_ids_in_one_request(self) -> None:
         segments = [
             {"id": 11, "raw": "奈奎斯特", "start": 1, "end": 2},
             {"id": 12, "raw": "准则", "start": 2, "end": 3},
             {"id": 13, "raw": "无码间串扰", "start": 3, "end": 4},
         ]
         response = {"blocks": [
-            {"segment_ids": [11, 12], "corrected": "奈奎斯特准则"},
+            {"segment_ids": [11], "corrected": "奈奎斯特"},
+            {"segment_ids": [12], "corrected": "准则"},
             {"segment_ids": [13], "corrected": "无码间串扰"},
         ]}
         config = {"ai": {"review_provider": {"context_window": 32768}}}
         with patch("qwen_asr_app.ai.request_ai_json", new=AsyncMock(return_value=response)):
             result = await polish_timestamped_segments(segments, "zh", config)
-        self.assertEqual([item["segment_ids"] for item in result], [[11, 12], [13]])
+        self.assertEqual([item["segment_ids"] for item in result], [[11], [12], [13]])
 
     async def test_missing_source_id_is_rejected(self) -> None:
         segments = [{"id": 1, "raw": "甲"}, {"id": 2, "raw": "乙"}]

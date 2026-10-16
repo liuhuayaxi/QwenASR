@@ -1027,9 +1027,9 @@ async def polish_timestamped_segments(
 ) -> list[dict[str, Any]]:
     """Refine ordered segments while keeping an exact source-id/time mapping.
 
-    The model may merge adjacent paragraphs, but it cannot split, reorder, skip,
-    duplicate or invent source ids. Timestamps are derived locally from those
-    ids instead of trusting model-generated clock text.
+    One request can contain many paragraphs, but every result keeps one source
+    id. Timestamps are derived locally from those ids instead of trusting
+    model-generated clock text.
     """
     if mode not in {"correction", "review", "global"}:
         raise ValueError("带时间戳精修仅支持 correction、review 或 global 模式")
@@ -1053,10 +1053,10 @@ async def polish_timestamped_segments(
     instructions = (
         f"{provider_prompt}\n{AI_SPEECH_CLEANUP_RULES}\n"
         "输入是按时间顺序排列的课堂转写段落。逐段校正术语、识别错误、标点和断句。"
-        "默认保持原段落；只有相邻段确属同一句或同一自然段时才合并。"
-        "每个输入 id 必须且只能出现一次，顺序不得改变；合并时把相邻 id 放入同一个 segment_ids。"
+        "批量请求只共享上下文，结果必须逐段回写：每个 blocks 元素的 segment_ids 只能含一个输入 id。"
+        "每个输入 id 必须且只能出现一次，顺序不得改变；即使相邻段属于同一句也不得合并。"
         "不得拆分单个 id、跳过内容、添加来源外信息或自行生成时间戳。"
-        "只返回 JSON：{\"blocks\":[{\"segment_ids\":[1,2],\"corrected\":\"精修文本\"}]}。"
+        "只返回 JSON：{\"blocks\":[{\"segment_ids\":[1],\"corrected\":\"第一段精修文本\"},{\"segment_ids\":[2],\"corrected\":\"第二段精修文本\"}]}。"
     )
     if config.get("_preserve_segment_boundaries"):
         instructions += (
@@ -1064,6 +1064,13 @@ async def polish_timestamped_segments(
             "不得合并或拆分 id。可以结合整批上下文校正跨段术语和断句，"
             "但每段只输出属于该输入 id 的内容，避免把整批正文重复填到多个段落。"
         )
+    translation_target=''
+    if mode=='global':
+        translation_mode=str(config.get('translation','off'))
+        if translation_mode=='auto':translation_target='English' if detected_language.lower() in {'chinese','cantonese','zh','yue'} else 'Chinese'
+        elif translation_mode in {'en','zh'}:translation_target={'en':'English','zh':'Chinese'}[translation_mode]
+        if translation_target:
+            instructions+='\n每个知识段另外返回 translation 字段，逐段翻译为 '+translation_target+'；译文必须只对应同一输入 id，不得合并或省略。'
     glossary = ai_terminology_context(
         config.get("terminology"),
         context_window=context_window_for(config, mode),
@@ -1076,7 +1083,7 @@ async def polish_timestamped_segments(
         instructions += evidence_instructions(config)
         instructions += '\n<course_evidence>\n' + json.dumps(config['_knowledge_evidence'], ensure_ascii=False) + '\n</course_evidence>'
     raw_text = json.dumps(source, ensure_ascii=False)
-    desired_output = max(600, int(estimate_tokens(raw_text) * 1.25) + 256)
+    desired_output = max(600, int(estimate_tokens(raw_text) * (2.5 if translation_target else 1.25)) + 256)
     previous_context, output_limit = fit_previous_context(
         raw_text,
         str(config.get("_transcript_context") or ""),
@@ -1095,7 +1102,7 @@ async def polish_timestamped_segments(
         mode=mode,
         max_output_tokens=output_limit,
     )
-    if config.get('_knowledge_assist_enabled') and isinstance(data.get('blocks'), list):
+    if config.get('_knowledge_assist_enabled') and isinstance(data.get('blocks'), list) and (mode!='global' or config.get('ai_correction')):
         from .transcription_assist.validation import protect_correction,correction_provenance
         by_id = {item['id']:item['text'] for item in source}
         for block in data['blocks']:
@@ -1125,16 +1132,22 @@ async def polish_timestamped_segments(
         except (TypeError, ValueError) as exc:
             raise AIRequestError("AI 返回了无效的段落编号，原文已保留", kind="invalid_segment_mapping") from exc
         corrected = str(raw_block.get("corrected") or "").strip()
+        translated=str(raw_block.get('translation') or '').strip()
+        if translation_target and not translated:
+            raise AIRequestError('AI 遗漏了逐段译文，正在拆批重试',kind='invalid_segment_mapping')
         if not ids or not corrected or any(value not in positions for value in ids):
             raise AIRequestError("AI 返回了空文本或不存在的段落编号，原文已保留", kind="invalid_segment_mapping")
-        if config.get("_preserve_segment_boundaries") and len(ids) != 1:
+        if len(ids) != 1:
             raise AIRequestError("批量精修合并了需要分别回写的段落，正在拆批重试", kind="invalid_segment_mapping")
+        if mode=='global' and not config.get('ai_correction'):
+            corrected=source[positions[ids[0]]]['text']
         block_positions = [positions[value] for value in ids]
         if block_positions != list(range(block_positions[0], block_positions[-1] + 1)) or block_positions[0] <= last_position:
             raise AIRequestError("AI 改变了段落顺序或合并了不相邻段落，原文已保留", kind="invalid_segment_mapping")
         last_position = block_positions[-1]
         flattened.extend(ids)
         result.append({"segment_ids": ids, "corrected": corrected,
+                       **({'translation':translated,'translation_target':translation_target} if translation_target else {}),
                        **({'correction_provenance':raw_block['correction_provenance']} if raw_block.get('correction_provenance') else {}),
                        **({'correction_review': raw_block['correction_review']} if raw_block.get('correction_review') else {})})
     if flattened != source_ids:
@@ -1152,8 +1165,8 @@ async def polish_timestamped_segments_resilient(
 ) -> list[dict[str, Any]]:
     """Refine a block, bisecting only when its structured result is unsafe.
 
-    Correct mappings still retain intelligent adjacent-paragraph merging. When
-    a provider truncates JSON or returns invalid ids, smaller independent
+    Each mapped result retains its original segment. When a provider
+    truncates JSON or returns invalid ids, smaller independent
     ranges are attempted so one bad response does not fail the whole lesson.
     """
     try:
@@ -1230,6 +1243,14 @@ async def polish_timestamped_segments_resilient(
             block['correction_provenance']=correction_provenance(raw,proposed,config,[int(segment['id'])],provider.get('cli_model') or provider.get('model'))
         if candidate:
             block['correction_review'] = candidate
+        if mode=='global' and str(config.get('translation','off'))!='off':
+            translation_config={**config,'ai_correction':False}
+            translated=await polish_and_translate(proposed if config.get('ai_correction') else raw,detected_language,translation_config)
+            if not str(translated.get('translation') or '').strip():
+                raise AIRequestError('AI 没有返回该段译文',kind='invalid_segment_mapping')
+            block.update(translation=translated['translation'],translation_target=translated.get('translation_target'))
+        if mode=='global' and not config.get('ai_correction'):
+            block['corrected']=raw;block.pop('correction_review',None);block.pop('correction_provenance',None)
         if on_checkpoint is not None:on_checkpoint([block])
         return [block]
     else:

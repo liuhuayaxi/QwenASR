@@ -139,7 +139,7 @@ class LibraryQueryTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(all(item['category']=='光学' for item in page['records']))
             self.assertEqual(len(LibrarySearch().search(records,'唯一查询词','物理')['matches']),30)
             self.assertEqual(LibrarySearch().search(records,'唯一查询词','物理')['total'],50)
-            with patch.object(app.recording_store,'list_records',return_value=records),patch.object(app.recording_store,'find',return_value=records[0]),patch.object(app,'discover_courses'):
+            with patch.object(app.recording_store,'list_records',return_value=records),patch.object(app.recording_store,'iter_records',side_effect=lambda:iter(records)),patch.object(app.recording_store,'find',return_value=records[0]),patch.object(app,'discover_courses'):
                 async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app.app),base_url='http://test') as client:
                     for old_page in ('/notes','/static/notes.html'):
                         redirect=await client.get(old_page+'?category=optics')

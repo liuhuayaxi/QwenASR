@@ -10,12 +10,61 @@ import subprocess
 import tempfile
 import unittest
 
-from qwen_asr_app.note_latex import prepare_document,compile_document,normalize_literal_code,normalize_box_titles,LatexCompileError,_sandbox,toolchain_identity
+from qwen_asr_app.note_latex import prepare_document,compile_document,normalize_literal_code,normalize_box_titles,normalize_table_floats,normalize_course_names,LatexCompileError,_sandbox,toolchain_identity
 
 TITLE=r'\CourseTitle{合成课程复习笔记}{直接 LaTeX 测试}'
 
 
 class LatexSourceTests(unittest.TestCase):
+    def test_course_name_uses_plain_english_without_allowing_accent_commands(self):
+        body=TITLE+'\n'+r'Schr\"odinger / Schr\"{o}dinger / Schrödinger / 薛定谔'
+        normalized=normalize_course_names(body)
+        self.assertEqual(normalized.count('Schrodinger'),3)
+        self.assertIn('薛定谔',normalized)
+        with tempfile.TemporaryDirectory() as raw:
+            prepare_document(normalized,raw,{'blocks':[]},[])
+            with self.assertRaises(ValueError):prepare_document(TITLE+r'\"a',raw,{'blocks':[]},[])
+
+    def test_plain_latin_policy_applies_to_different_courses_and_keeps_math_accents(self):
+        source=TITLE+'\n'+r'''Schr\"odinger, G\"{o}del, Poincaré, Fabry–Pérot, \^{o}.
+\[\hat{x}+\bar{y}+\tilde{z}\]'''
+        normalized=normalize_course_names(source)
+        for word in ('Schrodinger','Godel','Poincare','Fabry–Perot'):self.assertIn(word,normalized)
+        self.assertIn(r'\hat{x}+\bar{y}+\tilde{z}',normalized)
+        with tempfile.TemporaryDirectory() as raw:prepare_document(normalized,raw,{'blocks':[]},[])
+
+    def test_table_floats_keep_cells_captions_and_comments_in_place(self):
+        table=r'''\begin{table}% placement follows a comment
+[htbp!]
+\centering
+\caption{物理特性对比}
+\begin{tabularx}{\textwidth}{lXX}
+\toprule
+对象 & 条件 & 结论 \\
+\midrule
+SPM & 单信道 & $\Delta\phi$ \\
+\bottomrule
+\end{tabularx}
+\end{table}'''
+        body=TITLE+'\n% knowledge:k\n'+table+'\n% /knowledge:k\n% '+r'\begin{table}'
+        normalized=normalize_table_floats(body)
+        self.assertIn(r'\begin{center}% placement follows a comment',normalized)
+        self.assertIn(r'\captionof{table}{物理特性对比}',normalized)
+        self.assertIn(r'SPM & 单信道 & $\Delta\phi$',normalized)
+        self.assertIn('% /knowledge:k\n% '+r'\begin{table}',normalized)
+        self.assertNotIn('[htbp!]',normalized)
+        self.assertEqual(normalize_table_floats(normalized),normalized)
+        with tempfile.TemporaryDirectory() as raw:prepare_document(normalized,raw,{'blocks':[]},[])
+
+    def test_table_normalization_rejects_malformed_wrappers_and_preserves_safety(self):
+        for body in (r'\begin{table}[\input{bad}]x\end{table}',r'\begin{table}x',
+                     r'\begin{table}\begin{table}x\end{table}\end{table}',r'\begin{table}x\end{center}'):
+            with self.subTest(body=body),self.assertRaises(ValueError):normalize_table_floats(TITLE+body)
+        with tempfile.TemporaryDirectory() as raw:
+            for command in (r'\input{private}',r'\write18{shell}',r'\csname input\endcsname'):
+                with self.subTest(command=command),self.assertRaises(ValueError):
+                    prepare_document(normalize_table_floats(TITLE+r'\begin{table}'+command+r'\end{table}'),raw,{'blocks':[]},[])
+
     def test_missing_semantic_box_titles_are_inserted_without_consuming_body_or_comments(self):
         body=TITLE+'\n% '+r'\begin{FormulaBox}'+'\n'+r'''
 \begin{FormulaBox}
@@ -187,6 +236,20 @@ MOV AX, FIRST_1    ; 100% # & $ { } ~ ^
 
 @unittest.skipUnless(os.getenv('QWEN_ASR_REAL_LATEX_TEST')=='1','native direct LaTeX export is opt-in')
 class LatexNativeTests(unittest.TestCase):
+    def test_optics_and_assembly_share_normalized_table_pipeline_and_really_compile(self):
+        import pymupdf
+        for title,content in [('光学测试',r'Schr\"odinger 方程 $\hat{x}=x$'),
+                              ('指令测试','\\begin{verbatim}\nMOV AX, FIRST_1\nADD AX, SECOND\n\\end{verbatim}')]:
+            with self.subTest(course=title),tempfile.TemporaryDirectory() as raw:
+                folder=Path(raw)
+                source='\\CourseTitle{'+title+'}{合成回归测试}\n'+content+'\n'+r'\begin{table}[htbp]\caption{知识对比}\begin{tabularx}{\linewidth}{lX}\toprule 对象 & 条件与意义\\\midrule A & 完整保留的中文说明\\\bottomrule\end{tabularx}\end{table}'
+                body=normalize_course_names(normalize_table_floats(normalize_box_titles(normalize_literal_code(source))))
+                pdf,_=compile_document(body,folder,folder/'build',transcript={'blocks':[]},images=[])
+                with pymupdf.open(pdf) as doc:text='\n'.join(page.get_text() for page in doc)
+                self.assertIn(title,text);self.assertIn('知识对比',text);self.assertIn('完整保留',text)
+                if title=='光学测试':self.assertIn('Schrodinger',text)
+                else:self.assertIn('MOV AX, FIRST_1',text)
+
     def test_missing_box_title_before_equation_and_bold_example_compiles_after_normalization(self):
         import fitz
         with tempfile.TemporaryDirectory() as raw:

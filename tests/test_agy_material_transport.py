@@ -107,6 +107,23 @@ class MaterialTransportTests(unittest.IsolatedAsyncioTestCase):
     def test_pipe_only_cli_failure_is_retryable(self):
         self.assertEqual(_error_kind('[Errno 32] Broken pipe'),('network_transport',True))
 
+    async def test_silent_early_exit_is_retryable_but_never_approves_pages(self):
+        for code in (0,1):
+            with self.subTest(exit_code=code),tempfile.TemporaryDirectory() as raw:
+                process=child(exit_code=code)
+                with patch('qwen_asr_app.agy_materials.executable',return_value='/usr/bin/true'),patch('qwen_asr_app.agy_materials.asyncio.create_subprocess_exec',return_value=process):
+                    with self.assertRaises(MaterialSessionError) as caught:
+                        await request_materials('synthetic',Path(raw),PROVIDER)
+                self.assertEqual(caught.exception.kind,'provider_unavailable')
+                self.assertTrue(caught.exception.retriable)
+                receipt=json.loads(next((Path(raw)/'sessions').glob('failed-*.json')).read_text())
+                self.assertEqual(receipt['viewed_files'],[]);self.assertEqual(receipt['status'],'unreviewed')
+
+    def test_permanent_failures_do_not_become_retryable_silent_exits(self):
+        from qwen_asr_app.agy_materials import _material_failure
+        for detail in ('HTTP 401 invalid_grant','quota exceeded','unknown flag --schema','sandbox_apply: denied'):
+            with self.subTest(detail=detail):self.assertFalse(_material_failure(detail,returncode=1).retriable)
+
     def test_oauth_refresh_dns_and_connection_failures_are_transport_not_invalid_auth(self):
         exact=('API error (attempt 2): request failed: Post "https://daily-cloudcode-pa.googleapis.com/'
             'v1internal:streamGenerateContent?alt=sse": Post "https://oauth2.googleapis.com/token": '

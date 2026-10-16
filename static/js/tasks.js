@@ -99,7 +99,7 @@ function courseQueueDetails(task) {
     return `<article class="course-queue-item"><div class="course-queue-item-head"><b>${esc(item.title)}</b><span>${esc(item.state === 'running' ? '进行中' : item.state === 'paused' ? '已暂停' : '排队中')}</span></div><p>${esc(item.course || '')}${esc(window)}</p><div class="course-phases">${phases || `<small>${esc(item.message || '等待课程回放处理')}</small>`}</div></article>`;
   }).join('')}</div></details>`;
 }
-function taskStatus(task) { return task.recovered || task.display_status === 'recovered' ? '已恢复' : task.status === 'pending' && (task.attention_kind === 'review' || Number(task.review_required_blocks) > 0) ? '待核对' : labels[task.status] || task.status; }
+function taskStatus(task) { return task.recovered || task.display_status === 'recovered' ? '已恢复' : task.attention_kind === 'auto_review' ? '等待 AI 复核' : task.status === 'pending' && (task.attention_kind === 'review' || Number(task.review_required_blocks) > 0) ? '待核对' : labels[task.status] || task.status; }
 function taskActionLabel(task, action) { return task.type === 'course_queue' && ['continue', 'retry', 'pause', 'cancel'].includes(action) ? `${actionLabels[action]}课程队列` : actionLabels[action]; }
 function isReviewTask(task) { return task.status === 'pending' && task.attention_kind === 'review'; }
 function defaultBulkTasks(tasks) { return tasks.filter(task => !isReviewTask(task) && !task.is_context); }
@@ -164,7 +164,7 @@ function groupCard(group) {
 
   const current=group.current_tasks, history=group.history, task=leadingTask(group);
   const running=current.some(t=>active.has(t.status));
-  const review=!running && (task.attention_kind==='review' || (task.status==='pending' && task.review_required_blocks));
+  const review=!running && task.attention_kind!=='auto_review' && (task.attention_kind==='review' || (task.status==='pending' && task.review_required_blocks));
   const view=taskProgressView(task), activity=aiActivityView(task);
   const tone=running?'active':group.errors.length?'attention':review?'review':'quiet';
   const status=running?'处理中':review?'待核对':labels[group.status] || group.status;

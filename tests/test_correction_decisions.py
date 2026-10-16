@@ -72,3 +72,30 @@ class CorrectionDecisionTests(unittest.TestCase):
         self.busy=False
         self.assertEqual(self.client.post(self.url,json={'candidate_id':item['candidate_id'],'decision':'edit','text':' '}).status_code,400)
         self.assertEqual(self.record.segments,before)
+
+    def test_resolving_one_batch_member_keeps_each_timestamp_and_neighbor_proposal(self):
+        self.record.segments.append({'id':2,'start':1,'end':2,'raw':'第二段原文','corrected':'第二段原文',
+            'correction_review':{**self.proposal,'before':'第二段原文','after':'第二段建议'}})
+        self.record.save_all()
+        before=copy.deepcopy(self.record.segments[1])
+        candidates=self.client.get(self.url).json()['candidates']
+        self.assertEqual([item['segment_ids'] for item in candidates],[[1],[2]])
+        result=self.client.post(self.url,json={'candidate_id':candidates[0]['candidate_id'],'decision':'accept'})
+        self.assertEqual(result.status_code,200)
+        blocks=result.json()['session']['refined_transcript']
+        self.assertEqual([(b['segment_ids'],b['start'],b['end']) for b in blocks],[([1],0,1),([2],1,2)])
+        self.assertEqual(blocks[0]['text'],'功率为40 W')
+        self.assertEqual(self.record.segments[1],before)
+        self.assertEqual(result.json()['remaining'],1)
+
+    def test_global_batch_review_updates_only_one_nested_segment_and_its_export_text(self):
+        self.record.segments.append({'id':2,'start':1,'end':2,'raw':'第二段','corrected':'第二段'})
+        self.record.metadata['ai_global_rewrite']={'complete':True,'text':'旧文本','parts':[{'segment_ids':[1,2],
+            'corrected':'旧文本','blocks':[{'segment_ids':[1],'start':0,'end':1,'corrected':'功率为40 mW','correction_review':copy.deepcopy(self.proposal)},
+                {'segment_ids':[2],'start':1,'end':2,'corrected':'第二段精修'}]}]}
+        self.record.save_all();candidate=self.client.get(self.url).json()['candidates'][0]
+        response=self.client.post(self.url,json={'candidate_id':candidate['candidate_id'],'decision':'accept'})
+        self.assertEqual(response.status_code,200,response.text)
+        loaded=RecordingRecord.load(self.record.directory)
+        self.assertEqual([b['text'] for b in transcript_blocks(loaded)],['功率为40 W','第二段精修'])
+        self.assertEqual(loaded.metadata['ai_global_rewrite']['text'],'功率为40 W\n\n第二段精修')

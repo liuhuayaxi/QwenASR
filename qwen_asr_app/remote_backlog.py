@@ -11,12 +11,11 @@ class SilentSocket:
 
 
 async def retry_once(store, manager, live_sessions, unavailable, claim=None, on_completed=None):
-    from .live_session import TranscriptionSession
-    import soundfile as sf
-    for listed in store.list_records():
-        if unavailable(listed.id):continue
-        live=live_sessions.get(listed.id)
-        record=live.recording if live else store.find(listed.id)
+    identities=store.remote_backlog_ids() if hasattr(store,'remote_backlog_ids') else [row.id for row in store.list_records()]
+    for recording_id in identities:
+        if unavailable(recording_id):continue
+        live=live_sessions.get(recording_id)
+        record=live.recording if live else store.find(recording_id)
         if not record or (record.metadata.get('remote_backlog') or {}).get('status') in {'paused','cancelled'}:continue
         for ident, pending in list(record.metadata.get('pending_segments',{}).items()):
             if pending.get('state')=='processing' and live:continue
@@ -27,6 +26,8 @@ async def retry_once(store, manager, live_sessions, unavailable, claim=None, on_
             if not folder:continue
             source=Path(folder)/'audio.wav'
             if not source.is_file():continue
+            from .live_session import TranscriptionSession
+            import soundfile as sf
             session=live or TranscriptionSession(SilentSocket(),manager,store)
             session.recording=record
             audio=await asyncio.to_thread(lambda:sf.read(source,dtype='float32')[0])
@@ -49,12 +50,17 @@ async def retry_once(store, manager, live_sessions, unavailable, claim=None, on_
                 record.save_all()
             if not remaining and on_completed:on_completed(record.id)
             # One clip per sweep keeps other course/UI work responsive.
-            return
+            return True
+    return False
 
 
-async def recovery_loop(store, manager, live_sessions, unavailable, claim=None, on_completed=None):
+async def recovery_loop(store, manager, live_sessions, unavailable, claim=None, on_completed=None, on_idle=None):
+    last_idle_cleanup=0
     while True:
         await asyncio.sleep(5)
-        try:await retry_once(store,manager,live_sessions,unavailable,claim,on_completed)
+        try:
+            worked=await retry_once(store,manager,live_sessions,unavailable,claim,on_completed)
+            if not worked and on_idle and time.monotonic()-last_idle_cleanup>=30:
+                on_idle();last_idle_cleanup=time.monotonic()
         except asyncio.CancelledError:raise
         except Exception:await asyncio.sleep(5)

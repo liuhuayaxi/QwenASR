@@ -754,10 +754,13 @@ function recordingStatus(record) {
 async function refreshOpenNoteTranscript() {
   const current = state.noteSession;
   if (!current) return;
+  const transcriptSnapshot = session => JSON.stringify([session.segments || [],session.refined_transcript || [],session.ai_reviews || [],session.ai_jobs || {}]);
+  const before = transcriptSnapshot(current);
   try {
     const response = await fetch(`/api/recordings/${encodeURIComponent(current.id)}`, { cache: "no-store" });
     const payload = await response.json();
-    if (!response.ok || state.noteSession?.id !== current.id) return;
+    if (!response.ok || state.noteSession?.id !== current.id || transcriptSnapshot(state.noteSession) !== before) return;
+    if (transcriptSnapshot(payload.session) === before) return;
     state.noteSession.segments = payload.session.segments || [];
     state.noteSession.refined_transcript = payload.session.refined_transcript || [];
     state.noteSession.ai_reviews = payload.session.ai_reviews || [];
@@ -1435,13 +1438,13 @@ function renderNoteTranscript(session) {
   els.noteTranscript.innerHTML = blocks.length ? blocks.map((block) => {
     const replay = session.course_replay_sources?.length ? replayLaunchUrl(session, block.start) : '';
     return `
-    <article class="note-transcript-segment" data-start="${Number(block.start) || 0}" data-end="${Number(block.end) || 0}">
+    <article class="note-transcript-segment" data-segment-ids="${escapeHtml((block.segment_ids || [block.id]).join(','))}" data-start="${Number(block.start) || 0}" data-end="${Number(block.end) || 0}">
       <div class="transcript-source-actions">
-        <button class="transcript-time" type="button" data-seek="${Number(block.start) || 0}" title="定位并播放这段录音">${formatDuration(block.start)}<br>${formatDuration(block.end)}${refined && !block.refined ? block.correction_review ? "<br>待核对" : "<br>未精修" : ""}</button>
+        <button class="transcript-time" type="button" data-seek="${Number(block.start) || 0}" title="定位并播放这段录音">${formatDuration(block.start)}<br>${formatDuration(block.end)}${refined && !block.refined ? block.correction_review ? "<br>AI 待复核" : "<br>未精修" : ""}</button>
         ${replay ? `<a class="transcript-smartclass-jump" href="${escapeHtml(replay)}" target="_blank" rel="noopener noreferrer" title="在新标签页登录并跳转到南邮 Smart Class 对应回放时间">跳转</a>` : ""}
       </div>
       <div class="markdown-body">${refined ? renderMarkdown(block.text || "") : `<p>${escapeHtml(block.text || "")}</p>`}${refined && block.translation ? `<div class="translation-block"><small>${block.translation_target === "English" ? "ENGLISH" : "中文翻译"}</small><div class="translation-text transcript-markdown markdown-body">${renderMarkdown(block.translation)}</div></div>` : ""}${refined && !block.refined && block.segment_ids?.length === 1 && failedIds.has(String(block.segment_ids[0]))
-        ? `<button class="segment-retry-button note-segment-retry" type="button" data-segment-id="${escapeHtml(block.segment_ids[0])}">重试该段</button>` : ""}</div>
+        ? `<button class="segment-retry-button note-segment-retry" type="button" data-segment-id="${escapeHtml(block.segment_ids[0])}">重试该段</button>` : ""}${refined && block.ai_verification?.decision==='uncertain' ? `<p class="transcript-review-notice">AI 已复核，保留原文：${escapeHtml(block.ai_verification.reason)}</p>` : ""}</div>
     </article>`;
   }).join("") : '<div class="note-empty">尚无转写内容</div>';
   els.noteTranscript.querySelectorAll(".note-segment-retry").forEach((button) => {
@@ -1449,8 +1452,9 @@ function renderNoteTranscript(session) {
   });
   void renderCorrectionReview(session,{onResolved:updated=>{
     if(state.noteSession?.id!==updated.id)return;
-    state.noteSession=updated;
-    renderNoteTranscript(updated);
+    // Independent cards can finish out of order. Read the latest durable
+    // snapshot instead of installing an older POST response over another edit.
+    void refreshOpenNoteTranscript();
   }}).catch(()=>{});
 }
 

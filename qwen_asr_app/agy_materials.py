@@ -70,8 +70,11 @@ def _material_failure(detail, *, returncode=None):
     kind,retriable=_error_kind(value)
     if re.search(r'--effort.*not supported|unknown (?:flag|option)|invalid.*(?:flag|option)',value,re.I):
         kind,retriable='agy_cli_config',False
-    if not value.strip() and returncode in {None,0}:
-        kind,retriable='network_transport',True
+    if not value.strip() and returncode in {None,0,1}:
+        # A silent early exit provides no evidence of rejected credentials or
+        # a permanent configuration error. Permit bounded recovery at the
+        # owning stage, while keeping every page unreviewed until attested.
+        kind,retriable='provider_unavailable',True
     reason={
         'provider_auth':'登录状态不可用，请检查 AGY 登录',
         'provider_region':'当前账号的服务地区不可用',

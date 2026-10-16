@@ -332,7 +332,7 @@ async def visual_review(pdf, export, folder, provider, ledger, evidence, *, gene
 
 
 async def _visual_review_owned(pdf, export, folder, provider, ledger, evidence, *, generator_session_ids=(), progress=None):
-    import fitz
+    from .native_pdf import pdf_operation
     destination=pdf.parent
     # A regenerated export can share its content fingerprint directory while
     # the actual PDF bytes/layout change. Never show that PDF's old page PNGs.
@@ -362,17 +362,9 @@ async def _visual_review_owned(pdf, export, folder, provider, ledger, evidence, 
     # Map actual embedded pixels to final page numbers, rather than asking a
     # two-page reviewer to infer whether an illustration exists elsewhere.
     figure_pdf_locations={f['image_id']:[] for f in figures if not f.get('review_only')}
-    with PDF_LOCK,fitz.open(pdf) as doc:
-        image_ids_by_digest={}
-        for figure in figures:
-            if figure.get('review_only'):continue
-            pixels=fitz.Pixmap(safe_path(folder,figure['path']))
-            image_ids_by_digest.setdefault(pixels.digest,[]).append(figure['image_id'])
-            del pixels
-        for number,page in enumerate(doc,1):
-            for embedded in page.get_image_info(hashes=True):
-                for image_id in image_ids_by_digest.get(embedded['digest'],[]):
-                    if number not in figure_pdf_locations[image_id]:figure_pdf_locations[image_id].append(number)
+    figure_pdf_locations=await owned_thread(lambda:pdf_operation('image_locations',path=str(pdf),figures=[
+            {'image_id':figure['image_id'],'path':str(safe_path(folder,figure['path']))}
+            for figure in figures if not figure.get('review_only')]))
     report['figure_pdf_locations']=figure_pdf_locations
     release_pdf_cache()
     # Text-only legacy notes have no original-image slots to reserve. Keep
@@ -404,12 +396,9 @@ async def _visual_review_owned(pdf, export, folder, provider, ledger, evidence, 
 
     async def review_batch(numbers):
         paths=[];page_text=''
-        with PDF_LOCK,fitz.open(pdf) as doc:
-            for number in numbers:
-                page_text+=doc[number-1].get_text()
-                path=rendered/f'page-{number:03d}.png'
-                if not path.exists():doc[number-1].get_pixmap(matrix=fitz.Matrix(1.25,1.25),alpha=False).save(path)
-                paths.append(path)
+        paths=[rendered/f'page-{number:03d}.png' for number in numbers]
+        rows=await owned_thread(lambda:pdf_operation('render',path=str(pdf),pages=[{'page':number,'output':str(path),'scale':1.25} for number,path in zip(numbers,paths)]))
+        page_text=''.join(row['text'] for row in rows)
         terms=tokens(page_text)
         cited={int(value) for value in re.findall(r'S\s*(\d+)',page_text)}
         source_blocks=transcript.get('blocks',[])
@@ -438,8 +427,7 @@ async def _visual_review_owned(pdf, export, folder, provider, ledger, evidence, 
         if context_number is not None:
             context_path=rendered/f'page-{context_number:03d}.png'
             if not context_path.exists():
-                with PDF_LOCK,fitz.open(pdf) as doc:
-                    doc[context_number-1].get_pixmap(matrix=fitz.Matrix(1.25,1.25),alpha=False).save(context_path)
+                await owned_thread(lambda:pdf_operation('render',path=str(pdf),pages=[{'page':context_number,'output':str(context_path),'scale':1.25}]))
             context_paths.append(context_path)
         refs=ranked_figures[:1 if context_paths else 2]
         references=[safe_path(folder,f['path']) for f in refs]

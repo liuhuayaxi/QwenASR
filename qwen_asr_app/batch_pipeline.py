@@ -147,3 +147,5 @@ class SegmentCorrectionPipeline:
         for _ in range(self.concurrency):
             await self.submit(None)
         await self.task
+        from .transcription_assist.verification import verify_corrections
+        await verify_corrections(self.record,self.config)

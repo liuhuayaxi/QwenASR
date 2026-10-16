@@ -127,7 +127,7 @@ class RemoteEmbedder:
         """Incremental replica sync; Mac revalidates every returned ID/version."""
         key=json.dumps(self.contract,sort_keys=True)
         with store._connect() as db:
-            rows=[dict(r) for r in db.execute('''SELECT c.*,s.source_type,cv.vector,cv.dimension FROM chunks c
+            rows=[dict(r) for r in db.execute('''SELECT c.chunk_id,c.source_id,c.content_hash,c.lesson_id,c.origin,s.source_type FROM chunks c
                 JOIN sources s USING(source_id) JOIN chunk_vectors cv USING(chunk_id)
                 WHERE c.course_id=? AND c.is_active=1 AND s.status='active' AND cv.embedding_contract=?''',(course_id,key))]
         active={r['chunk_id']:r for r in rows}
@@ -137,8 +137,21 @@ class RemoteEmbedder:
         changed=[r for r in rows if manifest.get(r['chunk_id'])!=r['content_hash']]
         for start in range(0,max(len(changed),1),64):
             upsert=[]
-            for row in changed[start:start+64]:
-                vector=struct.unpack('<'+'f'*row['dimension'],row['vector'])
+            batch=changed[start:start+64]
+            # Hold at most one network batch of vector bytes. Waiting for
+            # Windows must not retain an entire course matrix in this process.
+            vectors={}
+            if batch:
+                with store._connect() as db:
+                    marks=','.join('?' for _ in batch)
+                    vectors={r['chunk_id']:dict(r) for r in db.execute(
+                        'SELECT c.chunk_id,c.content_hash,cv.vector,cv.dimension FROM chunks c JOIN chunk_vectors cv USING(chunk_id) '
+                        f'WHERE c.chunk_id IN ({marks}) AND c.is_active=1 AND cv.embedding_contract=?',
+                        [*(r['chunk_id'] for r in batch),key])}
+            for row in batch:
+                saved=vectors.get(row['chunk_id'])
+                if not saved or saved['content_hash']!=row['content_hash']:continue
+                vector=struct.unpack('<'+'f'*saved['dimension'],saved['vector'])
                 upsert.append({'id':row['chunk_id'],'version':row['content_hash'],'vector':vector,
                     'lesson_id':row['lesson_id'],'source_type':row['source_type'],'derived':row['origin']=='ai_derived'})
             if upsert or deleted:
@@ -155,7 +168,7 @@ class RemoteEmbedder:
             if not filters.get('include_derived') and row['origin']=='ai_derived' and row['source_type']!='recording_refined':continue
             current=store.get_chunk(hit['chunk_id']);source=store.get_source(row['source_id'])
             if not current or not current['is_active'] or current['content_hash']!=hit['version'] or not source or source['status']!='active':continue
-            row={k:v for k,v in row.items() if k!='vector'}
+            row={**current,'source_type':row['source_type']}
             row.update(vector_score=hit['score'],remote_index_version=result['index_version'])
             found.append(row)
         return found

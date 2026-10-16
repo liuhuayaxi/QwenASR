@@ -17,8 +17,7 @@ def source_hash(segments):
 
 
 def pending_ids(record):
-    # A protected numerical/scientific edit has already been computed. Only
-    # human verification remains; another AI request cannot resolve that flag.
+    # Protected edits belong to the independent verifier, not another rewrite.
     return {int(i) for block in transcript_blocks(record)
             if not block['refined'] and not block.get('correction_review')
             for i in block.get('segment_ids',[])}

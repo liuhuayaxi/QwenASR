@@ -52,6 +52,22 @@ class IdenticalLatexReviewTests(unittest.TestCase):
                 self.assertEqual(copied['identical_pdf_review_reuse']['source_review_sha256'],hashlib.sha256(original).hexdigest())
                 self.assertEqual((old/'review.json').read_bytes(),original)
 
+    def test_partial_review_reuses_only_pages_with_complete_session_receipts(self):
+        from qwen_asr_app.note_pdf import _reuse_identical_latex_review
+        for has_receipt in (True,False):
+            with self.subTest(has_receipt=has_receipt),tempfile.TemporaryDirectory() as raw:
+                folder=Path(raw);old,current,export,review,provenance=self.fixture(folder,scoped=False)
+                review.update(status='unreviewed',viewed_pages=[1],batches=[{'pages':[1],
+                    'receipt':{'session_id':'actual-reader'} if has_receipt else {},
+                    'result':{'viewed_pages':[1],'status':'passed'}}],active_batches={'2':{'state':'waiting'}})
+                (old/'review.json').write_text(json.dumps(review));before=(old/'review.json').read_bytes()
+                self.assertEqual(_reuse_identical_latex_review(folder,current,export,provenance),has_receipt)
+                self.assertEqual((old/'review.json').read_bytes(),before)
+                if has_receipt:
+                    copied=json.loads((current/'review.json').read_text())
+                    self.assertEqual(copied['viewed_pages'],[1]);self.assertEqual(copied['status'],'unreviewed')
+                    self.assertEqual(copied['active_batches'],{})
+
     def test_rejects_changed_source_assets_bindings_scope_or_incomplete_review(self):
         from qwen_asr_app.note_pdf import _reuse_identical_latex_review
         mutations=[('export',('body_sha256',),'different Markdown'),

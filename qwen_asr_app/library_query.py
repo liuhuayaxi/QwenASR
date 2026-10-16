@@ -24,25 +24,24 @@ def day_key(record):
 
 
 def listing(records, category='', date='', offset=0, limit=0):
-    counts = {}
+    counts = {};calendar={};selected=[]
     for record in records:
         course = record.metadata.get('category') or '未分类'
         item = counts.setdefault(course, {'records': 0, 'notes': 0})
         item['records'] += 1
         item['notes'] += bool((record.metadata.get('ai_note_summary') or {}).get('summary'))
-    selected = [record for record in records if not category or record.metadata.get('category') == category]
-    calendar = {}
-    for record in selected:
+        if category and record.metadata.get('category')!=category:continue
         day = day_key(record)
         if day:
             item = calendar.setdefault(day, {'count': 0, 'duration': 0})
             item['count'] += 1
             item['duration'] += round(record.duration, 1)
-    if date:
-        selected = [record for record in selected if day_key(record) == date]
+        if not date or day==date:
+            selected.append((str(record.metadata.get('started_at') or ''),record.list_item(),bool((record.metadata.get('ai_note_summary') or {}).get('summary'))))
+    selected.sort(key=lambda row:row[0],reverse=True)
     total = len(selected)
     page = selected[offset:offset + limit] if limit else selected[offset:]
-    return {'records': [record.list_item() for record in page], 'total': total,
+    return {'records': [row[1] for row in page], 'total': total,
             'offset': offset, 'limit': limit, 'next_offset': offset + len(page) if offset + len(page) < total else None,
             'course_counts': counts, 'calendar': calendar,
-            'note_count': sum(bool((record.metadata.get('ai_note_summary') or {}).get('summary')) for record in selected)}
+            'note_count': sum(row[2] for row in selected)}

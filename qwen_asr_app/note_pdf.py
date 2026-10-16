@@ -44,7 +44,10 @@ def _reuse_identical_latex_review(folder,output,export,provenance):
     if any(export.get(key) is None for key in outer_keys) or any(current_render.get(key) is None for key in render_keys):return False
     candidate=output/'candidate.pdf'
     if not candidate.is_file() or candidate.is_symlink() or digest(candidate)!=export.get('pdf_sha256'):return False
-    for previous in sorted((folder/'pdf').iterdir(),key=lambda path:path.name):
+    def saved_progress(path):
+        try:return len(json.loads((path/'review.json').read_text()).get('viewed_pages',[]))
+        except (OSError,ValueError,TypeError,AttributeError):return 0
+    for previous in sorted((folder/'pdf').iterdir(),key=lambda path:(-saved_progress(path),path.name)):
         if previous==output or not previous.is_dir() or previous.is_symlink():continue
         paths=[previous/name for name in ('export.json','review.json','candidate.pdf')]
         if any(not path.is_file() or path.is_symlink() for path in paths):continue
@@ -62,9 +65,20 @@ def _reuse_identical_latex_review(folder,output,export,provenance):
             if old.get('source_binding') is not None and old['source_binding']!=export.get('source_binding'):continue
             viewed=review.get('viewed_pages')
             if not isinstance(viewed,list) or any(type(page) is not int for page in viewed):continue
-            if review.get('policy')!=policy or review.get('status')!='passed' or review.get('pdf_sha256')!=export['pdf_sha256'] or sorted(viewed)!=list(range(1,pages+1)):continue
-            if scope.get('enabled') and (review.get('learning_scope_sha256')!=scope['sha256'] or review.get('scope_review_passed') is not True):continue
+            if review.get('policy')!=policy or review.get('pdf_sha256')!=export['pdf_sha256']:continue
+            if review.get('status')=='passed':
+                if sorted(viewed)!=list(range(1,pages+1)):continue
+            elif review.get('status')=='unreviewed':
+                if not viewed or len(viewed)!=len(set(viewed)) or any(page<1 or page>pages for page in viewed):continue
+                batches=review.get('batches') or []
+                if any(not batch.get('receipt',{}).get('session_id')
+                       or batch.get('result',{}).get('viewed_pages')!=batch.get('pages') for batch in batches):continue
+                if sorted(page for batch in batches for page in batch.get('pages',[]))!=sorted(viewed):continue
+            else:continue
+            if scope.get('enabled') and (review.get('learning_scope_sha256')!=scope['sha256']
+                    or (review.get('status')=='passed' and review.get('scope_review_passed') is not True)):continue
             copied=dict(review)
+            copied['active_batches']={}
             copied['identical_pdf_review_reuse']={'source_fingerprint':previous.name,
                 'source_review_sha256':hashlib.sha256(review_bytes).hexdigest(),
                 'pdf_sha256':export['pdf_sha256'],'reason':'same-pdf-bytes-and-source-binding'}
@@ -118,10 +132,10 @@ def _export_markdown_pdf(markdown, folder, provenance=None):
         if result.returncode:
             part.unlink(missing_ok=True)
             raise RuntimeError('PDF 导出未完成：'+result.stderr[-400:])
-        import fitz
-        with PDF_LOCK,fitz.open(part) as doc:
-            if not len(doc) or any(not p.get_text().strip() and not p.get_images() for p in doc):raise ValueError('PDF 包含空白页面，未发布')
-            pages=len(doc)
+        from .native_pdf import pdf_operation
+        with PDF_LOCK:inspection=pdf_operation('inspect',path=str(part))
+        if not inspection['pages'] or inspection['blank_pages']:raise ValueError('PDF 包含空白页面，未发布')
+        pages=inspection['pages']
         with part.open('rb') as stream:os.fsync(stream.fileno())
         os.replace(part,pdf)
         value={'fingerprint':ident,'pdf_sha256':digest(pdf),'pages':pages,'renderer':RENDERER,
@@ -157,11 +171,10 @@ def _export_latex_pdf(markdown, folder, provenance):
             generated,details=compile_document(body,folder,output/'tex-build',transcript=transcript,images=images)
         part=output/'candidate.part.pdf';shutil.copyfile(generated,part)
         with part.open('rb') as stream:os.fsync(stream.fileno())
-        import fitz
-        with PDF_LOCK,fitz.open(part) as document:
-            if not len(document) or any(not p.get_text().strip() and not p.get_images() for p in document):
-                raise ValueError('LaTeX PDF存在空白页；候选已保留，未发布')
-            pages=len(document)
+        from .native_pdf import pdf_operation
+        with PDF_LOCK:inspection=pdf_operation('inspect',path=str(part))
+        if not inspection['pages'] or inspection['blank_pages']:raise ValueError('LaTeX PDF存在空白页；候选已保留，未发布')
+        pages=inspection['pages']
         os.replace(part,pdf)
         value={'fingerprint':ident,'pdf_sha256':digest(pdf),'pages':pages,'renderer':'xelatex-course-v1',
             'body_sha256':hashlib.sha256(markdown.encode()).hexdigest(),'source_format':'latex',

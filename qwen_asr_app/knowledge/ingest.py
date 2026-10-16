@@ -522,7 +522,7 @@ class CourseIngestor:
             batch_size = 16
             if hasattr(embedder, "config") and isinstance(embedder.config, dict):
                 batch_size = max(1, embedder.config.get("batch_size", 16))
-            cached = self.store.cached_vectors([c['content_hash'] for c in chunks_data], active_contract)
+            cached = self.store.cached_vectors([c['content_hash'] for c in chunks_data], active_contract,compact=True)
             vectors = [cached.get(c['content_hash']) for c in chunks_data]
             missing=[i for i,value in enumerate(vectors) if value is None]
             if bounded_version:
@@ -550,8 +550,9 @@ class CourseIngestor:
                                     raise
                                 batch_vecs.append(None)
                                 vector_warning='部分完整结构块超过模型输入预算，保留全文供词法查询；其余分块已向量化'
+                    from array import array
                     for i,vector in zip(indexes,batch_vecs):
-                        vectors[i]=vector
+                        vectors[i]=array('f',vector) if vector is not None else None
             except Exception as exc:
                 if "尚未准备" in str(exc) or "not prepared" in str(exc).lower() or _is_embedding_budget_error(exc):
                     vectors = None
@@ -613,14 +614,8 @@ class CourseIngestor:
     def _check_embedded_mineru(self, pdf_path: Path) -> str | None:
         """Extract mineru-transcript.md embedded file from PDF if present."""
         try:
-            import pymupdf as fitz
-            doc = fitz.open(pdf_path)
-            try:
-                if "mineru-transcript.md" in doc.embfile_names():
-                    raw = doc.embfile_get("mineru-transcript.md")
-                    return raw.decode("utf-8", errors="replace")
-            finally:
-                doc.close()
+            from ..native_pdf import pdf_operation
+            return pdf_operation('embedded_markdown',path=str(pdf_path))
         except Exception:
             pass
         return None
@@ -645,19 +640,18 @@ class CourseIngestor:
 
     def _load_converted_pdf_content(self, pdf_path: Path, mineru_text: str | None) -> tuple[str, list[Chunk]]:
         """Index page-scoped MinerU output inside one converted PDF source."""
-        import pymupdf
+        from ..native_pdf import pdf_operation
         pages = []
         has_markers = False
         pattern = re.compile(r'\[\[AI_TRANSCRIPT_PAGE:(\d+)\]\](.*?)\[\[END_AI_TRANSCRIPT_PAGE:\1\]\]', re.S)
-        with pymupdf.open(pdf_path) as doc:
-            for index, page in enumerate(doc):
-                for match in pattern.finditer(page.get_text()):
-                    has_markers = True
-                    body = self._mineru_page_body(match.group(2))
-                    if body:
-                        # Link the physical page in the converted PDF (which may
-                        # include a cover), never guess it from the original page number.
-                        pages.append((index + 1, body))
+        for page in pdf_operation('text',path=str(pdf_path)):
+            for match in pattern.finditer(page['text']):
+                has_markers = True
+                body = self._mineru_page_body(match.group(2))
+                if body:
+                    # Link the physical page in the converted PDF (which may
+                    # include a cover), never guess it from the original page number.
+                    pages.append((page['page'], body))
         if has_markers:
             return '\n\n'.join(body for _, body in pages), chunk_pdf_document(pages)
         if mineru_text:
@@ -669,17 +663,11 @@ class CourseIngestor:
         return self._load_pdf_content(pdf_path)
 
     def _load_pdf_content(self, pdf_path: Path) -> tuple[str, list[Chunk]]:
-        import pymupdf as fitz
-        doc = fitz.open(pdf_path)
+        from ..native_pdf import pdf_operation
         pages_text: list[tuple[int, str]] = []
         full_parts = []
-        try:
-            for page_idx in range(len(doc)):
-                txt = doc[page_idx].get_text()
-                pages_text.append((page_idx + 1, txt))
-                full_parts.append(txt)
-        finally:
-            doc.close()
+        for page in pdf_operation('text',path=str(pdf_path)):
+            txt=page['text'];pages_text.append((page['page'],txt));full_parts.append(txt)
 
         full_text = "\n\n".join(full_parts)
         chunks = chunk_pdf_document(pages_text)

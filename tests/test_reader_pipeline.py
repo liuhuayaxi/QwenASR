@@ -89,6 +89,45 @@ class ArchiveTests(unittest.TestCase):
 
 
 class PipelineTests(unittest.IsolatedAsyncioTestCase):
+    async def test_global_resume_reuses_successful_subranges_after_a_sibling_failure(self):
+        with tempfile.TemporaryDirectory() as raw:
+            record=record_at(Path(raw),ai_note_summary={})
+            record.segments=[{'id':i,'start':(i-1)*60,'end':i*60,'raw':f'原文{i}'} for i in (1,2,3)]
+            config={'ai_correction':True,'translation':'off','ai':{'global_provider':{'context_window':256000}}}
+            async def partial(segments,*args,**kwargs):
+                kwargs['on_checkpoint']([{'segment_ids':[1],'corrected':'已保存第一段'}])
+                raise RuntimeError('second range disconnected')
+            with patch('qwen_asr_app.batch_ai.polish_timestamped_segments_resilient',side_effect=partial):
+                events=[event async for event in global_rewrite_events(record,config)]
+            self.assertFalse(events[-1]['global_rewrite']['complete'])
+            loaded=RecordingRecord.load(record.directory)
+            self.assertEqual(loaded.metadata['ai_global_rewrite']['parts'][0]['blocks'][0]['corrected'],'已保存第一段')
+            async def finish(segments,*args,**kwargs):
+                self.assertEqual([s['id'] for s in segments],[2,3])
+                return [{'segment_ids':[s['id']],'corrected':f"完成{s['id']}"} for s in segments]
+            with patch('qwen_asr_app.batch_ai.polish_timestamped_segments_resilient',side_effect=finish):
+                events=[event async for event in global_rewrite_events(loaded,config)]
+            self.assertTrue(events[-1]['global_rewrite']['complete'])
+            self.assertEqual([b['text'] for b in transcript_blocks(loaded)],['已保存第一段','完成2','完成3'])
+
+    async def test_global_pass_shares_one_request_but_persists_independent_segments_and_translations(self):
+        with tempfile.TemporaryDirectory() as raw:
+            record=record_at(Path(raw),ai_note_summary={})
+            record.segments=[{'id':i,'start':(i-1)*60,'end':i*60,'raw':f'原文{i}'} for i in (1,2,3)]
+            async def respond(segments,*args,**kwargs):
+                self.assertEqual([s['id'] for s in segments],[1,2,3])
+                return [{'segment_ids':[s['id']],'corrected':f"精修{s['id']}",
+                    'translation':f"Translation {s['id']}",'translation_target':'English'} for s in segments]
+            config={'ai_correction':True,'translation':'en','ai':{'global_provider':{'context_window':256000,'concurrency':2}}}
+            with patch('qwen_asr_app.batch_ai.polish_timestamped_segments_resilient',new=AsyncMock(side_effect=respond)) as request:
+                events=[event async for event in global_rewrite_events(record,config)]
+            request.assert_awaited_once();self.assertTrue(events[-1]['global_rewrite']['complete'])
+            loaded=RecordingRecord.load(record.directory);blocks=transcript_blocks(loaded)
+            self.assertEqual([(b['segment_ids'],b['start'],b['end']) for b in blocks],[([1],0,60),([2],60,120),([3],120,180)])
+            self.assertEqual([b['translation'] for b in blocks],['Translation 1','Translation 2','Translation 3'])
+            self.assertIn('00:01:00–00:02:00',loaded.corrected_transcript_path.read_text())
+            self.assertEqual([b['text'] for b in blocks],['精修1','精修2','精修3'])
+
     async def test_next_asr_starts_before_previous_ai_finishes(self):
         with tempfile.TemporaryDirectory() as raw:
             record = record_at(Path(raw), status='interrupted', ai_note_summary={})
@@ -252,33 +291,33 @@ class FunctionConcurrencyTests(unittest.IsolatedAsyncioTestCase):
             ]
             first_calls = []
 
-            async def first_pass(chunk, language, config):
-                index = int(chunk.split('chunk-')[1])
+            async def first_pass(segments, language, config, **kwargs):
+                index = segments[0]['id']-1
                 first_calls.append(index)
                 if index == 1:
                     raise RuntimeError('temporary failure')
                 await asyncio.sleep(.01 if index == 0 else .001)
-                return {'corrected': f'edited-{index}'}
+                return [{'segment_ids':[segments[0]['id']], 'corrected': f'edited-{index}'}]
 
             config = {'ai_correction': True, 'translation': 'off',
                       'ai': {'global_provider': {'concurrency': 2, 'context_window': 32768}}}
-            with patch('qwen_asr_app.batch_ai.chunk_text_blocks',
-                       return_value=[f'chunk-{i}' for i in range(3)]), \
-                 patch('qwen_asr_app.batch_ai.polish_and_translate', side_effect=first_pass):
+            with patch('qwen_asr_app.batch_ai.global_source_groups',
+                       return_value=[[segment] for segment in record.segments]), \
+                 patch('qwen_asr_app.batch_ai.polish_timestamped_segments_resilient', side_effect=first_pass):
                 first_events = [event async for event in global_rewrite_events(record, config)]
             self.assertFalse(first_events[-1]['global_rewrite']['complete'])
             self.assertEqual(first_calls, [0, 1, 2])
 
             retry_calls = []
 
-            async def retry_pass(chunk, language, retry_config):
-                index = int(chunk.split('chunk-')[1])
+            async def retry_pass(segments, language, retry_config, **kwargs):
+                index = segments[0]['id']-1
                 retry_calls.append(index)
-                return {'corrected': f'edited-{index}'}
+                return [{'segment_ids':[segments[0]['id']], 'corrected': f'edited-{index}'}]
 
-            with patch('qwen_asr_app.batch_ai.chunk_text_blocks',
-                       return_value=[f'chunk-{i}' for i in range(3)]), \
-                 patch('qwen_asr_app.batch_ai.polish_and_translate', side_effect=retry_pass):
+            with patch('qwen_asr_app.batch_ai.global_source_groups',
+                       return_value=[[segment] for segment in record.segments]), \
+                 patch('qwen_asr_app.batch_ai.polish_timestamped_segments_resilient', side_effect=retry_pass):
                 retry_events = [event async for event in global_rewrite_events(record, config)]
             result = retry_events[-1]['global_rewrite']
             self.assertEqual(retry_calls, [1])
@@ -295,21 +334,21 @@ class FunctionConcurrencyTests(unittest.IsolatedAsyncioTestCase):
             workers_finished = asyncio.Event()
             completed = 0
 
-            async def finish_without_yielding(chunk, language, config):
+            async def finish_without_yielding(segments, language, config, **kwargs):
                 nonlocal completed
                 completed += 1
                 if completed == 3:
                     workers_finished.set()
-                return {'corrected': f'edited-{chunk[-1]}'}
+                return [{'segment_ids':[segments[0]['id']], 'corrected': f"edited-{segments[0]['id']-1}"}]
 
             async def stalled_result():
                 await asyncio.Event().wait()
 
             config = {'ai_correction': True, 'translation': 'off',
                       'ai': {'global_provider': {'concurrency': 3, 'context_window': 32768}}}
-            with patch('qwen_asr_app.batch_ai.chunk_text_blocks',
-                       return_value=[f'chunk-{i}' for i in range(3)]), \
-                 patch('qwen_asr_app.batch_ai.polish_and_translate',
+            with patch('qwen_asr_app.batch_ai.global_source_groups',
+                       return_value=[[segment] for segment in record.segments]), \
+                 patch('qwen_asr_app.batch_ai.polish_timestamped_segments_resilient',
                        side_effect=finish_without_yielding), \
                  patch('qwen_asr_app.batch_ai.asyncio.as_completed',
                        side_effect=lambda tasks: iter([stalled_result()])):
@@ -327,9 +366,9 @@ class FunctionConcurrencyTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(saved['text'], 'edited-0\n\nedited-1\n\nedited-2')
             self.assertEqual(len(saved['parts']), 3)
 
-            with patch('qwen_asr_app.batch_ai.chunk_text_blocks',
-                       return_value=[f'chunk-{i}' for i in range(3)]), \
-                 patch('qwen_asr_app.batch_ai.polish_and_translate') as retry:
+            with patch('qwen_asr_app.batch_ai.global_source_groups',
+                       return_value=[[segment] for segment in record.segments]), \
+                 patch('qwen_asr_app.batch_ai.polish_timestamped_segments_resilient') as retry:
                 events = [event async for event in global_rewrite_events(record, config)]
             retry.assert_not_called()
             self.assertTrue(events[-1]['global_rewrite']['complete'])
