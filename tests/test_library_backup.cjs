@@ -26,6 +26,7 @@ function fixture() {
     },
     setTimeout: action => { timers.set(++timerId, action); return timerId; },
     clearTimeout: id => timers.delete(id),
+    AbortSignal,
   });
   vm.runInContext(fs.readFileSync('static/js/library-backup.js', 'utf8').replace('export function', 'function'), context);
   const panel = context.createLibraryBackup();

@@ -1,5 +1,5 @@
-import {taskGroups, filterTaskGroups, groupCounts, actionableTasks, completedTasks, taskMatchesType, activeStatuses, errorStatuses, leadingTask, taskProgressView, progressGroups} from './task-center-view.js?v=20261016-integration-1';
-import {createTaskPdfDialog} from './task-pdf-dialog.js?v=20261016-operations-1';
+import {taskGroups, filterTaskGroups, groupCounts, actionableTasks, completedTasks, taskMatchesType, activeStatuses, errorStatuses, leadingTask, taskProgressView, progressGroups} from './task-center-view.js?v=20261016-integration-2';
+import {createTaskPdfDialog} from './task-pdf-dialog.js?v=20261016-integration-2';
 import {aiTaskPayload} from './task-config.js?v=20260913-tasks-1';
 import {mergeLiveCourseProgress} from './course-progress.js?v=20261011-live-1';
 import {mineruEstimateLabel, legacyMineruProgress} from './mineru-progress-view.js?v=20261013-time-2';
@@ -158,7 +158,7 @@ function card(task, historical = false) {
     </div></div></article>`;
 }
 function contextQueueCard(task) {
-  return `<article class="task-card task-context-card" data-id="${esc(task.id)}">${task.actions?.length ? `<p class="task-queue-scope">队列操作会影响全部课次。</p><label><input class="task-select" type="checkbox" aria-label="选择整个课程队列" ${state.selected.has(task.id) ? 'checked' : ''} ${state.busy ? 'disabled' : ''}> 选择整个课程队列参与批量处理</label><div class="task-actions">${task.actions.map(action => `<button data-action="${action}" class="ui-button ${action === 'cancel' ? 'danger' : ''}" ${state.busy ? 'disabled' : ''}>${taskActionLabel(task, action)}</button>`).join('')}</div>` : ''}${courseQueueDetails(task)}</article>`;
+  return `<article class="task-card task-context-card" data-id="${esc(task.id)}">${task.actions?.length && taskMatchesType(task, $('typeFilter').value) ? `<p class="task-queue-scope">队列操作会影响全部课次。</p><label><input class="task-select" type="checkbox" aria-label="选择整个课程队列" ${state.selected.has(task.id) ? 'checked' : ''} ${state.busy ? 'disabled' : ''}> 选择整个课程队列参与批量处理</label><div class="task-actions">${task.actions.map(action => `<button data-action="${action}" class="ui-button ${action === 'cancel' ? 'danger' : ''}" ${state.busy ? 'disabled' : ''}>${taskActionLabel(task, action)}</button>`).join('')}</div>` : ''}${courseQueueDetails(task)}</article>`;
 }
 function groupCard(group) {
 
@@ -186,7 +186,7 @@ function groupCard(group) {
     ${error}${running && group.review_count?`<p class="group-secondary">另有 ${group.review_count} 个校对步骤待核对，不影响当前处理</p>`:''}
     <details class="group-details" data-detail-key="steps"><summary>任务详情<span>${current.length} 个当前步骤${history.length?` · ${history.length} 条历史`:''}</span></summary>
       ${current.map(t=>card(t)).join('')}
-      ${group.context_tasks?.length?`<details class="task-details" data-detail-key="queue-context"><summary>课程队列控制</summary>${group.context_tasks.map(contextQueueCard).join('')}</details>`:''}
+      ${group.context_tasks?.length?`<details class="task-details group-context" data-detail-key="queue-context"><summary>课程队列控制</summary>${group.context_tasks.map(contextQueueCard).join('')}</details>`:''}
       ${history.length?`<details class="group-history" data-detail-key="history"><summary>已完成与历史 · ${history.length} 条记录</summary>${history.map(t=>card(t,true)).join('')}</details>`:''}
     </details></section>`;
 
@@ -232,7 +232,8 @@ function render() {
   const focused = document.activeElement;
   const focusedDetail = focused?.matches('summary') ? detailKey(focused.parentElement) : null;
   const focusedGroup = focused?.closest('[data-group-id]')?.dataset.groupId;
-  const focusedId = focused?.closest('#taskList [data-id]')?.dataset.id;
+  const focusedCard = focused?.closest('#taskList article.task-card');
+  const focusedId = focusedCard ? focusedCard.dataset.id : focused?.closest('#taskList [data-id]')?.dataset.id;
   const focusedHref = focused?.matches('a[href]') ? focused.getAttribute('href') : null;
   const focusSelector = focused?.matches('.task-select') ? '.task-select' : focused?.matches('summary') ? 'summary' : focused?.dataset.action ? `[data-action="${focused.dataset.action}"]` : null;
   const groups = progressGroups(filteredGroups());
@@ -253,7 +254,8 @@ function render() {
   }
   if (focusedHref !== null && focusedGroup) {
     const group = [...$('taskList').querySelectorAll('[data-group-id]')].find(node => node.dataset.groupId === focusedGroup);
-    const owner = focusedId ? [...(group?.querySelectorAll('[data-id]') || [])].find(node => node.dataset.id === focusedId) : group;
+    const owner = focusedCard ? [...(group?.querySelectorAll('article.task-card[data-id]') || [])].find(node => node.dataset.id === focusedId)
+      : focusedId ? [...(group?.querySelectorAll('[data-id]') || [])].find(node => node.dataset.id === focusedId) : group;
     [...(owner?.querySelectorAll('a[href]') || [])].find(node => node.getAttribute('href') === focusedHref)?.focus({preventScroll:true});
   }
   document.querySelectorAll('[data-count]').forEach(node => node.textContent = state.counts[node.dataset.count] || 0);
@@ -267,7 +269,7 @@ function setFilter(filter) { state.filter = filter; applyFilters(); }
 async function load() {
   if (state.busy) return;
   if (state.loading) { state.reloadRequested = true; return; }
-  clearTimeout(timer); state.loading = true; const revision = state.revision, hadReady = state.ready;
+  clearTimeout(timer); state.loading = true; $('taskList').setAttribute('aria-busy', 'true'); const revision = state.revision, hadReady = state.ready;
   try {
     let data = await api('/api/tasks');
     if (!Array.isArray(data.tasks) && !Array.isArray(data.groups)) throw new Error('任务列表响应不完整');
@@ -305,10 +307,32 @@ async function load() {
     else if (!document.hidden) timer = setTimeout(load, 3000);
   }
 }
+function actionFocus() {
+  const element = document.activeElement;
+  return {element, group: element?.closest('[data-group-id]')?.dataset.groupId,
+    id: element?.closest('[data-id]')?.dataset.id, action: element?.dataset.action};
+}
+function restoreActionFocus(origin) {
+  // Do not take focus from an input the user moved to while IO was pending.
+  if (document.activeElement !== document.body) return;
+  if (origin.element?.isConnected && !origin.element.disabled && origin.element.getClientRects().length) {
+    origin.element.focus({preventScroll:true}); return;
+  }
+  const group = [...$('taskList').querySelectorAll('[data-group-id]')].find(node => node.dataset.groupId === origin.group);
+  const card = [...(group?.querySelectorAll('[data-id]') || [])].find(node => node.dataset.id === origin.id);
+  const button = [...(card?.querySelectorAll('[data-action]') || [])].find(node => node.dataset.action === origin.action && !node.disabled);
+  const target = button || group?.querySelector('.task-group-head h3') || $('listTitle');
+  if (!button) target.tabIndex = -1;
+  target.focus({preventScroll:true});
+}
+
 async function perform(targets, action, bulk = false) {
+  if (state.busy || !targets.length) return;
+  if (action === 'cancel' && !confirm(`确认取消 ${targets.length} 个处理步骤？已完成的结果仍保留。${targets.some(task => task.type === 'course_queue') ? '课程队列操作会影响全部课次。' : ''}`)) return;
   const newOperation = ['new_local', 'new_recognition'].includes(action);
   if (newOperation && !confirm('旧远端任务可能仍在运行。新任务可能重复计算，旧收据与结果会保留。确认创建新任务？')) return;
   if (state.busy || !targets.length) return;
+  const focus = actionFocus();
   state.busy = true; state.revision += 1; render(); notice('actionResult', '');
   try {
     // The backend rebuilds AI settings from its local durable store. Do not
@@ -325,7 +349,7 @@ async function perform(targets, action, bulk = false) {
       state.selected.delete(targets[0].id);
     }
   } catch (error) { notice('actionResult', error.message); }
-  finally { state.busy = false; lastPayload = ''; await load(); render(); }
+  finally { state.busy = false; lastPayload = ''; await load(); render(); restoreActionFocus(focus); }
 }
 $('statusFilters').addEventListener('click', event => { const button = event.target.closest('[data-status]'); if (button) setFilter(button.dataset.status); });
 document.querySelectorAll('[data-summary]').forEach(button => {if(!button.closest('#statusFilters'))button.addEventListener('click', () => setFilter(button.dataset.summary));});
@@ -344,24 +368,23 @@ $('retryFailed').addEventListener('click', async () => {
   const targets = failedTargets();
   if (state.busy || !targets.length) return;
   if (targets.length > 200) { toast('每次最多操作 200 项任务，请缩小筛选范围'); return; }
-  state.busy = true; state.revision += 1; render(); notice('actionResult', '');
+  state.busy = true; state.revision += 1;
+  state.selected = new Set(targets.map(task => task.id)); render(); notice('actionResult', '');
   const results = [];
   try {
-    // Explicit owners, frozen at the click, not the global retry endpoint.
-    // A step may support only continue, so keep that server-declared action.
+    // Freeze the visible identities, not the server-wide failure collection.
+    // Use each step's supported action; resumed steps need not support retry.
     for (const action of ['retry', 'continue']) {
       const batch = targets.filter(task => (task.actions.includes('retry') ? 'retry' : 'continue') === action);
       if (!batch.length) continue;
-      const response = await api('/api/tasks/bulk-action', {action, items:batch.map(task => aiTaskPayload(task, action))});
-      for (const item of response.results || []) {
-        results.push(item); if (item.ok) state.selected.delete(item.id);
-      }
+      const result = await api('/api/tasks/bulk-action', {action, items: batch.map(task => aiTaskPayload(task, action))});
+      results.push(...result.results);
+      for (const item of result.results) if (item.ok) state.selected.delete(item.id);
     }
     const failures = results.filter(item => !item.ok).map(item => `${item.id}：${item.error}`);
-    notice('actionResult', `已提交当前筛选内失败步骤 ${results.filter(item => item.ok).length}/${targets.length} 项${failures.length ? '\n' + failures.join('\n') : ''}`);
-  } catch (error) {
-    notice('actionResult', `已确认提交 ${results.filter(item => item.ok).length} 项。${error.message}；请刷新核对其余任务，避免重复提交。`);
-  } finally { state.busy = false; lastPayload = ''; await load(); render(); }
+    notice('actionResult', `已提交失败任务重试 ${results.filter(item => item.ok).length}/${targets.length} 项${failures.length ? '\n' + failures.join('\n') : ''}`);
+  } catch (error) { notice('actionResult', `已确认提交 ${results.filter(item => item.ok).length}/${targets.length} 项。${error.message}；未确认的步骤仍保留选择，请先核对状态。`); }
+  finally { state.busy = false; lastPayload = ''; await load(); render(); }
 });
 $('clearCompleted').addEventListener('click', async () => {
   const completed = filteredCompleted();

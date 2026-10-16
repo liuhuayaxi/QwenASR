@@ -84,6 +84,8 @@ async function fixtures(route) {
     tasks=[{id:'course_queue',type:'course_queue',family:'asr',label:'课程回放队列',title:'课程回放 · 1 堂课',status:'running',progress:10.7,total:1,completed:0,actions:['pause'],course_items:[{id:'course-a',title:'合成课堂 A',state:'running',progress:10.7,phases:[{key:'asr',label:'本地语音转写',percent:12.7,state:'running'}]}]}];
     liveCourse={queue:{paused:false,items:[{id:'course-a',title:'合成课堂 A',state:'running'}]},imports:[{id:'course-a',progress:62,phases:{download:{label:'获取回放音频',percent:100,state:'completed'},asr:{label:'本地语音转写',percent:48.8,detail:'45.9/94.0 分钟',state:'running'}}}]};
     await page.goto(origin+'/tasks');
+    const groupDetails=page.locator('.group-details');
+    if(await groupDetails.count() && !(await groupDetails.first().evaluate(e=>e.open))) await page.locator('.group-details > summary').first().click();
     const phase=page.locator('.course-phase').filter({hasText:'本地语音转写'}).locator('progress');
     await page.waitForFunction(()=>document.querySelector('.task-progress')?.value===62);
     assert.equal(await phase.getAttribute('value'),'48.8');
@@ -127,17 +129,22 @@ async function fixtures(route) {
       {id:'ai-synthetic',type:'summary',family:'ai',title:'合成总结',label:'课后笔记',status:'running',configured_provider:'remote_only'},
       {id:'mineru-unknown',type:'course_pdf',family:'mineru',title:'未收到识别回执',label:'资料识别',status:'running',configured_provider:'local'},
       {id:'asr-confirmed',type:'upload',family:'asr',title:'真实回执优先',label:'转写',status:'running',configured_provider:'local',inference:{provider:'remote',job_id:'synthetic-receipt'}}];
-    await page.goto(origin+'/tasks');await page.locator('[data-id="knowledge:local"]').waitFor();
-    for(const id of ['knowledge:local','classroom-note:synthetic','ai-synthetic']){
-      const details=page.locator(`[data-id="${id}"] .task-details`);
-      if(await details.count())await details.locator('summary').click();
-      assert.doesNotMatch(await page.locator(`[data-id="${id}"]`).innerText(),/实际来源待确认/);
+    await page.goto(origin+'/tasks');
+    const groupDetails=page.locator('.group-details');
+    for(let i=0;i<await groupDetails.count();i++){
+      if(!(await groupDetails.nth(i).evaluate(e=>e.open))) await groupDetails.nth(i).locator('> summary').click();
     }
-    assert.match(await page.locator('[data-id="knowledge:local"]').innerText(),/处理位置：Mac 本机/);
-    await page.locator('[data-id="mineru-unknown"] .task-details summary').click();
-    assert.match(await page.locator('[data-id="mineru-unknown"]').innerText(),/实际来源待确认/);
-    await page.locator('[data-id="asr-confirmed"] .task-details summary').click();
-    assert.match(await page.locator('[data-id="asr-confirmed"]').innerText(),/实际：Windows/);
+    await page.locator('article.task-card[data-id="knowledge:local"]').waitFor();
+    for(const id of ['knowledge:local','classroom-note:synthetic','ai-synthetic']){
+      const details=page.locator(`article.task-card[data-id="${id}"] .task-details`);
+      if(await details.count())await details.locator('summary').click();
+      assert.doesNotMatch(await page.locator(`article.task-card[data-id="${id}"]`).innerText(),/实际来源待确认/);
+    }
+    assert.match(await page.locator('article.task-card[data-id="knowledge:local"]').innerText(),/处理位置：Mac 本机/);
+    await page.locator('article.task-card[data-id="mineru-unknown"] .task-details summary').click();
+    assert.match(await page.locator('article.task-card[data-id="mineru-unknown"]').innerText(),/实际来源待确认/);
+    await page.locator('article.task-card[data-id="asr-confirmed"] .task-details summary').click();
+    assert.match(await page.locator('article.task-card[data-id="asr-confirmed"]').innerText(),/实际：Windows/);
   });
   await scenario('索引说明展示待转换数量，课堂只选择有效课件',async(page,context,origin)=>{
     const source=(id,state,status='已就绪')=>({source_id:id,title:id,state,status});
@@ -273,7 +280,7 @@ async function fixtures(route) {
     assert.equal(posts,0);
   });
   await scenario('课堂记录直接打开笔记',async(page,context,origin)=>{await page.goto(origin+'/library?recording='+record.id);await page.locator('#noteDialog[open]').waitFor();assert.match(await page.locator('#noteSummaryReader').innerText(),/菲涅耳公式/);});
-  await scenario('任务默认过滤分组与恢复',async(page,context,origin)=>{await page.goto(origin+'/tasks');await page.locator('.task-group').waitFor();assert.equal(await page.locator('.task-group').count(),1);assert.equal(await page.locator('.task-card').count(),2);await page.locator('[data-id="summary:smoke-class"] [data-action="continue"]').click();await page.getByText('任务已加入后台队列',{exact:true}).waitFor();assert.ok(requests.some(request=>request.path==='/api/tasks/action'));await page.locator('[data-status="completed"]').click();assert.equal(await page.locator('.task-card').count(),1);await page.goto(origin+'/tasks?category='+encodeURIComponent('空课程'));await page.locator('#lastUpdated').filter({hasText:'已同步'}).waitFor();assert.equal(await page.locator('.task-card').count(),0);});
+  await scenario('任务默认过滤分组与恢复',async(page,context,origin)=>{await page.goto(origin+'/tasks');await page.locator('.task-group').waitFor();assert.equal(await page.locator('.task-group').count(),1);assert.equal(await page.locator('.task-card').count(),2);const gd=page.locator('.group-details');if(await gd.count()&&!(await gd.first().evaluate(e=>e.open)))await page.locator('.group-details > summary').first().click();await page.locator('article.task-card[data-id="summary:smoke-class"] [data-action="continue"]').click();await page.getByText('任务已加入后台队列',{exact:true}).waitFor();assert.ok(requests.some(request=>request.path==='/api/tasks/action'));await page.locator('[data-status="completed"]').click();assert.equal(await page.locator('.task-card').count(),1);await page.goto(origin+'/tasks?category='+encodeURIComponent('空课程'));await page.locator('#lastUpdated').filter({hasText:'已同步'}).waitFor();assert.equal(await page.locator('.task-card').count(),0);});
   await scenario('MinerU 两端稳定耗时进度、刷新与旧任务兼容',async(page,context,origin)=>{
     const task={id:'mineru-remote',type:'course_pdf',family:'mineru',label:'课程资料识别',title:'合成讲义 · Windows',category:'合成课程',status:'running',
       stage:'Windows · MinerU · 版面分析 · 阶段 100% · 第 33–36 页/90 · 窗口 9/23',progress:42.5,actions:['pause','cancel'],
@@ -283,17 +290,22 @@ async function fixtures(route) {
       {...structuredClone(task),id:'mineru-legacy',title:'尚未启用耗时预估的旧任务',progress:null,progress_estimate:null},
       {...structuredClone(task),id:'mineru-loading',title:'刚开始准备的任务',progress:null,progress_estimate:null,stage:'正在加载模型'}];
     await page.goto(origin+'/tasks');
-    const card=page.locator('[data-id="mineru-remote"]');await card.waitFor();
+    const gd=page.locator('.group-details');
+    for(let i=0;i<await gd.count();i++){if(!(await gd.nth(i).evaluate(e=>e.open)))await gd.nth(i).locator('> summary').click();}
+    const card=page.locator('article.task-card[data-id="mineru-remote"]');await card.waitFor();
     assert.equal(await card.locator('progress').getAttribute('value'),'42.5');
     assert.match(await card.innerText(),/整体预估 42.5%/);
     assert.match(await card.innerText(),/预计剩余约 4 分 20 秒/);
-    assert.match(await page.locator('[data-id="mineru-local"]').innerText(),/初步估算/);
-    assert.equal(await page.locator('[data-id="mineru-legacy"] progress').getAttribute('value'),'35.6');
-    assert.match(await page.locator('[data-id="mineru-legacy"]').innerText(),/已完成页段/);
-    assert.equal(await page.locator('[data-id="mineru-loading"] .task-progress-indeterminate').evaluate(el=>getComputedStyle(el).animationName),'none');
+    assert.match(await page.locator('article.task-card[data-id="mineru-local"]').innerText(),/初步估算/);
+    assert.equal(await page.locator('article.task-card[data-id="mineru-legacy"] progress').getAttribute('value'),'35.6');
+    assert.match(await page.locator('article.task-card[data-id="mineru-legacy"]').innerText(),/已完成页段/);
+    assert.equal(await page.locator('article.task-card[data-id="mineru-loading"] .task-progress-indeterminate').evaluate(el=>getComputedStyle(el).animationName),'none');
     await page.screenshot({path:path.join(output,'mineru-time-progress.png'),fullPage:true});
     tasks[0]={...tasks[0],progress:62.1,progress_estimate:{...task.progress_estimate,percent:62.1,overrun:true,remaining_seconds:null}};
-    await page.reload();await card.waitFor();
+    await page.reload();
+    const gdReload=page.locator('.group-details');
+    for(let i=0;i<await gdReload.count();i++){if(!(await gdReload.nth(i).evaluate(e=>e.open)))await gdReload.nth(i).locator('> summary').click();}
+    await card.waitFor();
     assert.equal(await card.locator('progress').getAttribute('value'),'62.1');
     assert.match(await card.innerText(),/超出预估耗时/);
     assert.doesNotMatch(await card.innerText(),/预计剩余约/);
@@ -305,11 +317,12 @@ async function fixtures(route) {
       {id:'remote-asr',type:'upload',family:'asr',label:'转写',title:'已确认释放的旧版节点任务',status:'completed',inference:{provider:'remote',metrics:{gpu_release_verified:true}}}];
     await page.goto(origin+'/tasks');await page.locator('#lastUpdated').filter({hasText:'已同步'}).waitFor();
     await page.locator('button[data-status="all"]').click();
-    assert.doesNotMatch(await page.locator('[data-id="course_queue"]').innerText(),/遥测|来源未验证|资源释放/);
+    assert.doesNotMatch(await page.locator('.group-focus[data-id="course_queue"]').innerText(),/遥测|来源未验证|资源释放/);
     await page.locator('[data-detail-key="collection:completed"] > summary').click();
+    await page.locator('[data-group-id="task:remote-asr"] .group-details > summary').click();
     await page.locator('[data-group-id="task:remote-asr"] .group-history > summary').click();
-    await page.locator('[data-id="remote-asr"]').waitFor({state:'visible'});
-    assert.match(await page.locator('[data-id="remote-asr"]').innerText(),/显存释放已确认/);
+    await page.locator('article.task-card[data-id="remote-asr"]').waitFor({state:'visible'});
+    assert.match(await page.locator('article.task-card[data-id="remote-asr"]').innerText(),/显存释放已确认/);
     await page.screenshot({path:path.join(output,'resource-status.png'),fullPage:true});
   });
   await scenario('课程资料上传',async(page,context,origin)=>{await page.goto(origin+'/course-files');await page.locator('#filesInput').setInputFiles({name:'合成讲义.txt',mimeType:'text/plain',buffer:Buffer.from('合成课程资料')});await page.locator('#files [data-id="synthetic-file"]').waitFor();assert.ok(requests.some(request=>request.path==='/api/course-files/upload'));});
@@ -440,7 +453,7 @@ async function fixtures(route) {
     const push=requests.filter(request=>request.path.endsWith('/ideashell/push')).at(-1);
     assert.equal(JSON.parse(push.body).create_new,false);
   });
-  await scenario('课程内笔记与任务抽屉',async(page,context,origin)=>{await page.goto(origin+'/workspace?category='+encodeURIComponent(record.category));await page.locator('[data-recording="smoke-class"]').waitFor();await page.screenshot({path:path.join(output,'workspace.png'),fullPage:true});await page.locator('[data-recording="smoke-class"]').click();await page.frameLocator('#workspaceNoteFrame').locator('#noteDialog[open]').waitFor();await page.frameLocator('#workspaceNoteFrame').locator('#closeNoteDialog').click();await page.locator('#workspaceNoteDialog').waitFor({state:'hidden'});await page.locator('#workspaceTasks').click();await page.locator('#timelineDialog[open]').waitFor();await page.frameLocator('#timelineFrame').locator('.task-card').first().waitFor();});
+  await scenario('课程内笔记与任务抽屉',async(page,context,origin)=>{await page.goto(origin+'/workspace?category='+encodeURIComponent(record.category));await page.locator('[data-recording="smoke-class"]').waitFor();await page.screenshot({path:path.join(output,'workspace.png'),fullPage:true});await page.locator('[data-recording="smoke-class"]').click();await page.frameLocator('#workspaceNoteFrame').locator('#noteDialog[open]').waitFor();await page.frameLocator('#workspaceNoteFrame').locator('#closeNoteDialog').click();await page.locator('#workspaceNoteDialog').waitFor({state:'hidden'});await page.locator('#workspaceTasks').click();await page.locator('#timelineDialog[open]').waitFor();const timeline=page.frameLocator('#timelineFrame');await timeline.locator('.task-group').first().waitFor();await timeline.locator('.group-details > summary').first().click();await timeline.locator('.task-card').first().waitFor();});
   await scenario('最近课堂全屏笔记保存后关闭，恢复课程和滚动位置',async(page,context,origin)=>{
     let releaseSave,markStarted;
     const saveReady=new Promise(resolve=>releaseSave=resolve),saveStarted=new Promise(resolve=>markStarted=resolve);

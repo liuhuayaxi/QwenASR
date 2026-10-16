@@ -19,12 +19,18 @@ def _identity(level, holder, candidate):
 
 
 def _holders(record):
+    # Match transcript_blocks precedence exactly, including identical proposals
+    # repeated in older layers. Resolving a shadowed holder leaves the visible
+    # candidate pending forever.
+    global_result=record.metadata.get('ai_global_rewrite') or {}
+    groups=[('全局精修',global_result.get('parts') or [])] if global_result.get('complete') else []
+    groups.append(('阶段精修',record.metadata.get('ai_reviews') or []))
+    for level,parts in groups:
+        for part in parts:
+            if part.get('correction_review') and not part.get('ai_error') and str(part.get('corrected') or '').strip():
+                yield level,part
     for segment in record.segments:
         if segment.get('correction_review'):yield '片段精修',segment
-    for level,parts in [('阶段精修',record.metadata.get('ai_reviews') or []),
-                        ('全局精修',(record.metadata.get('ai_global_rewrite') or {}).get('parts') or [])]:
-        for part in parts:
-            if part.get('correction_review'):yield level,part
 
 
 def active_candidates(record):
@@ -73,6 +79,15 @@ def transcription_assist_router(store, require_available=None):
         previous=next((item for item in record.metadata.get('correction_decisions',[]) if item.get('candidate_id')==candidate_id),None)
         if previous:
             if previous.get('request_sha256')!=request_hash:raise HTTPException(409,'这条建议已经核对，请刷新后查看最新内容')
+            pending=next((item for item in active_candidates(record) if item['candidate_id']==candidate_id),None)
+            if pending is not None:
+                journal=json.loads((record.directory/'.correction-decisions'/(candidate_id+'.json')).read_text())
+                if journal.get('request_sha256')!=request_hash:raise HTTPException(409,'核对检查点不匹配，原内容已保留')
+                _,holder=next((level,holder) for level,holder in _holders(record)
+                    if _identity(level,holder,holder['correction_review'])==candidate_id)
+                holder.update(corrected=journal['chosen'],ai_pending=False,human_reviewed_at=journal['created_at'],human_review_decision=decision)
+                holder.pop('correction_review',None);holder.pop('ai_error',None)
+                record.save_all()
             return {'saved':True,'reused':True,'remaining':len(active_candidates(record)),'session':record.public()}
         candidate=next((item for item in active_candidates(record) if item['candidate_id']==candidate_id),None)
         if candidate is None:raise HTTPException(409,'原文或建议已经更新，本次未覆盖新内容，请刷新后核对')

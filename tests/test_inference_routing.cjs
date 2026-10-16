@@ -12,7 +12,7 @@ test('saved provider survives draft changes; failed load blocks start', async ()
     return elements.get(selector);
   }};
   let fail = false;
-  const ctx = {root, fetcher:async () => ({ok:!fail,json:async () => fail ? {detail:'offline'} :
+  const ctx = {AbortSignal, root, fetcher:async () => ({ok:!fail,json:async () => fail ? {detail:'offline'} :
     {settings:{asr_provider:'remote_only',mineru_provider:'local',base_url:'http://100.81.62.69:8765'}}})};
   vm.createContext(ctx);
   vm.runInContext(fs.readFileSync(path.join(base,'js/inference-settings.js'),'utf8').replace('export function','function'),ctx);
