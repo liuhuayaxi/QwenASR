@@ -1,0 +1,32 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><body><main><h1>推理位置与文件识别 · 组件操作测试</h1><section class="settings-group wide" id="inferenceSettingsGroup" data-settings-page="inference">
+            <div class="settings-group-heading"><b>推理位置与远程回退</b></div>
+            <div class="settings-group-grid">
+              <label><span>文档识别</span><select id="inferenceMineruProvider" class="field-select"><option value="local">本机 Mac</option><option value="remote_preferred">优先 Windows，确认未接受时回退</option><option value="remote_only">仅 Windows</option></select></label>
+              <label><span>语音识别</span><select id="inferenceAsrProvider" class="field-select"><option value="local">本机 Mac</option><option value="remote_preferred">优先 Windows，确认未接受时回退</option><option value="remote_only">仅 Windows</option></select></label>
+              <label><span>向量计算与检索</span><select id="inferenceKnowledgeProvider" class="field-select"><option value="local">本机 Mac</option><option value="remote_only">仅 Windows（不可用时使用词法检索）</option></select></label>
+              <label><span>课堂省电模式</span><select id="inferencePowerSaving" class="field-select"><option value="off">关闭 · 使用分别设置的位置</option><option value="on">启用 · ASR 与向量仅 Windows</option></select></label>
+              <label class="wide"><span>远程网关地址</span><input id="inferenceRemoteUrl" type="url" value="http://127.0.0.1:8765" /></label>
+            </div>
+            <div class="settings-actions"><button id="saveInferenceSettings" type="button" class="ui-button primary" disabled>保存推理位置</button><button id="testInferenceConnection" type="button" class="ui-button" disabled>测试远程连接</button></div>
+            <p id="inferenceSettingsStatus" class="setting-hint" role="status" aria-live="polite">打开设置后读取配置</p>
+          </section><label>本次上传单独使用 Mac<input id="uploadUseMac" type="checkbox"></label>
+          <section class="settings-group wide" id="mineruSettingsGroup" data-settings-page="documents">
+            <div class="settings-group-heading"><b>MinerU 文件识别</b><small id="mineruRuntimeStatus">打开设置后读取本机版本</small></div>
+            <div class="settings-group-grid">
+              <label class="wide"><span>质量档位</span><select id="mineruTier" class="field-select"><option value="flash">极速 · Flash</option><option value="basic">基础 · Basic</option><option value="standard" selected>标准 · Standard（推荐）</option><option value="advanced">高级 · Advanced（更高计算量）</option></select><small id="mineruTierHint" class="setting-hint"></small></label>
+              <label><span>文字识别方式</span><select id="mineruOcrMode" class="field-select"><option value="auto">自动判断（推荐）</option><option value="ocr">强制 OCR · 扫描件或文字层有误</option><option value="txt">优先原生文字层</option></select></label>
+              <label class="settings-checkbox"><span>图像内容分析</span><input id="mineruImageAnalysis" type="checkbox" checked /></label>
+            </div>
+            <details class="provider-settings"><summary>高级参数 · 内存、模型与处理速度</summary>
+              <div class="provider-settings-body settings-group-grid">
+                <label><span>小模型后端 </span><select id="mineruSmallBackend" class="field-select"><option value="auto">自动（推荐）</option><option value="torch">Torch · GPU / MPS</option><option value="onnx">ONNX · CPU（需下载对应模型）</option></select></label>
+                <label><span>视觉模型引擎 </span><select id="mineruVlmEngine" class="field-select"><option value="llama-cpp">llama.cpp · Apple Silicon / CPU</option><option value="auto">自动</option><option value="vllm">vLLM · Linux GPU（需另装）</option><option value="lmdeploy">LMDeploy · 支持的 GPU（需另装）</option></select></label>
+                <label><span>模型下载来源</span><select id="mineruModelSource" class="field-select"><option value="modelscope">ModelScope · 国内下载</option><option value="huggingface">Hugging Face</option><option value="auto">自动选择</option><option value="local">仅本地 · 缺少模型时报错</option></select></label>
+                <label><span>每次处理的页数 </span><input id="mineruWindowSize" type="number" min="0" max="128" step="1" value="0" /></label>
+                <label><span>视觉识别并发上限 </span><input id="mineruConcurrency" type="number" min="1" max="32" step="1" value="4" /></label>
+                <label class="wide"><span>推理内存预算（GB） </span><input id="mineruVram" type="number" min="0" max="128" step="1" value="0" /></label>
+              </div>
+            </details>
+            <div class="inline-setting"><button id="saveMineruSettings" class="mini-button primary-mini-button" type="button" disabled>保存 MinerU 设置</button><button id="resetMineruSettings" class="mini-button" type="button" disabled>恢复推荐值</button></div>
+            <p id="mineruSettingsStatus" class="setting-hint" role="status" aria-live="polite">尚未读取配置</p>
+          </section></main></body></html>
