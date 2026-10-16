@@ -23,7 +23,8 @@ def _holders(record):
     # repeated in older layers. Resolving a shadowed holder leaves the visible
     # candidate pending forever.
     global_result=record.metadata.get('ai_global_rewrite') or {}
-    groups=[('全局精修',global_result.get('parts') or [])] if global_result.get('complete') else []
+    global_holders=[block for part in global_result.get('parts') or [] for block in (part.get('blocks') or [part])]
+    groups=[('全局精修',global_holders)] if global_result.get('complete') else []
     groups.append(('阶段精修',record.metadata.get('ai_reviews') or []))
     for level,parts in groups:
         for part in parts:
@@ -47,6 +48,14 @@ def active_candidates(record):
         items.append({**copy.deepcopy(candidate),'candidate_id':_identity(level,holder,candidate),
             'segment_ids':ids,'start':block['start'],'end':block['end'],'level':level})
     return items
+
+
+def _refresh_global_text(record):
+    result=record.metadata.get('ai_global_rewrite') or {}
+    if not any(part.get('blocks') for part in result.get('parts') or []):return
+    for part in result['parts']:
+        if part.get('blocks'):part['corrected']='\n\n'.join(b['corrected'] for b in part['blocks'])
+    result['text']='\n\n'.join(str(part.get('corrected') or part.get('raw') or '') for part in result['parts'])
 
 
 def transcription_assist_router(store, require_available=None):
@@ -87,6 +96,7 @@ def transcription_assist_router(store, require_available=None):
                     if _identity(level,holder,holder['correction_review'])==candidate_id)
                 holder.update(corrected=journal['chosen'],ai_pending=False,human_reviewed_at=journal['created_at'],human_review_decision=decision)
                 holder.pop('correction_review',None);holder.pop('ai_error',None)
+                _refresh_global_text(record)
                 record.save_all()
             return {'saved':True,'reused':True,'remaining':len(active_candidates(record)),'session':record.public()}
         candidate=next((item for item in active_candidates(record) if item['candidate_id']==candidate_id),None)
@@ -109,6 +119,7 @@ def transcription_assist_router(store, require_available=None):
             'candidate_id':candidate_id,'request_sha256':request_hash,'decision':decision,
             'segment_ids':candidate['segment_ids'],'created_at':journal['created_at']})
         record.metadata['updated_at']=journal['created_at']
+        _refresh_global_text(record)
         record.save_all()
         return {'saved':True,'remaining':len(active_candidates(record)),'session':record.public()}
 

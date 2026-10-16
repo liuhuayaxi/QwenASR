@@ -209,7 +209,7 @@ class GroupedCorrectionTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(record.segments[0]['ai_pending'])
 
     async def test_rejects_merged_results_when_each_timestamp_needs_its_own_text(self):
-        config = high_config();config['_preserve_segment_boundaries'] = True
+        config = high_config()
         merged = {'blocks': [{'segment_ids': [1, 2], 'corrected': '整批文本'}]}
         with patch('qwen_asr_app.ai.request_ai_json', new=AsyncMock(return_value=merged)):
             with self.assertRaises(AIRequestError) as caught:

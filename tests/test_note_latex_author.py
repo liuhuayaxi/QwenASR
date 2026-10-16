@@ -23,6 +23,41 @@ class DirectLatexAuthorTests(unittest.IsolatedAsyncioTestCase):
                 await author.ensure_source('edited',folder,{'v':2},config,ledger,package,[])
                 self.assertEqual(request.await_count,3)
 
+    async def test_cached_equation_name_normalizes_without_another_ai_request(self):
+        import hashlib
+        with tempfile.TemporaryDirectory() as raw:
+            folder=Path(raw);destination=folder/'latex';destination.mkdir()
+            (folder/'transcript.json').write_text('{"blocks":[]}')
+            body='\\CourseTitle{课程}{测试}\n% knowledge:k\nSchr\\"odinger 方程\n% /knowledge:k'
+            original=hashlib.sha256(body.encode()).hexdigest()
+            saved={'binding':author._binding('ref',{}),'body_sha256':original,'writer_session_id':'original-writer'}
+            (destination/'body.tex').write_text(body);(destination/'source.json').write_text(json.dumps(saved))
+            with patch.object(author,'request_ai_text',AsyncMock()) as request:
+                manifest=await author.ensure_source('ref',folder,{}, {},{'knowledge':[{'id':'k'}]}, {},[])
+            request.assert_not_awaited()
+            self.assertIn('Schrodinger',(destination/'body.tex').read_text())
+            self.assertEqual((destination/('body-before-plain-names-'+original+'.tex')).read_text(),body)
+            self.assertEqual(manifest['previous_body_sha256'],original)
+            self.assertEqual(manifest['writer_session_id'],'original-writer')
+
+    async def test_single_batch_exhausted_legacy_source_is_revalidated_without_new_requests(self):
+        import hashlib
+        for course in ('光纤传输','汇编指令'):
+            with self.subTest(course=course),tempfile.TemporaryDirectory() as raw:
+                folder=Path(raw);destination=folder/'latex';destination.mkdir()
+                (folder/'transcript.json').write_text('{"blocks":[]}')
+                key=self.source_key();body='% knowledge:k\n'+course+r'\begin{table}[htbp]\caption{比较}\begin{tabular}{ll}A & B\\\end{tabular}\end{table}'+'\n% /knowledge:k'
+                originals={}
+                for number in (1,2,3):
+                    path=destination/f'{key}-attempt-{number}.tex';path.write_text(body);originals[path]=path.read_bytes()
+                    path.with_suffix('.receipt.json').write_text(json.dumps({'body_sha256':hashlib.sha256(body.encode()).hexdigest(),'writer_session_id':f'writer-{number}'}))
+                (destination/f'attempts-{key}.json').write_text(json.dumps({'attempts':3,'errors':['table']}))
+                with patch.object(author,'request_ai_text',AsyncMock()) as request:
+                    await author.ensure_source('ref',folder,{}, {},{'knowledge':[{'id':'k'}]}, {},[])
+                request.assert_not_awaited()
+                self.assertIn(r'\captionof{table}',(destination/'body.tex').read_text())
+                self.assertTrue(all(path.read_bytes()==data for path,data in originals.items()))
+
     async def test_invalid_knowledge_proposals_are_bounded_and_preserved(self):
         with tempfile.TemporaryDirectory() as raw:
             folder=Path(raw);(folder/'transcript.json').write_text('{"blocks":[]}')
@@ -254,6 +289,24 @@ class BatchedLatexAuthorTests(unittest.IsolatedAsyncioTestCase):
             batch_root=next((destination/'batches').iterdir())
             self.assertEqual(len(list((batch_root/'batch-001').glob('source-attempt-*.tex'))),3)
             self.assertFalse((batch_root/'batch-002').exists())
+
+    async def test_exhausted_table_proposal_recovers_without_new_ai_or_overwriting_sources(self):
+        with tempfile.TemporaryDirectory() as raw:
+            folder,ledger,images,package=self.fixture(raw)
+            async def respond(**kwargs):
+                body=self.proposal(kwargs['payload']);ident=kwargs['payload']['required_knowledge_ids'][0]
+                table=r'\begin{table}[htbp]\caption{原表题}\begin{tabular}{ll}A & B\\\end{tabular}\end{table}'
+                return body.replace('% /knowledge:'+ident,table+'\n% /knowledge:'+ident,1)
+            with patch.object(author,'request_ai_text',AsyncMock(side_effect=respond)) as request,patch.object(author,'context_window_for',return_value=256000):
+                with patch('qwen_asr_app.note_latex.normalize_table_floats',side_effect=lambda body:body):
+                    with self.assertRaisesRegex(ValueError,'三份完整源稿'):
+                        await author.ensure_source('ref',folder,{}, {},ledger,package,images)
+                sources={path:path.read_bytes() for path in (folder/'latex').rglob('source-attempt-*.tex')}
+                self.assertEqual(request.await_count,3)
+                await author.ensure_source('ref',folder,{}, {},ledger,package,images)
+                self.assertEqual(request.await_count,4)  # Only the previously unstarted second batch.
+                self.assertTrue(all(path.read_bytes()==value for path,value in sources.items()))
+                self.assertIn(r'\captionof{table}{原表题}',(folder/'latex/body.tex').read_text())
 
     def test_figure_placement_uses_evidence_and_respects_depth(self):
         ledger=[{'id':'early','topic':'光纤衰减','sources':['S1']},

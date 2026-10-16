@@ -90,9 +90,10 @@ async function transcribeUploadedFile(file, config, fileIndex, fileCount, resume
         addBatchBlock(els.batchAi, segment, text, `逐段修正 ${segment.id || ""}`);
       } else if (event.type === "ai_global_part") {
         const part = event.part || {};
-        const text = [part.corrected || part.raw, part.translation && `译文：${part.translation}`]
-          .filter(Boolean).join("\n\n");
-        addBatchBlock(els.batchAi, part, text, `全局改写 ${event.index}/${event.count}`);
+        for(const block of part.blocks || [part]) {
+          const text=[block.corrected || block.raw,block.translation && `译文：${block.translation}`].filter(Boolean).join('\n\n');
+          addBatchBlock(els.batchAi,block,text,`全局整理 · 第 ${(block.segment_ids || []).join(',')} 段`);
+        }
       } else if (event.type === "ai_global_complete") {
         const result = event.global_rewrite || {};
         addBatchBlock(

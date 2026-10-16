@@ -19,7 +19,8 @@ def transcript_blocks(record: Any) -> list[dict[str, Any]]:
     global_result = record.metadata.get("ai_global_rewrite") or {}
     candidates = []
     if global_result.get("complete"):
-        candidates.extend(global_result.get("parts") or [])
+        for part in global_result.get('parts') or []:
+            candidates.extend(part.get('blocks') or [part])
     candidates.extend(record.metadata.get("ai_reviews") or [])
     for part in candidates:
         ids = [int(value) for value in part.get("segment_ids", [])]
@@ -30,6 +31,7 @@ def transcript_blocks(record: Any) -> list[dict[str, Any]]:
         blocks.append({"start": min(float(s.get("start", 0)) for s in members),
                        "end": max(float(s.get("end", 0)) for s in members),
                        "text": text, "refined": not bool(part.get("correction_review")), "segment_ids": ids,
+                       **({key:part[key] for key in ('translation','translation_target') if part.get(key)}),
                        **({"correction_review":part["correction_review"]} if part.get("correction_review") else {})})
         covered.update(ids)
     for segment in segments:

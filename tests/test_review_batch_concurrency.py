@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch,AsyncMock
 
 from qwen_asr_app.review_notes import visual_review
 
@@ -31,6 +31,34 @@ def outcome(prompt, kwargs):
 
 
 class ReviewBatchConcurrencyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_transient_session_exit_recovers_automatically_and_permanent_auth_stops(self):
+        from qwen_asr_app.agy_materials import MaterialSessionError
+        for kind,retriable in [('provider_unavailable',True),('provider_auth',False)]:
+            with self.subTest(kind=kind),tempfile.TemporaryDirectory() as raw:
+                folder=Path(raw);pdf,export=candidate(folder,2);calls=0
+                async def model(prompt,folder,provider,**kwargs):
+                    nonlocal calls
+                    calls+=1
+                    if calls==1:raise MaterialSessionError('synthetic session failure',kind=kind,retriable=retriable)
+                    return outcome(prompt,kwargs)[1]
+                with patch('qwen_asr_app.review_notes.request_materials',side_effect=model),patch('qwen_asr_app.review_notes.asyncio.sleep',new=AsyncMock()):
+                    if retriable:
+                        report=await visual_review(pdf,export,folder,{'concurrency':1},[],[])
+                        self.assertEqual(report['status'],'passed');self.assertEqual(calls,2)
+                    else:
+                        with self.assertRaises(MaterialSessionError):await visual_review(pdf,export,folder,{'concurrency':1},[],[])
+                        self.assertEqual(calls,1)
+                        self.assertEqual(json.loads((folder/'review.json').read_text())['viewed_pages'],[])
+
+    async def test_repeated_transient_failures_have_a_finite_batch_budget(self):
+        from qwen_asr_app.agy_materials import MaterialSessionError
+        with tempfile.TemporaryDirectory() as raw:
+            folder=Path(raw);pdf,export=candidate(folder,2)
+            with patch('qwen_asr_app.review_notes.request_materials',new=AsyncMock(side_effect=MaterialSessionError('temporary',kind='provider_unavailable',retriable=True))) as request,patch('qwen_asr_app.review_notes.asyncio.sleep',new=AsyncMock()):
+                with self.assertRaises(MaterialSessionError) as caught:await visual_review(pdf,export,folder,{'concurrency':1},[],[])
+            self.assertEqual(request.await_count,3);self.assertEqual(caught.exception.kind,'review_batch_exhausted')
+            self.assertEqual(json.loads((folder/'review.json').read_text())['viewed_pages'],[])
+
     async def test_distinct_pdfs_are_serial_while_one_pdf_keeps_two_reviewers(self):
         with tempfile.TemporaryDirectory() as raw:
             first=Path(raw)/'first';second=Path(raw)/'second'

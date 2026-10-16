@@ -16,6 +16,7 @@ import re
 import shutil
 import subprocess
 import sys
+import unicodedata
 
 from .note_content import clock
 from .review_materials import PDF_LOCK, safe_path
@@ -170,6 +171,59 @@ def _argument(text, position):
             if not depth:return text[start:position],position+1
         position+=1
     raise ValueError('LaTeX 花括号未闭合')
+
+
+def normalize_table_floats(body):
+    """Keep generated tables beside their teaching block without float syntax.
+
+    Only the table wrapper, its placement hint and its caption command change.
+    The complete cells still pass the normal allowlist; unsafe TeX is never
+    discarded to make a proposal appear valid. Raw proposals stay immutable.
+    """
+    if not isinstance(body,str) or not body.strip() or len(body)>800_000:
+        raise ValueError('LaTeX 正文为空或过大')
+    mask=''.join(_without_comments(line)+''.join(char if char in '\r\n' else ' '
+        for char in line[len(_without_comments(line)):]) for line in body.splitlines(keepends=True))
+    patches=[];environments=[]
+    for match in _TOKENS.finditer(mask):
+        command=match.group(1)
+        if command in {'begin','end'}:
+            environment,end=_argument(mask,match.end())
+            if environment=='verbatim':raise ValueError('LaTeX verbatim 需要先规范化为字面代码')
+            if command=='begin':
+                if environment=='table':
+                    if 'table' in environments:raise ValueError('LaTeX table 不允许嵌套')
+                    patches.append((match.start(),end,r'\begin{center}'))
+                    after=end
+                    while after<len(mask) and mask[after].isspace():after+=1
+                    if after<len(mask) and mask[after]=='[':
+                        placement=re.match(r'\[[htbp!\s]+\]',mask[after:])
+                        if not placement:raise ValueError('LaTeX table 位置参数无效')
+                        patches.append((after,after+placement.end(),''))
+                environments.append(environment)
+            else:
+                if not environments or environments.pop()!=environment:
+                    raise ValueError('LaTeX 环境未成对闭合')
+                if environment=='table':patches.append((match.start(),end,r'\end{center}'))
+        elif command=='caption' and 'table' in environments:
+            patches.append((match.start(),match.end(),r'\captionof{table}'))
+    if environments:raise ValueError('LaTeX 环境未闭合')
+    for start,end,replacement in reversed(patches):body=body[:start]+replacement+body[end:]
+    return body
+
+
+def normalize_course_names(body):
+    """Use plain Latin spelling without modifying mathematical accent macros.
+
+    Latin text accents are deterministic typography, not new teaching content.
+    Match only a single complete letter argument; malformed or executable TeX
+    remains in the body and is rejected by the normal validator.
+    """
+    body=re.sub(r'''\\["'`^~=](?:\{([A-Za-z])\}|([A-Za-z]))''',lambda match:match[1] or match[2],body)
+    def plain(match):
+        value=unicodedata.normalize('NFKD',match[0])
+        return ''.join(char for char in value if not unicodedata.combining(char))
+    return re.sub(r'[À-ÖØ-öø-ÿ]',plain,body)
 
 
 def _validate_body(body):

@@ -22,7 +22,7 @@ from .ai import (
     summarize_transcript,
     summary_instructions,
 )
-from .context_budget import chunk_text_blocks, estimate_tokens
+from .context_budget import chunk_text_blocks, estimate_tokens, context_safe_source_budget
 from .note_content import transcript_blocks
 from .storage import RecordingRecord, format_clock, local_now
 
@@ -171,17 +171,30 @@ def _source_blocks(record: RecordingRecord) -> list[str]:
     ]
 
 
+def global_source_groups(record,config):
+    """Batch complete segment objects; grouping never changes output ownership."""
+    window=context_window_for(config,'global')
+    budget=min(context_safe_source_budget(window,fixed_overhead=1800),
+        agy_rewrite_source_budget(config,'global') if uses_agy_gemini(config,'global') else 3500)
+    groups=[];current=[];used=0
+    for segment in record.segments:
+        if segment.get('ai_suppressed') or not str(segment.get('corrected') or segment.get('raw') or '').strip():continue
+        cost=estimate_tokens(str(segment.get('corrected') or segment.get('raw') or ''))+24
+        if current and used+cost>budget:groups.append(current);current=[];used=0
+        current.append(segment);used+=cost
+    if current:groups.append(current)
+    return groups
+
+
 async def global_rewrite_events(
     record: RecordingRecord,
     config: dict[str, Any],
 ) -> AsyncIterator[dict[str, Any]]:
     """Run a context-safe global pass and persist each recoverable part."""
     context_window = context_window_for(config, "global")
-    long_context = uses_agy_gemini(config, "global")
-    chunks = chunk_text_blocks(
-        _source_blocks(record), context_window,
-        max_source_tokens=agy_rewrite_source_budget(config, "global") if long_context else 3500,
-    )
+    groups=global_source_groups(record,config)
+    chunks=['\n\n'.join(f"[{format_clock(float(s.get('start',0)))}–{format_clock(float(s.get('end',0)))}]\n"+
+        str(s.get('corrected') or s.get('raw') or '') for s in group) for group in groups]
     detected_language = next(
         (
             str(item.get("language") or "")
@@ -194,16 +207,19 @@ async def global_rewrite_events(
     global_config = await evidence_config(record, config, '\n'.join(str(s.get('raw') or '') for s in record.segments)[-5000:])
     global_config["_global_mode"] = True
     fingerprint = hashlib.sha256(
-        json.dumps([chunks, detected_language, global_config], ensure_ascii=False, sort_keys=True).encode()
+        json.dumps(['per-segment-global-v1',groups,detected_language,global_config], ensure_ascii=False, sort_keys=True).encode()
     ).hexdigest()
     previous = record.metadata.get("ai_global_rewrite") or {}
+    if previous and previous.get('fingerprint')!=fingerprint:
+        from .durable import atomic_json
+        old_hash=hashlib.sha256(json.dumps(previous,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
+        atomic_json(record.directory/'.refinement-history'/('global-before-'+old_hash+'.json'),previous)
     previous_parts = previous.get("parts") if previous.get("fingerprint") == fingerprint else []
     saved_by_index = {
         int(part["id"]) - 1: dict(part)
         for part in previous_parts or []
         if isinstance(part, dict)
         and isinstance(part.get("id"), int)
-        and not part.get("ai_error")
         and 1 <= int(part["id"]) <= len(chunks)
     }
     parts = [saved_by_index.get(index) for index in range(len(chunks))]
@@ -220,17 +236,39 @@ async def global_rewrite_events(
 
     semaphore = asyncio.Semaphore(concurrency_for(config, "global"))
     async def process(index, chunk):
-        if parts[index] is not None:
+        group=groups[index];expected=[int(s['id']) for s in group]
+        previous_part=parts[index] or {}
+        if (previous_part and not previous_part.get('ai_error')
+                and [b.get('segment_ids') for b in previous_part.get('blocks',[])]==[[ident] for ident in expected]):
             return index, parts[index], True
         async with semaphore:
             ai_config = json.loads(json.dumps(global_config))
             ai_config["_transcript_context"] = chunks[index - 1][-2000:] if index else ""
-            part = {"id": index + 1, "raw": chunk,
-                    "segment_ids": [int(segment["id"]) for segment in record.segments
-                                    if (f"[{format_clock(float(segment.get('start', 0)))}–{format_clock(float(segment.get('end', 0)))}]\n"
-                                        f"{segment.get('corrected') or segment.get('raw') or ''}") in chunk]}
+            by_id={int(s['id']):s for s in group}
+            saved={b['segment_ids'][0]:b for b in previous_part.get('blocks',[])
+                if len(b.get('segment_ids',[]))==1 and b['segment_ids'][0] in by_id and str(b.get('corrected') or '').strip()}
+            part = {"id": index + 1, "raw": chunk,"segment_ids":expected}
+            def checkpoint(blocks):
+                block_ids=[b.get('segment_ids') or [] for b in blocks]
+                if (any(len(ids)!=1 or ids[0] not in by_id for ids in block_ids)
+                        or len({ids[0] for ids in block_ids})!=len(block_ids)
+                        or any(not str(b.get('corrected') or '').strip() for b in blocks)):
+                    raise AIRequestError('全局整理未保留逐段映射',kind='invalid_segment_mapping')
+                for block in blocks:
+                    ids=block.get('segment_ids') or []
+                    saved[ids[0]]={**block,'start':by_id[ids[0]]['start'],'end':by_id[ids[0]]['end']}
+                part['blocks']=[saved[ident] for ident in expected if ident in saved]
+                part['corrected']='\n\n'.join(b['corrected'] for b in part['blocks'])
+                if any(b.get('translation') for b in part['blocks']):part['translation']='\n\n'.join(b.get('translation','') for b in part['blocks'])
+                part['ai_error']='本批还有未完成片段'
+                parts[index]=part;persist_global_parts()
             try:
-                part.update(await polish_and_translate(chunk, detected_language, ai_config))
+                remaining=[s for s in group if int(s['id']) not in saved]
+                mapped=await polish_timestamped_segments_resilient(remaining,detected_language,ai_config,mode='global',on_checkpoint=checkpoint) if remaining else []
+                if ([b.get('segment_ids') for b in mapped]!=[[int(s['id'])] for s in remaining]
+                        or any(not str(b.get('corrected') or '').strip() for b in mapped)):
+                    raise AIRequestError('全局整理未保留逐段映射',kind='invalid_segment_mapping')
+                checkpoint(mapped);part.pop('ai_error',None)
             except Exception as exc:
                 part["ai_error"] = str(exc)
             parts[index] = part
