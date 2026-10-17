@@ -1458,6 +1458,10 @@ async def ai_task_action(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
     if action in {"retry", "regenerate"}:
         if kind == "summary":
             if not resume_abstract:
+                # A human-requested retry grants one new finite validation
+                # round. The stable nonce prevents automatic transport retries
+                # from repeatedly replenishing a failed proposal budget.
+                config['_note_validation_retry_round'] = str(time.time_ns())
                 record.metadata.pop("ai_note_summary_draft", None)
         elif kind == "live_summary":
             record.metadata["ai_summaries"] = []

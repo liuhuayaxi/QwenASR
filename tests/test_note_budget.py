@@ -104,6 +104,29 @@ class NoteBudgetTests(unittest.TestCase):
 
 
 class PlanJSONRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_output_limit_splits_complete_sources_and_resumes_children(self):
+        from qwen_asr_app.review_notes import validated_plan_part
+        blocks=[{'source':'S'+str(i),'text':'完整原文','start':i,'end':i+1} for i in range(1,5)]
+        def proposal(ids):
+            return json.dumps({'knowledge':[{'id':'k1','kind':'new_development','sources':ids}],
+                               'figures':[],'omitted_sources':[],'warnings':[]})
+        package={'sources':[],'associations':[],'relevant_pages':[],'history_scope':'历史范围不足'}
+        payload={'transcript':blocks,'history':[],'history_scope':'历史范围不足'}
+        with tempfile.TemporaryDirectory() as raw:
+            folder=Path(raw)
+            with patch('qwen_asr_app.review_notes.request_ai_text',AsyncMock(side_effect=[
+                    AIRequestError('output token limit',kind='output_truncated',retriable=True),
+                    proposal(['S1','S2']),proposal(['S3','S4'])])) as request:
+                result=await validated_plan_part('识别知识',payload,config(),{'S1','S2','S3','S4'},package,folder,0)
+                self.assertEqual(request.await_count,3)
+                self.assertEqual([x['source'] for call in request.await_args_list[1:] for x in call.kwargs['payload']['transcript']],
+                                 ['S1','S2','S3','S4'])
+            self.assertEqual([s for k in result['knowledge'] for s in k['sources']],['S1','S2','S3','S4'])
+            with patch('qwen_asr_app.review_notes.request_ai_text',AsyncMock()) as request:
+                again=await validated_plan_part('识别知识',payload,config(),{'S1','S2','S3','S4'},package,folder,0)
+                self.assertEqual(again,result)
+                request.assert_not_awaited()
+
     async def test_malformed_json_is_preserved_and_repaired_with_complete_input(self):
         from qwen_asr_app.review_notes import validated_plan_part
         bad='{"knowledge": [{"id" "k1"}]}'
@@ -131,6 +154,23 @@ class PlanJSONRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     await validated_plan_part('知识清单',{},config(),set(),{'sources':[]},folder,0)
                 self.assertEqual(request.await_count,3)
                 self.assertEqual(len(list(folder.glob('coverage-response-*.txt'))),3)
+
+    async def test_explicit_retry_grants_one_bounded_round_without_overwriting_history(self):
+        from qwen_asr_app.review_notes import validated_plan_part
+        with tempfile.TemporaryDirectory() as raw:
+            folder=Path(raw)
+            with patch('qwen_asr_app.review_notes.request_ai_text',AsyncMock(return_value='{"broken":')) as request:
+                with self.assertRaises(ValueError):
+                    await validated_plan_part('知识清单',{},config(),set(),{'sources':[]},folder,0)
+                first={p.name:p.read_bytes() for p in folder.glob('coverage-response-*.txt')}
+                retry={**config(),'_note_validation_retry_round':'explicit-user-retry-1'}
+                with self.assertRaises(ValueError):
+                    await validated_plan_part('知识清单',{},retry,set(),{'sources':[]},folder,0)
+                with self.assertRaisesRegex(ValueError,'自动修复上限'):
+                    await validated_plan_part('知识清单',{},retry,set(),{'sources':[]},folder,0)
+                self.assertEqual(request.await_count,6)
+                self.assertEqual(len(list(folder.glob('coverage-response-*.txt'))),6)
+                self.assertEqual({name:(folder/name).read_bytes() for name in first},first)
 
 
 if __name__=='__main__':unittest.main()

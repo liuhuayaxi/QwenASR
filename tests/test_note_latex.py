@@ -357,6 +357,27 @@ ADD AX, SECOND
                     (destination/'consecutive-sources.log').write_text(log)
                     document[0].get_pixmap(matrix=fitz.Matrix(1,1),alpha=False).save(destination/'consecutive-sources-page-001.png')
 
+    def test_source_row_cannot_be_orphaned_from_the_last_explanation_line(self):
+        import fitz
+        from qwen_asr_app.note_latex_author import bind_knowledge_sources
+        with tempfile.TemporaryDirectory() as raw:
+            folder=Path(raw)
+            prose='光学谐振腔通过往返传播形成相干反馈，起振时增益必须补偿内部吸收与端面透射损耗。'
+            body=TITLE+'\n'
+            for number in range(1,31):
+                content=prose*(3+number%7)+r'\texttt{END'+str(number)+'}'
+                if number%2:content=r'\begin{enumerate}\item '+content+r'\end{enumerate}'
+                body+='% knowledge:k'+str(number)+'\n'+content+'\n% /knowledge:k'+str(number)+'\n'
+            body=bind_knowledge_sources(body,{'knowledge':[{'id':'k'+str(n),'sources':['S'+str(n)]} for n in range(1,31)]})
+            blocks=[{'start':i*68,'end':(i+1)*68} for i in range(30)]
+            pdf,_=compile_document(body,folder,folder/'build',transcript={'blocks':blocks},images=[])
+            with fitz.open(pdf) as document:
+                text=[page.get_text() for page in document]
+                for number in range(1,31):
+                    explanation=next(n for n,page in enumerate(text) if re.search(r'END'+str(number)+r'\b',page))
+                    citation=next(n for n,page in enumerate(text) if re.search(r'课堂\s*S'+str(number)+r'\s*·',page))
+                    self.assertEqual(explanation,citation,'source row detached at S'+str(number))
+
     def test_real_chinese_math_image_source_and_compiler_security(self):
         import fitz
         from PIL import Image,ImageDraw

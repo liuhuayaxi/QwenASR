@@ -92,7 +92,21 @@ def _material_failure(detail, *, returncode=None):
 def parse_json(text):
     value=str(text).strip()
     value=re.sub(r'^```(?:json)?\s*|\s*```$','',value)
-    return json.loads(value)
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError as exc:
+        if 'Invalid control character' not in exc.msg:raise
+        # A literal newline/tab inside a JSON string is a transport-format
+        # defect, not missing content. Preserve every character and validate
+        # the resulting object normally; do not invent escapes or fields.
+        result=json.loads(value,strict=False)
+        def safe(item):
+            if isinstance(item,str):return all(ord(c)>=32 or c in '\n\r\t' for c in item)
+            if isinstance(item,list):return all(safe(v) for v in item)
+            if isinstance(item,dict):return all(safe(k) and safe(v) for k,v in item.items())
+            return True
+        if not safe(result):raise exc
+        return result
 
 
 def sandbox_profile(folder, cli):
@@ -140,6 +154,16 @@ async def _request_materials(instructions, folder, provider, *, read_paths=(), r
     from .ai import estimate_tokens
     if estimate_tokens(prompt)+len(images)*4096+32768+16000>int(provider.get('context_window') or 32768):
         raise ValueError('视觉资料、协议及输出超过当前已保存上下文预算；未静默截断')
+    from .agy_cli import INLINE_INPUT_BYTES, _file_prompt
+    text_files={}
+    if len(prompt.encode())>INLINE_INPUT_BYTES:
+        prompt,transport_folder=_file_prompt(prompt,folder,additional_read_paths=allowed)
+        text_files=json.loads((transport_folder/'transport.json').read_text())['files']
+        allowed.update(text_files)
+        file_versions.update({p:spec['sha256'] for p,spec in text_files.items()})
+        encoded_estimate=estimate_tokens(prompt)+sum(estimate_tokens(Path(p).read_text()) for p in text_files)+len(images)*4096+32768+16000
+        if encoded_estimate>int(provider.get('context_window') or 32768):
+            raise ValueError('完整视觉资料文件、图片、协议及输出超过已保存上下文预算；未发送或截断资料')
     command=[cli,'--input-format','stream-json','--output-format','stream-json','--model',model(provider),
              '--mode','plan','--sandbox','--disable-slash-commands']
     if schema is not None:command.extend(['--json-schema',json.dumps(schema,ensure_ascii=False)])
@@ -175,6 +199,29 @@ async def _request_materials(instructions, folder, provider, *, read_paths=(), r
             try:process.kill()
             except ProcessLookupError:pass
             await process.wait()
+    # Some AGY 1.4 print runs lose both model deltas and final text despite a
+    # durable completed turn. Replay only this exact turn, with successful
+    # allowed reads and native finish validation, through the normal validator.
+    initial_session='';empty_success=False
+    for line in stdout.decode(errors='replace').splitlines():
+        try:event=json.loads(line)
+        except ValueError:continue
+        if not isinstance(event,dict):continue
+        if event.get('event')=='init':initial_session=event.get('conversation_id') or ''
+        if event.get('event')=='result':
+            result=event.get('result') or {}
+            empty_success=(result.get('status')=='SUCCESS' and not result.get('response')
+                           and not isinstance(result.get('structured_output'),dict))
+    if not process.returncode and initial_session and (text_files or empty_success):
+        from .agy_session import read_session,SessionEvidenceError
+        specs={p:{'sha256':file_versions[p],'lines':1} for p in allowed}
+        specs.update(text_files)
+        try:
+            recovered=read_session(initial_session,prompt,allowed_files=specs,
+                                   required_files=[*images,*text_files],schema=schema)
+        except SessionEvidenceError as exc:
+            raise MaterialSessionError(str(exc),kind='input_too_long' if '截断' in str(exc) else 'agy_cli_error') from exc
+        stdout='\n'.join(json.dumps(event,ensure_ascii=False) for event in recovered['events']).encode()
     session=None;viewed=set();response=None;tools=[];upstream_error='';structured=False
     finish_validation_errors=0;finish_recovered=False;recovered_result=False
     for line in stdout.decode(errors='replace').splitlines():

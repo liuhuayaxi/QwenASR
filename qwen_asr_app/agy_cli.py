@@ -1,10 +1,9 @@
 """Small, non-interactive adapter for the local ``agy`` CLI.
 
-The CLI is deliberately isolated from the web process' shell environment: a
-single prompt is sent through AGY's stream-json stdin protocol and only the
-final response is returned.  This keeps long lecture text out of argv (macOS
-has a relatively small argv limit) and prevents the agent from editing the
-QwenASR checkout while it is being used as an AI provider.
+Small prompts use stream-json stdin. Large prompts use bounded, hashed files
+inside an OS sandbox, with completed read receipts for every line. Only the
+final response from this exact completed conversation is returned; long
+lecture text never goes into argv or an unbounded CLI user-message envelope.
 """
 from __future__ import annotations
 from contextvars import ContextVar
@@ -17,6 +16,9 @@ import os
 import re
 import shutil
 import subprocess
+import hashlib
+import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +30,11 @@ from .context_budget import estimate_tokens, normalize_context_window
 
 DEFAULT_MODEL = "gemini-3.8-flash-medium"
 DEFAULT_TIMEOUT = 1800
+# AGY's user-request envelope truncates near 192 KB, independently of the
+# model's token window. Keep inline turns small; transport larger inputs as
+# individually bounded, receipt-checked files without dropping source text.
+INLINE_INPUT_BYTES = 80_000
+FILE_INPUT_BYTES = 16_000
 
 
 def _text(value: Any) -> str:
@@ -185,6 +192,108 @@ def compose_prompt(instructions: str, payload: dict[str, Any]) -> str:
     )
 
 
+def _file_prompt(prompt: str, working: Path, *, additional_read_paths=()):
+    from .durable import atomic_json
+    request = working/'requests'/uuid.uuid4().hex
+    request.mkdir(parents=True, mode=0o700)
+    files = {}
+    fragments = [prompt[i:i+700] for i in range(0, len(prompt), 700)]
+    groups = []
+    current = []
+    for fragment in fragments:
+        candidate = [*current, fragment]
+        if current and len(json.dumps(candidate, ensure_ascii=False, indent=2).encode()) > FILE_INPUT_BYTES:
+            groups.append(current)
+            current = []
+        current.append(fragment)
+    if current:
+        groups.append(current)
+    reconstructed = []
+    for index, group in enumerate(groups):
+        path = request/f'input-{index:04d}.json'
+        atomic_json(path, {'part': index+1, 'parts': len(groups), 'content_fragments': group})
+        data = path.read_bytes()
+        files[str(path)] = {'sha256': hashlib.sha256(data).hexdigest(),
+                            'lines': len(data.splitlines())}
+        reconstructed.extend(group)
+    if ''.join(reconstructed) != prompt:
+        raise ValueError('AGY 资料分块校验失败，原始输入未发送')
+    additional = sorted(str(Path(p).resolve()) for p in additional_read_paths)
+    reading_rule = ('读取全部文字资料后，必须依完整任务要求实际查看指定图片。' if additional else
+                    '不打开正文中提及的其他文件；排版写作只使用资料里已提供的图片清单和读图说明。')
+    transport_prompt = (
+        '这是 QwenASR 的独立文本整理请求。完整任务和原始资料以 JSON 字符串片段保存在下面的文件中，'
+        '避免 CLI 截断长消息。先依照文件顺序逐个使用 view_file 完整读取全部文件。'
+        '每个文件的 content_fragments 按原顺序连接，JSON 字符串转义按正常 JSON 含义理解；'
+        '再将所有文件连接，即为完整的同一个请求，不得遗漏末尾片段。'
+        '按其中 SYSTEM INSTRUCTIONS 处理 INPUT 数据，直接返回任务要求的完整最终正文。'
+        '只允许 view_file 读取清单文件，以及 allowed_additional_files 明确列出的原始资料和图片；'
+        f'{reading_rule}'
+        '不得执行命令、写文件、访问其他路径、浏览网页、发送消息或委派子代理。'
+        '不要输出读取过程或声称已经完成而省略正文。\n'
+        +json.dumps({'request_sha256': hashlib.sha256(prompt.encode()).hexdigest(),
+                     'allowed_additional_files':additional,
+                     'files': [{'path': path, 'lines': spec['lines']} for path, spec in files.items()]}, ensure_ascii=False)
+    )
+    atomic_json(request/'transport.json', {'version': 1, 'prompt': transport_prompt,
+                'source_sha256': hashlib.sha256(prompt.encode()).hexdigest(),
+                'source_bytes': len(prompt.encode()), 'files': files})
+    return transport_prompt, request
+
+
+def _finish_output(stdout, stderr, working, message, returncode=0):
+    """Use stdout normally; verify the exact durable turn on missing output."""
+    prompt = json.loads(message)['message']['content']
+    manifest = Path(working)/'transport.json'
+    files = json.loads(manifest.read_text())['files'] if manifest.is_file() else None
+    session = ''
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+            if not isinstance(event, dict):
+                continue
+            ident = event.get('conversation_id') or (event.get('result') or {}).get('conversation_id')
+            if ident:
+                session = str(ident)
+        except (ValueError, TypeError, AttributeError):
+            continue
+    last_session_id.set(session)
+    try:
+        response = _decode_output(stdout, stderr)
+    except AIRequestError as exc:
+        if files is not None and session and exc.kind in {'network_transport','network_read_timeout','agy_cli_error'}:
+            from .agy_session import output_limit_before_failure
+            if output_limit_before_failure(session,prompt):
+                raise AIRequestError('AGY 生成先达到输出上限，后续续写连接未完成；应拆小完整知识批次重试',
+                                     kind='output_truncated',retriable=True) from exc
+        # Only recover an explicitly successful but empty final result. Auth,
+        # network, cancellation and failed results remain real failures.
+        if str(exc) != 'AGY CLI 返回了空结果' or not session:
+            raise
+        response = None
+    if returncode:
+        kind, retriable = _error_kind(stderr)
+        raise AIRequestError(f'AGY CLI 异常退出（退出码 {returncode}），本次结果未采纳', kind=kind, retriable=retriable)
+    if response is not None and files is None:
+        return response
+    from .agy_session import read_session, SessionEvidenceError
+    try:
+        receipt = read_session(session, prompt, allowed_files=files)
+    except SessionEvidenceError as exc:
+        detail = str(exc)
+        if files is not None:
+            from .durable import atomic_json
+            atomic_json(Path(working)/'failure.json', {'session_id':session,'error':detail})
+        kind = 'input_too_long' if '截断' in detail else 'agy_cli_error'
+        raise AIRequestError(detail, kind=kind, retriable=False) from exc
+    if files is not None:
+        from .durable import atomic_json
+        atomic_json(Path(working)/'receipt.json', {k: v for k, v in receipt.items() if k not in {'response','events'}})
+    if response is not None and response.strip() != receipt['response']:
+        raise AIRequestError('AGY 最终正文与本次完成记录不一致，未采纳结果', kind='agy_cli_error', retriable=False)
+    return receipt['response']
+
+
 def _request_arguments(instructions: str, payload: dict[str, Any], provider: dict[str, Any]):
     prompt = compose_prompt(instructions, payload)
     window = normalize_context_window(provider.get('context_window'))
@@ -201,6 +310,14 @@ def _request_arguments(instructions: str, payload: dict[str, Any], provider: dic
     timeout = timeout_seconds(provider)
     working = PRIVATE_ROOT / "agy-cli"
     working.mkdir(parents=True, exist_ok=True, mode=0o700)
+    file_transport = len(prompt.encode()) > INLINE_INPUT_BYTES
+    if file_transport:
+        prompt, working = _file_prompt(prompt, working)
+        manifest = json.loads((working/'transport.json').read_text())
+        encoded_estimate = estimate_tokens(prompt) + sum(estimate_tokens(Path(p).read_text()) for p in manifest['files']) + 16_000
+        if encoded_estimate > window:
+            raise AIRequestError(f'AGY 完整资料文件及协议预计 {encoded_estimate:,} tokens，超过已保存上下文预算 {window:,}；未发送或截断资料',
+                                 kind='input_too_long',retriable=False)
     # A single user message through stdin avoids argv limits and is supported
     # by AGY 1.3.x. Slash expansion is disabled and the working directory is
     # an empty private directory, so transcript text cannot become a command
@@ -218,7 +335,18 @@ def _request_arguments(instructions: str, payload: dict[str, Any], provider: dic
     # variant. Passing --effort now fails before inference. Keep the same ID.
     if selected_model.endswith("-high") and not selected_model.startswith('gemini-'):
         command[command.index("--mode"):command.index("--mode")] = ["--effort", selected_effort]
-    return command, message, working, subprocess_environment(), timeout
+    if file_transport:
+        if sys.platform != 'darwin' or not shutil.which('sandbox-exec'):
+            raise AIRequestError('AGY 长文本受控资料通道需要本机资料沙箱', kind='material_sandbox_unavailable', retriable=False)
+        from .agy_materials import sandbox_profile
+        command = ['sandbox-exec', '-p', sandbox_profile(working, cli), *command]
+        env = subprocess_environment()
+        temporary = working/'.tmp'
+        temporary.mkdir(mode=0o700)
+        env['TMPDIR'] = str(temporary)
+    else:
+        env = subprocess_environment()
+    return command, message, working, env, timeout
 
 
 def run_sync(instructions: str, payload: dict[str, Any], provider: dict[str, Any]) -> str:
@@ -242,7 +370,7 @@ def run_sync(instructions: str, payload: dict[str, Any], provider: dict[str, Any
         ) from exc
     except OSError as exc:
         raise AIRequestError(f"启动 AGY CLI 失败：{exc}", kind="agy_cli_unavailable", retriable=False) from exc
-    return _decode_output(completed.stdout, completed.stderr)
+    return _finish_output(completed.stdout, completed.stderr, working, message, completed.returncode)
 
 
 async def request_text(instructions: str, payload: dict[str, Any], provider: dict[str, Any]) -> str:
@@ -323,14 +451,7 @@ async def request_text(instructions: str, payload: dict[str, Any], provider: dic
                 pass
             await process.wait()
     decoded=stdout.decode('utf-8',errors='replace')
-    last_session_id.set('')
-    for line in decoded.splitlines():
-        try:
-            event=json.loads(line)
-            ident=event.get('conversation_id') or (event.get('result') or {}).get('conversation_id')
-            if ident:last_session_id.set(str(ident))
-        except (ValueError,TypeError):pass
-    return _decode_output(decoded, stderr.decode("utf-8", errors="replace"))
+    return _finish_output(decoded, stderr.decode("utf-8", errors="replace"), working, message, process.returncode)
 
 
 def status(provider: dict[str, Any]) -> dict[str, Any]:

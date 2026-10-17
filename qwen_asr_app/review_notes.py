@@ -9,7 +9,7 @@ import re
 import time
 import weakref
 
-from .ai import request_ai_text, provider_for_mode, context_window_for, estimate_tokens
+from .ai import request_ai_text, provider_for_mode, context_window_for, estimate_tokens, AIRequestError
 from .agy_materials import request_materials, parse_json, MaterialSessionError
 from .durable import atomic_bytes, atomic_json
 from .note_content import transcript_blocks, clock
@@ -274,12 +274,28 @@ async def validated_plan_part(instructions, payload, config, source_ids, package
     budget instead of spending another unbounded sequence of model requests.
     """
     folder=Path(folder)
+    split_path=folder/f'coverage-split-{index}.json'
+    if split_path.exists():
+        return await _split_plan_part(instructions,payload,config,source_ids,package,folder,index,
+                                      json.loads(split_path.read_text()),max_repairs=max_repairs)
     previous=None;error=None;diagnostics={};start=0
-    checkpoints=sorted(folder.glob(f'coverage-validation-{index}-attempt-*.json'))
+    checkpoints=sorted(folder.glob(f'coverage-validation-{index}-attempt-*.json'),
+                       key=lambda p:int(p.stem.rsplit('-',1)[-1]))
     if checkpoints:
         saved=json.loads(checkpoints[-1].read_text())
         previous=saved['proposal'];error=saved['validation_error'];diagnostics=saved.get('diagnostics',{})
         start=int(saved['attempt'])+1
+        max_repairs=max(max_repairs,int(saved.get('max_repairs',max_repairs)))
+    retry_round=config.get('_note_validation_retry_round')
+    if retry_round:
+        round_path=folder/f'coverage-retry-round-{index}.json'
+        round_state=json.loads(round_path.read_text()) if round_path.exists() else {}
+        if round_state.get('round')!=retry_round:
+            round_state={'round':retry_round,'first_attempt':start,
+                         'last_attempt':start+2,'created_at':local_now()}
+            atomic_json(round_path,round_state)
+        max_repairs=int(round_state['last_attempt'])
+    if checkpoints:
         if start>max_repairs:
             raise ValueError('知识清单已达到自动修复上限，全部提案与校验依据已保留：'+error)
     for attempt in range(start,max_repairs+1):
@@ -296,6 +312,14 @@ async def validated_plan_part(instructions, payload, config, source_ids, package
 严格执行原课件掌握/理解/了解层级，修复validation_diagnostics所指条目并复核其他条目；不要删除有效内容或修改原始输入。'''
                 result=await model_json(repair_instructions,{'source_input':payload,'invalid_proposal':previous,
                     'validation_error':error,'validation_diagnostics':diagnostics,'repair_attempt':attempt},config,response_path=response_path)
+        except AIRequestError as exc:
+            if exc.kind!='output_truncated' or len(payload.get('transcript',[]))<2:
+                raise
+            blocks=payload['transcript'];middle=len(blocks)//2
+            split={'reason':'provider_output_truncated','created_at':local_now(),
+                   'groups':[[b['source'] for b in blocks[:middle]],[b['source'] for b in blocks[middle:]]]}
+            atomic_json(split_path,split)
+            return await _split_plan_part(instructions,payload,config,source_ids,package,folder,index,split,max_repairs=max_repairs)
         except PlanResponseError as exc:
             error=str(exc);previous={'unparsed_json':exc.raw};diagnostics={'response_format':'invalid_json'}
             atomic_json(folder/f'coverage-validation-{index}-attempt-{attempt}.json',{
@@ -306,11 +330,13 @@ async def validated_plan_part(instructions, payload, config, source_ids, package
             continue
         try:
             result=review_scope.canonical_metadata(result,package.get('learning_scope',{}))
+            result=review_scope.canonical_evidence_quotes(result,package.get('_scope_transcript_blocks',[]))
             validate_plan(result,source_ids,package)
             return result
         except ValueError as exc:
             diagnostics=getattr(exc,'diagnostics',{})
             diagnostics['all_mixed_depth_items']=review_scope.mixed_depth_diagnostics(result,package.get('learning_scope',{}))
+            diagnostics['all_literal_quote_issues']=review_scope.literal_quote_diagnostics(result,package.get('_scope_transcript_blocks',[]))
             error=str(exc)
             atomic_json(folder/f'coverage-validation-{index}-attempt-{attempt}.json',{
                 'attempt':attempt,'max_repairs':max_repairs,'validation_error':error,
@@ -319,6 +345,49 @@ async def validated_plan_part(instructions, payload, config, source_ids, package
             if attempt==max_repairs:
                 raise ValueError('知识清单自动修复后仍未通过校验，全部提案与校验依据已保留：'+error) from exc
     raise ValueError('知识清单自动修复状态无效，已有成果已保留')
+
+
+async def _split_plan_part(instructions,payload,config,source_ids,package,folder,index,split,*,max_repairs=2):
+    """After a real output-limit failure, resume smaller complete source groups."""
+    blocks=payload.get('transcript',[]);groups=split.get('groups',[])
+    ordered=[b['source'] for b in blocks]
+    if (len(groups)<2 or any(not group for group in groups)
+            or [ident for group in groups for ident in group]!=ordered
+            or set(ordered)!=set(source_ids)):
+        raise ValueError('知识清单拆分计划与完整来源不一致，旧成果已保留')
+    by_id={b['source']:b for b in blocks}
+    semaphore=asyncio.Semaphore(2)
+    async def child_part(child,ids):
+        destination=Path(folder)/f'coverage-subparts-{index}'/str(child)
+        destination.mkdir(parents=True,exist_ok=True)
+        path=destination/'completed.json'
+        if path.exists():
+            result=json.loads(path.read_text());validate_plan(result,set(ids),package)
+        else:
+            local=coverage_payload([by_id[ident] for ident in ids],payload,package,payload.get('history',[]))
+            # Keep all already-selected history and its original judgment limit.
+            local['history']=payload.get('history',[])
+            local['history_scope']=payload.get('history_scope',package.get('history_scope',''))
+            async with semaphore:
+                result=await validated_plan_part(instructions,local,config,set(ids),package,destination,0,max_repairs=max_repairs)
+            atomic_json(path,result)
+        return result
+    results=await asyncio.gather(*(child_part(child,ids) for child,ids in enumerate(groups)),return_exceptions=True)
+    failures=[result for result in results if isinstance(result,BaseException)]
+    if failures:raise failures[0]
+    merged={'knowledge':[],'figures':[],'omitted_sources':[],'warnings':[],
+            'figures_required':False,'_provider_session_ids':[]}
+    for child,result in enumerate(results):
+        for item in result['knowledge']:
+            merged['knowledge'].append({**item,'id':f's{child}-'+str(item['id'])})
+        for key in ('figures','omitted_sources','warnings'):merged[key].extend(result.get(key,[]))
+        merged['figures_required']|=bool(result.get('figures_required'))
+        merged['_provider_session_ids'].extend(result.get('_provider_session_ids',[]) or
+            ([result['_provider_session_id']] if result.get('_provider_session_id') else []))
+    if package.get('learning_scope',{}).get('enabled'):
+        merged['objective_coverage']=review_scope.merge_coverage(results,package['learning_scope'])
+    validate_plan(merged,source_ids,package)
+    return merged
 
 
 async def visual_review(pdf, export, folder, provider, ledger, evidence, *, generator_session_ids=(), progress=None):
@@ -349,7 +418,19 @@ async def _visual_review_owned(pdf, export, folder, provider, ledger, evidence, 
     report={'pdf_sha256':export['pdf_sha256'],'policy':policy,'learning_scope_sha256':scope_digest,'status':'unreviewed','viewed_pages':[],'issues':[],
             'reviewer_session_ids':[],'batches':[],'coverage':ledger,'renderer':export['renderer']}
     if saved and saved.get('pdf_sha256')==export['pdf_sha256'] and saved.get('policy')==policy and saved.get('learning_scope_sha256')==scope_digest:
-        report=saved
+        expected={r['objective_id'] for r in ledger.get('objective_coverage',[]) if r.get('relevance')=='relevant'} if isinstance(ledger,dict) else set()
+        checked={f['objective_id'] for b in saved.get('batches',[]) for f in b.get('result',{}).get('scope_findings',[]) if f.get('status')!='not_in_batch'}
+        missing=expected-checked
+        if scope.get('enabled') and missing and sorted(saved.get('viewed_pages',[]))==list(range(1,export['pages']+1)):
+            # Earlier dispatch considered only standalone knowledge mappings.
+            # A full review with an unrequested understanding objective must
+            # obtain fresh evidence instead of reusing the same incomplete set.
+            previous=hashlib.sha256(json.dumps(saved,sort_keys=True,ensure_ascii=False).encode()).hexdigest()[:16]
+            atomic_json(destination/f'review-before-scope-redispatch-{previous}.json',saved)
+            report['redispatched_scope_ids']=sorted(missing)
+            atomic_json(report_path,report)
+            if progress:progress(0,export['pages'])
+        else:report=saved
     # Final products are processed serially. Independent batches of this one
     # PDF may overlap, with at most two lightweight calls and four images each.
     figures_path=Path(folder)/'images.json'
@@ -432,14 +513,22 @@ async def _visual_review_owned(pdf, export, folder, provider, ledger, evidence, 
         refs=ranked_figures[:1 if context_paths else 2]
         references=[safe_path(folder,f['path']) for f in refs]
         required=[*paths,*context_paths,*references]
-        required_scope_ids=sorted({oid for item in ledger.get('knowledge',[]) if set(item.get('sources',[]))&{'S'+str(n) for n in cited} for oid in item.get('objective_ids',[])}) if isinstance(ledger,dict) else []
+        cited_sources={'S'+str(n) for n in cited}
+        required_scope_ids=sorted(
+            {oid for item in ledger.get('knowledge',[]) if set(item.get('sources',[]))&cited_sources
+             for oid in item.get('objective_ids',[])} |
+            {item['objective_id'] for item in ledger.get('objective_coverage',[])
+             if item.get('relevance')=='relevant' and set(item.get('sources',[]))&cited_sources}
+        ) if isinstance(ledger,dict) else []
         scope_review_instructions='''
 必须明确参考原课件每章最前面的学习重点范围写作要求核查：掌握项本节涉及则必须有，了解项只简述，不得在重点公式、推导、计算题、必背清单中展开。了解参数仅作为掌握公式必要符号时允许定义。不能以转写提到某式作为必须展开的理由。
 返回 scope_policy_checked:true 和 scope_findings:[{objective_id:真实要求ID,status:appropriate|not_in_batch|mastery_missing|familiarity_expanded|unconfirmed,page:本批页码,evidence:具体页面证据,suggestion:修订建议}]。至少逐一核对 required_scope_ids，另主动报告本批任何了解内容展开过深和掌握遗漏。学习范围问题必须列为 blocking，不得只返回通用passed。''' if scope.get('enabled') else ''
-        prompt=REVIEW+scope_review_instructions+review_scope.instructions(scope)+'\n按本批页码检查相应内容，并用全文知识清单核对章节范围；不将本批未显示的前后页直接判为遗漏。figure_pdf_locations 是通过原 PNG 像素摘要与最终 PDF 内嵌图像匹配得到的全文实际位置。图在其他页出现，不能仅因本批没有显示而称为全文缺图。context_pages 为相邻最终页面，须实际查看并用来核对跨页的图注、推导与例题步骤；下一页已有完整步骤时不得把正常续页判为掌握内容缺失。上下文页不计入本批 viewed_pages，问题页码也只能填本批 pages。\n'+json.dumps({'pages':numbers,'coverage':ledger,'transcript_evidence':transcript_evidence,
+        prompt=REVIEW+scope_review_instructions+review_scope.instructions(scope)+'\n按本批页码检查相应内容，并用全文知识清单核对章节范围；不将本批未显示的前后页直接判为遗漏。native_page_text 是本次最终 PDF 的原生文字层，仅用于核对文字和公式拼写，避免看图误读；排版、裁切、图像和公式位置仍必须以实际页面图为准，不能用文字层代替看图。判断标题重复时须实际指出两处排版位置，原课件图片自带标题与规范图注同名不算重复排版。完整教学图因前页空间不足而独占末页的自然留白不算内容遗漏，不得为了填空白增加来源未要求的新内容。figure_pdf_locations 是通过原 PNG 像素摘要与最终 PDF 内嵌图像匹配得到的全文实际位置。图在其他页出现，不能仅因本批没有显示而称为全文缺图。context_pages 为相邻最终页面，须实际查看并用来核对跨页的图注、推导与例题步骤；下一页已有完整步骤时不得把正常续页判为掌握内容缺失。上下文页不计入本批 viewed_pages，问题页码也只能填本批 pages。\n'+json.dumps({'pages':numbers,'native_page_text':[{'page':number,'text':row['text']} for number,row in zip(numbers,rows)],'coverage':ledger,'transcript_evidence':transcript_evidence,
             'figure_pdf_locations':figure_pdf_locations,'figure_location_method':'原图 Pixmap.digest 匹配最终 PDF get_image_info(hashes=True).digest',
             'context_pages':([{'page':context_number,'path':str(context_paths[0]),'figure_ids':[ident for ident,locations in figure_pdf_locations.items() if context_number in locations]}] if context_paths else []),
             'source_evidence':relevant_evidence,'original_figures':refs,'source_scope':'本批相关原页，含不作正文配图的原公式页；OCR仅用于导航，公式以实际原图为准。全文知识清单另附',
+            'prior_adjudication_context':{'use':'仅定位先前争议，须独立对照本批实际页面与来源，不接受任何自称通过结论',
+                'findings':[row for row in report.get('adjudication_findings',[]) if row.get('page') in numbers]},
             'pdf':str(pdf),'pdf_sha256':export['pdf_sha256'],'learning_scope':scope,'required_scope_ids':required_scope_ids},ensure_ascii=False)
         for attempt in range(3):
             key='-'.join(map(str,numbers))
@@ -465,7 +554,7 @@ async def _visual_review_owned(pdf, export, folder, provider, ledger, evidence, 
             finally:
                 report['active_batches'].pop(key,None)
                 atomic_json(report_path,report)
-        if receipt['session_id'] in generator_session_ids:raise ValueError('审查会话与生成会话相同')
+        if receipt['session_id'] in {*generator_session_ids,*report.get('disputed_reviewer_session_ids',[])}:raise ValueError('审查会话与生成或被复核会话相同')
         if sorted(result.get('viewed_pages',[]))!=numbers or result.get('status') not in {'passed','needs_revision'} or not isinstance(result.get('issues'),list):raise ValueError('审查回执缺少实际页码、问题或结论')
         for issue in result['issues']:
             if issue.get('page') not in numbers or issue.get('severity') not in {'blocking','warning'} or not issue.get('evidence'):raise ValueError('审查问题缺少页码或证据')
@@ -532,6 +621,8 @@ async def generate(record, config):
     identity=budget_compatible_identity(record.directory/'.review-notes',
         [pipeline_version,record.id,blocks,selection,corpus,historical_versions,saved_notes_markdown(record)],config)
     relative=f'.review-notes/{identity}';folder=record.directory/relative;folder.mkdir(parents=True,exist_ok=True,mode=0o700)
+    from .note_review_repair import resume_install
+    resume_install(folder)
     task_path=folder/'task.json'
     task=json.loads(task_path.read_text()) if task_path.exists() else {'id':identity,'version':pipeline_version,'created_at':local_now(),'base_body_sha256':initial}
     _resume_revision_checkpoint(folder,task)
@@ -694,7 +785,16 @@ async def generate(record, config):
         else:
             budget=require_budget(instructions,payload,config,label='完整图文写作',window=context_window_for(config,'summary'))
             atomic_json(folder/'writing-budget.json',budget)
-            markdown=await request_ai_text(instructions=instructions,payload=payload,config=config,mode='summary',max_output_tokens=32768)
+            split_writer=folder/'markdown-batches/plan.json'
+            try:
+                if split_writer.exists():
+                    raise AIRequestError('继续已保存的图文写作拆分',kind='output_truncated')
+                markdown=await request_ai_text(instructions=instructions,payload=payload,config=config,mode='summary',max_output_tokens=32768)
+            except AIRequestError as exc:
+                if exc.kind!='output_truncated':raise
+                from .note_markdown_batches import write_batches
+                markdown,writers=await write_batches(instructions,payload,config,folder)
+                task['writer_session_ids']=list(dict.fromkeys([*task.get('writer_session_ids',[]),*writers]))
             from .agy_cli import last_session_id
             task['writer_session_id']=last_session_id.get()
             markdown=f'# {record.metadata.get("title","课堂复习笔记")}\n\n课程：{package["category"]}  \n课次：{package["lesson_date"]}\n\n> 新旧内容判断范围：本节完整转写，以及已收录的 {package["history_count"]} 个此前课次中的相关片段。历史未收录或未检出，不能证明老师此前没有讲过。\n\n'+markdown
@@ -738,6 +838,29 @@ async def generate(record, config):
                   **review_start_progress(task,export))
             report=await visual_review(pdf,export,folder,provider,plan,package['relevant_pages'],generator_session_ids=task['writer_session_ids'],
                 progress=lambda done,total:stage(record,task,folder,f'独立审查 · 已查看 {done}/{total} 页',reviewed_pages=done,review_total_pages=total))
+            if report.get('issues'):
+                from .note_review_repair import repair_review
+                stage(record,task,folder,'修订 · 自动核对审查问题')
+                repair=await repair_review(markdown,folder,material_version,provider,plan,package,images,pdf,report,
+                    generator_session_ids=task['writer_session_ids'],retry_round=config.get('_note_validation_retry_round'),
+                    allow_changes=revision<2,
+                    progress=lambda page,total:stage(record,task,folder,f'修订 · 自动核对第 {page} 页'))
+                task['automatic_review_audit']=repair.get('audit')
+                task['writer_session_ids']=list(dict.fromkeys([*task['writer_session_ids'],*repair['session_ids']]))
+                if repair['changed']:
+                    _checkpoint_revision(folder,task,markdown,repair['markdown'],revision,
+                        repair['session_ids'][-1] if repair['session_ids'] else None)
+                    markdown=repair['markdown'];feedback=None
+                    continue
+                if repair.get('recheck_pages'):
+                    if revision==2:raise ValueError('自动复审达到本轮上限，原报告和独立判断已保留')
+                    from .note_review_repair import queue_independent_recheck
+                    queue_independent_recheck(pdf,report,repair['recheck_pages'],repair['audit'],folder=folder,retry_round=config.get('_note_validation_retry_round'))
+                    _checkpoint_revision(folder,task,markdown,markdown,revision)
+                    feedback=None
+                    continue
+                if report['status']=='passed' and repair['unresolved']:
+                    raise ValueError('自动复核仍有证据不足的问题，草稿和判断已保留，未发布待核对版本')
             if report['status']=='passed':break
             if revision==2:break
             stage(record,task,folder,'修订')
@@ -803,6 +926,8 @@ async def upgrade_pdf(record, config):
     initial=body_hash(note)
     relative=note.get('review_package') or f'.review-notes/legacy-{initial[:24]}'
     folder=safe_path(record.directory,relative);folder.mkdir(parents=True,exist_ok=True)
+    from .note_review_repair import resume_install
+    resume_install(folder)
     package_path=folder/'materials.json'
     package=json.loads(package_path.read_text()) if package_path.exists() else await owned_thread(collect,record,folder)
     ledger=json.loads((folder/'coverage.json').read_text()) if (folder/'coverage.json').exists() else {'warning':'历史笔记未建立完整知识点覆盖清单，不把文本存在当作覆盖通过'}
@@ -814,12 +939,37 @@ async def upgrade_pdf(record, config):
     note['material_version']={**(note.get('material_version') or {}),'layout_engine':'xelatex-course-v1'}
     images=json.loads((folder/'images.json').read_text()) if (folder/'images.json').exists() else []
     from .note_latex_author import export_direct
-    (pdf,export),latex_manifest=await export_direct(note['summary'],folder,note['material_version'],config,ledger,package,images)
-    report=await visual_review(pdf,export,folder,provider,ledger,package['relevant_pages'],
-        generator_session_ids=(latex_manifest.get('writer_session_ids') or ([latex_manifest['writer_session_id']] if latex_manifest.get('writer_session_id') else [])))
+    task_path=folder/'task.json';task=json.loads(task_path.read_text()) if task_path.exists() else None
+    for repair_round in range(3):
+        if task:stage(record,task,folder,'LaTeX 排版',status='running')
+        (pdf,export),latex_manifest=await export_direct(note['summary'],folder,note['material_version'],config,ledger,package,images)
+        writers=latex_manifest.get('writer_session_ids') or ([latex_manifest['writer_session_id']] if latex_manifest.get('writer_session_id') else [])
+        if task:stage(record,task,folder,'独立审查',pdf_sha256=export['pdf_sha256'],
+            review_report=str((pdf.parent/'review.json').relative_to(folder)),**review_start_progress(task,export))
+        report=await visual_review(pdf,export,folder,provider,ledger,package['relevant_pages'],generator_session_ids=writers,
+            progress=(lambda done,total:stage(record,task,folder,f'独立审查 · 已查看 {done}/{total} 页',reviewed_pages=done,review_total_pages=total)) if task else None)
+        if report.get('issues'):
+            from .note_review_repair import repair_review
+            if task:stage(record,task,folder,'修订 · 自动核对审查问题')
+            repair=await repair_review(note['summary'],folder,note['material_version'],provider,ledger,package,images,pdf,report,
+                generator_session_ids=writers,retry_round=config.get('_note_validation_retry_round'),
+                allow_changes=repair_round<2,allow_markdown_changes=False,
+                progress=(lambda page,total:stage(record,task,folder,f'修订 · 自动核对第 {page} 页')) if task else None)
+            if task:task['automatic_review_audit']=repair.get('audit')
+            if repair['changed']:continue
+            if repair.get('recheck_pages'):
+                if repair_round==2:raise ValueError('自动复审达到本轮上限，已有正文与判断保留')
+                from .note_review_repair import queue_independent_recheck
+                queue_independent_recheck(pdf,report,repair['recheck_pages'],repair['audit'],folder=folder,retry_round=config.get('_note_validation_retry_round'))
+                continue
+            if report['status']=='passed' and repair['unresolved']:
+                raise ValueError('自动复核仍有证据不足的问题，已有正文与完整提案保留')
+        break
+    if task:stage(record,task,folder,'已完成' if report['status']=='passed' else '待修订',status='completed' if report['status']=='passed' else 'pending')
     current=json.loads(record.meta_path.read_text())
     if body_hash(current.get('ai_note_summary'))!=initial:raise ValueError('审查期间笔记已修改，通过结果只绑定候选旧版本')
     record.metadata.update(current)
     record.metadata['ai_note_summary'].update(review_package=relative,pdf_sha256=export['pdf_sha256'],review_status=report['status'],material_version=note['material_version'])
+    if task:record.metadata.pop('ai_note_summary_draft',None)
     record.save_metadata()
     return {'status':report['status'],'pdf_sha256':export['pdf_sha256'],'pages':export['pages']}

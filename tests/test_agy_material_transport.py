@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from qwen_asr_app.agy_cli import _error_kind
-from qwen_asr_app.agy_materials import MaterialSessionError, communicate, request_materials, sandbox_profile
+from qwen_asr_app.agy_materials import MaterialSessionError, communicate, request_materials, sandbox_profile, parse_json
 
 
 PROVIDER={'transport':'agy_cli','context_window':256000,'cli_model':'gemini-3.8-flash-high'}
@@ -32,6 +32,11 @@ def child(events=(), *, stderr=b'', exit_code=0):
 
 
 class MaterialTransportTests(unittest.IsolatedAsyncioTestCase):
+    def test_literal_json_newlines_are_preserved_but_other_invalid_syntax_is_rejected(self):
+        self.assertEqual(parse_json('{"quote":"原文第一行\n第二行\t公式"}'),{'quote':'原文第一行\n第二行\t公式'})
+        for value in ['{"quote":"bad\x00data"}','{"quote" "missing-colon"}','{"quote":"bad\\q escape"}']:
+            with self.assertRaises(json.JSONDecodeError):parse_json(value)
+
     async def vision_attempt(self,folder,events,schema):
         process=child(events)
         images=[folder/'page-021.png',folder/'page-022.png']
@@ -70,6 +75,18 @@ class MaterialTransportTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(receipt['tools'],['view_file','view_file','finish'])
             saved=list((folder/'sessions').glob('*.json'));self.assertEqual(len(saved),1)
             self.assertNotIn('synthetic-private-response',saved[0].read_text())
+
+    async def test_empty_success_replays_verified_reads_and_structured_finish(self):
+        with tempfile.TemporaryDirectory() as raw:
+            folder=Path(raw).resolve();schema,events,expected=self.finish_recovery_fixture(folder)
+            empty=[events[0],{'event':'result','result':{'status':'SUCCESS','response':''}}]
+            with patch('qwen_asr_app.agy_session.read_session',return_value={'events':events}) as restore:
+                text,receipt=await self.vision_attempt(folder,empty,schema)
+            self.assertEqual(json.loads(text),expected)
+            self.assertEqual(len(receipt['viewed_files']),2)
+            self.assertEqual(set(restore.call_args.kwargs['required_files']),
+                             {str(folder/'page-021.png'),str(folder/'page-022.png')})
+            self.assertEqual(restore.call_args.kwargs['schema'],schema)
 
     async def test_unrecovered_finish_error_cannot_claim_a_completed_review(self):
         with tempfile.TemporaryDirectory() as raw:

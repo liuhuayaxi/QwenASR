@@ -36,6 +36,27 @@ BLOCKS = [{'source':'S1','text':'本课讲阈值增益，光限制因子只需�
 class ScopePlanTests(unittest.TestCase):
     def validate(self, value): return scope.validate_plan(value,{'S1'},lesson_scope(),BLOCKS)
 
+    def test_literal_joined_excerpts_select_one_without_changing_source_decisions(self):
+        blocks=[{'source':'S1','text':'本节首先介绍光学谐振腔如何提供反馈。'},
+                {'source':'S2','text':'随后说明分布反馈光栅能够选择特定的振荡波长。'}]
+        original={'objective_coverage':[{'objective_id':'feedback','relevance':'relevant','sources':['S1','S2'],
+            'evidence_quote':'本节首先介绍光学谐振腔如何提供反馈。...随后说明分布反馈光栅能够选择特定的振荡波长。'}]}
+        fixed=scope.canonical_evidence_quotes(original,blocks)
+        self.assertEqual(fixed['objective_coverage'][0]['evidence_quote'],blocks[1]['text'])
+        self.assertEqual(fixed['objective_coverage'][0]['sources'],['S1','S2'])
+        self.assertEqual(fixed['objective_coverage'][0]['relevance'],'relevant')
+        self.assertIn('...',original['objective_coverage'][0]['evidence_quote'])
+        self.assertEqual(fixed['literal_quote_resolutions'][0]['literal_source'],'S2')
+        invented=copy.deepcopy(original)
+        invented['objective_coverage'][0]['evidence_quote']='本节首先介绍光学谐振腔如何提供反馈。...没有出现在转写中的虚构结论与公式。'
+        self.assertEqual(scope.canonical_evidence_quotes(invented,blocks),invented)
+        adjacent=copy.deepcopy(original)
+        adjacent['objective_coverage'][0]['evidence_quote']=blocks[0]['text']+blocks[1]['text']
+        fixed=scope.canonical_evidence_quotes(adjacent,blocks)
+        self.assertEqual(fixed['objective_coverage'][0]['evidence_quote'],blocks[1]['text'])
+        nonadjacent=[blocks[0],{'source':'S3','text':'真实但没有被引用的中间原文'},blocks[1]]
+        self.assertEqual(scope.canonical_evidence_quotes(adjacent,nonadjacent),adjacent)
+
     def test_mastery_parameter_symbol_does_not_force_familiarity_derivation(self):
         self.validate(plan())
 
@@ -52,6 +73,8 @@ class ScopePlanTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'无效学习要求'):self.validate(value)
         value=plan();value['objective_coverage'][0]['evidence_quote']='本节完全不存在的句子'
         with self.assertRaisesRegex(ValueError,'逐字课堂证据'):self.validate(value)
+        value['objective_coverage'][1]['evidence_quote']='另一段不存在的引用'
+        self.assertEqual([row['objective_id'] for row in scope.literal_quote_diagnostics(value,BLOCKS)],['gain','gamma'])
 
     def test_familiarity_cannot_be_upgraded_or_mixed_into_mastery(self):
         for mutation in ('upgrade','formula','mix'):
@@ -206,6 +229,45 @@ class ScopeCacheTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ScopeVisualGateTests(unittest.IsolatedAsyncioTestCase):
+    async def test_relevant_understanding_objective_is_dispatched_without_a_standalone_knowledge_block(self):
+        import pymupdf
+        from qwen_asr_app.review_notes import visual_review
+        with tempfile.TemporaryDirectory() as raw:
+            root=Path(raw);pdf=root/'candidate.pdf'
+            with pymupdf.open() as document:
+                document.new_page().insert_text((50,50),'S1 threshold gain and threshold state')
+                document.save(pdf)
+            digest=hashlib.sha256(pdf.read_bytes()).hexdigest()
+            policy=lesson_scope()
+            policy['items'].append({'id':'threshold-state','text':'理解阈值条件','level':'understand','page':2})
+            ledger=plan()
+            ledger['objective_coverage'].append({'objective_id':'threshold-state','relevance':'relevant',
+                'sources':['S1'],'evidence_quote':'阈值增益','reason':'同一说明中的理解要求，无须独立重复知识块'})
+            (root/'learning-scope.json').write_text(json.dumps(policy))
+            (root/'transcript.json').write_text(json.dumps({'blocks':BLOCKS,'segments':[]}))
+            (root/'note.md').write_text('<!-- knowledge:k1 -->阈值增益平衡损耗，理解起振条件。<!-- /knowledge:k1 -->\n<!-- knowledge:k2 -->光限制因子表示场重叠。<!-- /knowledge:k2 -->')
+            async def reviewer(prompt,folder,provider,**kwargs):
+                payload=json.loads(prompt.rsplit('\n',1)[-1])
+                self.assertEqual(payload['required_scope_ids'],['gain','gamma','threshold-state'])
+                return json.dumps({'viewed_pages':[1],'status':'passed','issues':[],'scope_policy_checked':True,
+                    'scope_findings':[{'objective_id':ident,'status':'appropriate','page':1,'evidence':'本页相应内容'}
+                                      for ident in payload['required_scope_ids']]}),{'session_id':'independent-threshold-review'}
+            with patch('qwen_asr_app.review_notes.request_materials',side_effect=reviewer):
+                report=await visual_review(pdf,{'pages':1,'pdf_sha256':digest,'renderer':'test'},root,{},ledger,[])
+            self.assertEqual(report['status'],'passed')
+            self.assertTrue(report['scope_review_passed'])
+            # Reproduce a prior full review that never received this objective.
+            report['batches'][0]['result']['scope_findings']=[r for r in report['batches'][0]['result']['scope_findings'] if r['objective_id']!='threshold-state']
+            report.update(status='needs_revision',scope_review_passed=False)
+            (root/'review.json').write_text(json.dumps(report))
+            progress=[]
+            with patch('qwen_asr_app.review_notes.request_materials',side_effect=reviewer) as request:
+                repaired=await visual_review(pdf,{'pages':1,'pdf_sha256':digest,'renderer':'test'},root,{},ledger,[],progress=lambda done,total:progress.append((done,total)))
+            request.assert_awaited_once()
+            self.assertEqual(progress[0],(0,1))
+            self.assertEqual(repaired['status'],'passed')
+            self.assertTrue(list(root.glob('review-before-scope-redispatch-*.json')))
+
     async def test_old_generic_review_cannot_bypass_scope_and_real_body_gate(self):
         from contextlib import nullcontext
         from types import SimpleNamespace

@@ -167,6 +167,25 @@ class DirectLatexAuthorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(r'\SourceRef{3}',result);self.assertIn(r'\SourceRef{8}',result)
         self.assertEqual(result,author.bind_knowledge_sources(result,ledger))
 
+    def test_time_reference_stays_with_explanation_before_a_page_sized_figure(self):
+        source='% knowledge:k\n解释对应的器件结构。\n'+r'\CourseFigure{assets/fig-0123456789abcdef.png}{原课件第8页}{保留图中标签。}'+'\n% /knowledge:k'
+        ledger={'knowledge':[{'id':'k','sources':['S12','S13']}]}
+        result=author.bind_knowledge_sources(source,ledger)
+        self.assertLess(result.index(r'\SourceRef{12}'),result.index(r'\CourseFigure'))
+        self.assertEqual(result.count(r'\SourceRef{12}'),1)
+        self.assertEqual(result.count(r'\SourceRef{13}'),1)
+        self.assertEqual(result,author.bind_knowledge_sources(result,ledger))
+        self.assertIn('{原课件第8页}{保留图中标签。}',result)
+
+    def test_final_list_item_keeps_its_source_before_the_list_closes(self):
+        source='% knowledge:k\n'+r'\begin{enumerate}\item 说明。\end{enumerate}'+'\n% /knowledge:k'
+        ledger={'knowledge':[{'id':'k','sources':['S12']}]}
+        result=author.bind_knowledge_sources(source,ledger)
+        self.assertLess(result.index(r'\SourceRef{12}'),result.index(r'\end{enumerate}'))
+        self.assertIn('\n% /knowledge:k',result)
+        author.validate_coverage(result,ledger,{})
+        self.assertEqual(result,author.bind_knowledge_sources(result,ledger))
+
     def test_material_supplement_does_not_acquire_a_false_lecture_citation(self):
         source='% knowledge:s\n课件第25页补充。\\SourceRef{92}\n% /knowledge:s'
         ledger={'knowledge':[{'id':'s','sources':['S92'],'kind':'material_supplement'}]}

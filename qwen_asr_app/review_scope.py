@@ -160,6 +160,63 @@ def canonical_metadata(plan,scope):
     return result
 
 
+def canonical_evidence_quotes(plan, blocks):
+    """Select one literal quote when a model joined fully grounded excerpts.
+
+    This changes no relevance, source IDs, knowledge or depth. Every excerpt
+    separated by an explicit ellipsis must already match a cited original;
+    paraphrases and invented text still fail normal validation.
+    """
+    import copy
+    result=copy.deepcopy(plan)
+    originals={b['source']:str(b.get('text','')) for b in blocks}
+    order={b['source']:index for index,b in enumerate(blocks)}
+    compact=lambda text:re.sub(r'\s+','',str(text))
+    resolutions=[]
+    for row in result.get('objective_coverage',[]):
+        quote=str(row.get('evidence_quote') or '')
+        cited=[(source,originals[source]) for source in row.get('sources',[]) if source in originals]
+        if row.get('relevance')!='relevant' or any(compact(quote) in compact(text) for _,text in cited):
+            continue
+        # ASR source boundaries can split one continuous spoken sentence.
+        # Accept only a literal span across consecutive original blocks, then
+        # retain the longest part inside one original source as the quote.
+        ordered=sorted(cited,key=lambda pair:order[pair[0]])
+        if len(ordered)>1 and all(order[b[0]]==order[a[0]]+1 for a,b in zip(ordered,ordered[1:])):
+            combined=''.join(compact(text) for _,text in ordered)
+            start=combined.find(compact(quote))
+            if start>=0:
+                end=start+len(compact(quote));offset=0;matches=[]
+                for source,text in ordered:
+                    positions=[i for i,c in enumerate(text) if not c.isspace()]
+                    left=max(0,start-offset);right=min(len(positions),end-offset)
+                    if right-left>=12:
+                        matches.append((text[positions[left]:positions[right-1]+1],source))
+                    offset+=len(positions)
+                if matches:
+                    selected,source=max(matches,key=lambda pair:len(compact(pair[0])))
+                    row['evidence_quote']=selected
+                    resolutions.append({'objective_id':row['objective_id'],'original_quote':quote,
+                        'literal_quote':selected,'literal_source':source,
+                        'method':'select-single-source-from-literal-adjacent-original-span'})
+                    continue
+        pieces=[part.strip() for part in re.split(r'\.{3,}|…{1,}',quote) if part.strip()]
+        if len(pieces)<2 or any(len(compact(part))<12 for part in pieces):continue
+        matches=[]
+        for piece in pieces:
+            match=next(((source,text) for source,text in cited if compact(piece) in compact(text)),None)
+            if match is None:break
+            matches.append((piece,match[0]))
+        if len(matches)!=len(pieces):continue
+        selected,source=max(matches,key=lambda pair:len(compact(pair[0])))
+        row['evidence_quote']=selected
+        resolutions.append({'objective_id':row['objective_id'],'original_quote':quote,
+                            'literal_quote':selected,'literal_source':source,
+                            'method':'select-one-of-fully-literal-ellipsis-excerpts'})
+    if resolutions:result.setdefault('literal_quote_resolutions',[]).extend(resolutions)
+    return result
+
+
 def mixed_depth_diagnostics(plan,scope):
     objectives={i['id']:i for i in scope.get('items',[])};issues=[]
     for item in plan.get('knowledge',[]):
@@ -168,6 +225,21 @@ def mixed_depth_diagnostics(plan,scope):
             issues.append({'knowledge_id':item.get('id'),'sources':item.get('sources',[]),
                            'objective_levels':{i:objectives[i]['level'] for i in ids},
                            'required_action':'按不同深度拆为独立知识点；不能提升了解或删除相关掌握要求'})
+    return issues
+
+
+def literal_quote_diagnostics(plan, blocks):
+    """Report every non-literal row together so one repair can fix all rows."""
+    originals={b['source']:str(b.get('text','')) for b in blocks}
+    compact=lambda text:re.sub(r'\s+','',str(text))
+    issues=[]
+    for row in plan.get('objective_coverage',[]):
+        if row.get('relevance')!='relevant':continue
+        quote=compact(row.get('evidence_quote') or '')
+        sources=row.get('sources',[])
+        if quote and any(quote in compact(originals.get(source,'')) for source in sources):continue
+        issues.append({'objective_id':row.get('objective_id'),'source_ids':sources,
+            'required_action':'从某一个所列S来源选择一段连续原话，不拼接或改写；核对相关性后保留真实判断'})
     return issues
 
 

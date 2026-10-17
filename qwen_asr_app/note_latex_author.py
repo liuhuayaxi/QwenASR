@@ -118,11 +118,26 @@ def bind_knowledge_sources(body,ledger):
         pattern=re.compile(r'(^%\s*knowledge:'+re.escape(ident)+r'\s*\n)(.*?)(^%\s*/knowledge:'+re.escape(ident)+r'\s*$)',re.M|re.S)
         def replace(match):
             content=re.sub(r'\\TimeRange\s*\{[^{}]*\}', '',match[2])
-            # The fixed template renders source rows separately. Keep those
-            # rows after the complete teaching block, never inside a sentence.
+            # Keep the source row with teaching text. A final full-width figure
+            # can move to the next page; its source row belongs before that
+            # figure so the preceding explanation retains its time reference.
             content=re.sub(r'\\SourceRef\s*\{[1-9][0-9]*\}', '',content)
+            content=re.sub(r'\\par\s*(?=\\CourseFigure\b)', '',content)
             content=re.sub(r'\\par\s*$', '',content.rstrip()).rstrip()
-            content+='\n\\par '+''.join('\\SourceRef{'+number+'}' for number in selected)+'\n'
+            # Let the source macro attach its no-break penalty before ending
+            # the preceding paragraph. An explicit \par here can ship the
+            # last line to the page builder before that penalty is installed.
+            row='\n'+''.join('\\SourceRef{'+number+'}' for number in selected)+'\n'
+            figure=re.search(r'\\CourseFigure\b',content)
+            boundary=figure.start() if figure else len(content)
+            before,after=content[:boundary].rstrip(),content[boundary:]
+            # A list ends its last paragraph before returning to the caller.
+            # Keep the row inside its final item so the template can attach
+            # the penalty while the last explanation line is still available.
+            closing=re.search(r'(?:\\end\{(?:enumerate|itemize|description)\}\s*)+$',before)
+            if closing:before=before[:closing.start()].rstrip()+row+before[closing.start():]
+            else:before+=row
+            content=(before+after).rstrip()+'\n'
             return match[1]+content+match[3]
         body=pattern.sub(replace,body)
     return body
