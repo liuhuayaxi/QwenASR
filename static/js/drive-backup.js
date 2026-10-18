@@ -9,6 +9,7 @@ export function createDriveBackup() {
   const folder = byId('driveBackupFolder');
   const authLink = byId('driveBackupAuthLink');
   const credential = byId('driveBackupCredentials');
+  const previewPanel = byId('driveBackupPreview');
   const options = ['pdf', 'transcripts', 'notes', 'automatic'];
   let current = null, pending = false, dirty = false, timer;
   const size = bytes => bytes >= 1024 ** 3 ? `${(bytes / 1024 ** 3).toFixed(2)} GB` : `${(bytes / 1024 ** 2).toFixed(1)} MB`;
@@ -28,18 +29,20 @@ export function createDriveBackup() {
     const busy = pending || current?.busy || current?.authorizing;
     root.querySelectorAll('[data-drive-action]').forEach(button => {
       const action = button.dataset.driveAction;
-      button.disabled = pending || (busy && !['stop','cancel-auth','refresh'].includes(action))
-        || (['start','test','disconnect'].includes(action) && !current?.connected)
-        || (['start','test','preview','connect'].includes(action) && dirty)
+      button.disabled = pending || (busy && !['stop','cancel-auth'].includes(action))
+        || (['start','disconnect'].includes(action) && !current?.connected)
+        || (['start','connect'].includes(action) && dirty)
         || (action === 'connect' && !current?.configured)
         || (action === 'stop' && !current?.busy)
         || (action === 'cancel-auth' && !current?.authorizing);
     });
     root.querySelectorAll('input,select').forEach(input => { input.disabled = !!busy; });
-    byId('driveBackupSave').textContent = dirty ? '保存备份选项 *' : '保存备份选项';
+    byId('driveBackupSave').classList.toggle('hidden', !dirty);
+    byId('driveBackupStop').classList.toggle('hidden', !current?.busy);
   }
   function render(data) {
-    const previouslyConfigured = current?.configured;
+    const wasConnected = current?.connected;
+    const wasAuthorizing = current?.authorizing;
     current = data;
     if (!dirty) {
       options.forEach(name => { byId('driveOption-' + name).checked = data.options[name]; });
@@ -47,30 +50,36 @@ export function createDriveBackup() {
     }
     account.textContent = data.authorizing ? '等待 Google 授权，请在打开的页面完成登录'
       : data.connected ? `已连接 · ${data.account.email || data.account.name || 'Google 账号'}`
-      : data.configured ? '已导入客户端配置 · 等待连接 Google 账号' : '尚未配置 · 展开下方首次连接说明';
-    if (previouslyConfigured !== data.configured) byId('driveBackupSetup').open = !data.configured;
+      : data.configured ? '等待连接 Google 账号' : '尚未连接 · 展开“账号与连接”完成配置';
+    if (wasConnected !== data.connected || wasAuthorizing !== data.authorizing) {
+      byId('driveBackupSetup').open = !data.connected || data.authorizing;
+    }
+    byId('driveBackupConnect').textContent = data.connected ? '重新连接' : '连接 Google 账号';
     byId('driveBackupCancelAuth').classList.toggle('hidden', !data.authorizing);
     if (!data.authorizing) { authLink.classList.add('hidden'); authLink.removeAttribute('href'); }
     folder.classList.toggle('hidden', !data.folder_url);
     if (data.folder_url) folder.href = data.folder_url;
     else folder.removeAttribute('href');
-    byId('driveBackupLastSuccess').textContent = data.last_success ? `最近完整备份：${data.last_success}` : '尚未完成全量备份';
+    const completedAt = data.last_success ? new Date(data.last_success) : null;
+    byId('driveBackupLastSuccess').textContent = completedAt && !Number.isNaN(completedAt.getTime())
+      ? `最近完整备份：${completedAt.toLocaleString('zh-CN', {hour12:false})}` : '尚未完成全量备份';
     const job = data.job;
-    progress.classList.toggle('hidden', !job);
+    progress.classList.toggle('hidden', !data.busy);
     if (job) {
       if (job.status === 'scanning') progress.removeAttribute('value');
       else progress.value = job.total ? Math.min(100, 100 * (job.completed + (data.busy && job.file_size ? job.file_bytes / job.file_size : 0)) / job.total) : job.status === 'completed' ? 100 : 0;
-      status.textContent = `${job.sample ? '小批量测试 · ' : ''}${labels[job.status] || job.status} · 已核对 ${job.completed}/${job.total} · 新传/更新 ${job.uploaded} · 未变化 ${job.skipped} · 失败 ${job.failed}`
+      status.textContent = `${labels[job.status] || job.status} · 已核对 ${job.completed}/${job.total} · 新传/更新 ${job.uploaded} · 未变化 ${job.skipped} · 失败 ${job.failed}`
         + (job.current ? `\n${job.current} · ${size(job.file_bytes)} / ${size(job.file_size)}` : '')
         + (job.message ? `\n${job.message}` : '');
-    } else status.textContent = '连接后可先上传最多 3 个较小文件，校验成功后再备份全部资料。';
+    } else status.textContent = data.connected ? '已准备好，点击“立即备份”或开启自动备份。' : '连接 Google 账号后即可备份资料。';
     if (data.error) status.textContent += '\n' + data.error;
     details.replaceChildren();
     for (const error of job?.errors || []) {
       const line = document.createElement('li'); line.textContent = `${error.file}：${error.message}`; details.append(line);
     }
     const preview = data.preview;
-    byId('driveBackupPreviewSummary').textContent = preview ? `当前范围：${preview.count} 个文件 · ${size(preview.bytes)}${preview.count > 40 ? '（展示前 40 项）' : ''}` : '可先预览待备份文件，预览不会上传。';
+    byId('driveBackupPreviewSummary').textContent = previewPanel.open && preview
+      ? `备份清单 · ${preview.count} 个文件 · ${size(preview.bytes)}${preview.count > 40 ? '（展示前 40 项）' : ''}` : '查看备份清单';
     const list = byId('driveBackupPreviewList'); list.replaceChildren();
     for (const file of preview?.files || []) { const li = document.createElement('li'); li.textContent = file; list.append(li); }
     controls();
@@ -107,11 +116,15 @@ export function createDriveBackup() {
       }
     } catch (error) {
       if (popup) popup.close();
-      status.textContent = `操作未完成：${error.message}。可点击“刷新状态”核对结果。`;
+      status.textContent = `操作未完成：${error.message}。正在自动核对状态…`;
     } finally { pending = false; controls(); schedule(); }
   }
   root.querySelectorAll('[data-drive-action]').forEach(button => button.addEventListener('click', () => run(button.dataset.driveAction)));
   root.querySelectorAll('input,select').forEach(input => input.addEventListener('change', () => { dirty = true; controls(); }));
+  previewPanel.addEventListener('toggle', () => {
+    if (previewPanel.open && !dirty && !pending) void run('preview');
+    if (!previewPanel.open) byId('driveBackupPreviewSummary').textContent = '查看备份清单';
+  });
   document.querySelector('[data-settings-tab="library"]')?.addEventListener('click', () => run('refresh'));
   run('refresh');
   return {refresh:() => run('refresh')};

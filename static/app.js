@@ -17,7 +17,7 @@ import { createClassroomIntelligence } from "./js/classroom-intelligence.js?v=20
 import { createClassroomChat } from "./js/classroom-chat.js?v=20261015-reader-math-scope-8";
 import { createSettingsNavigation } from "./js/settings-navigation.js?v=20261011-ui-final";
 import { createLibraryBackup } from "./js/library-backup.js?v=20261014-daily";
-import { createDriveBackup } from "./js/drive-backup.js?v=20261018-drive-1";
+import { createDriveBackup } from "./js/drive-backup.js?v=20261018-drive-simple-3";
 
 import { createContinuation, recognitionText } from "./js/workbench/continuation.js?v=20261011-ui-final";
 
@@ -2684,7 +2684,7 @@ async function init() {
   }
   if (query.get('settings')==='terminology') openAdvancedSettings(els.terminology);
   if (query.get('settings') === 'library') {
-    openAdvancedSettings($("#driveBackupSave"));
+    openAdvancedSettings($("#driveBackupStart"));
     $("#driveBackupSettings").scrollIntoView({block: 'start'});
   }
   if (["mineru", "inference"].includes(query.get("settings"))) {
