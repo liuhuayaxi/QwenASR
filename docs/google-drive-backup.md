@@ -15,6 +15,16 @@
 
 外部应用处于 Testing 时，包含 Drive 权限的刷新令牌会在 7 天后过期。长期使用需要正确配置发布状态；实际验证要求以 Google 控制台为准。授权过期后界面会提示重新连接。
 
+## 个人长期使用
+
+个人自用可以将 OAuth 应用切换为 **In production / 正式版**，继续使用 `drive.file`，无需为此扩大到整个云盘的权限。Google 控制台可能要求先补齐应用首页、隐私政策和使用条款，再开放发布按钮。
+
+本项目的功能、隐私和条款说明发布于[个人备份说明页](https://gist.github.com/liuhuayaxi/f979839837fd3de783d620b5005b1a57)。公开页面只包含此模块的功能和数据处理说明，不包含应用源码、个人资料、配置或凭据；对应文本保存在 `docs/drive-oauth/`。
+
+发布完成后，重新连接一次 Google 账号，取得正式状态下的新授权。正式版去除了 Testing 特有的 7 天授权期限，程序仍需正常刷新访问令牌；用户撤销授权、账号政策变化等仍可能使授权失效，届时需要重新连接。个人自用的验证例外与长期令牌行为以 [Google 的验证说明](https://developers.google.com/identity/protocols/oauth2/production-readiness/brand-verification#exceptions_to_verification_requirements)及[令牌有效期说明](https://developers.google.com/identity/protocols/oauth2)为准。
+
+本机于 2026-10-18 完成正式版切换和重新授权，并验证新刷新令牌能够取得访问令牌、继续访问原来的备份目录。自动增量备份已设为每 10 分钟检查一次，检查仅在 QwenASR 服务运行时执行。本机证据保存在 `output/playwright/google-drive-production-verification.json` 和 `google-drive-production.png`。
+
 官方说明：
 - [OAuth 桌面应用与 PKCE](https://developers.google.com/identity/protocols/oauth2/native-app)
 - [Drive API Python 配置流程](https://developers.google.com/workspace/drive/api/quickstart/python)
