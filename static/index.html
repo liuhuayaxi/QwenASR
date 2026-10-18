@@ -399,6 +399,47 @@
             </div>
           </section>
 
+          <section class="settings-group wide" id="driveBackupSettings" data-settings-page="library" aria-label="Google Drive 备份">
+            <div class="settings-group-heading"><b>Google Drive 备份</b></div>
+            <div class="settings-group-grid">
+              <p id="driveBackupAccount" class="setting-hint wide" role="status">正在读取云盘连接状态…</p>
+              <details id="driveBackupSetup" class="settings-advanced wide">
+                <summary>首次连接 · 导入 Google 客户端配置</summary>
+                <div class="settings-group-grid single-column">
+                  <p class="setting-hint">在 <a href="https://console.cloud.google.com/apis/library/drive.googleapis.com" target="_blank" rel="noopener noreferrer">Google Cloud 启用 Drive API</a>，配置 Google Auth Platform，并创建“桌面应用”类型的 OAuth 客户端。下载 JSON 后在这里导入，再点击保存和连接账号。</p>
+                  <label class="wide"><span>OAuth 客户端 JSON</span><input id="driveBackupCredentials" type="file" accept=".json,application/json" /></label>
+                  <p class="setting-hint">外部应用处于 Testing 时，请把自己的账号加入测试用户；Drive 刷新令牌会在 7 天后过期。长期使用需在 Google Auth Platform 正确配置发布状态。<a href="https://developers.google.com/workspace/drive/api/quickstart/python" target="_blank" rel="noopener noreferrer">查看官方配置步骤</a></p>
+                </div>
+              </details>
+              <label class="settings-checkbox"><span>资料库中的 PDF</span><input id="driveOption-pdf" type="checkbox" checked /></label>
+              <label class="settings-checkbox"><span>原始转写、修正文本和时间轴</span><input id="driveOption-transcripts" type="checkbox" checked /></label>
+              <label class="settings-checkbox"><span>课堂笔记和 AI 总结</span><input id="driveOption-notes" type="checkbox" /></label>
+              <label class="settings-checkbox"><span>启用自动增量备份</span><input id="driveOption-automatic" type="checkbox" /></label>
+              <label><span>自动检查间隔</span><select id="driveBackupInterval" class="field-select"><option value="5">每 5 分钟</option><option value="10" selected>每 10 分钟</option><option value="30">每 30 分钟</option><option value="60">每小时</option><option value="1440">每天</option></select></label>
+              <p class="setting-hint wide">按资料库目录保存到“QwenASR备份”。自动备份在 QwenASR 服务运行时检查新增和变化的文件；本地删除不删除云端副本。备份范围不含录音音频、应用配置、密钥和缓存。</p>
+              <div class="inline-setting wide">
+                <button id="driveBackupSave" class="mini-button" type="button" data-drive-action="configure">保存备份选项</button>
+                <button class="mini-button" type="button" data-drive-action="connect">连接 Google 账号</button>
+                <a id="driveBackupAuthLink" class="mini-button hidden" target="_blank" rel="noopener noreferrer">打开 Google 授权页</a>
+                <button id="driveBackupCancelAuth" class="mini-button hidden" type="button" data-drive-action="cancel-auth">取消等待授权</button>
+                <button class="mini-button" type="button" data-drive-action="disconnect">断开本机连接</button>
+              </div>
+              <div class="inline-setting wide">
+                <button class="mini-button" type="button" data-drive-action="preview">预览备份清单</button>
+                <button class="mini-button" type="button" data-drive-action="test">小批量测试（最多 3 个）</button>
+                <button class="mini-button primary-mini-button" type="button" data-drive-action="start">立即增量备份</button>
+                <button class="mini-button" type="button" data-drive-action="stop">暂停并关闭自动备份</button>
+                <button class="mini-button" type="button" data-drive-action="refresh">刷新状态</button>
+                <a id="driveBackupFolder" class="mini-button hidden" target="_blank" rel="noopener noreferrer">打开云盘备份目录</a>
+              </div>
+              <progress id="driveBackupProgress" class="wide hidden" style="width:100%" max="100" aria-label="Google Drive 备份进度"></progress>
+              <p id="driveBackupStatus" class="setting-hint wide" style="white-space:pre-line;overflow-wrap:anywhere" role="status" aria-live="polite"></p>
+              <small id="driveBackupLastSuccess" class="setting-hint wide"></small>
+              <ul id="driveBackupDetails" class="setting-hint wide" style="overflow-wrap:anywhere"></ul>
+              <details class="settings-advanced wide"><summary id="driveBackupPreviewSummary">可先预览待备份文件，预览不会上传。</summary><ul id="driveBackupPreviewList" class="setting-hint" style="max-height:220px;overflow:auto;overflow-wrap:anywhere;padding-right:18px"></ul></details>
+            </div>
+          </section>
+
           <section class="settings-group wide" data-settings-page="library" aria-label="日常备份">
             <div class="settings-group-heading"><b>日常备份</b></div>
             <div class="settings-group-grid single-column">
@@ -884,6 +925,6 @@
     </dialog>
 
     <div id="toast" class="toast" role="status"></div>
-    <script src="/static/app.js?v=20261016-decisions-1" type="module"></script>
+    <script src="/static/app.js?v=20261018-drive-1" type="module"></script>
   </body>
 </html>

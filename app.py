@@ -74,6 +74,7 @@ from qwen_asr_app.course_file_routes import CourseFileAPI
 from qwen_asr_app.categories import change_category
 from qwen_asr_app.shared_library import LibraryWatch, discover_courses
 from qwen_asr_app.library_backup import BackupManager, backup_router, backup_sources
+from qwen_asr_app.drive_backup import DriveBackup, drive_backup_router
 from qwen_asr_app.library_layout import shared
 from qwen_asr_app.review import (
     bisect_audio_range,
@@ -127,6 +128,7 @@ async def lifespan(_: FastAPI):
         # without opening another listener.
         async with smartclass_service.lifespan(smartclass_service.app):
             await library_watch.start()
+            await drive_backup_manager.start_loop()
             await knowledge_service.start()
             await knowledge_coordinator.start()
             intelligence_service = getattr(intelligence_router, 'intelligence_service', None)
@@ -140,6 +142,7 @@ async def lifespan(_: FastAPI):
             try:
                 yield
             finally:
+                await drive_backup_manager.close()
                 backlog.cancel()
                 correction_recovery.cancel()
                 await asyncio.gather(backlog,correction_recovery,return_exceptions=True)
@@ -1597,7 +1600,7 @@ async def service_stop_guard(action: str, request: Request):
         *intelligence_router.intelligence_service._running_tasks.values(),
         *intelligence_router.intelligence_service._debounce_tasks.values(),
     ]
-    if (backup_manager.busy or backup_manager.downloads or service_mutations or model_manager.active_jobs or model_manager.connected_clients or running_batch_ids or record_operations
+    if (backup_manager.busy or backup_manager.downloads or drive_backup_manager.busy or drive_backup_manager.pending_auth or service_mutations or model_manager.active_jobs or model_manager.connected_clients or running_batch_ids or record_operations
         or knowledge_service.job_manager._active_job_id or knowledge_service.job_manager._queue.qsize()
         or any(not t.done() for t in tasks) or (active and active.metadata.get("status") == "active")):
         raise HTTPException(409, "录音或任务仍在运行，进度已保留，请完成或暂停后再停止")
@@ -3759,6 +3762,9 @@ from qwen_asr_app.note_library import NoteLibrary, note_library_router
 app.include_router(note_router(recording_store, recording_operation))
 review_library = NoteLibrary(app_settings, recording_store)
 app.include_router(note_library_router(app_settings, recording_store, library=review_library))
+drive_backup_manager = DriveBackup(app_settings, recording_store, review_library,
+                                  can_run=lambda: not backup_manager.busy and not service_draining)
+app.include_router(drive_backup_router(drive_backup_manager))
 
 
 def require_backup_idle():
@@ -3769,7 +3775,7 @@ def require_backup_idle():
              *intelligence_router.intelligence_service._running_tasks.values(),
              *intelligence_router.intelligence_service._debounce_tasks.values(),
              smartclass_service.job, smartclass_service.catalog_job]
-    if (service_draining or backup_manager.busy or service_mutations > 1
+    if (service_draining or backup_manager.busy or drive_backup_manager.busy or drive_backup_manager.pending_auth or service_mutations > 1
             or model_manager.active_jobs or model_manager.connected_clients
             or running_batch_ids or record_operations or classroom_chat_running
             or knowledge_service.job_manager._active_job_id or knowledge_service.job_manager._queue.qsize()
