@@ -102,6 +102,11 @@ def history_signature(record, settings):
     return sorted(values,key=lambda x:(x['date'],str(x['id'])))
 
 
+def history_content_signature(values):
+    """Display titles can change after AI naming; they are not source content."""
+    return [{key:value for key,value in row.items() if key!='title'} for row in values]
+
+
 def safe_path(root, relative):
     root=Path(root).resolve()
     if not isinstance(relative,str) or '\\' in relative or ':' in relative or relative.startswith('/'):

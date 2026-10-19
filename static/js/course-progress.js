@@ -24,7 +24,7 @@ export function mergeLiveCourseProgress(payload, live) {
     const status = live.queue.paused ? 'paused' : states.has('running') ? 'running'
       : states.has('queued') ? 'queued' : 'interrupted';
     const progress = Math.round(items.reduce((sum, item) => sum + item.progress, 0) / items.length * 10) / 10;
-    return [{...task, title: `课程回放 · ${items.length} 堂课`, total: items.length, completed: 0,
+    return [{...task, title: `课程回放 · ${items.length} 堂课`, total: live.queue.items.length, completed: live.queue.items.length-items.length,
       progress, status, actions: ['running', 'queued'].includes(status) ? ['pause'] : ['continue'],
       course_items: items, warnings: items.map(item => `${item.title}：${item.message || item.state}`)}];
   });

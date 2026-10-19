@@ -32,6 +32,25 @@ def child(events=(), *, stderr=b'', exit_code=0):
 
 
 class MaterialTransportTests(unittest.IsolatedAsyncioTestCase):
+    async def test_large_session_requires_every_image_to_be_actually_read(self):
+        with tempfile.TemporaryDirectory() as raw:
+            folder=Path(raw).resolve();images=[folder/f'page-{n:03d}.png' for n in range(25)]
+            for path in images:path.write_bytes(b'synthetic-image')
+            reads=[{'event':'step_update','step_update':{'state':'DONE','step_type':'tool',
+                'tool_info':{'name':'view_file','parameters':{'AbsolutePath':str(path)},'output':'image/png'}}} for path in images]
+            for missing in (False,True):
+                events=[{'event':'init','conversation_id':'large-session'},*(reads[:-1] if missing else reads),
+                    {'event':'result','result':{'status':'SUCCESS','response':'review complete'}}]
+                with patch('qwen_asr_app.agy_materials.executable',return_value='/usr/bin/true'), \
+                     patch('qwen_asr_app.agy_materials.asyncio.create_subprocess_exec',return_value=child(events)):
+                    call=request_materials('Review all images sequentially',folder,{**PROVIDER,'context_window':1048576},
+                        read_paths=images,require_images=images)
+                    if missing:
+                        with self.assertRaisesRegex(RuntimeError,'没有实际读取全部'):await call
+                    else:
+                        _,receipt=await call
+                        self.assertEqual(len(receipt['viewed_files']),25)
+
     def test_literal_json_newlines_are_preserved_but_other_invalid_syntax_is_rejected(self):
         self.assertEqual(parse_json('{"quote":"原文第一行\n第二行\t公式"}'),{'quote':'原文第一行\n第二行\t公式'})
         for value in ['{"quote":"bad\x00data"}','{"quote" "missing-colon"}','{"quote":"bad\\q escape"}']:
@@ -123,6 +142,26 @@ class MaterialTransportTests(unittest.IsolatedAsyncioTestCase):
 
     def test_pipe_only_cli_failure_is_retryable(self):
         self.assertEqual(_error_kind('[Errno 32] Broken pipe'),('network_transport',True))
+
+    async def test_interrupted_long_material_result_cannot_recover_partial_durable_text(self):
+        with tempfile.TemporaryDirectory() as raw:
+            folder=Path(raw).resolve()
+            process=child([{'event':'init','conversation_id':'synthetic-interruption'},
+                           {'event':'result','result':{'status':'FAILED','error':'interrupted'}}])
+            with patch('qwen_asr_app.agy_materials.executable',return_value='/usr/bin/true'), \
+                 patch('qwen_asr_app.agy_materials.asyncio.create_subprocess_exec',return_value=process), \
+                 patch('qwen_asr_app.agy_session.read_session') as restore:
+                with self.assertRaises(MaterialSessionError) as caught:
+                    await request_materials('资料'*50000,folder,PROVIDER)
+            restore.assert_not_called()
+            self.assertEqual(caught.exception.kind,'network_transport')
+            self.assertTrue(caught.exception.retriable)
+
+    def test_terminated_material_child_is_retryable(self):
+        from qwen_asr_app.agy_materials import _material_failure
+        failure=_material_failure('',returncode=-15)
+        self.assertEqual(failure.kind,'network_transport')
+        self.assertTrue(failure.retriable)
 
     async def test_silent_early_exit_is_retryable_but_never_approves_pages(self):
         for code in (0,1):

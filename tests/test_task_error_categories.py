@@ -84,6 +84,84 @@ class WrappedProviderErrorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(app._task_error_kind('AGY 资料会话连接中断；未完成视觉审查'), 'network_transport')
         self.assertEqual(app._task_error_kind('AGY 资料会话响应超时'), 'network_read_timeout')
         self.assertNotIn(app._task_error_kind('AGY 资料会话登录状态不可用'), app.AUTO_RETRY_KINDS)
+        self.assertEqual(app._task_error_kind('AGY CLI 请求失败：Eligibility check failed: Get "https://www.googleapis.com/oauth2/v2/userinfo": EOF'), 'network_transport')
+
+    async def test_exact_native_interruption_retries_summary_and_keeps_checkpoints(self):
+        from qwen_asr_app.agy_cli import _decode_output
+        with tempfile.TemporaryDirectory() as directory:
+            record = self.record(directory)
+            checkpoint = {'phase': '识别本节新内容', 'parts': {'0': '已保存第一批'}, 'total_parts': 2}
+            record.metadata['ai_note_summary_draft'] = checkpoint.copy()
+            record.save_metadata()
+            attempts = 0
+            async def generate(*args):
+                nonlocal attempts
+                attempts += 1
+                self.assertEqual(record.metadata['ai_note_summary_draft'], checkpoint)
+                self.assertEqual(json.loads(record.meta_path.read_text())['summary_job'].get('error_kind', ''), '')
+                if attempts == 1:
+                    try:
+                        _decode_output(json.dumps({'event': 'result', 'result': {'status': 'FAILED', 'error': 'interrupted'}}), '')
+                    except RuntimeError as cause:
+                        raise HTTPException(502, str(cause)) from cause
+                return {'summary': {'summary': '完成', 'review_status': 'passed'}}
+            with patch.object(app, 'recording_store', store_for(record)), \
+                 patch.object(app.ai_preferences, 'task_config', return_value={}), \
+                 patch.object(app, 'generate_library_summary', side_effect=generate), \
+                 patch.object(app, '_automatic_retry_delay', return_value=0):
+                app.start_summary_job(record, {'config': {}})
+                await asyncio.wait_for(app.background_summary_tasks[record.id], 2)
+            self.assertEqual(attempts, 2)
+            saved = json.loads(record.meta_path.read_text())['summary_job']
+            self.assertEqual(saved['status'], 'completed')
+            self.assertEqual(saved['error_kind'], '')
+            self.assertEqual(app._task_error_kind('AGY CLI 请求失败：interrupted'), 'network_transport')
+
+    async def test_persistent_interruption_has_finite_retry_budget(self):
+        from qwen_asr_app.ai import AIRequestError
+        with tempfile.TemporaryDirectory() as directory:
+            record = self.record(directory)
+            with patch.object(app, 'recording_store', store_for(record)), \
+                 patch.object(app.ai_preferences, 'task_config', return_value={}), \
+                 patch.object(app, 'generate_library_summary', new=AsyncMock(side_effect=AIRequestError('interrupted', kind='network_transport'))) as generate, \
+                 patch.object(app, 'MAX_AUTOMATIC_RETRIES', 2), \
+                 patch.object(app, '_automatic_retry_delay', return_value=0):
+                app.start_summary_job(record, {'config': {}})
+                await asyncio.wait_for(app.background_summary_tasks[record.id], 2)
+            self.assertEqual(generate.await_count, 3)
+            self.assertEqual(json.loads(record.meta_path.read_text())['summary_job']['status'], 'failed')
+
+    def test_old_oauth_eof_auth_label_is_reclassified_without_changing_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            record = self.record(directory)
+            record.metadata['summary_job'] = {'status':'failed','error_kind':'provider_auth',
+                'error':'AGY CLI 请求失败：Eligibility check failed: Get "https://www.googleapis.com/oauth2/v2/userinfo": EOF'}
+            record.save_metadata()
+            before = record.meta_path.read_bytes()
+            with patch.object(app, 'recording_store', store_for(record)):
+                task = next(t for t in app.compact_ai_tasks() if t['type']=='summary')
+            self.assertEqual(task['error_kind'],'network_transport')
+            self.assertEqual(record.meta_path.read_bytes(), before)
+
+    async def test_transient_abstract_failure_retries_only_abstract_and_preserves_note(self):
+        with tempfile.TemporaryDirectory() as directory:
+            record = self.record(directory)
+            note = record.directory / 'saved-note.md'
+            note.write_text('已经完成审查的完整笔记')
+            before = note.read_bytes()
+            full_result = {'summary': {'summary':'已经完成审查的完整笔记','review_status':'passed',
+                'abstract_error':'AGY CLI 请求失败：Eligibility check failed: Get "https://www.googleapis.com/oauth2/v2/userinfo": EOF'}}
+            with patch.object(app, 'recording_store', store_for(record)), \
+                 patch.object(app.ai_preferences, 'task_config', return_value={}), \
+                 patch.object(app, 'generate_library_summary', new=AsyncMock(return_value=full_result)) as full, \
+                 patch.object(app, 'generate_library_summary_abstract', new=AsyncMock(return_value={'summary':{'review_status':'passed'}})) as abstract, \
+                 patch.object(app, '_automatic_retry_delay', return_value=0):
+                app.start_summary_job(record, {'config': {}})
+                await asyncio.wait_for(app.background_summary_tasks[record.id], 2)
+            full.assert_awaited_once()
+            abstract.assert_awaited_once()
+            self.assertEqual(note.read_bytes(), before)
+            self.assertEqual(json.loads(record.meta_path.read_text())['summary_job']['status'],'completed')
 
     def test_pending_scientific_review_is_not_reported_as_failed_correction(self):
         with tempfile.TemporaryDirectory() as directory:

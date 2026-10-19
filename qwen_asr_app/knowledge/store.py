@@ -741,6 +741,11 @@ class KnowledgeStore:
             row = conn.execute("SELECT * FROM chunks WHERE chunk_id = ?", (chunk_id,)).fetchone()
             return dict(row) if row else None
 
+    def get_citation(self, citation_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row=conn.execute('SELECT * FROM chunks WHERE citation_id = ?', (citation_id,)).fetchone()
+            return dict(row) if row else None
+
     # ---------------- Job queue ----------------
 
     def create_job(self, job_id: str, category: str) -> None:

@@ -17,6 +17,30 @@ PROMPT = '唯一请求标记：request-93ab'
 
 
 class SessionRecoveryTests(unittest.TestCase):
+    def test_redundant_past_end_read_requires_an_explicit_complete_read_first(self):
+        source=self.root/'input-0000.json';source.write_text('{"source":"complete"}')
+        files={str(source):{'lines':1,'sha256':hashlib.sha256(source.read_bytes()).hexdigest()}}
+        read=self.answer(content='',tool_calls=[{'name':'view_file','args':{'AbsolutePath':str(source)}}])
+        done={'type':'GENERIC','status':'DONE','content':'The above content shows the entire, complete file contents of the requested file.'}
+        extra=self.answer(content='',tool_calls=[{'name':'view_file','args':{'AbsolutePath':str(source),'ContentOffset':15000}}])
+        failure={'type':'GENERIC','status':'ERROR','content':'ContentOffset 15000 exceeds line range size 14922'}
+        entries=[self.user(),read,done,extra,failure,self.answer()]
+        self.save(entries)
+        result=self.recover(allowed_files=files)
+        self.assertEqual(result['response'],'完整最终答案');self.assertEqual(result['redundant_read_errors'],1)
+        self.assertEqual(len([e for e in result['events'] if e.get('event')=='step_update']),1)
+        variants=[
+            [self.user(),extra,failure,self.answer()],
+            [self.user(),read,{**done,'content':'partial file'},extra,failure,self.answer()],
+            [self.user(),read,done,extra,{**failure,'content':'permission denied'},self.answer()],
+            [self.user(),read,done,extra,{**failure,'status':'CANCELLED'},self.answer()],
+        ]
+        for variant in variants:
+            self.save(variant)
+            with self.assertRaises(SessionEvidenceError):self.recover(allowed_files=files)
+        self.save(entries);source.write_text('source edited during review')
+        with self.assertRaisesRegex(SessionEvidenceError,'改变'):self.recover(allowed_files=files)
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -97,6 +121,29 @@ class SessionRecoveryTests(unittest.TestCase):
             with self.assertRaises(AIRequestError) as caught:
                 _finish_output(auth,'',self.root,message,1)
             self.assertEqual(caught.exception.kind,'provider_auth')
+
+    def test_failed_cli_recovers_only_a_verified_complete_output_continuation(self):
+        source=self.root/'input.json';source.write_text('complete source')
+        files={str(source):{'lines':1,'sha256':hashlib.sha256(source.read_bytes()).hexdigest()}}
+        (self.root/'transport.json').write_text(json.dumps({'files':files}))
+        read=self.answer(content='',tool_calls=[{'name':'view_file','args':{'AbsolutePath':str(source)}}])
+        done={'type':'GENERIC','status':'DONE','content':'source read'}
+        limit={'type':'ERROR_MESSAGE','status':'DONE','content':'Error: Your previous response was cut off because it exceeded the output token limit\nRetries remaining: 3'}
+        valid=[self.user(),read,done,self.answer(content='partial'),limit,self.answer()]
+        self.save(valid)
+        stream=json.dumps({'event':'result','result':{'status':'FAILED','conversation_id':SESSION,'error':limit['content']}})
+        message=json.dumps({'message':{'content':PROMPT}})
+        def saved(session,prompt,**kwargs):return read_session(session,prompt,root=self.root,**kwargs)
+        def probe(session,prompt):return output_limit_before_failure(session,prompt,root=self.root)
+        with patch('qwen_asr_app.agy_session.read_session',side_effect=saved),patch('qwen_asr_app.agy_session.output_limit_before_failure',side_effect=probe):
+            self.assertEqual(_finish_output(stream,'',self.root,message,1),'完整最终答案')
+            for broken in [valid[:-1],valid+[{'type':'ERROR_MESSAGE','status':'DONE','content':'not logged in'}],valid[:1]+valid[3:]]:
+                self.save(broken)
+                with self.assertRaises(AIRequestError):_finish_output(stream,'',self.root,message,1)
+            self.save(valid)
+            with self.assertRaises(AIRequestError):_finish_output(stream,'HTTP 401 invalid_grant',self.root,message,1)
+            source.write_text('changed')
+            with self.assertRaises(AIRequestError):_finish_output(stream,'',self.root,message,1)
 
     def test_all_file_lines_must_have_successful_reads_and_unchanged_bytes(self):
         source = self.root/'source.json'

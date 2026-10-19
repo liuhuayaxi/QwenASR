@@ -79,7 +79,7 @@ export function taskProgressView(task) {
   const stage=String(task.stage || task.phase || '');
   const done=task.status==='completed' || task.recovered;
   if (task.attention_kind==='auto_review' || (task.type==='refinement' && stage.startsWith('AI 自动复核'))) {
-    return {label:stage || 'AI 自动复核',detail:'AI 逐项检查改动；无法确认时保留原文，无需逐条确认',count:'',percent:null};
+    return {label:stage || 'AI 自动复核',count:task.verification?.total?`已复核 ${task.verification.completed || 0}/${task.verification.total} 条修改`:`剩余 ${task.review_required_blocks || 0} 条修改`,detail:'AI 逐项检查改动；无法确认时保留原文，无需逐条确认',percent:null};
   }
   if (task.status==='pending' && (task.attention_kind==='review' || Number(task.review_required_blocks)>0)) {
     return {label:`${task.review_required_blocks || task.total || 0} 段待核对`,detail:'校对结果已保存，核对数字与公式后即可使用',count:'',percent:null};
@@ -92,12 +92,12 @@ export function taskProgressView(task) {
     return {label:(stage.split(' · ')[0] || '准备开始')+(task.review_round>1?` · 第 ${task.review_round} 轮`:''),count,detail:'',steps,index,percent:measured?Math.min(100,Math.round((task.completed||0)/task.total*100)):null};
   }
   const total=Number(task.total)||0,completed=Number(task.completed)||0;
-  const unit=task.progress_unit || (task.type==='course_queue'?'堂课':task.family==='mineru'?'个文件':'段');
+  const unit=task.progress_unit || (task.type==='course_queue'?(task.course_item?'阶段':'堂课'):task.family==='mineru'?'个文件':'段');
   const count=total?`${task.type==='refinement'?'已保存 ':''}${completed}/${total} ${unit}`:'';
   const percent=done?100:Object.hasOwn(task,'progress')?(task.progress==null?null:Number(task.progress))
     :total?Math.round(completed/total*100):null;
   return {label:stage || (done?'处理完成':task.status==='queued'?'等待开始':task.status==='paused'?'已暂停':task.status==='cancelled'?'已取消，进度已保存':'处理中'),count,
-    detail:task.type==='refinement' && task.remaining_segments!=null?`剩余 ${task.remaining_segments} 段 · 继续时只补未完成部分`:'',
+    detail:task.type==='course_queue' && task.course_item?(task.next_action || '继续未完成阶段'):task.type==='refinement' && task.remaining_segments!=null?`剩余 ${task.remaining_segments} 段 · 继续时只补未完成部分`:'',
     percent:percent===null?null:Math.max(0,Math.min(done?100:99,percent))};
 }
 

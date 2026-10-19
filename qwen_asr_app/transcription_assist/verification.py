@@ -9,6 +9,7 @@ import asyncio
 import copy
 import hashlib
 import json
+from pathlib import Path
 import uuid
 import weakref
 
@@ -101,93 +102,198 @@ def _apply(record, candidate, decision, receipt, binding):
     record.save_all()
 
 
+def _evidence(config):
+    return [{k:copy.deepcopy(item.get(k)) for k in
+             ('citation_id','origin','text','title','page','start','end')}
+            for item in config.get('_knowledge_evidence') or []
+            if not item.get('stale') and item.get('origin') in {'original','human'}
+            and isinstance(item.get('citation_id'),str) and str(item.get('text') or '').strip()]
+
+
+def _save_batch(record, group, payload, response, instructions, provider, session, bindings):
+    _validate(response,payload)
+    if (_payload(record,group,payload['course_evidence'])!=payload
+            or any(_owner(record,c) is None or _binding(record,c)!=bindings[c['candidate_id']] for c in group)):
+        raise AIRequestError('复核期间来源已更新，原文与新修改保留',kind='stale_correction')
+    receipt = {'policy':POLICY,'request_id':uuid.uuid4().hex,'created_at':local_now(),
+               'provider_session_id':session,'model':provider.get('cli_model') or provider.get('model',''),
+               'instructions_sha256':_hash(instructions),'payload':payload,'response':response}
+    receipt['sha256'] = _hash(receipt)
+    folder=record.directory/'.correction-verifications'
+    name = 'request-'+receipt['sha256']+'.json'
+    atomic_json(folder/name,receipt)
+    for candidate in group:
+        atomic_json(folder/(candidate['candidate_id']+'.json'),
+                    {'candidate':candidate,'source_sha256':bindings[candidate['candidate_id']], 'receipt_file':name})
+    return receipt
+
+
+async def recover_correction_session(record, config, request_folder, session_id, *, apply=False):
+    """Import a known failed request only after the same strict live checks.
+
+    This is also a read-only acceptance probe by default. Imported decisions
+    use the ordinary journal, so a crash resumes without another AI request.
+    """
+    from ..agy_session import read_session
+    from ..agy_cli import compose_prompt
+    from ..agy_materials import parse_json
+    from . import service
+    folder=Path(request_folder)
+    manifest=json.loads((folder/'transport.json').read_text())
+    source=''.join(''.join(json.loads(Path(p).read_text())['content_fragments']) for p in manifest['files'])
+    if hashlib.sha256(source.encode()).hexdigest()!=manifest['source_sha256']:
+        raise AIRequestError('原复核请求资料已变化',kind='stale_correction')
+    payload=json.loads(source.split('INPUT (JSON):\n',1)[1])
+    if source!=compose_prompt(INSTRUCTIONS,payload) or payload.get('policy')!=POLICY:
+        raise AIRequestError('原复核请求协议不一致',kind='stale_correction')
+    current={c['candidate_id']:c for c in active_candidates(record)}
+    try:group=[current[c['candidate_id']] for c in payload['candidates']]
+    except KeyError:raise AIRequestError('原复核建议已变化',kind='stale_correction') from None
+    if _payload(record,group,payload['course_evidence'])!=payload:
+        raise AIRequestError('原复核来源或建议已变化',kind='stale_correction')
+    # Validate the exact historical citations against current indexed revisions
+    # and source files. A new relevance search could pick different neighbors;
+    # it is not an identity/freshness check and may invoke an embedding model.
+    for item in payload['course_evidence']:
+        knowledge=service._knowledge
+        chunk=knowledge.store.get_citation(item['citation_id']) if knowledge is not None else None
+        if (not chunk or chunk.get('category')!=record.metadata.get('category')
+                or any(chunk.get(k)!=v for k,v in item.items())
+                or any(not e.get('valid') or e.get('stale') for e in knowledge.validate_evidence([chunk]))):
+            raise AIRequestError('课程资料已变化或无法核实，原结论未回写',kind='stale_correction')
+    receipt=read_session(session_id,manifest['prompt'],allowed_files=manifest['files'],require_output_continuation=True)
+    response=parse_json(receipt['response']);decisions=_validate(response,payload)
+    bindings={c['candidate_id']:_binding(record,c) for c in group}
+    if apply:
+        saved=_save_batch(record,group,payload,response,INSTRUCTIONS,provider_for_mode(config.get('ai',{}),'correction'),session_id,bindings)
+        for candidate,decision in zip(group,decisions):
+            _apply(record,candidate,decision,saved,bindings[candidate['candidate_id']])
+        from ..note_content import transcript_blocks
+        done=sum((b.get('ai_verification') or {}).get('policy')==POLICY for b in transcript_blocks(record))
+        pending=len(active_candidates(record))
+        record.metadata['correction_verification']={'status':'pending' if pending else 'completed',
+            'completed':done,'total':done+pending,'error':'','error_kind':'','updated_at':local_now()}
+        record.save_metadata()
+    return {'checked':len(decisions),'uncertain':sum(d['decision']=='uncertain' for d in decisions),'applied':apply}
+
+
 async def verify_corrections(record, config, on_progress=None):
-    """Check only current visible proposals, with crash-safe per-item recovery."""
-    if record is None or not active_candidates(record):
-        return {'checked':0, 'uncertain':0}
+    if record is None:return {'checked':0,'uncertain':0}
     key = (id(asyncio.get_running_loop()), str(record.directory))
     lock = _locks.setdefault(key, asyncio.Lock())
     async with lock:
-        candidates = active_candidates(record)
-        total = len(candidates); checked = uncertain = 0
-        folder = record.directory/'.correction-verifications'
-        # Replay a completed provider decision if a process stopped before the
-        # following recording save. Never replay across changed acoustic text.
-        remaining = []
-        for candidate in candidates:
-            binding = _binding(record, candidate)
-            path = folder/(candidate['candidate_id']+'.json')
-            if path.is_file():
-                journal = json.loads(path.read_text())
-                receipt = json.loads((folder/journal['receipt_file']).read_text())
-                content = {k:v for k,v in receipt.items() if k!='sha256'}
-                if (receipt.get('sha256') != _hash(content) or receipt.get('policy') != POLICY
-                        or journal.get('candidate') != candidate or journal.get('source_sha256') != binding):
-                    raise AIRequestError('复核检查点与来源不一致，原文保留', kind='stale_correction')
-                decisions = _validate(receipt['response'], receipt['payload'])
-                decision = next(d for d in decisions if d['candidate_id']==candidate['candidate_id'])
-                _apply(record, candidate, decision, receipt, binding)
-                checked += 1; uncertain += decision['decision']=='uncertain'
-            else:
-                remaining.append(candidate)
-        if on_progress:on_progress(checked,total)
-        from .service import evidence_config
-        provider = provider_for_mode(config.get('ai',{}),'correction')
-        is_cli = provider_transport(provider)=='agy_cli'
-        capacity = min(32768,context_window_for(config,'correction')//2) if is_cli else output_limit_for(config, 'correction', 32768)
-        if capacity < 856:
-            raise AIRequestError('校对输出上限过小，无法完整保存独立复核；请提高到至少 856 tokens',kind='configuration')
-        maximum = max(1, (capacity-256)//600)
-        while remaining:
-            group = remaining[:maximum]
-            # Retrieve original course material for this independent request.
-            enhanced = await evidence_config(record, config, '\n'.join(c['before'] for c in group), limit=8)
-            evidence = {}
-            # Candidate receipts may refer to superseded course revisions.
-            # Only the independently refreshed retrieval enters this request.
-            for item in enhanced.get('_knowledge_evidence') or []:
-                if (not item.get('stale') and item.get('origin') in {'original','human'}
-                        and isinstance(item.get('citation_id'),str) and str(item.get('text') or '').strip()):
-                    evidence[item['citation_id']] = {k:copy.deepcopy(item.get(k)) for k in
-                        ('citation_id','origin','text','title','page','start','end')}
-            while True:
-                payload = _payload(record,group,list(evidence.values()))
-                reserve = min(capacity, 256+600*len(group))
-                cost = estimate_tokens(INSTRUCTIONS)+estimate_tokens(json.dumps(payload,ensure_ascii=False))+reserve+(16000 if is_cli else 512)
-                if cost <= context_window_for(config,'correction'):break
-                if len(group)==1:
-                    raise AIRequestError('单条复核的来源超出上下文窗口，原文保留；请增大校对窗口',kind='context_length')
-                group = group[:max(1,len(group)//2)]
-            bindings = {c['candidate_id']:_binding(record,c) for c in group}
-            from ..agy_cli import last_session_id
-            last_session_id.set('')
-            for attempt in range(2):
-                instructions = INSTRUCTIONS + ('\n上次结论缺少有效的逐项映射或依据，请严格按协议重新复核。' if attempt else '')
+        return await _verify_with_status(record,config,on_progress)
+
+
+async def _verify_with_status(record,config,on_progress):
+    if record is None:return {'checked':0,'uncertain':0}
+    total=len(active_candidates(record))
+    if not total:return {'checked':0,'uncertain':0}
+    from ..note_content import transcript_blocks
+    baseline=sum((b.get('ai_verification') or {}).get('policy')==POLICY for b in transcript_blocks(record))
+    state=record.metadata.setdefault('correction_verification',{})
+    def progress(done,count):
+        state.update(status='running',completed=baseline+done,total=baseline+count,error='',error_kind='',retry_in_seconds=0,updated_at=local_now())
+        record.save_metadata()
+        if on_progress:on_progress(baseline+done,baseline+count)
+    progress(0,total)
+    try:
+        result=await _verify_corrections(record,config,on_progress=progress)
+    except BaseException as exc:
+        state.update(status='interrupted' if isinstance(exc,asyncio.CancelledError) else 'failed',
+                     error=str(exc),error_kind=getattr(exc,'kind','interrupted'),updated_at=local_now())
+        record.save_metadata()
+        raise
+    state.update(status='completed',error='',error_kind='',updated_at=local_now())
+    record.save_metadata()
+    return result
+
+
+async def _verify_corrections(record, config, on_progress=None):
+    """Check only current visible proposals, with crash-safe per-item recovery."""
+    if record is None or not active_candidates(record):
+        return {'checked':0, 'uncertain':0}
+    candidates = active_candidates(record)
+    total = len(candidates); checked = uncertain = 0
+    folder = record.directory/'.correction-verifications'
+    # Replay a completed provider decision if a process stopped before the
+    # following recording save. Never replay across changed acoustic text.
+    remaining = []
+    for candidate in candidates:
+        binding = _binding(record, candidate)
+        path = folder/(candidate['candidate_id']+'.json')
+        if path.is_file():
+            journal = json.loads(path.read_text())
+            receipt = json.loads((folder/journal['receipt_file']).read_text())
+            content = {k:v for k,v in receipt.items() if k!='sha256'}
+            if (receipt.get('sha256') != _hash(content) or receipt.get('policy') != POLICY
+                    or journal.get('candidate') != candidate or journal.get('source_sha256') != binding):
+                raise AIRequestError('复核检查点与来源不一致，原文保留', kind='stale_correction')
+            decisions = _validate(receipt['response'], receipt['payload'])
+            decision = next(d for d in decisions if d['candidate_id']==candidate['candidate_id'])
+            _apply(record, candidate, decision, receipt, binding)
+            checked += 1; uncertain += decision['decision']=='uncertain'
+        else:
+            remaining.append(candidate)
+    if on_progress:on_progress(checked,total)
+    from .service import evidence_config
+    provider = provider_for_mode(config.get('ai',{}),'correction')
+    is_cli = provider_transport(provider)=='agy_cli'
+    capacity = min(32768,context_window_for(config,'correction')//2) if is_cli else output_limit_for(config, 'correction', 32768)
+    if capacity < 856:
+        raise AIRequestError('校对输出上限过小，无法完整保存独立复核；请提高到至少 856 tokens',kind='configuration')
+    # CLI High models spend output on thinking as well as JSON and do not
+    # expose a hard max_output_tokens flag. Start small and split on actual
+    # output exhaustion; keep every candidate and all retrieved evidence.
+    maximum = min(8 if is_cli else 54, max(1, (capacity-256)//(2400 if is_cli else 600)))
+
+    async def process(group, evidence):
+        nonlocal checked, uncertain, maximum
+        payload = _payload(record,group,evidence)
+        reserve = min(capacity, 256+(2400 if is_cli else 600)*len(group))
+        cost = estimate_tokens(INSTRUCTIONS)+estimate_tokens(json.dumps(payload,ensure_ascii=False))+reserve+(16000 if is_cli else 512)
+        if cost > context_window_for(config,'correction'):
+            if len(group)==1:
+                raise AIRequestError('单条复核的来源超出上下文窗口，原文保留；请增大校对窗口',kind='context_length')
+            middle=len(group)//2
+            await process(group[:middle],evidence)
+            await process(group[middle:],evidence)
+            return
+        bindings = {c['candidate_id']:_binding(record,c) for c in group}
+        from ..agy_cli import last_session_id
+        last_session_id.set('')
+        for attempt in range(2):
+            instructions = INSTRUCTIONS + ('\n上次结论缺少有效的逐项映射或依据，请严格按协议重新复核。' if attempt else '')
+            try:
                 response = await request_ai_json(instructions=instructions,payload=payload,config=config,
                                                  mode='correction',max_output_tokens=reserve)
-                try:
-                    decisions = _validate(response,payload)
-                    break
-                except AIRequestError:
-                    atomic_json(folder/('rejected-'+uuid.uuid4().hex+'.json'),
-                                {'policy':POLICY,'payload_sha256':_hash(payload),'response':response,'created_at':local_now()})
-                    if attempt:raise
-            # Validate the whole batch before mutating any of its segments.
-            if any(_owner(record,c) is None or _binding(record,c)!=bindings[c['candidate_id']] for c in group):
-                raise AIRequestError('复核期间来源已更新，原文与新修改保留',kind='stale_correction')
-            provider = provider_for_mode(config.get('ai',{}),'correction')
-            receipt = {'policy':POLICY,'request_id':uuid.uuid4().hex,'created_at':local_now(),
-                       'provider_session_id':last_session_id.get(), 'model':provider.get('cli_model') or provider.get('model',''),
-                       'instructions_sha256':_hash(instructions),'payload':payload,'response':response}
-            receipt['sha256'] = _hash(receipt)
-            name = 'request-'+receipt['sha256']+'.json'
-            atomic_json(folder/name,receipt)
-            for candidate in group:
-                atomic_json(folder/(candidate['candidate_id']+'.json'),
-                            {'candidate':candidate,'source_sha256':bindings[candidate['candidate_id']], 'receipt_file':name})
-            for candidate,decision in zip(group,decisions):
-                _apply(record,candidate,decision,receipt,bindings[candidate['candidate_id']])
-                checked += 1; uncertain += decision['decision']=='uncertain'
-                if on_progress:on_progress(checked,total)
-            remaining = remaining[len(group):]
-        return {'checked':checked,'uncertain':uncertain}
+            except AIRequestError as exc:
+                atomic_json(folder/('failed-'+uuid.uuid4().hex+'.json'), {
+                    'policy':POLICY,'payload':payload,'source_bindings':bindings,
+                    'provider_session_id':last_session_id.get(),'error_kind':exc.kind,'created_at':local_now()})
+                if exc.kind not in {'output_truncated','input_too_long','context_length'} or len(group)==1:
+                    raise
+                middle=len(group)//2
+                maximum=min(maximum,middle)
+                await process(group[:middle],evidence)
+                await process(group[middle:],evidence)
+                return
+            try:
+                decisions = _validate(response,payload)
+                break
+            except AIRequestError:
+                atomic_json(folder/('rejected-'+uuid.uuid4().hex+'.json'),
+                            {'policy':POLICY,'payload_sha256':_hash(payload),'response':response,'created_at':local_now()})
+                if attempt:raise
+        receipt = _save_batch(record,group,payload,response,instructions,provider,last_session_id.get(),bindings)
+        for candidate,decision in zip(group,decisions):
+            _apply(record,candidate,decision,receipt,bindings[candidate['candidate_id']])
+            checked += 1; uncertain += decision['decision']=='uncertain'
+            if on_progress:on_progress(checked,total)
+
+    while remaining:
+        group=remaining[:maximum]
+        enhanced = await evidence_config(record, config, '\n'.join(c['before'] for c in group), limit=8)
+        await process(group, _evidence(enhanced))
+        remaining=remaining[len(group):]
+    return {'checked':checked,'uncertain':uncertain}

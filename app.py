@@ -44,6 +44,7 @@ from qwen_asr_app.context_budget import (
     estimate_tokens,
 )
 from qwen_asr_app.ai import (
+    AIRequestError,
     concurrency_for,
     close_ai_clients,
     context_window_for,
@@ -864,6 +865,7 @@ def compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any]]:
             abstract_pending = _summary_abstract_pending(record)
             if abstract_pending and status in {"failed", "interrupted"}:
                 status = "completed_with_errors"
+            inferred_error_kind = _task_error_kind(str(summary.get("error") or ""))
             tasks.append({
                 **base,
                 **ai_provider_snapshot("summary"),
@@ -872,7 +874,8 @@ def compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any]]:
                 "label": AI_TASK_LABELS["summary"],
                 "status": status,
                 "error": str(summary.get("error") or ""),
-                "error_kind": _task_error_kind(str(summary.get("error") or "")),
+                "error_kind": (inferred_error_kind if inferred_error_kind != "upstream"
+                               else summary.get("error_kind") or "upstream") if summary.get("error") else "",
                 "completed": summary_progress['completed_parts'],
                 "total": int(summary_progress['total_parts'] or 0),
                 "progress_unit": summary_progress.get('unit', '批'),
@@ -919,7 +922,7 @@ def compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any]]:
                 historical_error = failed_errors[-1] if failed_errors else ""
                 retrying = refinement_running and saved_status in {"queued", "running"}
                 task_error = str(refinement_job.get("error") or ("" if retrying else historical_error))
-                if review_blocks and not unprocessed_blocks and not refinement_running:task_error=''
+                if review_blocks and not unprocessed_blocks and not refinement_running and status=='pending':task_error=''
                 review_only = bool(review_blocks and not unprocessed_blocks and not task_error
                                    and not refinement_running and status == "pending")
                 tasks.append({
@@ -937,6 +940,7 @@ def compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any]]:
                     "total": refinement_progress['total_segments'],
                     "progress_unit": "段",
                     "saved_segments": refinement_progress['saved_segments'],
+                    "verification":record.metadata.get("correction_verification",{}),
                     "remaining_segments": refinement_progress['remaining_segments'],
                     "total_batches": int(refinement_job.get('total_batches') or 0),
                     "completed_batches": int(refinement_job.get('completed_batches') or 0),
@@ -1994,6 +1998,8 @@ async def generate_library_summary(
         job = summary_jobs.get(session_id)
         if job is not None:
             job["phase"] = "AI 取名"
+        record.metadata['ai_note_summary_draft']={'phase':'AI 取名','parts':{},'total_parts':0}
+        record.save_metadata()
         try:
             prompt = str(payload.get("title_prompt") or ai_preferences.read().get("title_prompt")
                          or DEFAULT_AI_TITLE_PROMPT).strip()
@@ -2010,6 +2016,8 @@ async def generate_library_summary(
             summary = record.metadata["ai_note_summary"]
             summary["title_error"] = str(exc)
             record.save_metadata()
+        record.metadata.pop('ai_note_summary_draft',None)
+        record.save_metadata()
         return {"summary": summary, "session": record.public(include_segments=False)}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2049,6 +2057,7 @@ def start_summary_job(record: RecordingRecord, payload: dict[str, Any], *, autom
 
     async def execute() -> None:
         automatic_attempt = 0
+        continue_abstract = resume_abstract
 
         def save_state(status: str, error: str = "", **values: Any) -> None:
             current = recording_store.find(session_id)
@@ -2059,8 +2068,8 @@ def start_summary_job(record: RecordingRecord, payload: dict[str, Any], *, autom
         try:
             while True:
                 try:
-                    save_state("running", retry_in_seconds=0)
-                    result = await (upgrade_library_note_pdf(session_id, payload) if payload.get('_pdf_only') else generate_library_summary_abstract(session_id, payload) if resume_abstract
+                    save_state("running", error_kind="", retry_in_seconds=0)
+                    result = await (upgrade_library_note_pdf(session_id, payload) if payload.get('_pdf_only') else generate_library_summary_abstract(session_id, payload) if continue_abstract
                                     else generate_library_summary(session_id, payload))
                     note_result = result.get('summary') or {}
                     if note_result.get('review_status') in {'needs_revision','unreviewed'}:
@@ -2068,11 +2077,18 @@ def start_summary_job(record: RecordingRecord, payload: dict[str, Any], *, autom
                         return
                     abstract_error = (result.get("summary") or {}).get("abstract_error")
                     if abstract_error:
+                        abstract_kind = _task_error_kind(str(abstract_error))
+                        if abstract_kind in AUTO_RETRY_KINDS:
+                            # The detailed note/PDF is already saved. A transient
+                            # abstract failure must retry only this final step.
+                            continue_abstract = True
+                            save_state("running", resume_stage="abstract")
+                            raise AIRequestError(str(abstract_error), kind=abstract_kind, retriable=True)
                         save_state("completed_with_errors", str(abstract_error), resume_stage="abstract",
                                    retry_in_seconds=0, auto_retry_count=automatic_attempt)
                         return
                     save_state(
-                        "completed", auto_retry_count=automatic_attempt,
+                        "completed", error_kind="", auto_retry_count=automatic_attempt,
                         retry_in_seconds=0, resume_stage="",
                     )
                     return

@@ -37,7 +37,8 @@ test('finished courses disappear and newly queued courses appear before disk cat
   status.queue.items = [{id: 'a', state: 'completed'}, {id: 'b', title: '课堂 B', state: 'queued'}];
   const task = mergeLiveCourseProgress(payload(), status).tasks[0];
   assert.equal(task.status, 'queued');
-  assert.equal(task.total, 1);
+  assert.equal(task.total, 2);
+  assert.equal(task.completed, 1);
   assert.equal(task.progress, 0);
   assert.deepEqual(task.course_items.map(item => item.id), ['b']);
   assert.deepEqual(task.actions, ['pause']);

@@ -31,6 +31,65 @@ def outcome(prompt, kwargs):
 
 
 class ReviewBatchConcurrencyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_large_context_reviews_25_pages_together_with_small_serial_renders(self):
+        from qwen_asr_app.native_pdf import pdf_operation
+        with tempfile.TemporaryDirectory() as raw:
+            folder=Path(raw);pdf,export=candidate(folder,25);calls=[];renders=[]
+            def native(operation,**kwargs):
+                if operation=='render':
+                    renders.append(len(kwargs['pages']))
+                    self.assertLessEqual(len(kwargs['pages']),4)
+                return pdf_operation(operation,**kwargs)
+            async def review(prompt,folder,provider,**kwargs):
+                numbers=json.loads(prompt.rsplit('\n',1)[-1])['pages'];calls.append(numbers)
+                self.assertEqual(len(kwargs['require_images']),25)
+                self.assertTrue(all(path.is_file() for path in kwargs['require_images']))
+                return json.dumps({'status':'passed','issues':[],'viewed_pages':numbers}),{'session_id':'large-review'}
+            with patch('qwen_asr_app.native_pdf.pdf_operation',side_effect=native),patch('qwen_asr_app.review_notes.request_materials',side_effect=review):
+                report=await visual_review(pdf,export,folder,{'transport':'agy_cli','context_window':1048576},[],[])
+            self.assertEqual(calls,[list(range(1,26))]);self.assertEqual(renders,[4,4,4,4,4,4,1])
+            self.assertEqual(report['status'],'passed');self.assertEqual(report['batch_size'],32)
+
+    async def test_larger_resume_batches_preserve_previous_small_batch_receipts(self):
+        from qwen_asr_app.review_notes import REVIEW_POLICY
+        with tempfile.TemporaryDirectory() as raw:
+            folder=Path(raw);pdf,export=candidate(folder,20);calls=[]
+            previous={'pages':[5,6,7,8],'receipt':{'session_id':'already-reviewed'},
+                'result':{'status':'passed','issues':[],'viewed_pages':[5,6,7,8]}}
+            (folder/'review.json').write_text(json.dumps({'pdf_sha256':export['pdf_sha256'],'policy':REVIEW_POLICY,
+                'learning_scope_sha256':None,'status':'unreviewed','batches':[previous],'batch_size':4}))
+            async def review(prompt,folder,provider,**kwargs):
+                numbers=json.loads(prompt.rsplit('\n',1)[-1])['pages'];calls.append(numbers)
+                return json.dumps({'status':'passed','issues':[],'viewed_pages':numbers}),{'session_id':'new-'+str(numbers[0])}
+            with patch('qwen_asr_app.review_notes.request_materials',side_effect=review):
+                report=await visual_review(pdf,export,folder,{'transport':'agy_cli','context_window':1048576},[],[])
+            self.assertEqual(calls,[[1,2,3,4],list(range(9,21))])
+            self.assertIn(previous,report['batches']);self.assertEqual(report['viewed_pages'],list(range(1,21)))
+
+    async def test_passed_warning_does_not_start_another_repair_or_export(self):
+        from types import SimpleNamespace
+        from qwen_asr_app.review_notes import upgrade_pdf,blocking_review
+        with tempfile.TemporaryDirectory() as raw:
+            folder=Path(raw);package=folder/'.review-notes/test';package.mkdir(parents=True)
+            pdf,export=candidate(package,2)
+            metadata={'ai_note_summary':{'summary':'已完成正文','review_package':'.review-notes/test','review_warning':'旧提示'}}
+            meta=folder/'session.json';meta.write_text(json.dumps(metadata))
+            record=SimpleNamespace(directory=folder,metadata=metadata,meta_path=meta,
+                save_metadata=lambda:meta.write_text(json.dumps(metadata)))
+            (package/'materials.json').write_text(json.dumps({'relevant_pages':[]}))
+            warning={'page':1,'severity':'warning','problem':'标点','evidence':'句号前空格'}
+            report={'status':'passed','issues':[warning]}
+            with patch('qwen_asr_app.review_notes.review_scope.prepare',AsyncMock(return_value={'enabled':False})), \
+                 patch('qwen_asr_app.note_latex_author.export_direct',AsyncMock(return_value=((pdf,export),{}))) as render, \
+                 patch('qwen_asr_app.review_notes.visual_review',AsyncMock(return_value=report)) as review, \
+                 patch('qwen_asr_app.note_review_repair.repair_review',AsyncMock()) as repair:
+                result=await upgrade_pdf(record,{'ai':{}})
+            self.assertEqual(result['status'],'passed');self.assertEqual(render.await_count,1)
+            self.assertEqual(review.await_count,1);repair.assert_not_awaited()
+            self.assertNotIn('review_warning',record.metadata['ai_note_summary'])
+            blocking={'page':2,'severity':'blocking','problem':'公式错误','evidence':'原式冲突'}
+            self.assertEqual(blocking_review({'issues':[warning,blocking]})['issues'],[blocking])
+
     async def test_transient_session_exit_recovers_automatically_and_permanent_auth_stops(self):
         from qwen_asr_app.agy_materials import MaterialSessionError
         for kind,retriable in [('provider_unavailable',True),('provider_auth',False)]:
@@ -49,6 +108,23 @@ class ReviewBatchConcurrencyTests(unittest.IsolatedAsyncioTestCase):
                         with self.assertRaises(MaterialSessionError):await visual_review(pdf,export,folder,{'concurrency':1},[],[])
                         self.assertEqual(calls,1)
                         self.assertEqual(json.loads((folder/'review.json').read_text())['viewed_pages'],[])
+
+    async def test_wrong_path_reopens_only_unfinished_batch_and_keeps_saved_pages(self):
+        from qwen_asr_app.agy_materials import MaterialSessionError
+        with tempfile.TemporaryDirectory() as raw:
+            folder=Path(raw);pdf,export=candidate(folder,8);calls=[]
+            async def model(prompt,folder,provider,**kwargs):
+                # Retry guidance precedes the unchanged final JSON payload.
+                payload=json.loads(prompt.rsplit('\n',1)[-1]);first=payload['pages'][0]
+                calls.append(first)
+                if first==5 and calls.count(5)==1:
+                    raise MaterialSessionError('wrong input-0002.png',kind='material_read_path',retriable=True)
+                return outcome(prompt,kwargs)[1]
+            with patch('qwen_asr_app.review_notes.request_materials',side_effect=model),patch('qwen_asr_app.review_notes.asyncio.sleep',new=AsyncMock()):
+                report=await visual_review(pdf,export,folder,{'concurrency':1},[],[])
+            self.assertEqual(calls,[1,5,5]);self.assertEqual(report['status'],'passed')
+            self.assertEqual(report['viewed_pages'],list(range(1,9)))
+            self.assertEqual(len(report['batches']),2)
 
     async def test_repeated_transient_failures_have_a_finite_batch_budget(self):
         from qwen_asr_app.agy_materials import MaterialSessionError

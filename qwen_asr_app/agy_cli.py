@@ -104,41 +104,47 @@ def _error_kind(message: str) -> tuple[str, bool]:
         return "provider_region", False
     # Explicit rejected credentials must never become retryable merely because
     # a diagnostic also mentions OAuth, EOF, or an ambiguous handshake timeout.
-    if re.search(r'\b401\b',value) or any(marker in value for marker in (
+    if re.search(r'\b(?:401|403)\b',value) or any(marker in value for marker in (
         'invalid_grant','invalid grant','invalid_client','invalid client','revoked',
         'bad credentials','invalid credentials','invalid api key','unauthorized',
         'not logged in','login required',
     )):
         return 'provider_auth',False
-    # Refreshing a still-valid grant can fail before an HTTP response exists.
-    # Match the actual transport evidence before broad "oauth" auth matching;
-    # a generic refresh/login failure alone still requires authentication help.
-    refresh_network='token refresh failed due to network error' in value
-    oauth_transport=('oauth2.googleapis.com' in value and re.search(
+    # Classify transport evidence independently of endpoint spelling. Login,
+    # userinfo, eligibility and generation can all lose the connection before
+    # receiving an authentication decision. An OAuth URL is not that decision.
+    transport_failure=re.search(
         r'dial tcp|lookup[^\n]*no such host|connection (?:reset|refused|closed)|'
         r'network is unreachable|no route to host|broken pipe|\beof\b|'
-        r'i/o timeout|(?:tls handshake|connection|connect) timed?\s*out|deadline exceeded',value))
-    if refresh_network or oauth_transport:
+        r'i/o timeout|(?:tls handshake|connection|connect) timed?\s*out|'
+        r'token refresh failed due to network error',value)
+    if transport_failure:
         return 'network_transport',True
     # This CLI message covers a timed-out eligibility/auth handshake. It is
     # ambiguous, unlike an explicit revoked grant or login requirement, so
     # permit bounded transport retries before asking the user to sign in.
     if "authentication failed or timed out" in value:
         return "network_connect_timeout", True
-    if any(marker in value for marker in ("unauthenticated", "authentication", "oauth", "login", "not logged in", "permission denied")):
-        return "provider_auth", False
     if any(marker in value for marker in ("resource exhausted", "rate limit", "too many requests", "429")):
         return "rate_limit", True
-    if any(marker in value for marker in ('unavailable (code 503)', 'service unavailable', 'service is currently unavailable', 'bad gateway', 'gateway timeout')):
+    if re.search(r'\b(?:502|503|504)\b',value) or any(marker in value for marker in ('service unavailable', 'service is currently unavailable', 'bad gateway', 'gateway timeout')):
         return 'provider_unavailable', True
     if any(marker in value for marker in ("deadline exceeded", "timed out", "timeout")):
         return "network_read_timeout", True
+    # A terminated native language server reports only `interrupted`, without
+    # the older "stream was interrupted" sentence. Local task cancellation is
+    # handled separately as CancelledError and must never enter this retry path.
+    if re.search(r'(?:^|[:：]\s*)interrupted[.!]?\s*$', value.strip()):
+        return "network_transport", True
     if any(marker in value for marker in (
         "connection reset", "broken pipe", "unexpected eof", "post \"http", ": eof", "eof",
         "the stream was interrupted", "stream interrupted",
+        "生成连接中断",
         "network issue connecting to the server",
     )):
         return "network_transport", True
+    if any(marker in value for marker in ("unauthenticated", "authentication", "oauth", "login", "permission denied")):
+        return "provider_auth", False
     if any(marker in value for marker in (
         "maximum output", "max tokens", "output token", "output limit",
         "context length", "too many tokens", "truncated", "cut off",
@@ -165,8 +171,20 @@ def _decode_output(stdout: str, stderr: str) -> str:
         kind, retriable = _error_kind(message)
         raise AIRequestError(f"AGY CLI 没有返回最终结果：{message or '空输出'}", kind=kind, retriable=retriable)
     if str(result.get("status") or "").upper() not in {"SUCCESS", "COMPLETED", "OK"}:
-        message = _text(result.get("error")) or (stderr or "AGY CLI 请求失败").strip()
+        message = _text(result.get("error")) or stderr.strip() or _text(result.get("status")) or "AGY CLI 请求失败"
         kind, retriable = _error_kind(message)
+        # A short status must not hide a concrete credential/configuration
+        # failure emitted on stderr. Do not mix arbitrary stdout into errors.
+        if message.lower() == 'interrupted' and stderr.strip():
+            diagnostic_kind, diagnostic_retry = _error_kind(stderr)
+            if diagnostic_kind != 'agy_cli_error':
+                kind, retriable = diagnostic_kind, diagnostic_retry
+        if message.lower() == 'interrupted' and kind == 'network_transport':
+            message = '生成连接中断；已完成内容保留，可从断点继续'
+        elif kind == 'output_truncated':
+            message = '生成达到输出上限；已保存结果保留，本批需要拆小重试'
+        else:
+            message = re.sub(r'Retries remaining:\s*\d+', 'AGY 内部重试提示（不代表应用重试次数）', message)
         raise AIRequestError(f"AGY CLI 请求失败：{message[:2_000]}", kind=kind, retriable=retriable)
     response = _text(result.get("response"))
     if not response:
@@ -224,6 +242,7 @@ def _file_prompt(prompt: str, working: Path, *, additional_read_paths=()):
     transport_prompt = (
         '这是 QwenASR 的独立文本整理请求。完整任务和原始资料以 JSON 字符串片段保存在下面的文件中，'
         '避免 CLI 截断长消息。先依照文件顺序逐个使用 view_file 完整读取全部文件。'
+        '清单文件已拆成可完整读取的小文件；默认读取即可。当工具说明 entire, complete file contents 时，该文件已读完，直接读下一个文件，不得再猜测 ContentOffset 追加读取。'
         '每个文件的 content_fragments 按原顺序连接，JSON 字符串转义按正常 JSON 含义理解；'
         '再将所有文件连接，即为完整的同一个请求，不得遗漏末尾片段。'
         '按其中 SYSTEM INSTRUCTIONS 处理 INPUT 数据，直接返回任务要求的完整最终正文。'
@@ -258,34 +277,38 @@ def _finish_output(stdout, stderr, working, message, returncode=0):
         except (ValueError, TypeError, AttributeError):
             continue
     last_session_id.set(session)
+    continuation = False
     try:
         response = _decode_output(stdout, stderr)
     except AIRequestError as exc:
-        if files is not None and session and exc.kind in {'network_transport','network_read_timeout','agy_cli_error'}:
+        if returncode in {-15, -2, 130, 143} and exc.kind == 'agy_cli_error':
+            raise AIRequestError('AGY 生成进程已中断；已保存进度可继续',
+                                 kind='network_transport', retriable=True) from exc
+        if files is not None and session and exc.kind in {'output_truncated','network_transport','network_read_timeout','agy_cli_error'}:
             from .agy_session import output_limit_before_failure
-            if output_limit_before_failure(session,prompt):
-                raise AIRequestError('AGY 生成先达到输出上限，后续续写连接未完成；应拆小完整知识批次重试',
-                                     kind='output_truncated',retriable=True) from exc
-        # Only recover an explicitly successful but empty final result. Auth,
-        # network, cancellation and failed results remain real failures.
-        if str(exc) != 'AGY CLI 返回了空结果' or not session:
+            continuation = output_limit_before_failure(session,prompt)
+        if not continuation and (str(exc) != 'AGY CLI 返回了空结果' or not session):
             raise
         response = None
-    if returncode:
+    if returncode or continuation:
         kind, retriable = _error_kind(stderr)
-        raise AIRequestError(f'AGY CLI 异常退出（退出码 {returncode}），本次结果未采纳', kind=kind, retriable=retriable)
+        if returncode in {-15, -2, 130, 143} and kind == 'agy_cli_error':
+            kind, retriable = 'network_transport', True
+        if not continuation or (stderr.strip() and kind not in {'output_truncated','network_transport','network_read_timeout'}):
+            raise AIRequestError(f'AGY CLI 异常退出（退出码 {returncode}），本次结果未采纳', kind=kind, retriable=retriable)
     if response is not None and files is None:
         return response
     from .agy_session import read_session, SessionEvidenceError
     try:
-        receipt = read_session(session, prompt, allowed_files=files)
+        receipt = read_session(session, prompt, allowed_files=files, require_output_continuation=continuation)
     except SessionEvidenceError as exc:
         detail = str(exc)
         if files is not None:
             from .durable import atomic_json
             atomic_json(Path(working)/'failure.json', {'session_id':session,'error':detail})
-        kind = 'input_too_long' if '截断' in detail else 'agy_cli_error'
-        raise AIRequestError(detail, kind=kind, retriable=False) from exc
+        incomplete=detail in {'AGY 会话完成记录尚不可用','AGY 未保存完整最终正文','AGY 超限后尚未完成续写','AGY 最终正文尚未完整结束'}
+        kind = 'input_too_long' if '截断' in detail else 'output_truncated' if continuation and incomplete else 'agy_cli_error'
+        raise AIRequestError(detail, kind=kind, retriable=kind=='output_truncated') from exc
     if files is not None:
         from .durable import atomic_json
         atomic_json(Path(working)/'receipt.json', {k: v for k, v in receipt.items() if k not in {'response','events'}})

@@ -13,7 +13,9 @@ import re
 
 
 class SessionEvidenceError(ValueError):
-    pass
+    def __init__(self, message, *, kind='agy_cli_error'):
+        super().__init__(message)
+        self.kind = kind
 
 
 def output_limit_before_failure(session_id, prompt, *, root=None):
@@ -40,7 +42,8 @@ def _arguments(call):
     return result
 
 
-def read_session(session_id, prompt, *, root=None, allowed_files=None, required_files=None, schema=None):
+def read_session(session_id, prompt, *, root=None, allowed_files=None, required_files=None, schema=None,
+                 require_output_continuation=False):
     """Return only a verified completed turn and its successful read receipts."""
     if not re.fullmatch(r'[0-9a-fA-F-]{36}', str(session_id or '')):
         raise SessionEvidenceError('AGY 没有返回有效会话编号')
@@ -64,8 +67,18 @@ def read_session(session_id, prompt, *, root=None, allowed_files=None, required_
     user_text = str(users[0].get('content') or '')
     if 'NOTE: The output was truncated because it was too long.' in user_text:
         raise SessionEvidenceError('AGY 内部截断了请求资料，未采纳不完整输入的结果')
-    if prompt not in user_text:
+    request_match=re.search(r'<USER_REQUEST>\s*(.*?)\s*(?:</USER_REQUEST>|\Z)',user_text,re.S)
+    if (request_match[1].strip() if request_match else user_text.strip()) != prompt.strip():
         raise SessionEvidenceError('AGY 会话输入与本次请求不一致')
+    limits = [i for i,e in enumerate(entries) if e.get('type') == 'ERROR_MESSAGE'
+              and e.get('status') == 'DONE' and 'exceeded the output token limit' in str(e.get('content',''))]
+    if any(e.get('type') == 'ERROR_MESSAGE' and i not in limits for i,e in enumerate(entries)):
+        raise SessionEvidenceError('AGY 续写包含其他失败，未采纳结果')
+    if require_output_continuation:
+        if not allowed_files or not limits:
+            raise SessionEvidenceError('AGY 缺少本次输出超限及完整资料证据')
+        # Only this known internal continuation is recoverable. An auth/network
+        # error or another user turn must not be hidden by a later answer.
     allowed = {str(Path(p).resolve()): spec for p, spec in (allowed_files or {}).items()}
     required = set(allowed) if required_files is None else {str(Path(p).resolve()) for p in required_files}
     intervals = {p: [] for p in allowed}
@@ -73,15 +86,31 @@ def read_session(session_id, prompt, *, root=None, allowed_files=None, required_
     responses = []
     calls = []
     structured = None
+    complete_reads=set();redundant_read_errors=0
     events = [{'event': 'init', 'conversation_id': session_id}]
     for entry in entries:
         status = entry.get('status')
         if status in {'ERROR', 'FAILED', 'CANCELLED', 'CANCELED'}:
+            # Some agents ask for an extra offset after the tool explicitly
+            # reported the complete text file. An exhausted offset adds no
+            # missing evidence; keep the successful read instead of throwing
+            # away an otherwise complete review. Never forgive an unknown
+            # path, first/partial read, cancellation or other tool failure.
+            if status=='ERROR' and entry.get('type')=='GENERIC' and pending:
+                name,file,args=pending[0]
+                offset=args.get('ContentOffset')
+                exhausted=re.search(r'ContentOffset (\d+) exceeds line range size (\d+)',str(entry.get('content','')))
+                if (name=='view_file' and file in complete_reads and type(offset) is int
+                        and exhausted and offset==int(exhausted[1]) and offset>int(exhausted[2])
+                        and args.get('StartLine',1)==1 and args.get('EndLine',allowed[file]['lines'])>=allowed[file]['lines']):
+                    pending.pop(0);redundant_read_errors+=1
+                    continue
             # The native finish validator can reject a proposal and accept a
             # corrected one in this same turn. Preserve that error in replay.
             if not (schema is not None and entry.get('type') == 'GENERIC' and pending
                     and pending[0][0] == 'finish' and re.search(r'invalid arguments\s*:', str(entry.get('content','')), re.I)):
-                raise SessionEvidenceError('AGY 工具或生成步骤失败；未采纳该会话结果')
+                raise SessionEvidenceError('AGY 工具或生成步骤失败；未采纳该会话结果',
+                    kind='material_read_path' if pending and pending[0][0]=='view_file' else 'agy_cli_error')
         if entry.get('type') == 'PLANNER_RESPONSE':
             planned = entry.get('tool_calls') or []
             if planned:
@@ -98,7 +127,7 @@ def read_session(session_id, prompt, *, root=None, allowed_files=None, required_
                     args = _arguments(call)
                     value = args.get('AbsolutePath')
                     if not isinstance(value, str) or str(Path(value).resolve()) not in allowed:
-                        raise SessionEvidenceError('AGY 文本会话尝试读取未授权文件')
+                        raise SessionEvidenceError('AGY 文本会话尝试读取未授权文件',kind='material_read_path')
                     pending.append((name, str(Path(value).resolve()), args))
                     calls.append(name)
             elif entry.get('content'):
@@ -119,16 +148,21 @@ def read_session(session_id, prompt, *, root=None, allowed_files=None, required_
             if status != 'DONE':
                 raise SessionEvidenceError('AGY 工具读取回执不完整')
             if re.search(r'permission denied|operation not permitted|file not found|no such file|error (?:reading|opening)|<truncated \d+ bytes>', output, re.I):
-                raise SessionEvidenceError('AGY 资料读取失败或输出被截断')
+                raise SessionEvidenceError('AGY 资料读取失败或输出被截断',kind='material_read_path')
             start = args.get('StartLine', 1)
             end = args.get('EndLine', allowed[file]['lines'])
             if not isinstance(start, int) or not isinstance(end, int):
                 raise SessionEvidenceError('AGY 资料读取范围无效')
             intervals[file].append((start, end))
+            if (start==1 and end>=allowed[file]['lines'] and not args.get('ContentOffset')
+                    and 'The above content shows the entire, complete file contents of the requested file.' in output):
+                complete_reads.add(file)
             events.append({'event':'step_update','step_update':{'step_type':'tool',
                 'state':'DONE','tool_info':{'name':name,'parameters':args,'output':output}}})
     if pending or (structured is None and (not responses or entries[-1] is not responses[-1])):
         raise SessionEvidenceError('AGY 未保存完整最终正文')
+    if require_output_continuation and (not responses or entries.index(responses[-1]) <= limits[-1]):
+        raise SessionEvidenceError('AGY 超限后尚未完成续写')
     for file, spec in allowed.items():
         try:
             data = Path(file).read_bytes()
@@ -146,4 +180,5 @@ def read_session(session_id, prompt, *, root=None, allowed_files=None, required_
                    'response':response, **({'structured_output':structured} if structured is not None else {})}})
     return {'response': response, 'session_id': session_id, 'events': events,
             'viewed_files': sorted(p for p, values in intervals.items() if values),
+            'redundant_read_errors':redundant_read_errors,
             'tools': calls, 'recovered_from_completed_turn': True}

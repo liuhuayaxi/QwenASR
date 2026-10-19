@@ -114,6 +114,41 @@ class StreamTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(list(Path(temp).rglob('session.json'))), 1)
             self.assertEqual(model.active_jobs, 0)
 
+    async def test_resume_only_verification_reuses_first_round_and_asr(self):
+        with tempfile.TemporaryDirectory() as temp:
+            record=make_record(Path(temp))
+            raw=bytes(3*16000*2)
+            import hashlib
+            record.segments=[{'id':101,'raw':'原始数值九','start':0,'end':3,'course_chunk':0,'chunk_end_sample':48000}]
+            record.metadata['ai_reviews']=[{'id':'saved','segment_ids':[101],'raw':'原始数值九','corrected':'原始数值九','start':0,'end':3,
+                'correction_review':{'before':'原始数值九','after':'原始数值9','risks':[],'evidence':[]}}]
+            record.metadata['course_stream'].update(chunks=[{'samples':48000,'sha256':hashlib.sha256(raw).hexdigest(),'cursor':{}}],completed_chunks=1,input_complete=True)
+            folder=record.directory/'.course-chunks';folder.mkdir();(folder/'00000.pcm').write_bytes(raw)
+            model=SimpleNamespace(active_jobs=0,cancel_unload=lambda:None,schedule_unload=lambda:None,transcribe=AsyncMock())
+            with patch('qwen_asr_app.batch_pipeline.correct_batch_segment',new=AsyncMock()) as rewrite,patch('qwen_asr_app.transcription_assist.verification.verify_corrections',new=AsyncMock()) as verify:
+                job=CourseStreamJob(record,{'ai_correction':True},model,set());job.start()
+                await asyncio.wait_for(job.task,5)
+            rewrite.assert_not_awaited();model.transcribe.assert_not_awaited();verify.assert_awaited_once()
+            self.assertEqual(record.metadata['status'],'completed')
+            self.assertEqual(record.segments[0]['raw'],'原始数值九')
+
+    async def test_verification_interruption_recovers_without_repeating_audio(self):
+        from qwen_asr_app.ai import AIRequestError
+        from qwen_asr_app.batch_pipeline import SegmentCorrectionPipeline
+        with tempfile.TemporaryDirectory() as temp:
+            record=make_record(Path(temp))
+            record.segments=[{'id':101,'raw':'已保存原文','corrected':'已保存原文','start':0,'end':3}]
+            with patch('qwen_asr_app.transcription_assist.verification.verify_corrections',
+                       new=AsyncMock(side_effect=[AIRequestError('interrupted',kind='network_transport'), {'checked':1}])) as verify, \
+                 patch('qwen_asr_app.ai.asyncio.sleep',new=AsyncMock()), \
+                 patch('qwen_asr_app.batch_pipeline.correct_batch_segment',new=AsyncMock()) as rewrite:
+                pipeline=SegmentCorrectionPipeline(record, {})
+                await asyncio.wait_for(pipeline.finish(),2)
+            self.assertEqual(verify.await_count,2)
+            rewrite.assert_not_awaited()
+            self.assertEqual(record.segments[0]['raw'],'已保存原文')
+            self.assertEqual(record.metadata['correction_verification']['auto_retry_count'],1)
+
     async def test_resume_accepted_chunks_without_duplicate_asr(self):
         with tempfile.TemporaryDirectory() as temp:
             record = make_record(Path(temp))

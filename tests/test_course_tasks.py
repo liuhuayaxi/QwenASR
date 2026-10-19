@@ -37,8 +37,8 @@ class CourseTaskFeedTests(unittest.TestCase):
                 result = course_tasks.course_tasks()
             self.assertEqual(len(result), 1)
             task = result[0]
-            self.assertEqual(task["total"], 1)
-            self.assertEqual(task["completed"], 0)
+            self.assertEqual(task["total"], 2)
+            self.assertEqual(task["completed"], 1)
             self.assertEqual(task["progress"], 37)
             self.assertEqual([item["title"] for item in task["course_items"]], ["正在处理的课次"])
             self.assertEqual(len(task["course_items"][0]["phases"]), 4)

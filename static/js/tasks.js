@@ -1,7 +1,7 @@
-import {taskGroups, filterTaskGroups, groupCounts, actionableTasks, completedTasks, taskMatchesType, activeStatuses, errorStatuses, leadingTask, taskProgressView, progressGroups} from './task-center-view.js?v=20261016-integration-2';
-import {createTaskPdfDialog} from './task-pdf-dialog.js?v=20261016-integration-2';
+import {taskGroups, filterTaskGroups, groupCounts, actionableTasks, completedTasks, taskMatchesType, activeStatuses, errorStatuses, leadingTask, taskProgressView, progressGroups} from './task-center-view.js?v=20261018-recovery-1';
+import {createTaskPdfDialog} from './task-pdf-dialog.js?v=20261018-recovery-1';
 import {aiTaskPayload} from './task-config.js?v=20260913-tasks-1';
-import {mergeLiveCourseProgress} from './course-progress.js?v=20261011-live-1';
+import {mergeLiveCourseProgress} from './course-progress.js?v=20261018-recovery-1';
 import {mineruEstimateLabel, legacyMineruProgress} from './mineru-progress-view.js?v=20261013-time-2';
 import {resourceStatus} from './resource-status.js?v=20261013-1';
 import {aiActivityView} from './ai-activity-view.js?v=20261016-review-1';
@@ -118,7 +118,7 @@ function card(task, historical = false) {
   const estimateLabel = mineruEstimateLabel(estimate, task.status) || (legacyProgress !== null ? '按已完成页段显示 · 整体耗时预估尚未就绪' : task.family === 'mineru' && task.status === 'running' ? '正在计算整体进度' : '');
   const resource = resourceStatus(task);
   const reviewCount = Number(task.review_required_blocks) || Number(task.total) || 0;
-  const count = task.type === 'summary' && !done ? phaseProgress.count : review ? (reviewCount ? `${reviewCount} 段待核对` : '等待人工核对') : task.total ? `${task.family === 'ai' ? '已完成 ' : ''}${task.completed || 0}/${task.total}${task.type === 'course_queue' ? ' 堂课' : task.family === 'mineru' ? ' 个文件' : task.family === 'ai' ? ` ${task.progress_unit || '批'}` : ' 段'}` : '';
+  const count = (task.type === 'summary' || task.type === 'course_queue' || task.type === 'refinement') && !done ? phaseProgress.count : review ? (reviewCount ? `${reviewCount} 段待核对` : '等待人工核对') : task.total ? `${task.family === 'ai' ? '已完成 ' : ''}${task.completed || 0}/${task.total}${task.type === 'course_queue' ? ' 堂课' : task.family === 'mineru' ? ' 个文件' : task.family === 'ai' ? ` ${task.progress_unit || '批'}` : ' 段'}` : '';
   const wait = task.status === 'waiting_retry' && task.retry_in_seconds ? ` · 约 ${task.retry_in_seconds} 秒后自动重试` : '';
   const stage = (activity ? [task.stage, activity.label].filter(Boolean).join(' · ')
     : task.stage || (task.status === 'pending' ? '等待手动开始处理' : labels[task.status])) + wait;

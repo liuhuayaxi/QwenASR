@@ -5,7 +5,7 @@ import time
 from typing import Any
 
 from .batch_ai import correct_batch_segment, correct_batch_segments
-from .ai import concurrency_for, context_window_for, uses_agy_gemini, agy_rewrite_source_budget
+from .ai import concurrency_for, context_window_for, uses_agy_gemini, agy_rewrite_source_budget, retry_transient_ai
 from .context_budget import estimate_tokens
 
 CORRECTION_BATCH_SECONDS = 1800
@@ -148,4 +148,13 @@ class SegmentCorrectionPipeline:
             await self.submit(None)
         await self.task
         from .transcription_assist.verification import verify_corrections
-        await verify_corrections(self.record,self.config)
+        def waiting(kind, delay, attempt, exc):
+            if self.record is not None:
+                state = self.record.metadata.setdefault('correction_verification', {})
+                state.update(status='waiting_retry', error=str(exc), error_kind=kind,
+                             retry_in_seconds=delay, auto_retry_count=attempt)
+                self.record.save_metadata()
+        # This pipeline also owns course-stream/upload work outside the task
+        # center's retry loop. Resume verification receipts without repeating
+        # ASR or first-pass correction after a native CLI interruption.
+        await retry_transient_ai(lambda: verify_corrections(self.record,self.config), on_wait=waiting)

@@ -38,7 +38,7 @@ from .terminology import ai_terminology_context
 logger = logging.getLogger(__name__)
 _api_clients: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 TRANSIENT_AI_KINDS = {
-    "rate_limit", "provider_busy", "network_dns", "network_connect",
+    "rate_limit", "provider_busy", "provider_unavailable", "network_dns", "network_connect",
     "network_connect_timeout", "network_read_timeout", "network_transport",
 }
 
@@ -100,7 +100,7 @@ async def retry_transient_ai(
             return await operation()
         except Exception as exc:
             kind = str(getattr(exc, "kind", ""))
-            if kind not in TRANSIENT_AI_KINDS or retries >= max_retries:
+            if kind not in TRANSIENT_AI_KINDS or not getattr(exc, "retriable", True) or retries >= max_retries:
                 raise
             retries += 1
             delay = min(300, 15 * (2 ** (retries - 1)))
@@ -583,6 +583,9 @@ async def _request_ai_text_unlimited(
     if provider_transport(provider) == "agy_cli":
         from .agy_cli import request_text
 
+        # This CLI has no supported hard output-token flag. Callers must size
+        # complete batches conservatively and split on output_truncated;
+        # max_output_tokens here is a planning budget, not an enforced cap.
         return await request_text(instructions, payload, provider)
     base_url, api_key = provider_credentials(config, mode)
     model = select_model(ai, mode)

@@ -5,6 +5,44 @@ from unittest.mock import AsyncMock,patch
 from qwen_asr_app import note_latex_author as author
 
 class DirectLatexAuthorTests(unittest.IsolatedAsyncioTestCase):
+    def test_relocating_reference_clusters_does_not_leave_separators(self):
+        body=r'''% knowledge:k
+系数 $A_{21}$ 的两种视角 \SourceRef{1}, \SourceRef{2}, \SourceRef{3}：
+定义说明 \SourceRef{1}，\SourceRef{2}。
+保留坐标 $(x,y)$ 与自然逗号，继续解释。
+% /knowledge:k
+'''
+        ledger={'knowledge':[{'id':'k','sources':['S1','S2','S3']}]}
+        result=author.bind_knowledge_sources(body,ledger)
+        self.assertIn('两种视角：',result)
+        self.assertIn('定义说明。',result)
+        self.assertIn('$(x,y)$ 与自然逗号，继续解释。',result)
+        self.assertEqual(result.count(r'\SourceRef'),2)
+        self.assertEqual(author.bind_knowledge_sources(result,ledger),result)
+
+    def test_legacy_reference_punctuation_cleanup_preserves_math_and_comments(self):
+        before='正文 , , , ：下一句 , 。\n$x,。$ 与 \\[a,。\\]\n% 注释 , 。\n'
+        after=author.normalize_reference_punctuation(before)
+        self.assertEqual(after,'正文：下一句。\n$x,。$ 与 \\[a,。\\]\n% 注释 , 。\n')
+        self.assertEqual(author.normalize_reference_punctuation(after),after)
+
+    async def test_cached_reference_debris_is_repaired_without_regenerating_text(self):
+        import hashlib
+        with tempfile.TemporaryDirectory() as raw:
+            folder=Path(raw);dest=folder/'latex';dest.mkdir()
+            body='\\CourseTitle{课堂}{测试}\n% knowledge:k\n解释 , , ：完整正文 , 。\n% /knowledge:k'
+            original=hashlib.sha256(body.encode()).hexdigest()
+            (dest/'body.tex').write_text(body)
+            (dest/'source.json').write_text(json.dumps({'binding':author._binding('ref',{}),
+                'body_sha256':original,'writer_session_id':'original-writer'}))
+            with patch.object(author,'request_ai_text',AsyncMock()) as request:
+                result=await author.ensure_source('ref',folder,{}, {},{'knowledge':[{'id':'k'}]}, {},[])
+            request.assert_not_awaited()
+            self.assertIn('解释：完整正文。',(dest/'body.tex').read_text())
+            self.assertEqual(result['previous_body_sha256'],original)
+            self.assertEqual(result['writer_session_id'],'original-writer')
+            self.assertEqual((dest/('body-before-plain-names-'+original+'.tex')).read_text(),body)
+
     def source_key(self,markdown='ref',provenance=None):
         import hashlib
         binding=author._binding(markdown,provenance or {})

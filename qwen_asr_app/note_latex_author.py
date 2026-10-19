@@ -105,13 +105,35 @@ def _proposal_state(destination,key,state_path):
     return state,proposals
 
 
+def normalize_reference_punctuation(body):
+    """Remove citation-separator debris without touching formulas or comments."""
+    protected = re.compile(
+        r'(?<!\\)%[^\n]*|(?<!\\)\$\$.*?(?<!\\)\$\$|(?<!\\)\$[^$]*?(?<!\\)\$|'
+        r'\\\[.*?\\\]|\\\(.*?\\\)|'
+        r'\\begin\{(?P<mathenv>equation\*?|align\*?|aligned|gather\*?|multline\*?)\}.*?\\end\{(?P=mathenv)\}',
+        re.S)
+    def clean(text):
+        return re.sub(r'[ \t]*[,，](?:[ \t]*[,，])*[ \t]*(?=[。！？：；])', '', text)
+    parts=[];last=0
+    for match in protected.finditer(body):
+        parts.extend((clean(body[last:match.start()]),match[0]));last=match.end()
+    return ''.join(parts)+clean(body[last:])
+
+
+def _strip_source_references(text):
+    reference=r'\\SourceRef\s*\{[1-9][0-9]*\}'
+    # Separators belong to the reference cluster. Removing the macros one at
+    # a time left ", , , :" throughout otherwise complete lesson notes.
+    return re.sub(r'[ \t]*'+reference+r'(?:\s*[,，;；、]?\s*'+reference+r')*', '', text)
+
+
 def bind_knowledge_sources(body,ledger):
     """Attach canonical references so layout rewriting cannot lose provenance."""
     for item in ledger.get('knowledge',[]):
         ident=str(item['id']);sources=[value[1:] for value in item.get('sources',[]) if re.fullmatch(r'S[1-9][0-9]*',value)]
         if item.get('kind')=='material_supplement':
             pattern=re.compile(r'(^%\s*knowledge:'+re.escape(ident)+r'\s*\n)(.*?)(^%\s*/knowledge:'+re.escape(ident)+r'\s*$)',re.M|re.S)
-            body=pattern.sub(lambda match:match[1]+re.sub(r'\\SourceRef\s*\{[1-9][0-9]*\}', '',match[2])+match[3],body)
+            body=pattern.sub(lambda match:match[1]+_strip_source_references(match[2])+match[3],body)
             continue
         if not sources:continue
         selected=list(dict.fromkeys([sources[0],sources[-1]]))
@@ -121,7 +143,7 @@ def bind_knowledge_sources(body,ledger):
             # Keep the source row with teaching text. A final full-width figure
             # can move to the next page; its source row belongs before that
             # figure so the preceding explanation retains its time reference.
-            content=re.sub(r'\\SourceRef\s*\{[1-9][0-9]*\}', '',content)
+            content=_strip_source_references(content)
             content=re.sub(r'\\par\s*(?=\\CourseFigure\b)', '',content)
             content=re.sub(r'\\par\s*$', '',content.rstrip()).rstrip()
             # Let the source macro attach its no-break penalty before ending
@@ -140,7 +162,7 @@ def bind_knowledge_sources(body,ledger):
             content=(before+after).rstrip()+'\n'
             return match[1]+content+match[3]
         body=pattern.sub(replace,body)
-    return body
+    return normalize_reference_punctuation(body)
 
 
 def ensure_title(body,markdown,package):
@@ -349,14 +371,14 @@ async def _ensure_batch(payload,folder,destination,config,ledger,scope,images,tr
             raise ValueError('LaTeX已通过批次源稿改变，原检查点与诊断已保留')
         if not isinstance(accepted.get('writer_session_id'),str) or not accepted['writer_session_id'].strip():
             raise ValueError('LaTeX已通过批次缺少可核对的写作者会话回执')
-        body=body_path.read_text();normalized=normalize_course_names(body)
+        body=body_path.read_text();normalized=normalize_reference_punctuation(normalize_course_names(body))
         _prepare_fragment(normalized,ledger,scope,images,folder,transcript)
         if normalized!=body:
             # Keep the accepted source and writer receipt as historical evidence.
             # A spelling-only derivative gets its own hash and traceable receipt.
             accepted={**accepted,'previous_body_sha256':accepted['body_sha256'],
                 'body_sha256':hashlib.sha256(normalized.encode()).hexdigest(),
-                'normalization':'plain-course-names-v1'}
+                'normalization':'plain-course-names-and-reference-punctuation-v2'}
             atomic_bytes(destination/'body-plain-names.tex',normalized.encode())
             atomic_json(destination/'plain-names.json',accepted)
             body=normalized
@@ -512,14 +534,14 @@ async def ensure_source(markdown,folder,provenance,config,ledger,package,images,
     saved=json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
     if (feedback is None and saved.get('binding')==binding and source_path.exists()
             and saved.get('body_sha256')==hashlib.sha256(source_path.read_bytes()).hexdigest()):
-        body=source_path.read_text();normalized=normalize_course_names(body)
+        body=source_path.read_text();normalized=normalize_reference_punctuation(normalize_course_names(body))
         if normalized!=body:
             validate_coverage(normalized,ledger,package.get('learning_scope',{'enabled':False}))
             prepared=prepare_document(normalized,folder,images=images)
             original=saved['body_sha256']
             atomic_bytes(destination/('body-before-plain-names-'+original+'.tex'),body.encode())
             atomic_json(destination/('source-before-plain-names-'+original+'.json'),saved)
-            saved={**saved,'previous_body_sha256':original,'normalization':'plain-course-names-v1',
+            saved={**saved,'previous_body_sha256':original,'normalization':'plain-course-names-and-reference-punctuation-v2',
                 'body_sha256':hashlib.sha256(normalized.encode()).hexdigest(),'template_sha256':prepared['template_sha256']}
             atomic_bytes(source_path,normalized.encode());atomic_json(manifest_path,saved)
         return saved

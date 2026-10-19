@@ -80,6 +80,49 @@ class AGYCLITests(unittest.TestCase):
         self.assertEqual(caught.exception.kind, 'network_transport')
         self.assertTrue(caught.exception.retriable)
 
+    def test_native_interruption_variants_are_retryable_without_accepting_partial_text(self):
+        for result in (
+            {'status': 'FAILED', 'error': 'interrupted', 'response': '不完整正文'},
+            {'status': 'INTERRUPTED', 'response': '不完整正文'},
+        ):
+            with self.subTest(result=result), self.assertRaises(AIRequestError) as caught:
+                _decode_output(json.dumps({'event': 'result', 'result': result}), '')
+            self.assertEqual(caught.exception.kind, 'network_transport')
+            self.assertTrue(caught.exception.retriable)
+
+    def test_interruption_does_not_hide_rejected_credentials(self):
+        result = {'status': 'FAILED', 'error': 'interrupted'}
+        with self.assertRaises(AIRequestError) as caught:
+            _decode_output(json.dumps({'event': 'result', 'result': result}), '401 invalid_grant')
+        self.assertEqual(caught.exception.kind, 'provider_auth')
+        self.assertFalse(caught.exception.retriable)
+
+    def test_terminated_child_without_result_remains_retryable(self):
+        with patch('qwen_asr_app.agy_cli.subprocess.run', return_value=subprocess.CompletedProcess([], -15, '', '')):
+            with self.assertRaises(AIRequestError) as caught:
+                run_sync('test', {}, {'cli_model': 'gemini-3.8-flash-high'})
+        self.assertEqual(caught.exception.kind, 'network_transport')
+        self.assertTrue(caught.exception.retriable)
+
+    def test_transport_failure_on_any_auth_endpoint_is_not_a_login_rejection(self):
+        endpoints = ('https://www.googleapis.com/oauth2/v2/userinfo',
+                     'https://oauth2.googleapis.com/token',
+                     'https://accounts.google.com/login',
+                     'https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist')
+        for endpoint in endpoints:
+            for detail, expected in (('EOF', 'network_transport'), ('connection reset by peer', 'network_transport'),
+                                     ('dial tcp: lookup host: no such host', 'network_transport'),
+                                     ('deadline exceeded', 'network_read_timeout'), ('HTTP 503', 'provider_unavailable')):
+                error = f'Eligibility check failed: Get "{endpoint}": {detail}'
+                with self.subTest(error=error), self.assertRaises(AIRequestError) as caught:
+                    _decode_output(json.dumps({'event':'result','result':{'status':'FAILED','error':error}}), '')
+                self.assertEqual(caught.exception.kind, expected)
+                self.assertTrue(caught.exception.retriable)
+                with self.assertRaises(AIRequestError) as rejected:
+                    _decode_output(json.dumps({'event':'result','result':{'status':'FAILED','error':error+'; HTTP 401 invalid_grant'}}), '')
+                self.assertEqual(rejected.exception.kind, 'provider_auth')
+                self.assertFalse(rejected.exception.retriable)
+
     def test_ambiguous_auth_timeout_is_retried_but_explicit_login_failure_is_not(self):
         for message, kind, retriable in (
             ('authentication failed or timed out', 'network_connect_timeout', True),

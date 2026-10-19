@@ -20,6 +20,29 @@ def config(window=1048576, transport='agy_cli'):
 
 
 class NoteBudgetTests(unittest.TestCase):
+    def test_history_rename_preserves_legacy_checkpoint_and_new_task_identity(self):
+        from qwen_asr_app.review_notes import history_with_saved_titles
+        from qwen_asr_app.review_materials import history_content_signature
+        history=[{'id':'previous','date':'2026-09-03','title':'旧课名',
+                  'transcript_sha256':'original','refinement_sha256':'verified'}]
+        inputs=['pipeline','record',history]
+        old=hashlib.sha256(json.dumps([*inputs,summary_signature(config())],sort_keys=True,ensure_ascii=False,default=str).encode()).hexdigest()[:24]
+        renamed=[{**history[0],'title':'自动生成的新课名'}]
+        with tempfile.TemporaryDirectory() as raw:
+            # New identities bind content, not mutable display labels.
+            stable=budget_compatible_identity(raw,inputs,config(),history_index=2)
+            self.assertEqual(stable,budget_compatible_identity(raw,['pipeline','record',renamed],config(),history_index=2))
+            folder=Path(raw)/old;folder.mkdir()
+            (folder/'task.json').write_text(json.dumps({'generation_config':config()['ai']['summary_provider']}))
+            (folder/'proposed-note.json').write_text(json.dumps({'material_version':{'history':history}}))
+            self.assertEqual(budget_compatible_identity(raw,['pipeline','record',renamed],config(),history_index=2),old)
+            self.assertEqual(history_with_saved_titles(folder,renamed),history)
+            self.assertEqual(history_content_signature(history),history_content_signature(renamed))
+            for key in ('id','date','transcript_sha256','refinement_sha256'):
+                changed=[{**renamed[0],key:'changed-source'}]
+                self.assertNotEqual(history_content_signature(history),history_content_signature(changed))
+                self.assertNotEqual(budget_compatible_identity(raw,['pipeline','record',changed],config(),history_index=2),old)
+
     def test_revision_uses_saved_long_window_and_reports_components_when_too_small(self):
         payload={'draft':'正文'*16000,'review':'审查'*8000,'evidence':'原资料'*46000,'latex_draft':'公式'*12000}
         budget=require_budget('修订完整笔记',payload,config())

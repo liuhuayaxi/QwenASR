@@ -87,7 +87,7 @@ def save_imports(*, force=True):
     _last_import_save = now
 
 
-PHASE_WEIGHTS = {"download": 25, "asr": 45, "correction": 15, "summary": 15}
+PHASE_WEIGHTS = {"download": 25, "asr": 45, "correction": 10, "verification": 5, "summary": 10, "review": 5}
 
 
 def begin_import_progress(entry, run_options):
@@ -96,9 +96,13 @@ def begin_import_progress(entry, run_options):
         "asr": {"label": "本地语音转写", "percent": 0, "detail": "等待音频", "state": "pending"},
     }
     if run_options.get("ai_correction", True):
-        phases["correction"] = {"label": "AI 精修", "percent": 0, "detail": "等待转写", "state": "pending"}
+        phases["correction"] = {"label": "首轮文字修正", "percent": 0, "detail": "等待转写", "state": "pending"}
+        phases["verification"] = {"label": "独立文字复核", "percent": 0, "detail": "等待首轮修正", "state": "pending"}
     if run_options.get("generate_summary", True):
         phases["summary"] = {"label": "课堂笔记", "percent": 0, "detail": "等待转写完成", "state": "pending"}
+        phases["review"] = {"label": "笔记逐页审查", "percent": 0, "detail": "等待排版完成", "state": "pending"}
+    for key,old in entry.get('phases',{}).items():
+        if key in phases and old.get('state')=='completed':phases[key]={**old,'label':phases[key]['label']}
     entry["phases"] = phases
     entry["progress"] = 0
 
@@ -178,6 +182,12 @@ async def reconcile_imports():
             changed = True
     if changed:
         save_imports()
+        # A note may finish through the task center after the replay runner
+        # disconnects. Reconcile the queue too, or resume generates it again.
+        for queued in queue_state["items"]:
+            if imports.get(queued["group"]["id"], {}).get("state") == "completed":
+                queued["state"] = "completed"
+        save_queue()
 
 
 @asynccontextmanager
@@ -260,9 +270,13 @@ async def service_stop_guard(action: str, request: Request):
 @app.get("/api/status")
 async def get_status(course: str = ''):
     groups = [group for group in group_rows.values() if group.get('course_key') == course] if course else []
+    from .course_phase_status import lesson_phases
+    store=getattr(app.state,'recording_store',None)
+    shown=[{**entry,'phases':lesson_phases(entry,store.find(entry.get('record_id','')) if store else None)}
+           for entry in imports.values() if entry.get('state') in {'running','queued'}]
     return {**status, "service": "courses", "pid": os.getpid(), "instance": os.getenv("QWEN_ASR_INSTANCE", ""), "credentials_saved": (STATE_DIR / "credentials.json").exists(),
             "term": current_term(), "courses": list(course_rows.values()),
-            "imports": [entry for entry in imports.values() if entry.get("state") in {"running", "queued"}],
+            "imports": shown,
             "options": options, "queue": queue_view(),
             "lesson_course": course, "lesson_statuses": await import_statuses(groups)}
 
@@ -496,9 +510,22 @@ async def consume_stream(local, path, entry, **kwargs):
 async def import_stream(local, group, config, entry):
     """The decoder blocks only on durable upload, while the main server runs ASR."""
     headers = {"X-QwenASR-Client": "smartclass"}
-    update_import_phase(entry, "download", 1, "正在获取回放音轨地址")
-    async with platform_lock:
-        sources = await asyncio.to_thread(client.audio_sources, group)
+    store=getattr(app.state,'recording_store',None)
+    cached=store.find(entry.get('record_id','')) if store else None
+    saved=cached.metadata.get('course_stream',{}) if cached else {}
+    cached_sources=saved.get('sources') or []
+    local_complete=bool(saved.get('input_complete') and cached_sources
+        and (group['id'] in saved.get('keys',[]) or cached.metadata.get('source_filename')==f"smartclass_{group['id']}.flac")
+        and {str(s['video_id']) for s in cached_sources}==set(video_ids(group)))
+    if local_complete:
+        # Creation verifies every retained chunk hash before starting the AI
+        # pipeline. Completed input needs no fresh campus URL or download.
+        sources=cached_sources
+        complete_import_phase(entry,'download','完整音频已在本地，核对分片后继续')
+    else:
+        update_import_phase(entry, "download", 1, "正在获取回放音轨地址")
+        async with platform_lock:
+            sources = await asyncio.to_thread(client.audio_sources, group)
     response = await local.post(WORKBENCH + "/api/course-streams", json={
         "key": group["id"], "duration": group["duration"], "config": config,
         "sources": [{k: v for k, v in source.items() if k != "url"} for source in sources],
@@ -509,6 +536,8 @@ async def import_stream(local, group, config, entry):
         detail = response.json().get("detail") if response.headers.get("content-type", "").startswith("application/json") else None
         raise SmartClassError(detail if isinstance(detail, str) else "分段转写任务创建失败，请检查语音工作台")
     state = response.json()
+    if local_complete and not state.get('download_complete'):
+        raise SmartClassError('本地音频完成标记发生变化，已保留分片，请核对后继续')
     entry.update(record_id=state["id"], directory=state["directory"])
     save_imports()
     ident = state["id"]
@@ -614,20 +643,29 @@ async def import_stream(local, group, config, entry):
             update_import_phase(
                 entry,
                 "asr",
-                100 if state["status"] == "completed" else asr_percent,
-                f"{state['asr_seconds']/60:.1f}/{expected/60:.1f} 分钟 · {state.get('stage') or '正在转写'}",
-                "completed" if state["status"] == "completed" else "running",
+                100 if state.get('asr_complete') or state["status"] == "completed" else asr_percent,
+                '语音转写已保存 · '+str(state['segments'])+' 段' if state.get('asr_complete') else f"{state['asr_seconds']/60:.1f}/{expected/60:.1f} 分钟",
+                "completed" if state.get('asr_complete') or state["status"] == "completed" else "running",
             )
             if "correction" in entry.get("phases", {}):
                 segment_count = int(state["segments"] or 0)
-                correction_percent = 100 if state["status"] == "completed" else 100 * state["corrected_segments"] / max(1, segment_count)
+                refinement=state.get('refinement') or {}
+                saved=refinement.get('saved_segments',state['corrected_segments'])
+                correction_done=state['status']=='completed' or bool(state.get('asr_complete') and refinement and not refinement.get('remaining_segments'))
+                correction_percent = 100 if correction_done else 100 * saved / max(1, segment_count)
                 update_import_phase(
                     entry,
                     "correction",
                     correction_percent,
-                    f"{state['corrected_segments']}/{segment_count} 段",
-                    "completed" if state["status"] == "completed" else ("running" if segment_count else "pending"),
+                    f"已保存 {saved}/{segment_count} 段",
+                    "completed" if correction_done else ("running" if segment_count else "pending"),
                 )
+                verification=state.get('verification') or {}
+                if verification:
+                    total=int(verification.get('total') or 0);done=int(verification.get('completed') or 0)
+                    update_import_phase(entry,'verification',100*done/max(1,total),
+                        f"已复核 {done}/{total} 条修改"+("；继续未完成复核" if verification.get('status')=='failed' else ''),
+                        'error' if verification.get('status')=='failed' else verification.get('status','pending'))
             status["message"] = f"{group['title']}：{entry['message']}"
             # The workbench task feed reads this checkpoint in another process.
             save_imports(force=False)
@@ -725,7 +763,8 @@ async def import_group(group: dict, run_options: dict | None = None):
         entry.update(record_id=complete["id"], directory=complete["directory"])
         complete_import_phase(entry, "download", "回放音频已获取")
         complete_import_phase(entry, "asr", "语音转写已完成")
-        complete_import_phase(entry, "correction", "AI 精修已完成")
+        complete_import_phase(entry, "correction", "首轮文字修正已保存")
+        complete_import_phase(entry, "verification", "独立文字复核已完成")
         if manifest_path.exists():
             private_json(Path(complete["directory"]) / "课程来源.json", read_json(manifest_path, {}))
         if options.get("generate_summary", True):
@@ -756,7 +795,11 @@ async def import_group(group: dict, run_options: dict | None = None):
                 if total_parts:
                     unit = state.get('progress_unit') if state.get('progress_unit') in {'页', '批'} else '个分块'
                     summary_detail += f" · {completed_parts}/{total_parts} {unit}"
-                update_import_phase(entry, "summary", summary_percent, summary_detail)
+                if re.search('独立审查|逐页审查|修订',summary_detail):
+                    complete_import_phase(entry,'summary','笔记已生成并排版')
+                    update_import_phase(entry,'review',summary_percent,summary_detail)
+                else:
+                    update_import_phase(entry, "summary", summary_percent, summary_detail)
                 entry["message"] = summary_detail
                 status["message"] = f"{group['title']}：{summary_detail}"
                 save_imports(force=False)
@@ -891,8 +934,6 @@ async def start_import(data: Selection):
 async def resume_queue():
     global job
     check_idle()
-    if not status.get("identity"):
-        raise HTTPException(400, "请先重新连接账号，再继续已保存队列")
     for item in queue_state["items"]:
         if item["state"] != "completed":
             item["state"] = "queued"
@@ -900,7 +941,28 @@ async def resume_queue():
     save_queue()
     stop_event.clear()
     status.update(state="running", message="正在继续已保存队列")
-    job = asyncio.create_task(run_queue())
+    async def resume_saved():
+        # A service restart clears memory, not the saved account. Restore it
+        # here as well as on startup, without asking the user to log in again.
+        if not status.get("identity") or not status.get("authenticated", True):
+            status.update(session_check="checking", message="正在使用已保存账号恢复课程连接…")
+            try:
+                async with platform_lock:
+                    identity = await asyncio.to_thread(client.ensure_login)
+                status.update(identity=identity, authenticated=True, session_check="ready")
+                status.pop("connection_warning", None)
+            except (SmartClassError, httpx.HTTPError) as exc:
+                message = connection_error(exc, client.last_stage) if isinstance(exc, httpx.HTTPError) else str(exc)
+                status.update(authenticated=False, session_check="error", connection_warning=message)
+                # Already saved audio/transcripts do not depend on the portal.
+                # Any remaining downloads retain their own truthful failure.
+        if not stop_event.is_set() and not queue_state.get("paused"):
+            try:
+                await reconcile_imports()
+            except (httpx.HTTPError, ValueError):
+                pass
+            await run_queue()
+    job = asyncio.create_task(resume_saved())
     return {"started": True}
 
 

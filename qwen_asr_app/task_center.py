@@ -69,7 +69,11 @@ def group_tasks(tasks):
             expanded.append({**task, 'recording_id': item.get('recording_id') or '',
                              'course_item': item, 'title': item.get('title') or task['title'],
                              'category': item.get('course') or '', 'status': state,
-                             'stage': stage, 'progress': item.get('progress', 0),
+                             'stage': stage, 'progress': (current or {}).get('percent',item.get('progress',0)),
+                             'completed':sum(p.get('state')=='completed' for p in phases),
+                             'total':len(phases), 'progress_unit':'阶段',
+                             'next_action':('继续'+str((current or {}).get('label') or '未完成阶段')),
+                             'warnings':[],
                              'error': stage if state in {'failed', 'interrupted'} else '',
                              'updated_at': item.get('updated_at') or task.get('updated_at') or '',
                              'display_status': state})
@@ -96,7 +100,7 @@ def group_tasks(tasks):
                 # current AI owners supply the actionable state of that step.
                 unfinished = [p.get('key') for p in task['course_item'].get('phases', [])
                               if p.get('state') != 'completed']
-                covered = {'summary': {'summary'}, 'correction': {'refinement'}, 'asr': {'remote_asr', 'upload'}}
+                covered = {'summary': {'summary'}, 'review': {'summary'}, 'verification': {'refinement','summary'}, 'correction': {'refinement'}, 'asr': {'remote_asr', 'upload'}}
                 if unfinished and all(any(o.get('type') in covered.get(key, set()) for o in owners) for key in unfinished):
                     task['is_context'] = True
         history = [t for t in tasks if t.get('recovered') or t['status'] in {'completed', 'cancelled'}]

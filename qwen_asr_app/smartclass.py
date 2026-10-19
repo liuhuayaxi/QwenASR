@@ -280,6 +280,12 @@ class SmartClassClient:
             for attempt in range(3 if method.upper() == "GET" else 1):
                 try:
                     response = self.http.request(method, url, **kwargs)
+                    # A temporary gateway failure is not a rejected login.
+                    # Retry only reads; never loop credential POSTs on a 4xx.
+                    if method.upper() == "GET" and response.status_code in {429, 502, 503, 504} and attempt < 2:
+                        response.close()
+                        time.sleep(.5 * (attempt + 1))
+                        continue
                     break
                 except httpx.HTTPError:
                     if method.upper() != "GET" or attempt == 2:

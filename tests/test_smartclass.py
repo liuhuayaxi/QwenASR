@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 import httpx
 
@@ -49,6 +50,33 @@ class GroupTests(unittest.TestCase):
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_gateway_failure_retries_get_without_losing_query(self):
+        seen = []
+        def handle(request):
+            seen.append(request)
+            return httpx.Response(502 if len(seen) < 3 else 200, text='ready')
+        client = SmartClassClient(transport=httpx.MockTransport(handle))
+        self.addCleanup(client.close)
+        with patch('qwen_asr_app.smartclass.time.sleep'):
+            result = client.request('GET', PORTAL + '/UserSpace/CourseCenter.aspx', params={'check': '1'})
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(len(seen), 3)
+        self.assertTrue(all(r.url.params['check'] == '1' for r in seen))
+
+    def test_gateway_retries_are_bounded_and_do_not_repeat_credentials(self):
+        for method, code, expected in [('GET', 502, 3), ('GET', 401, 1), ('POST', 502, 1)]:
+            seen = []
+            def handle(request):
+                seen.append(request)
+                return httpx.Response(code)
+            client = SmartClassClient(transport=httpx.MockTransport(handle))
+            try:
+                with patch('qwen_asr_app.smartclass.time.sleep'), self.assertRaises(SmartClassError):
+                    client.request(method, PORTAL + '/test')
+                self.assertEqual(len(seen), expected)
+            finally:
+                client.close()
+
     def test_platform_cipher_matches_published_script_vector(self):
         self.assertEqual(decrypt_platform("30597f5d6d50b15923ab9ecd17180292"), "test")
         self.assertEqual(len(encrypt_cas("password")), 32)

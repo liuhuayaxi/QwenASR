@@ -32,7 +32,10 @@ def course_tasks():
         ident = item['group']['id']
         entry = imports.get(ident, {})
         phase_data = []
-        for key, phase in (entry.get('phases') or {}).items():
+        from .course_phase_status import lesson_phases
+        from .storage import recording_store
+        record=recording_store.find(entry.get('record_id') or entry.get('recording_id') or '')
+        for key, phase in lesson_phases(entry,record).items():
             if not isinstance(phase, dict):
                 continue
             phase_data.append({
@@ -59,7 +62,7 @@ def course_tasks():
     return [{'id': 'course_queue', 'type': 'course_queue', 'family': 'asr', 'label': '课程回放队列',
              'title': f'课程回放 · {len(items)} 堂课', 'category': '', 'source': '课程回放', 'status': status,
              'run_identity': run_identity,
-             'completed': 0, 'total': len(items), 'progress': overall, 'stage': '按未完成课次处理',
+             'completed': len(all_items)-len(items), 'total': len(all_items), 'progress': overall, 'stage': '按未完成课次处理',
              'actions': ['pause'] if status in {'running', 'queued'} else ['continue'] if remaining else [],
              'warnings': details, 'course_items': course_items, 'result_url': '/course/'}]
 

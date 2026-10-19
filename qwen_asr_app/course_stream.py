@@ -121,11 +121,15 @@ class CourseStreamJob:
         timing={key:round(sum(values),3) if values else None for key,values in totals.items()}
         timing['asr_timing_observations']={key:len(values) for key,values in totals.items()}
         timing['asr_timing_basis']='completed_transcript_segments'
+        from .refinement import saved_progress
+        refinement=saved_progress(r)
         return {"id": r.id, "directory": str(r.directory), "status": r.metadata["status"],
                 "next_index": len(chunks), "download_seconds": round(r.duration, 2),
                 "expected_seconds": round(float(s.get("expected_seconds", 0)), 2),
                 "asr_seconds": round(sum(c["samples"] for c in chunks[:done]) / SAMPLE_RATE, 2),
                 "segments": len(r.segments), "corrected_segments": corrected,
+                "asr_complete": bool(s.get('input_complete') and chunks and done>=len(chunks)),
+                "refinement": refinement, "verification": r.metadata.get('correction_verification',{}),
                 "ai_errors": sum(bool(v.get("ai_error")) for v in r.segments),
                 "download_complete": bool(s.get("input_complete")), "stage": s.get("stage", ""),
                 "error": s.get("error", ""), "paused": bool(s.get("paused")),
@@ -209,8 +213,10 @@ class CourseStreamJob:
         try:
             if self.config.get("ai_correction"):
                 pipeline = SegmentCorrectionPipeline(self.record, self.config)
+                from .refinement import pending_ids
+                pending=pending_ids(self.record)
                 for segment in list(self.record.segments):
-                    if not segment_ai_complete(segment, self.config):
+                    if int(segment['id']) in pending or (self.config.get('translation','off')!='off' and not segment_ai_complete(segment,self.config)):
                         await pipeline.submit(segment)
             while True:
                 index = int(self.state.get("completed_chunks", 0))

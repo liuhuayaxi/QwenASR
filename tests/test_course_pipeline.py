@@ -15,6 +15,8 @@ from fastapi import HTTPException
 from qwen_asr_app import smartclass_service as service
 from qwen_asr_app.smartclass import SmartClassError
 
+reconcile_imports = service.reconcile_imports
+
 
 async def until(predicate):
     async with asyncio.timeout(2):
@@ -36,6 +38,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             self.stack.enter_context(patch.object(service, name, value))
         self.stack.enter_context(patch.object(service, 'save_imports'))
         self.stack.enter_context(patch.object(service, 'save_queue'))
+        self.stack.enter_context(patch.object(service, 'reconcile_imports', AsyncMock()))
 
     async def asyncTearDown(self):
         service.stop_event.set()
@@ -163,6 +166,45 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             await service.job
             self.assertEqual(run.await_count, 5)
 
+    async def test_resume_restores_saved_login_without_manual_reconnect(self):
+        service.status.update(identity=None, authenticated=False)
+        service.queue_state['items'] = [{'group': self.groups['A'], 'state': 'interrupted', 'options': {}}]
+        def verify_started(group, options):
+            self.assertTrue(service.status['authenticated'])
+        with patch.object(service.client, 'ensure_login', return_value={'name': 'saved'}) as login, \
+             patch.object(service, 'import_group', AsyncMock(side_effect=verify_started)) as run:
+            self.assertTrue((await service.resume_queue())['started'])
+            with self.assertRaises(HTTPException):
+                await service.resume_queue()
+            await service.job
+        login.assert_called_once()
+        run.assert_awaited_once()
+        self.assertEqual(service.queue_view()['remaining'], 0)
+
+    async def test_platform_outage_does_not_block_local_work_or_lose_queue(self):
+        service.status.update(identity=None, authenticated=False)
+        service.queue_state['items'] = [{'group': self.groups['A'], 'state': 'interrupted', 'options': {}}]
+        with patch.object(service.client, 'ensure_login', side_effect=SmartClassError('平台请求失败（HTTP 502）')) as login, \
+             patch.object(service, 'import_group', AsyncMock()) as run:
+            await service.resume_queue()
+            await service.job
+        login.assert_called_once()
+        run.assert_awaited_once()
+        self.assertFalse(service.status['authenticated'])
+        self.assertIn('502', service.status['connection_warning'])
+        self.assertEqual(service.queue_view()['remaining'], 0)
+
+    async def test_completed_note_reconciles_queue_without_regeneration(self):
+        service.imports['A'] = {'record_id': 'saved', 'state': 'interrupted'}
+        service.queue_state['items'] = [{'group': self.groups['A'], 'state': 'interrupted', 'options': {}}]
+        transport = httpx.MockTransport(lambda request: httpx.Response(200, json={'records': [
+            {'id': 'saved', 'status': 'completed', 'summary_job': {'status': 'completed'}}]}))
+        client = httpx.AsyncClient(transport=transport)
+        with patch.object(service.httpx, 'AsyncClient', return_value=client):
+            await reconcile_imports()
+        self.assertEqual(service.queue_view()['remaining'], 0)
+        self.assertEqual(service.imports['A']['state'], 'completed')
+
     async def test_failed_task_does_not_retry_forever_and_can_be_appended_again(self):
         started, release = [], asyncio.Event()
 
@@ -213,6 +255,30 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             courses.assert_called_once()
             release.set()
             await runner
+
+    async def test_complete_local_input_resumes_without_campus_urls_or_download(self):
+        from types import SimpleNamespace
+        saved={'course_stream':{'input_complete':True,'keys':['A'],
+            'sources':[{'video_id':'A','segment_id':'1'}]}}
+        record=SimpleNamespace(metadata=saved)
+        store=SimpleNamespace(find=lambda ident:record if ident=='saved-record' else None)
+        entry={'id':'A','record_id':'saved-record'};service.begin_import_progress(entry,{})
+        group={'id':'A','title':'A','duration':100,'videos':[{'NewID':'A'}]}
+        with tempfile.TemporaryDirectory() as raw:
+            state={'id':'saved-record','directory':raw,'next_index':1,'status':'processing',
+                'download_complete':True,'download_seconds':100,'asr_seconds':100,
+                'corrected_segments':1,'segments':1,'ai_errors':0,'asr_complete':True}
+            def handler(request):
+                if request.method=='POST':
+                    self.assertEqual(json.loads(request.content)['sources'],saved['course_stream']['sources'])
+                    return httpx.Response(200,json=state)
+                self.assertEqual(request.url.path,'/api/course-streams/saved-record')
+                return httpx.Response(200,json={**state,'status':'completed'})
+            async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as local:
+                with patch.object(service.app.state,'recording_store',store,create=True),patch.object(service.client,'audio_sources',side_effect=AssertionError('Unneeded campus call')),patch.object(service,'stream_audio',side_effect=AssertionError('Unneeded download')):
+                    result=await service.import_stream(local,group,{},entry)
+            self.assertEqual(result['status'],'completed')
+            self.assertEqual(entry['phases']['asr']['state'],'completed')
 
     async def test_download_slot_moves_to_next_course_before_asr_finishes(self):
         states, downloaded = {}, []

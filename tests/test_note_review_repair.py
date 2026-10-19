@@ -62,6 +62,32 @@ class LocalPatchTests(unittest.TestCase):
 
 
 class AutonomousRepairTests(unittest.IsolatedAsyncioTestCase):
+    async def test_more_than_eight_pages_reuses_bounded_per_page_decisions(self):
+        from qwen_asr_app.note_review_repair import INSTRUCTIONS
+        with tempfile.TemporaryDirectory() as raw:
+            f=Path(raw);md,p,pdf,report,ledger,body=self.fixture(f)
+            report['status']='needs_revision';report['issues']=[];report['batches']=[]
+            for page in range(1,10):
+                image=f/'pages'/report['pdf_sha256']/f'page-{page:03d}.png';image.write_bytes(b'page')
+                report['issues'].append({'page':page,'severity':'warning','problem':'核对排版','evidence':'本页'})
+                report['batches'].append({'pages':[page],'receipt':{'required_images':[str(image)]}})
+            async def decide(prompt,*args,**kwargs):
+                payload=json.loads(prompt[len(INSTRUCTIONS)+1:])
+                self.assertLessEqual(len(kwargs['require_images']),4)
+                result={'decisions':[{'issue_index':x['issue_index'],'decision':'acceptable_layout','evidence':'已实际核对'} for x in payload['issues']],
+                        'latex_patches':[],'markdown_patches':[]}
+                return json.dumps(result),{'session_id':'repairer-'+str(payload['page'])}
+            request=AsyncMock(side_effect=decide)
+            with patch('qwen_asr_app.note_review_repair.pdf_operation',return_value=[{'page':i,'text':'S1 工艺'} for i in range(1,10)]), \
+                 patch('qwen_asr_app.note_review_repair.request_materials',request):
+                await repair_review(md,f,p,{},ledger,{},[],pdf,report)
+                await repair_review(md,f,p,{},ledger,{},[],pdf,report)
+            self.assertEqual(request.await_count,9)
+            progress=json.loads((f/'automatic-repair'/report['pdf_sha256']/'progress.json').read_text())
+            self.assertEqual(progress['completed_pages'],list(range(1,10)))
+            self.assertEqual((f/'latex/body.tex').read_text(),body)
+            self.assertEqual(report['status'],'needs_revision')
+
     def fixture(self,folder):
         markdown='<!-- knowledge:k -->正确工艺说明[原文 S1](#source-1)<!-- /knowledge:k -->'
         body=r'\CourseTitle{测试}{来源核对}'+'\n% knowledge:k\n错误工艺说明'+r'\SourceRef{1}'+'\n% /knowledge:k\n'

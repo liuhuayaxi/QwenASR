@@ -150,6 +150,60 @@ class AutomaticVerificationTests(unittest.IsolatedAsyncioTestCase):
                 request.assert_not_awaited()
             self.assertEqual(len(active_candidates(record)),3)
 
+    async def test_output_exhaustion_bisects_with_all_evidence_and_journals_each_child(self):
+        with tempfile.TemporaryDirectory() as directory:
+            record=self.record(directory)
+            attempts=[];accepted=[]
+            evidence=[{'citation_id':'Kfull','origin':'original','text':'完整的原始课程证据'}]
+            async def retrieve(r,c,t,**k):return {**c,'_knowledge_evidence':evidence}
+            async def upstream(**request):
+                payload=request['payload'];ids=[c['candidate_id'] for c in payload['candidates']]
+                attempts.append(len(ids));self.assertEqual(payload['course_evidence'][0]['text'],evidence[0]['text'])
+                if len(ids)>1:raise AIRequestError('output limit',kind='output_truncated')
+                accepted.extend(ids)
+                return self.reply(payload)
+            with patch.object(verify,'request_ai_json',side_effect=upstream),patch('qwen_asr_app.transcription_assist.service.evidence_config',side_effect=retrieve):
+                await verify.verify_corrections(record,CONFIG)
+            self.assertEqual(attempts,[3,1,2,1,1])
+            self.assertEqual(len(accepted),3);self.assertEqual(len(set(accepted)),3)
+            self.assertFalse(active_candidates(record))
+            self.assertEqual(len(list((record.directory/'.correction-verifications').glob('request-*.json'))),3)
+
+    async def test_partial_split_success_survives_a_later_error_and_resumes_only_remaining(self):
+        with tempfile.TemporaryDirectory() as directory:
+            record=self.record(directory);accepted=[]
+            async def upstream(**request):
+                payload=request['payload']
+                if len(payload['candidates'])>1:raise AIRequestError('limit',kind='output_truncated')
+                if accepted:raise AIRequestError('auth',kind='provider_auth')
+                accepted.append(payload['candidates'][0]['candidate_id']);return self.reply(payload)
+            with patch.object(verify,'request_ai_json',side_effect=upstream):
+                with self.assertRaises(AIRequestError):await verify.verify_corrections(record,CONFIG)
+            self.assertEqual(len(active_candidates(record)),2)
+            self.assertEqual(record.metadata['correction_verification']['status'],'failed')
+            reloaded=type(record).load(record.directory)
+            async def finish(**request):
+                self.assertFalse(set(accepted)&{c['candidate_id'] for c in request['payload']['candidates']})
+                return self.reply(request['payload'])
+            with patch.object(verify,'request_ai_json',side_effect=finish):await verify.verify_corrections(reloaded,CONFIG)
+            self.assertFalse(active_candidates(reloaded))
+
+    async def test_cli_high_starts_with_at_most_eight_and_single_limit_is_finite(self):
+        with tempfile.TemporaryDirectory() as directory:
+            record=self.record(directory);attempts=[]
+            for i in range(4,21):
+                segment=copy.deepcopy(record.segments[0]);segment.update(id=i,start=i*10,end=i*10+9)
+                holder=copy.deepcopy(record.metadata['ai_reviews'][0]);holder.update(id=i,segment_ids=[i],start=i*10,end=i*10+9)
+                record.segments.append(segment);record.metadata['ai_reviews'].append(holder)
+            config={'ai':{'correction_provider':{'transport':'agy_cli','cli_model':'gemini-3.8-flash-high','context_window':256000}}}
+            async def upstream(**request):
+                attempts.append(len(request['payload']['candidates']))
+                raise AIRequestError('output limit',kind='output_truncated')
+            with patch.object(verify,'request_ai_json',side_effect=upstream):
+                with self.assertRaises(AIRequestError):await verify.verify_corrections(record,config)
+            self.assertEqual(attempts,[8,4,2,1])
+            self.assertEqual(len(active_candidates(record)),20)
+
     async def test_completed_refinement_with_only_candidates_runs_verifier(self):
         with tempfile.TemporaryDirectory() as directory:
             record=self.record(directory)

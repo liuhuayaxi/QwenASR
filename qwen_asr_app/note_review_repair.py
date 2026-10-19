@@ -182,15 +182,24 @@ async def repair_review(markdown,folder,provenance,provider,ledger,package,image
         raise ValueError('自动复核页面与LaTeX源稿版本不一致，未修正其他版本')
     rows=await await_owned_task(asyncio.create_task(asyncio.to_thread(pdf_operation,'text',path=str(pdf))))
     groups=issue_groups(issues,rows,ledger)
-    if len(groups)>8:raise ValueError('自动复核问题页超过本轮上限，完整成果与审查保留')
+    if any(page not in {row['page'] for row in rows} for page in groups):
+        raise ValueError('自动复核问题页不在当前 PDF 中，完整成果与审查保留')
     transcript=json.loads((folder/'transcript.json').read_text())
     root=folder/'automatic-repair'/report['pdf_sha256'];root.mkdir(parents=True,exist_ok=True)
     sessions=[];audits=[];unresolved=False;recheck_pages=[]
+    def checkpoint():
+        atomic_json(root/'progress.json', {'pdf_sha256':report['pdf_sha256'],
+            'completed_pages':[row['page'] for row in audits], 'total_pages':len(groups)})
+    checkpoint()
+    # One page per request, at most four images and three proposals per page.
+    # A document with more than eight findings can continue through the same
+    # persisted page decisions; increasing its length never adds concurrency.
     for page,page_issues in sorted(groups.items()):
         if progress:progress(page,len(groups))
         text=next(r['text'] for r in rows if r['page']==page)
         ids,selection=_selected(body,markdown,ledger,images,report,page,text)
-        if not ids:unresolved=True;audits.append({'page':page,'decision':'defer','reason':'缺少可局部修正的来源知识块'});continue
+        if not ids:
+            unresolved=True;audits.append({'page':page,'decision':'defer','reason':'缺少可局部修正的来源知识块'});checkpoint();continue
         batch=next((b for b in report.get('batches',[]) if page in b['pages']),{})
         paths=[safe_path(folder,str(Path(p).resolve().relative_to(folder.resolve())) if Path(p).is_absolute() else p)
                for p in batch.get('receipt',{}).get('required_images',[]) if str(p).lower().endswith('.png')]
@@ -243,6 +252,7 @@ async def repair_review(markdown,folder,provenance,provider,ledger,package,image
         body=apply_patches(body,result['latex_patches'],ids,'latex')
         markdown=apply_patches(markdown,result['markdown_patches'],ids,'markdown')
         sessions.append(receipt['session_id']);audits.append({'page':page,**decision})
+        checkpoint()
         unresolved|=any(d['decision']=='defer' for d in result['decisions'])
         if any(issues[d['issue_index']]['severity']=='blocking' and d['decision'] in {'false_positive','acceptable_layout'} for d in result['decisions']):
             recheck_pages.append(page)
