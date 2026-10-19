@@ -100,6 +100,7 @@ class ModelManager:
             if self.worker is not None and self.worker.is_alive():
                 if getattr(self, '_retained_unready_worker', False):
                     raise RuntimeError("模型尚未加载成功且原子进程未退出，请先释放该进程后重试")
+                self.schedule_unload()
                 return
             self.status = "loading"
             self.detail = "正在按需加载 Qwen3-ASR-1.7B…"
@@ -117,6 +118,7 @@ class ModelManager:
                 self.load_seconds = round(time.monotonic() - started, 1)
                 self.status = "ready"
                 self.detail = f"Qwen3-ASR-1.7B BF16 已就绪 · {self.device}"
+                self.schedule_unload()
             except asyncio.CancelledError:
                 # Loading may have completed after its requester disconnected.
                 if load_completed and self.worker is not None and self.worker.is_alive():
@@ -137,6 +139,7 @@ class ModelManager:
                 self.status = "error"
                 self.detail = f"模型加载失败：{exc}"
                 print(self.detail, flush=True)
+                self.schedule_unload()
 
     def _start_worker_sync(self) -> None:
         self._stop_worker_sync()
@@ -250,26 +253,33 @@ class ModelManager:
 
     def client_connected(self) -> None:
         self.connected_clients += 1
-        self.cancel_unload()
+        self.schedule_unload()
 
     def client_disconnected(self) -> None:
         self.connected_clients = max(0, self.connected_clients - 1)
         self.schedule_unload()
 
-    def schedule_unload(self, delay: float = 5.0) -> None:
-        if self._closing or self._unloading or self.connected_clients or self.active_jobs or self.worker is None:
+    @property
+    def idle_release_seconds(self) -> float:
+        # A paused page is not a model lease. Keep a short warm interval for
+        # live work, then let process exit return both RAM and Metal allocations.
+        return 30.0 if self.connected_clients else 5.0
+
+    def schedule_unload(self, delay: float | None = None) -> None:
+        if self._closing or self._unloading or self.active_jobs or self.worker is None:
             return
         self.cancel_unload()
-        self.unload_task = asyncio.create_task(self._unload_after(delay))
+        self.unload_task = asyncio.create_task(self._unload_after(
+            self.idle_release_seconds if delay is None else delay))
 
     async def _unload_after(self, delay: float) -> None:
         try:
             await asyncio.sleep(delay)
-            if self.connected_clients or self.active_jobs:
+            if self.active_jobs:
                 return
             async with self.infer_lock:
                 async with self.load_lock:
-                    if self.connected_clients or self.active_jobs or self.worker is None:
+                    if self.active_jobs or self.worker is None:
                         return
                     await self._unload_worker()
                     print("Qwen3-ASR 子进程已退出，模型内存已归还系统。", flush=True)

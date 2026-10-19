@@ -55,7 +55,7 @@ function environment(groups = [group('a'), group('b')]) {
     Option: function(text, value) { const node = new Element('option'); node.textContent = text; node.value = value; return node; },
     location: {origin: 'http://127.0.0.1:8765', search: ''},
     document: {getElementById: element, createElement: tag => new Element(tag), addEventListener() {}},
-    window: {addEventListener() {}},
+    window: {addEventListener() {}, setTimeout() { return 1; }, clearTimeout() {}},
     async fetch(url, init) {
       requests.push({url, body: init?.body ? JSON.parse(init.body) : null});
       const data = url.startsWith('/api/lessons?') ? await env.lessonResponse(url)

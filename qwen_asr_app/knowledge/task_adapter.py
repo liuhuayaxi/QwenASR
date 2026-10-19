@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 import re
+from types import SimpleNamespace
 from urllib.parse import urlencode
 
 from ..classroom_intelligence.store import ClassroomNoteStore, read_notes_doc
@@ -22,11 +23,22 @@ class IntelligenceTasks:
         self.knowledge=knowledge
         self.intelligence=intelligence
         self.recordings=recordings
+        from ..classroom_intelligence.background import NoteJobIndex
+        self._note_job_index = getattr(intelligence, '_note_job_index', None) or NoteJobIndex()
 
     def tasks(self):
         result=[]
         jobs = self.knowledge.jobs()
-        visit=getattr(self.recordings,'iter_records',self.recordings.list_records)
+        lightweight = getattr(self.recordings, 'iter_list_items', None)
+        if callable(lightweight):
+            items = list(lightweight())
+            def visit():
+                for item in items:
+                    directory = self.recordings.paths.get(item['id'])
+                    if directory is not None:
+                        yield SimpleNamespace(id=item['id'], metadata=item, directory=directory)
+        else:
+            visit=getattr(self.recordings,'iter_records',self.recordings.list_records)
         record_titles = {record.id:record.metadata.get('title') for record in visit()}
         for job in jobs:
             status=job['status']
@@ -61,7 +73,7 @@ class IntelligenceTasks:
             result.append(task)
         for record in visit():
             try:
-                notes=read_notes_doc(record).get('notes',[])
+                notes = self._note_job_index.read(record)[1] if callable(lightweight) else read_notes_doc(record).get('notes',[])
             except (OSError,ValueError):
                 continue
             for note in notes:

@@ -7,10 +7,10 @@ class TaskScope:
     def __init__(self, root, ident):
         if not root or not ident or any(c not in '0123456789abcdef' for c in ident):
             raise RuntimeError('WORKER_CGROUP_DELEGATION_REQUIRED')
-        root = Path(root).resolve()
         entries = Path('/proc/self/cgroup').read_text().splitlines()
         relative = next(line.split(':', 2)[2] for line in entries if line.startswith('0::'))
         own = (Path('/sys/fs/cgroup')/relative.lstrip('/')).resolve()
+        root = own if root == 'auto' else Path(root).resolve()
         if (root != own or not root.name.endswith('.service') or root.stat().st_uid != os.getuid()
                 or not (root/'cgroup.controllers').is_file()):
             raise RuntimeError('WORKER_CGROUP_NOT_OWNED_BY_SERVICE')

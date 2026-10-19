@@ -15,14 +15,18 @@ import shutil
 import subprocess
 import sys
 import uuid
+from contextlib import contextmanager
 from datetime import datetime
+from functools import wraps
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
 from fastapi import APIRouter, Body, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 
-from .durable import atomic_json
+from .durable import atomic_bytes, atomic_json
+from .media_retention import file_worker
 from .paths import PRIVATE_ROOT
 from .storage import TRASH_ROOT, local_now, safe_component
 from .library_layout import AI_NOTES, NOTE_LIBRARY_MARKER
@@ -91,10 +95,19 @@ def _source_lesson(record: Any) -> dict[str, Any]:
     }
 
 
+def _locked(method):
+    @wraps(method)
+    def run(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return run
+
+
 class NoteLibrary:
     def __init__(self, settings: Any, recordings: Any) -> None:
         self.settings = settings
         self.recordings = recordings
+        self._lock = RLock()
         self.state_path = NOTE_STATE_PATH
         self.state = _read_json(self.state_path)
         self.state.setdefault("notes", [])
@@ -202,12 +215,42 @@ class NoteLibrary:
                 except OSError:
                     pass
 
+    @contextmanager
+    def transaction(self):
+        """Serialize a complete mutation, restoring its catalog on failure.
+
+        Category moves use the same boundary as PDF uploads/deletes. Merely
+        locking atomic_json would still allow a stale list to win afterwards.
+        """
+        with self._lock:
+            previous = copy.deepcopy(self.state)
+            try:
+                saved = self.state_path.read_bytes()
+            except FileNotFoundError:
+                saved = None
+            try:
+                yield
+            except BaseException as exc:
+                self.state = previous
+                try:
+                    # An atomic write can fail after replace (e.g. directory
+                    # fsync); restore the persisted snapshot in that case too.
+                    if saved is None:
+                        self.state_path.unlink(missing_ok=True)
+                    elif not self.state_path.exists() or self.state_path.read_bytes() != saved:
+                        atomic_bytes(self.state_path, saved)
+                except OSError as rollback_error:
+                    raise RuntimeError(f"笔记目录恢复失败，请保留文件并检查 {self.state_path}：{rollback_error}") from exc
+                raise
+
+    @_locked
     def _save(self) -> None:
         self.state["storage_root"] = str(self.storage_root)
         self.state["updated_at"] = local_now()
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         atomic_json(self.state_path, self.state)
 
+    @_locked
     def template(self) -> str:
         value = self.state.get("prompt_template")
         return str(value) if isinstance(value, str) and value.strip() else DEFAULT_NOTE_PROMPT
@@ -218,8 +261,9 @@ class NoteLibrary:
             raise ValueError("提示词模板不能为空")
         if len(value) > 40_000:
             raise ValueError("提示词模板不能超过 40000 个字符")
-        self.state["prompt_template"] = value
-        self._save()
+        with self.transaction():
+            self.state["prompt_template"] = value
+            self._save()
         return value
 
     def set_root(self, value: str) -> Path:
@@ -227,6 +271,7 @@ class NoteLibrary:
             raise ValueError("AI 笔记随课程保存；请在“资料库与配置”中迁移整个资料库")
         return self.storage_root
 
+    @_locked
     def categories(self) -> list[str]:
         names = list(self.settings.categories)
         for note in self.state.get("notes", []):
@@ -239,21 +284,17 @@ class NoteLibrary:
         """Project paths to the destination before the category transaction."""
         if category == target:
             return False
-        previous = copy.deepcopy(self.state)
-        changed = False
-        for note in self.state.get("notes", []):
-            if isinstance(note, dict) and note.get("category") == category:
-                note["category"] = target
-                path = self._note_path(note)
-                if path.is_relative_to(self.storage_root / category):
-                    note["path"] = (Path(target) / path.relative_to(self.storage_root / category)).as_posix()
-                changed = True
-        if changed:
-            try:
+        with self.transaction():
+            changed = False
+            for note in self.state.get("notes", []):
+                if isinstance(note, dict) and note.get("category") == category:
+                    note["category"] = target
+                    path = self._note_path(note)
+                    if path.is_relative_to(self.storage_root / category):
+                        note["path"] = (Path(target) / path.relative_to(self.storage_root / category)).as_posix()
+                    changed = True
+            if changed:
                 self._save()
-            except BaseException:
-                self.state = previous
-                raise
         return changed
 
     def lessons(self, category: str = "") -> list[dict[str, Any]]:
@@ -272,6 +313,7 @@ class NoteLibrary:
             raw = self.storage_root / raw
         return raw.resolve()
 
+    @_locked
     def notes(self, category: str = "") -> list[dict[str, Any]]:
         result = []
         for note in self.state.get("notes", []):
@@ -280,7 +322,7 @@ class NoteLibrary:
             if category and str(note.get("category") or "未分类") != category:
                 continue
             path = self._note_path(note)
-            item = dict(note)
+            item = copy.deepcopy(note)
             item["exists"] = path.is_file()
             item["path"] = str(path)
             item["download_url"] = f"/api/notes/{note.get('id')}/download"
@@ -288,13 +330,28 @@ class NoteLibrary:
         result.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
         return result
 
+    @_locked
+    def snapshot(self, category: str = "") -> dict[str, Any]:
+        categories = self.categories()
+        if category not in categories:
+            category = categories[0] if categories else "未分类"
+        return {"categories": categories, "category": category, "lessons": self.lessons(category),
+                "notes": self.notes(category), "storage_root": str(self.folder(category)),
+                "library_root": str(self.storage_root), "layout": "course-notes-v1",
+                "prompt_template": self.template()}
+
     def add(self, category: str, title: str, filename: str, source_ids: list[str], path: Path) -> dict[str, Any]:
+        with self.transaction():
+            return self._add(category, title, filename, source_ids, path)
+
+    def _add(self, category: str, title: str, filename: str, source_ids: list[str], path: Path) -> dict[str, Any]:
         safe_category = safe_component(category, "未分类")
         safe_title = safe_component(title or Path(filename).stem, "AI复习笔记")
         entry_id = uuid.uuid4().hex
         folder = self.folder(safe_category, create=True)
         destination = folder / f"{safe_title}-{entry_id[:10]}.pdf"
-        shutil.move(str(path), str(destination))
+        if destination.exists() or destination.is_symlink():
+            raise ValueError("已有同名笔记文件，请重试")
         source_set = {str(item) for item in source_ids if str(item).strip()}
         lessons = [item for item in self.lessons(safe_category) if item["id"] in source_set]
         entry = {
@@ -307,22 +364,47 @@ class NoteLibrary:
             "source_session_ids": [item["id"] for item in lessons],
             "source_lessons": [{key: item[key] for key in ("id", "title", "date")} for item in lessons],
         }
-        self.state.setdefault("notes", []).append(entry)
-        self._save()
+        try:
+            shutil.move(str(path), str(destination))
+            self.state.setdefault("notes", []).append(entry)
+            self._save()
+        except BaseException:
+            if destination.exists():
+                if path.exists():
+                    # shutil.move can leave its partial copy when the source
+                    # is on another volume. The original still belongs to us.
+                    destination.unlink()
+                else:
+                    shutil.move(str(destination), str(path))
+            raise
         return {**entry, "path": str(destination), "exists": True, "download_url": f"/api/notes/{entry_id}/download"}
 
     def remove(self, note_id: str) -> None:
+        with self.transaction():
+            self._remove(note_id)
+
+    def _remove(self, note_id: str) -> None:
         notes = self.state.get("notes", [])
         entry = next((item for item in notes if isinstance(item, dict) and item.get("id") == note_id), None)
         if entry is None:
             raise FileNotFoundError("没有找到这份笔记")
         path = self._note_path(entry)
-        if path.exists():
-            trash = TRASH_ROOT / ("笔记-" + uuid.uuid4().hex)
-            trash.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(path), str(trash / path.name))
-        self.state["notes"] = [item for item in notes if item is not entry]
-        self._save()
+        destination = None
+        try:
+            if path.exists():
+                trash = TRASH_ROOT / ("笔记-" + uuid.uuid4().hex)
+                trash.mkdir(parents=True, exist_ok=True)
+                destination = trash / path.name
+                shutil.move(str(path), str(destination))
+            self.state["notes"] = [item for item in notes if item is not entry]
+            self._save()
+        except BaseException:
+            if destination is not None and destination.exists():
+                if path.exists():
+                    destination.unlink()
+                else:
+                    shutil.move(str(destination), str(path))
+            raise
 
     def prompt(self, category: str, source_ids: list[str], template: str | None = None) -> dict[str, Any]:
         selected = {str(value) for value in source_ids if str(value).strip()}
@@ -349,13 +431,7 @@ def note_library_router(settings: Any, recordings: Any, *, library: NoteLibrary 
 
     @router.get("/api/notes")
     async def list_notes(category: str = "") -> dict[str, Any]:
-        categories = library.categories()
-        if category not in categories:
-            category = categories[0] if categories else "未分类"
-        return {"categories": categories, "category": category, "lessons": library.lessons(category),
-                "notes": library.notes(category), "storage_root": str(library.folder(category)),
-                "library_root": str(library.storage_root), "layout": "course-notes-v1",
-                "prompt_template": library.template()}
+        return await asyncio.to_thread(library.snapshot, category)
 
     @router.post("/api/notes/upload")
     async def upload_note(category: str = Form(...), title: str = Form(""), source_ids: str = Form(""), file: UploadFile = File(...)) -> dict[str, Any]:
@@ -380,7 +456,7 @@ def note_library_router(settings: Any, recordings: Any, *, library: NoteLibrary 
                 raise ValueError("课次选择数据无效") from exc
             if not isinstance(ids, list):
                 raise ValueError("课次选择数据无效")
-            entry = await asyncio.to_thread(library.add, category, title, filename, ids, temporary)
+            entry = await file_worker(library.add, category, title, filename, ids, temporary)
             return {"note": entry, "storage_root": str(library.folder(category))}
         except (ValueError, OSError) as exc:
             raise HTTPException(400, str(exc)) from exc
@@ -390,7 +466,8 @@ def note_library_router(settings: Any, recordings: Any, *, library: NoteLibrary 
 
     @router.get("/api/notes/{note_id}/download")
     async def download_note(note_id: str) -> FileResponse:
-        entry = next((item for item in library.state.get("notes", []) if isinstance(item, dict) and item.get("id") == note_id), None)
+        entries = await asyncio.to_thread(library.notes)
+        entry = next((item for item in entries if item.get("id") == note_id), None)
         if entry is None:
             raise HTTPException(404, "没有找到这份笔记")
         path = library._note_path(entry)
@@ -401,7 +478,7 @@ def note_library_router(settings: Any, recordings: Any, *, library: NoteLibrary 
     @router.post("/api/notes/{note_id}/delete")
     async def delete_note(note_id: str) -> dict[str, Any]:
         try:
-            await asyncio.to_thread(library.remove, note_id)
+            await file_worker(library.remove, note_id)
         except (FileNotFoundError, OSError) as exc:
             raise HTTPException(404, str(exc)) from exc
         return {"deleted": True}
@@ -409,7 +486,7 @@ def note_library_router(settings: Any, recordings: Any, *, library: NoteLibrary 
     @router.post("/api/notes/generate-prompt")
     async def generate_prompt(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
         try:
-            return library.prompt(str(payload.get("category") or ""), payload.get("source_ids") or [], payload.get("template"))
+            return await asyncio.to_thread(library.prompt, str(payload.get("category") or ""), payload.get("source_ids") or [], payload.get("template"))
         except (ValueError, TypeError) as exc:
             raise HTTPException(400, str(exc)) from exc
 
@@ -442,7 +519,7 @@ def note_library_router(settings: Any, recordings: Any, *, library: NoteLibrary 
             if "storage_root" in payload:
                 library.set_root(str(payload.get("storage_root") or ""))
             if "prompt_template" in payload:
-                library.set_template(str(payload.get("prompt_template") or ""))
+                await file_worker(library.set_template, str(payload.get("prompt_template") or ""))
         except (ValueError, OSError) as exc:
             raise HTTPException(400, str(exc)) from exc
         return {"storage_root": str(library.storage_root), "prompt_template": library.template()}

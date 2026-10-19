@@ -9,8 +9,10 @@ import os
 import re
 import sqlite3
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
 class _ClosingConnection(sqlite3.Connection):
@@ -189,6 +191,12 @@ class KnowledgeStore:
                 conn.execute("ALTER TABLE sources ADD COLUMN error TEXT")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_sources_asset ON sources(asset_id)")
             conn.execute('CREATE TABLE IF NOT EXISTS knowledge_meta (key TEXT PRIMARY KEY,value TEXT NOT NULL)')
+            membership = conn.execute("SELECT value FROM knowledge_meta WHERE key='source_membership_version'").fetchone()
+            if not membership or membership['value'] != '1':
+                # Older releases updated sources on a course move but kept
+                # the old membership in reused (and historical) chunks.
+                self._align_chunk_membership(conn)
+                conn.execute("INSERT OR REPLACE INTO knowledge_meta VALUES ('source_membership_version','1')")
             version=conn.execute("SELECT value FROM knowledge_meta WHERE key='lexical_version'").fetchone()
             if not version or version['value']!='zh-en-v2':
                 conn.execute('DELETE FROM chunks_fts')
@@ -198,6 +206,122 @@ class KnowledgeStore:
                 conn.execute("INSERT OR REPLACE INTO knowledge_meta VALUES ('lexical_version','zh-en-v2')")
 
     # ---------------- Course management ----------------
+
+    @staticmethod
+    def _align_chunk_membership(conn, source_id=None):
+        scope = " AND chunks.source_id = ?" if source_id is not None else ""
+        params = (source_id,) if source_id is not None else ()
+        conn.execute("""
+            UPDATE chunks SET (course_id, category, lesson_id) =
+                (SELECT course_id, category, lesson_id FROM sources WHERE sources.source_id = chunks.source_id)
+            WHERE EXISTS (SELECT 1 FROM sources WHERE sources.source_id = chunks.source_id
+                AND (sources.course_id IS NOT chunks.course_id OR sources.category IS NOT chunks.category
+                     OR sources.lesson_id IS NOT chunks.lesson_id))
+            """ + scope, params)
+        conn.execute("""
+            UPDATE chunks_fts SET category = (SELECT category FROM chunks WHERE chunks.chunk_id = chunks_fts.chunk_id)
+            WHERE chunk_id IN (SELECT chunk_id FROM chunks WHERE 1=1
+            """ + scope + ") AND category IS NOT (SELECT category FROM chunks WHERE chunks.chunk_id = chunks_fts.chunk_id)", params)
+
+    @staticmethod
+    def _update_source_metadata(conn, meta):
+        source_id = meta['source_id']
+        existing = conn.execute('SELECT * FROM sources WHERE source_id=?', (source_id,)).fetchone()
+        if existing is None:
+            return
+        fields = ('course_id', 'category', 'lesson_id', 'title', 'file_path', 'open_url', 'lineage')
+        values = {key: meta.get(key) for key in fields}
+        values['lineage'] = json.dumps(meta.get('lineage') or {})
+        if any(existing[key] != values[key] for key in fields):
+            conn.execute('UPDATE sources SET ' + ','.join(key + '=?' for key in fields) + ',updated_at=? WHERE source_id=?',
+                         (*[values[key] for key in fields], time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), source_id))
+            # Keep page/time anchors on historical citations when the source
+            # base URL changes, instead of replacing each with the bare URL.
+            old_url, new_url = existing['open_url'], meta['open_url']
+            for chunk in conn.execute('SELECT chunk_id,open_url FROM chunks WHERE source_id=?', (source_id,)).fetchall():
+                url = chunk['open_url']
+                if url == old_url or (old_url and url.startswith(old_url) and url[len(old_url):len(old_url)+1] in {'#', '&'}):
+                    url = new_url + url[len(old_url):]
+                conn.execute('UPDATE chunks SET title=?,open_url=? WHERE chunk_id=?', (meta['title'], url, chunk['chunk_id']))
+            KnowledgeStore._align_chunk_membership(conn, source_id)
+
+    def sync_source_metadata(self, source_meta):
+        """Move metadata even when unchanged content can reuse its revision."""
+        with self._connect() as conn:
+            self._update_source_metadata(conn, source_meta)
+
+    @contextmanager
+    def category_transaction(self, category, target, course_id, source_folder, target_folder):
+        """Keep the knowledge catalog in the same commit boundary as a move.
+
+        Filesystem callers hold this transaction until their settings, sidecar,
+        material index and reversible moves have all succeeded.
+        """
+        source_folder, target_folder = Path(source_folder), Path(target_folder)
+        now = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+
+        def moved_path(value):
+            if not value:
+                return value
+            path = Path(value)
+            return str(target_folder / path.relative_to(source_folder)) if path.is_relative_to(source_folder) else value
+
+        def moved_url(value):
+            url = urlsplit(value)
+            query = [(key, target if key == 'category' and value == category else value)
+                     for key, value in parse_qsl(url.query, keep_blank_values=True)]
+            return urlunsplit((url.scheme, url.netloc, url.path, urlencode(query), url.fragment))
+
+        with self._connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            conn.execute('DELETE FROM courses WHERE category=? AND course_id<>?', (category, course_id))
+            conn.execute('''INSERT INTO courses (course_id,category,folder_path,created_at,updated_at)
+                            VALUES (?,?,?,?,?) ON CONFLICT(course_id) DO UPDATE SET
+                            category=excluded.category,folder_path=excluded.folder_path,updated_at=excluded.updated_at''',
+                         (course_id, target, str(target_folder), now, now))
+            sources = conn.execute('SELECT * FROM sources WHERE category=?', (category,)).fetchall()
+            file_proofs, parent_proofs = [], []
+            from .ingest import compute_file_stat_hash
+            for row in sources:
+                meta = dict(row)
+                lineage = json.loads(meta.get('lineage') or '{}')
+                if meta['file_path'] and meta['source_type'] != 'recording_refined':
+                    old_stat = compute_file_stat_hash(Path(meta['file_path']))
+                    if old_stat[2] and old_stat[2] == meta['stat_hash']:
+                        file_proofs.append((meta['source_id'], moved_path(meta['file_path']), old_stat[:2]))
+                parent_path = lineage.get('parent_file_path')
+                if parent_path:
+                    old_stat = compute_file_stat_hash(Path(parent_path))
+                    if old_stat[2] and old_stat[2] == lineage.get('parent_stat_hash'):
+                        parent_proofs.append((meta['source_id'], moved_path(parent_path), old_stat[:2]))
+                for key in ('parent_file_path', 'file_path'):
+                    if key in lineage:
+                        lineage[key] = moved_path(lineage[key])
+                meta.update(course_id=course_id, category=target, file_path=moved_path(meta['file_path']),
+                            open_url=moved_url(meta['open_url']), lineage=lineage)
+                self._update_source_metadata(conn, meta)
+                if row['source_type'] == 'course_terminology' and row['course_id'] != course_id:
+                    # A merge retains the target profile. The deleted course's
+                    # glossary remains historical evidence, not active advice.
+                    conn.execute("UPDATE sources SET status='tombstoned' WHERE source_id=?", (row['source_id'],))
+                    conn.execute('UPDATE chunks SET is_active=0 WHERE source_id=?', (row['source_id'],))
+                    conn.execute('DELETE FROM chunks_fts WHERE chunk_id IN (SELECT chunk_id FROM chunks WHERE source_id=?)', (row['source_id'],))
+            conn.execute('UPDATE knowledge_jobs SET category=? WHERE category=?', (target, category))
+            yield
+            # File freshness signatures include the absolute path. Rebase
+            # only proofs that were current before the move and whose bytes'
+            # stat did not change; stale evidence must remain stale.
+            for source_id, path, previous_stat in file_proofs:
+                current = compute_file_stat_hash(Path(path))
+                if current[2] and current[:2] == previous_stat:
+                    conn.execute('UPDATE sources SET stat_hash=? WHERE source_id=?', (current[2], source_id))
+            for source_id, path, previous_stat in parent_proofs:
+                current = compute_file_stat_hash(Path(path))
+                if current[2] and current[:2] == previous_stat:
+                    row = conn.execute('SELECT lineage FROM sources WHERE source_id=?', (source_id,)).fetchone()
+                    lineage = json.loads(row['lineage'])
+                    lineage['parent_stat_hash'] = current[2]
+                    conn.execute('UPDATE sources SET lineage=? WHERE source_id=?', (json.dumps(lineage), source_id))
 
     def get_course(self, category: str) -> dict[str, Any] | None:
         with self._connect() as conn:
@@ -497,7 +621,8 @@ class KnowledgeStore:
                 )
 
                 # 3. Deactivate old chunks for this source
-                cursor.execute("UPDATE chunks SET is_active = 0 WHERE source_id = ?", (source_id,))
+                cursor.execute("UPDATE chunks SET is_active = 0, course_id = ?, category = ?, lesson_id = ? WHERE source_id = ?",
+                               (source_meta['course_id'], source_meta['category'], source_meta.get('lesson_id'), source_id))
                 cursor.execute(
                     "DELETE FROM chunks_fts WHERE chunk_id IN (SELECT chunk_id FROM chunks WHERE source_id = ?)",
                     (source_id,),
@@ -523,6 +648,9 @@ class KnowledgeStore:
                             revision=excluded.revision,
                             content_hash=excluded.content_hash,
                             chunk_index=excluded.chunk_index,
+                            course_id=excluded.course_id,
+                            category=excluded.category,
+                            lesson_id=excluded.lesson_id,
                             title=excluded.title,
                             kind=excluded.kind,
                             origin=excluded.origin,
@@ -632,6 +760,7 @@ class KnowledgeStore:
               AND c.category = ?
               AND c.is_active = 1
               AND s.status = 'active'
+              AND s.category = c.category AND s.course_id = c.course_id
         """
         params: list[Any] = [match_query, category]
 
@@ -679,6 +808,7 @@ class KnowledgeStore:
             WHERE c.category = ?
               AND c.is_active = 1
               AND s.status = 'active'
+              AND s.category = c.category AND s.course_id = c.course_id
               AND cv.embedding_contract = ?
         """
         params: list[Any] = [category, contract_str]

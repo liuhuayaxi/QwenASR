@@ -1,8 +1,9 @@
 import {renderCorrectionReview} from "./js/transcription-assist.js?v=20261016-decisions-1";
 import "./js/knowledge-settings.js?v=20261015-illustrated-windows";
 import {cachedJson} from './js/cached-json.js';
+import {createVisiblePoll} from './js/visible-poll.js';
 import { createBatchView } from "./js/batch-view.js?v=20261015-reader-math-scope-8";
-import { createLibraryTools } from "./js/library-tools.js?v=20261007-search-focus-1";
+import { createLibraryTools } from "./js/library-tools.js?v=20261019-idle-lifecycle-1";
 import { createMarkdownReader, renderMarkdown } from "./js/markdown-reader.js?v=20261015-reader-math-scope-8";
 import { createNoteAutosave } from "./js/note-autosave.js?v=20260923-upgrade-1";
 import { DEFAULT_NOTE_SUMMARY_PROMPT } from "./js/default-prompts.js?v=20261015-learning-scope-1";
@@ -13,11 +14,11 @@ import { createRecordingDiscard } from "./js/recording-discard.js?v=20261015-rea
 import { IDEASHELL_SERVERS, normalizeIdeashellServer } from "./js/ideashell-config.js?v=20261007";
 import { createMineruSettings } from "./js/mineru-settings.js?v=20261015-illustrated-windows";
 import { createInferenceSettings } from "./js/inference-settings.js?v=20261015-illustrated-windows";
-import { createClassroomIntelligence } from "./js/classroom-intelligence.js?v=20261015-reader-math-scope-8";
-import { createClassroomChat } from "./js/classroom-chat.js?v=20261015-reader-math-scope-8";
-import { createSettingsNavigation } from "./js/settings-navigation.js?v=20261011-ui-final";
+import { createClassroomIntelligence } from "./js/classroom-intelligence.js?v=20261019-idle-lifecycle-1";
+import { createClassroomChat } from "./js/classroom-chat.js?v=20261019-idle-lifecycle-1";
+import { createSettingsNavigation } from "./js/settings-navigation.js?v=20261019-idle-lifecycle-1";
 import { createLibraryBackup } from "./js/library-backup.js?v=20261014-daily";
-import { createDriveBackup } from "./js/drive-backup.js?v=20261018-drive-simple-3";
+import { createDriveBackup } from "./js/drive-backup.js?v=20261019-idle-lifecycle-1";
 
 import { createContinuation, recognitionText } from "./js/workbench/continuation.js?v=20261011-ui-final";
 
@@ -119,7 +120,7 @@ const DEFAULT_LIVE_PARAMS = {
 };
 
 const state = {
-  capturing: false, pausing: false, ending: false, uploading: false, modelReady: false,
+  capturing: false, starting: false, captureStart: null, pausing: false, ending: false, uploading: false, modelReady: false,
   activeSession: null, shownSession: null, ws: null, stream: null, audioContext: null,
   source: null, processor: null, analyser: null, animation: null, segments: new Map(),
   reviewCards: new Map(), library: [], categories: ["未分类"], categoryProfiles: {}, activeView: "transcript",
@@ -128,6 +129,10 @@ const state = {
   aiTasks: [], aiTasksLoading: false,
   endPolling: new Set(),
 };
+let healthPoll, aiTasksPoll, summaryStatusPoll;
+let healthStatus = "loading", healthSignature = "";
+let capturePollingActive = false, lastAiTasksAt = 0, aiTasksFailed = false;
+const summaryStatusRequests = new Map(), summaryStatuses = new Map();
 const settingsNavigation = createSettingsNavigation();
 createLibraryBackup();
 createDriveBackup();
@@ -151,7 +156,7 @@ const {
 } = createTranscriptView({
   els, state, toast, updateButtons, switchView,
   onRetrySegment: retrySegmentAi,
-  onSessionShown: (session) => { summaryView?.renderSession(session); classroomChat?.showSession(session); classroomIntelligence?.showSession(session);
+  onSessionShown: (session) => { summaryView?.renderSession(session); classroomChat?.showSession(session);
     continuation.remember(session);
     const button = $("#openCompletedNote");
     button.classList.toggle("hidden", session.status === "active");
@@ -215,6 +220,7 @@ function openAdvancedSettings(focusTarget = null) {
   settingsNavigation.reveal(focusTarget);
   if (!panel && !$("[data-ai-section=chat]").classList.contains("hidden")) void classroomChat?.refreshModels();
   if (!els.settingsDialog.open) els.settingsDialog.showModal();
+  document.dispatchEvent(new Event('qwenasr:viewchange'));
   if (focusTarget) requestAnimationFrame(() => focusTarget.focus({preventScroll: true}));
   if (focusTarget) requestAnimationFrame(() => {
     const rect = focusTarget.getBoundingClientRect(), frame = $(".settings-page-body").getBoundingClientRect();
@@ -277,19 +283,22 @@ function handleRecordCategoryChange() {
 }
 
 function updateButtons() {
+  const active = state.starting || state.capturing || state.pausing || state.ending || state.uploading;
+  if (active !== capturePollingActive) { capturePollingActive = active; healthPoll?.schedule(); aiTasksPoll?.schedule(); }
   const discarding = recordingDiscard?.isPending(state.activeSession?.id);
-  const busy = state.pausing || state.ending || state.uploading || discarding;
+  const busy = state.starting || state.pausing || state.ending || state.uploading || discarding;
   els.recordButton.disabled = !state.modelReady || busy;
   els.recordButton.classList.toggle("recording", state.capturing);
   if (discarding) els.recordLabel.textContent = "正在停止并丢弃这条录音…";
   else if (state.ending) els.recordLabel.textContent = "正在生成 AAC 与打包…";
   else if (state.pausing) els.recordLabel.textContent = "正在保存当前段…";
+  else if (state.starting) els.recordLabel.textContent = "正在启动麦克风…";
   else if (state.capturing) els.recordLabel.textContent = "暂停收音";
   else if (state.activeSession) els.recordLabel.textContent = "恢复转写";
   else if (state.modelReady) els.recordLabel.textContent = "新建并开始转写";
   else els.recordLabel.textContent = "模型加载中";
   els.endButton.classList.toggle("hidden", !state.activeSession);
-  els.endButton.disabled = state.ending || state.pausing || state.uploading || discarding;
+  els.endButton.disabled = busy;
   recordingDiscard?.update();
   els.uploadButton.disabled = !state.modelReady || busy || Boolean(state.activeSession);
   els.recordName.disabled = Boolean(state.activeSession) || busy;
@@ -743,6 +752,8 @@ function switchView(view) {
   const target = library ? "/library" : "/";
   if (location.pathname !== target) history.pushState(null, "", target);
   if (library) renderLibrary();
+  document.dispatchEvent(new Event('qwenasr:viewchange'));
+  if (state.capturing && !state.animation) drawMeter();
 }
 
 function recordingStatus(record) {
@@ -774,18 +785,22 @@ async function refreshOpenNoteTranscript() {
 async function loadAiTasks() {
   if (state.aiTasksLoading) return;
   state.aiTasksLoading = true;
+  lastAiTasksAt = Date.now();
   try {
-    const response = await fetch("/api/ai-tasks", { cache: "no-store" });
+    const response = await fetch("/api/ai-tasks", { cache: "no-store", signal: AbortSignal.timeout(15000) });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.detail || "无法读取 AI 任务");
+    aiTasksFailed = false;
     const nextTasks = payload.tasks || [];
     const tasksChanged = JSON.stringify(nextTasks) !== JSON.stringify(state.aiTasks || []);
     state.aiTasks = nextTasks;
     if (state.noteSession && tasksChanged) refreshOpenNoteTranscript();
   } catch (error) {
     // Keep the last task status while the backend reconnects.
+    aiTasksFailed = true;
   } finally {
     state.aiTasksLoading = false;
+    aiTasksPoll?.schedule();
   }
 }
 
@@ -1400,6 +1415,7 @@ async function openLibraryRecord(sessionId, focus = null) {
     renderNoteDialog(payload.session);
     openNoteReaderSurface();
     if (!els.noteDialog.open) els.noteDialog.showModal();
+    document.dispatchEvent(new Event('qwenasr:viewchange'));
     if (focus) requestAnimationFrame(() => libraryTools.focusSearch(focus));
     return payload.session;
   } catch (error) { toast(error.message, 5000); }
@@ -2015,9 +2031,13 @@ async function loadSession() {
 
 async function pollHealth() {
   try {
-    const response = await fetch("/api/health", { cache: "no-store" });
+    const response = await fetch("/api/health", { cache: "no-store", signal: AbortSignal.timeout(10000) });
     if (!response.ok) throw new Error("服务健康检查失败");
     const health = await response.json();
+    healthStatus = health.status;
+    const signature = JSON.stringify([health.status, health.detail, health.model, health.device, health.asr_provider, state.shownSession?.inference]);
+    if (healthSignature === signature) return;
+    healthSignature = signature;
     els.modelBadge.className = `status-badge ${health.status}`;
     const remote = ['remote_only', 'remote_preferred'].includes(health.asr_provider);
     const mode = health.asr_provider === 'remote_only' ? 'Windows' : '优先 Windows';
@@ -2026,13 +2046,12 @@ async function pollHealth() {
     els.footerDevice.textContent = remote ? mode + ' · Qwen3-ASR' : health.model + ' · ' + health.device;
     state.modelReady = remote || ["ready", "idle", "loading"].includes(health.status);
     updateButtons();
-    setTimeout(pollHealth, health.status === "loading" ? 1200 : 5000);
   } catch (_) {
+    healthStatus = "error"; healthSignature = "";
     els.modelBadge.className = "status-badge error";
     els.modelStatus.textContent = "服务连接中断";
     $("#recognitionStatus").textContent = "当前状态：本地服务连接中断 · 恢复连接后自动更新";
     state.modelReady = false; updateButtons();
-    setTimeout(pollHealth, 1800);
   }
 }
 
@@ -2040,27 +2059,31 @@ function wsUrl() {
   return `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws/transcribe`;
 }
 
-function connectFor(command, commandPayload = {}) {
+function connectFor(command, commandPayload = {}, owner = null) {
   return new Promise((resolve, reject) => {
     let settled = false;
     let config;
     try { config = command === "end" ? { type: "config", ...commandPayload.summary_payload?.config } : sessionConfig(); }
     catch (error) { reject(error); return; }
     const ws = new WebSocket(wsUrl());
+    if (owner) owner.ws = ws;
     ws.binaryType = "arraybuffer";
     const timer = setTimeout(() => {
       if (!settled) { settled = true; reject(new Error("转写服务响应超时")); ws.close(); }
     }, 30000);
     ws.onopen = () => {
+      if (owner && (owner.cancelled || state.captureStart !== owner)) { ws.close(); return; }
       state.ws = ws;
       if (command !== "end") ws.send(JSON.stringify(config));
       ws.send(JSON.stringify({ type: command, ...commandPayload }));
     };
     ws.onerror = () => {
       clearTimeout(timer);
-      if (!settled) reject(new Error("无法连接转写服务"));
+      if (!settled) { settled = true; reject(new Error("无法连接转写服务")); }
+      ws.close();
     };
     ws.onmessage = (event) => {
+      if (owner?.cancelled || state.ws !== ws) return;
       const message = JSON.parse(event.data);
       handleMessage(message);
       if (!settled && ["config_error", "start_error", "end_error"].includes(message.type)) {
@@ -2094,48 +2117,71 @@ function connectFor(command, commandPayload = {}) {
 }
 
 async function startCapture() {
-  if (!state.modelReady || state.capturing || state.pausing || state.ending || recordingDiscard?.isPending(state.activeSession?.id)) return;
-  let stream;
+  if (!state.modelReady || state.starting || state.capturing || state.pausing || state.ending || recordingDiscard?.isPending(state.activeSession?.id)) return;
+  // Claim the whole asynchronous startup before the first await. Each attempt
+  // owns its resources until it can publish a complete, still-current capture.
+  const attempt = { cancelled: false };
+  state.captureStart = attempt;
+  state.starting = true;
+  updateButtons();
+  const ensureCurrent = () => {
+    if (attempt.cancelled || state.captureStart !== attempt) throw new DOMException("录音启动已取消", "AbortError");
+  };
   try {
     await inferenceSettingsPanel.load();
+    ensureCurrent();
     sessionConfig(!state.activeSession);
     if (!navigator.mediaDevices?.getUserMedia) throw new Error("当前浏览器不支持麦克风采集，请使用最新版 Safari 或 Chrome");
-    stream = await navigator.mediaDevices.getUserMedia({
+    attempt.stream = await navigator.mediaDevices.getUserMedia({
       audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
     });
-    state.stream = stream;
-    try { await connectFor("start"); }
+    ensureCurrent();
+    try { await connectFor("start", {}, attempt); }
     catch (error) {
+      ensureCurrent();
       if (error.code !== "writer_conflict" || !window.confirm("另一页面正在录音。接管后该页面将停止收音，是否接管？")) throw error;
-      await connectFor("start", { takeover: true });
+      await connectFor("start", { takeover: true }, attempt);
     }
+    ensureCurrent();
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-    state.audioContext = new AudioContextClass({ latencyHint: "interactive" });
-    await state.audioContext.resume();
-    state.source = state.audioContext.createMediaStreamSource(state.stream);
-    state.processor = state.audioContext.createScriptProcessor(4096, 1, 1);
-    state.analyser = state.audioContext.createAnalyser();
-    state.analyser.fftSize = 256;
-    const silent = state.audioContext.createGain();
-    silent.gain.value = 0;
-    state.source.connect(state.analyser);
-    state.source.connect(state.processor);
-    state.processor.connect(silent);
-    silent.connect(state.audioContext.destination);
+    attempt.audioContext = new AudioContextClass({ latencyHint: "interactive" });
+    await attempt.audioContext.resume();
+    ensureCurrent();
+    if (attempt.ws.readyState !== WebSocket.OPEN || state.ws !== attempt.ws) throw new Error("转写服务连接已关闭");
+    attempt.source = attempt.audioContext.createMediaStreamSource(attempt.stream);
+    attempt.processor = attempt.audioContext.createScriptProcessor(4096, 1, 1);
+    attempt.analyser = attempt.audioContext.createAnalyser();
+    attempt.analyser.fftSize = 256;
+    attempt.silent = attempt.audioContext.createGain();
+    attempt.silent.gain.value = 0;
+    attempt.source.connect(attempt.analyser);
+    attempt.source.connect(attempt.processor);
+    attempt.processor.connect(attempt.silent);
+    attempt.silent.connect(attempt.audioContext.destination);
+    for (const key of ["stream", "audioContext", "source", "processor", "analyser", "silent"]) state[key] = attempt[key];
     state.capturing = true;
     state.processor.onaudioprocess = (event) => {
-      if (!state.capturing || !state.ws || state.ws.readyState !== WebSocket.OPEN) return;
-      const pcm16k = resample(event.inputBuffer.getChannelData(0), state.audioContext.sampleRate);
-      state.ws.send(pcm16k.buffer);
+      if (!state.capturing || state.ws !== attempt.ws || attempt.ws.readyState !== WebSocket.OPEN) return;
+      const pcm16k = resample(event.inputBuffer.getChannelData(0), attempt.audioContext.sampleRate);
+      attempt.ws.send(pcm16k.buffer);
     };
     els.listeningLabel.textContent = "正在监听 · 等待说话";
     showSession(state.activeSession, false);
     updateButtons();
     drawMeter();
   } catch (error) {
+    releaseAudioResources(attempt);
+    if (attempt.stream && state.stream === attempt.stream) {
+      state.capturing = false;
+      state.stream = state.audioContext = state.source = state.processor = state.analyser = state.silent = null;
+      cancelAnimationFrame(state.animation);
+      drawIdleMeter();
+    }
+    if (state.ws === attempt.ws) state.ws = null;
+    attempt.ws?.close();
+    if (attempt.cancelled || state.captureStart !== attempt) return;
+    attempt.cancelled = true;
     console.error("Microphone startup failed", error);
-    stream?.getTracks().forEach((track) => track.stop());
-    if (state.ws) { const ws = state.ws; state.ws = null; ws.close(); }
     let message = error.message || "无法启动麦克风";
     if (error.name === "NotAllowedError") {
       let sitePermission = "unknown";
@@ -2147,18 +2193,37 @@ async function startCapture() {
     else if (error.name === "NotReadableError") message = "麦克风正被其他应用独占，请关闭相关应用后重试。";
     els.listeningLabel.textContent = state.activeSession ? "会话已保留 · 点击恢复" : "麦克风未启动";
     toast(message, 7600);
-    updateButtons();
+  } finally {
+    if (state.captureStart === attempt) {
+      state.captureStart = null;
+      state.starting = false;
+      updateButtons();
+    }
   }
+}
+
+function releaseAudioResources(resources) {
+  if (resources.processor) resources.processor.onaudioprocess = null;
+  for (const key of ["processor", "source", "analyser", "silent"]) {
+    try { resources[key]?.disconnect(); } catch { /* Already disconnected. */ }
+  }
+  resources.stream?.getTracks().forEach(track => track.stop());
+  try { resources.audioContext?.close()?.catch(() => {}); } catch { /* Already closed. */ }
 }
 
 function stopAudioNodes() {
   cancelAnimationFrame(state.animation);
-  if (state.processor) state.processor.onaudioprocess = null;
-  state.processor?.disconnect();
-  state.source?.disconnect();
-  state.stream?.getTracks().forEach((track) => track.stop());
-  state.audioContext?.close();
-  state.stream = state.audioContext = state.source = state.processor = state.analyser = null;
+  if (state.captureStart) {
+    const attempt = state.captureStart;
+    attempt.cancelled = true;
+    releaseAudioResources(attempt);
+    if (state.ws === attempt.ws) state.ws = null;
+    attempt.ws?.close();
+    state.captureStart = null;
+    state.starting = false;
+  }
+  releaseAudioResources(state);
+  state.stream = state.audioContext = state.source = state.processor = state.analyser = state.silent = state.animation = null;
   drawIdleMeter();
 }
 
@@ -2343,18 +2408,26 @@ function handleMessage(message) {
   }
 }
 
-function drawMeter() {
-  if (!state.capturing || !state.analyser) return;
+function drawMeter(now = performance.now()) {
+  state.animation = null;
+  if (!state.capturing || !state.analyser || document.hidden || state.activeView === 'library') return;
+  state.animation = requestAnimationFrame(drawMeter);
+  if (now - (drawMeter.lastFrame || 0) < 32) return;
+  drawMeter.lastFrame = now;
   const canvas = els.meter;
   const context = canvas.getContext("2d");
-  const values = new Uint8Array(state.analyser.frequencyBinCount);
+  const values = drawMeter.values?.length === state.analyser.frequencyBinCount
+    ? drawMeter.values : (drawMeter.values = new Uint8Array(state.analyser.frequencyBinCount));
   state.analyser.getByteFrequencyData(values);
-  const gradient = context.createLinearGradient(0, 0, canvas.width, 0);
-  gradient.addColorStop(0, "rgba(185,231,118,.38)");
-  gradient.addColorStop(.5, "rgba(185,231,118,.95)");
-  gradient.addColorStop(1, "rgba(239,121,95,.75)");
+  if (!drawMeter.gradient || drawMeter.width !== canvas.width) {
+    drawMeter.width = canvas.width;
+    drawMeter.gradient = context.createLinearGradient(0, 0, canvas.width, 0);
+    drawMeter.gradient.addColorStop(0, "rgba(185,231,118,.38)");
+    drawMeter.gradient.addColorStop(.5, "rgba(185,231,118,.95)");
+    drawMeter.gradient.addColorStop(1, "rgba(239,121,95,.75)");
+  }
   context.clearRect(0, 0, canvas.width, canvas.height);
-  context.strokeStyle = gradient;
+  context.strokeStyle = drawMeter.gradient;
   context.lineWidth = 3;
   context.beginPath();
   for (let x = 0; x < canvas.width; x += 6) {
@@ -2364,7 +2437,6 @@ function drawMeter() {
     context.lineTo(x, canvas.height / 2 + amp / 2);
   }
   context.stroke();
-  state.animation = requestAnimationFrame(drawMeter);
 }
 
 function drawIdleMeter() {
@@ -2422,6 +2494,7 @@ els.terminology.addEventListener("change", () => sendLiveConfigUpdate("课程术
 els.openSettingsDialog.addEventListener("click", () => openAdvancedSettings());
 document.querySelector("[data-open-settings]")?.addEventListener("click", event => { event.preventDefault(); openAdvancedSettings(); });
 els.closeSettingsDialog.addEventListener("click", () => els.settingsDialog.close());
+els.settingsDialog.addEventListener('close', () => document.dispatchEvent(new Event('qwenasr:viewchange')));
 els.settingsDialog.addEventListener("click", (event) => {
   if (event.target === els.settingsDialog) els.settingsDialog.close();
 });
@@ -2492,7 +2565,10 @@ recordingDiscard = createRecordingDiscard({
   onFailed: id => { if (state.activeSession?.id === id) { state.ending = false; els.listeningLabel.textContent = '录音仍保留 · 请核对丢弃结果'; updateButtons(); } },
 });
 els.noteDialog.addEventListener("cancel", event => { event.preventDefault(); closeNoteDialog(); });
-els.noteDialog.addEventListener("close", () => { closeNoteReaderSurface(); state.noteSession = null; });
+els.noteDialog.addEventListener("close", () => {
+  closeNoteReaderSurface(); state.noteSession = null; summaryStatuses.clear();
+  document.dispatchEvent(new Event('qwenasr:viewchange'));
+});
 els.retryUnrefined.addEventListener("click", async () => {
   const record = state.noteSession;
   if (!record) return;
@@ -2658,7 +2734,7 @@ async function init() {
   void continuation.refresh();
   if (state.activeSession) applySessionCourseSettings(state.activeSession);
   else applyCategoryProfile(selectedRecordCategory() || "未分类");
-  pollHealth();
+  healthPoll.wake();
   const query = new URLSearchParams(location.search);
   if (query.get("category") && !state.activeSession) {
     const course = query.get("category");
@@ -2675,7 +2751,11 @@ async function init() {
   if (query.get("chat")) {
     const response = await fetch(`/api/recordings/${encodeURIComponent(query.get("chat"))}`, {cache:"no-store"});
     const payload = await response.json();
-    if (response.ok && payload.session) { showSession(payload.session, true); classroomIntelligence?.switchTab(query.get("panel") === "scribbles" ? "scribbles" : "chat"); $("#classroomChat").scrollIntoView({block:"nearest"}); }
+    if (response.ok && payload.session) {
+      showSession(payload.session, true);
+      const panel = ['scribbles', 'related', 'chat'].includes(query.get('panel')) ? query.get('panel') : 'chat';
+      classroomIntelligence?.switchTab(panel); $("#classroomChat").scrollIntoView({block:"nearest"});
+    }
     else toast(payload.detail || "无法读取课堂问答来源", 5000);
   }
   if (query.get("settings") === "ai") {
@@ -2874,19 +2954,25 @@ for (const mode of ["global","correction","review"]) {
 }
 
 async function refreshSummaryStatus(id) {
-  try {
-    const response = await fetch(`/api/recordings/${encodeURIComponent(id)}/summary-status`, {cache:"no-store"});
-    if (!response.ok) return;
-    const job = await response.json();
-    if (state.noteSession?.id !== id) return;
-    $("#summaryJobStatus").classList.toggle("hidden", !job.running);
-    if (job.running) {
-      $("#summaryJobText").textContent = `${job.phase || "准备生成"} · 已完成 ${job.completed_parts}/${job.total_parts || "…"} 段 · 已用时 ${formatDuration(job.elapsed_seconds)}`;
-      els.generateNoteSummary.disabled = true;
-    } else if (!state.summaryGenerating.has(id)) {
-      els.generateNoteSummary.disabled = state.noteSession.status !== "completed";
-    }
-  } catch { /* The generation request reports transport errors separately. */ }
+  if (summaryStatusRequests.has(id)) return summaryStatusRequests.get(id);
+  const request = (async () => {
+    try {
+      const response = await fetch(`/api/recordings/${encodeURIComponent(id)}/summary-status`, {cache:"no-store", signal: AbortSignal.timeout(15000)});
+      if (!response.ok) return;
+      const job = await response.json();
+      if (state.noteSession?.id !== id) return;
+      summaryStatuses.set(id, job);
+      $("#summaryJobStatus").classList.toggle("hidden", !job.running);
+      if (job.running) {
+        $("#summaryJobText").textContent = `${job.phase || "准备生成"} · 已完成 ${job.completed_parts}/${job.total_parts || "…"} 段 · 已用时 ${formatDuration(job.elapsed_seconds)}`;
+        els.generateNoteSummary.disabled = true;
+      } else if (!state.summaryGenerating.has(id)) {
+        els.generateNoteSummary.disabled = state.noteSession.status !== "completed";
+      }
+    } catch { /* The generation request reports transport errors separately. */ }
+  })().finally(() => { summaryStatusRequests.delete(id); summaryStatusPoll?.schedule(); });
+  summaryStatusRequests.set(id, request);
+  return request;
 }
 $("#cancelSummaryJob").addEventListener("click", async () => {
   const id = state.noteSession?.id;
@@ -2894,17 +2980,16 @@ $("#cancelSummaryJob").addEventListener("click", async () => {
   const response = await fetch(`/api/recordings/${encodeURIComponent(id)}/cancel-summary`, {method:"POST"});
   if (response.ok) { toast("已请求取消；完成的分块会保留", 4200); setTimeout(() => refreshSummaryStatus(id), 500); }
 });
-setInterval(() => {
-  if (!document.hidden && state.noteSession && !state.summaryGenerating.has(state.noteSession.id)) refreshSummaryStatus(state.noteSession.id);
-}, 3000);
-setInterval(() => {
-  if (!document.hidden) loadAiTasks();
-}, 5000);
+healthPoll = createVisiblePoll({run: pollHealth, delay: () => healthStatus === 'loading' ? 1200 :
+  healthStatus === 'error' ? 5000 : capturePollingActive ? 5000 : 60000});
+aiTasksPoll = createVisiblePoll({run: loadAiTasks, delay: () => aiTasksFailed || capturePollingActive ||
+  state.aiTasks.some(task => ['queued', 'running', 'pending', 'waiting_retry', 'stopping'].includes(task.status)) ? 5000 : 60000});
+summaryStatusPoll = createVisiblePoll({run: () => refreshSummaryStatus(state.noteSession.id),
+  enabled: () => els.noteDialog.open && state.noteSession && !state.summaryGenerating.has(state.noteSession.id),
+  delay: () => summaryStatuses.get(state.noteSession?.id)?.running ? 3000 : 60000,
+  events: ['qwenasr:viewchange']});
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) {
-    loadAiTasks();
-    if (state.noteSession) refreshSummaryStatus(state.noteSession.id);
-  }
+  if (!document.hidden && state.capturing && !state.animation) drawMeter();
 });
 
 document.querySelectorAll('[id$="Concurrency"]').forEach((input) => input.addEventListener("input", scheduleApiSave));
@@ -2912,8 +2997,12 @@ document.querySelectorAll('[id$="MaxOutput"]:not(#chatMaxOutput)').forEach((inpu
 
 // Keep course names and recording paths in step with Finder changes.
 const sharedLibraryEvents = new EventSource('/api/library/events');
-let sharedLibraryRefresh;
+let sharedLibraryRefresh, aiTaskEventTimer;
 sharedLibraryEvents.onmessage = () => {
+  if (document.hidden) return;
+  if (!aiTaskEventTimer) aiTaskEventTimer = setTimeout(() => {
+    aiTaskEventTimer = null; aiTasksPoll.wake();
+  }, Math.max(0, 5000 - (Date.now() - lastAiTasksAt)));
   clearTimeout(sharedLibraryRefresh);
   sharedLibraryRefresh = setTimeout(() => {
     if (document.visibilityState === 'visible' && state.activeView === 'library') loadLibrary();

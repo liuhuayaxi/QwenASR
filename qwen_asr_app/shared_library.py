@@ -4,9 +4,11 @@ import copy
 import json
 import shutil
 import time
+import uuid
+from contextlib import nullcontext
 from pathlib import Path
 
-from .durable import atomic_json
+from .durable import atomic_bytes, atomic_json
 from .library_layout import AI_FILES, AI_NOTES, INDEX, NOTE_LIBRARY_MARKER, RECORDINGS, shared
 from .storage import default_course_profile, safe_component, local_now
 
@@ -133,36 +135,44 @@ def change_shared_category(settings, recordings, category, name=None):
         return {'category': category, 'deleted': False}
     if name is not None and (target.exists() or target_name in settings.categories):
         raise ValueError('已有同名分类，请使用其他名称')
+    from .knowledge.ingest import SIDECAR_FILENAME
+    from .knowledge.store import KnowledgeStore
+
+    db_path = settings.storage_root / '.knowledge.db'
+    knowledge = KnowledgeStore(db_path) if db_path.is_file() else None
+
+    def course_id(folder):
+        path = folder / SIDECAR_FILENAME
+        if path.is_symlink():
+            raise ValueError('课程编号文件不能是符号链接')
+        if path.exists():
+            value = json.loads(path.read_text(encoding='utf-8'))
+            if not isinstance(value, dict) or not isinstance(value.get('course_id'), str) or not value['course_id']:
+                raise ValueError('课程编号文件损坏，请先核对课程目录')
+            return value['course_id']
+        saved = knowledge.get_course(folder.name) if knowledge else None
+        return saved['course_id'] if saved else None
+
+    # A merge retains the destination identity. Internal sidecars are metadata,
+    # not user originals competing for a filename in the destination folder.
+    source_id = course_id(source)
+    target_id = (course_id(target) if name is None else None) or source_id or 'c_' + uuid.uuid4().hex[:12]
     previous_categories = list(settings.categories)
     previous_profiles = copy.deepcopy(settings.category_profiles)
-    if name is not None:
-        source.rename(target)
-        try:
-            profile = settings.category_profiles.get(category, default_course_profile(category))
-            atomic_json(target / '.qwenasr-course.json', {'category': target_name, **profile})
-            settings.categories = [target_name if value == category else value for value in settings.categories]
-            settings.category_profiles[target_name] = settings.category_profiles.pop(category, profile)
-            settings.save()
-        except BaseException:
-            target.rename(source)
-            settings.categories, settings.category_profiles = previous_categories, previous_profiles
-            atomic_json(source / '.qwenasr-course.json', {'category': category, **previous_profiles.get(category, {})})
-            settings.save()
-            raise
-    else:
+    moves = []
+    incoming, existing = {}, {}
+    if name is None:
         # Merge direct originals, AI outputs, recording directories and stable
         # indexes. Reject collisions before any move; never overwrite a file.
-        target.mkdir(exist_ok=True)
-        moves = []
         for child in source.iterdir():
-            if child.name in {'.qwenasr-course.json', INDEX}:
+            if child.name in {'.qwenasr-course.json', SIDECAR_FILENAME, INDEX}:
                 continue
             destination = target / child.name
             if child.name in {AI_FILES, AI_NOTES, RECORDINGS} and destination.is_dir():
                 moves.extend((item, destination / item.name) for item in child.iterdir())
             else:
                 moves.append((child, destination))
-        if any(destination.exists() for _, destination in moves):
+        if any(destination.exists() or destination.is_symlink() for _, destination in moves):
             raise ValueError('“未分类”中已有同名内容，请先改名后再删除分类')
         def index(folder):
             path = folder / INDEX / 'index.json'
@@ -170,28 +180,92 @@ def change_shared_category(settings, recordings, category, name=None):
         incoming, existing = index(source), index(target)
         if incoming.keys() & existing.keys():
             raise ValueError('目标分类已有相同文件编号，请先核对重复资料')
-        completed = []
+    snapshots = {}
+    completed = []
+    created = []
+
+    def snapshot(path):
+        if path.is_symlink():
+            raise ValueError('课程元数据不能是符号链接')
+        snapshots[path] = path.read_bytes() if path.exists() else None
+
+    def mkdir(path):
+        missing = []
+        while not path.exists():
+            missing.append(path)
+            path = path.parent
+        for folder in reversed(missing):
+            folder.mkdir()
+            created.append(folder)
+
+    def move(old, new):
         try:
-            for old, new in moves:
-                new.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(old), str(new))
-                completed.append((old, new))
-            atomic_json(target / INDEX / 'index.json', {**existing, **incoming})
-            settings.categories.remove(category)
-            settings.category_profiles.pop(category, None)
-            settings.save()
+            shutil.move(str(old), str(new))
         except BaseException:
-            for old, new in reversed(completed):
-                shutil.move(str(new), str(old))
-            atomic_json(target / INDEX / 'index.json', existing)
-            settings.categories, settings.category_profiles = previous_categories, previous_profiles
-            settings.save()
+            if new.exists() and not old.exists():
+                completed.append((old, new))
             raise
-        # Retain deleted classification metadata outside the visible library.
-        from .storage import TRASH_ROOT
-        backup = TRASH_ROOT / ('分类-' + category + '-' + str(time.time_ns()))
-        backup.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(source), str(backup))
+        completed.append((old, new))
+
+    for filename in ('.qwenasr-course.json', SIDECAR_FILENAME):
+        snapshot((source if name is not None else target) / filename)
+    if name is None:
+        snapshot(target / INDEX / 'index.json')
+    transaction = knowledge.category_transaction(category, target_name, target_id, source, target) if knowledge else nullcontext()
+    try:
+        with transaction:
+            if name is not None:
+                move(source, target)
+                profile = settings.category_profiles.get(category, default_course_profile(category))
+                atomic_json(target / '.qwenasr-course.json', {**profile, 'category': target_name})
+                settings.categories = [target_name if value == category else value for value in settings.categories]
+                settings.category_profiles[target_name] = settings.category_profiles.pop(category, profile)
+            else:
+                mkdir(target)
+                for old, new in moves:
+                    mkdir(new.parent)
+                    move(old, new)
+                mkdir(target / INDEX)
+                atomic_json(target / INDEX / 'index.json', {**existing, **incoming})
+                settings.categories.remove(category)
+                settings.category_profiles.pop(category, None)
+            atomic_json(target / SIDECAR_FILENAME, {'course_id': target_id, 'category': target_name})
+            settings.save()
+            if name is None:
+                # Archiving the removed identity is part of the transaction;
+                # failure must restore its user files and both catalogs too.
+                from .storage import TRASH_ROOT
+                backup = TRASH_ROOT / ('分类-' + category + '-' + str(time.time_ns()))
+                mkdir(backup.parent)
+                move(source, backup)
+    except BaseException as exc:
+        errors = []
+        for old, new in reversed(completed):
+            try:
+                shutil.move(str(new), str(old))
+            except OSError as rollback_error:
+                errors.append(str(rollback_error))
+        for path, saved in snapshots.items():
+            try:
+                if saved is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    atomic_bytes(path, saved)
+            except OSError as rollback_error:
+                errors.append(str(rollback_error))
+        settings.categories, settings.category_profiles = previous_categories, previous_profiles
+        try:
+            settings.save()
+        except OSError as rollback_error:
+            errors.append(str(rollback_error))
+        for folder in reversed(created):
+            try:
+                folder.rmdir()
+            except OSError:
+                pass
+        if errors:
+            raise RuntimeError('分类更新未完成，部分文件需要恢复，请保留原目录和回收站：' + '; '.join(errors)) from exc
+        raise
     discover_courses(settings)
     recordings.refresh()
     return {'category': target_name, 'deleted': name is None}

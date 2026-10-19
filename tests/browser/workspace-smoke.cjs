@@ -6,7 +6,7 @@ const http = require('node:http');
 const assert = require('node:assert/strict');
 const {chromium} = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const root = path.resolve(__dirname,'../..');
-const output = path.join(root,'output/playwright');
+const output = path.resolve(process.env.QWEN_ASR_BROWSER_OUTPUT || path.join(root,'output/playwright'));
 fs.mkdirSync(output,{recursive:true});
 const record = {id:'smoke-class',title:'合成课堂第 3 讲',category:'合成课程',status:'completed',kind:'upload',started_at:'2026-10-10T08:00:00+08:00',duration:60,
  segments:[{id:1,start:0,end:60,raw:'合成原文：菲涅耳公式与相位差。',corrected:'合成校对内容：菲涅耳公式与相位差。'}],ai_reviews:[],ai_summaries:[],
@@ -64,7 +64,7 @@ async function fixtures(route) {
 (async()=>{
  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
  const origin=`http://127.0.0.1:${server.address().port}`;
- const browser=await chromium.launch({...(process.env.QWEN_ASR_BROWSER_CHANNEL === 'chromium' ? {} : {channel:process.env.QWEN_ASR_BROWSER_CHANNEL || 'chrome'}),headless:true,args:['--use-fake-device-for-media-stream','--use-fake-ui-for-media-stream']});
+ const browser=await chromium.launch({...(process.env.QWEN_ASR_BROWSER_EXECUTABLE ? {executablePath:process.env.QWEN_ASR_BROWSER_EXECUTABLE} : process.env.QWEN_ASR_BROWSER_CHANNEL === 'chromium' ? {} : {channel:process.env.QWEN_ASR_BROWSER_CHANNEL || 'chrome'}),headless:true,args:['--use-fake-device-for-media-stream','--use-fake-ui-for-media-stream']});
  const results=[];
  async function scenario(name,run) {
   if(process.env.QWEN_ASR_SMOKE_FILTER && !name.includes(process.env.QWEN_ASR_SMOKE_FILTER))return;
@@ -85,7 +85,8 @@ async function fixtures(route) {
     liveCourse={queue:{paused:false,items:[{id:'course-a',title:'合成课堂 A',state:'running'}]},imports:[{id:'course-a',progress:62,phases:{download:{label:'获取回放音频',percent:100,state:'completed'},asr:{label:'本地语音转写',percent:48.8,detail:'45.9/94.0 分钟',state:'running'}}}]};
     await page.goto(origin+'/tasks');
     const groupDetails=page.locator('.group-details');
-    if(await groupDetails.count() && !(await groupDetails.first().evaluate(e=>e.open))) await page.locator('.group-details > summary').first().click();
+    await groupDetails.first().waitFor({state:'attached'});
+    if(!(await groupDetails.first().evaluate(e=>e.open))) await page.locator('.group-details > summary').first().click();
     const phase=page.locator('.course-phase').filter({hasText:'本地语音转写'}).locator('progress');
     await page.waitForFunction(()=>document.querySelector('.task-progress')?.value===62);
     assert.equal(await phase.getAttribute('value'),'48.8');
@@ -131,6 +132,7 @@ async function fixtures(route) {
       {id:'asr-confirmed',type:'upload',family:'asr',title:'真实回执优先',label:'转写',status:'running',configured_provider:'local',inference:{provider:'remote',job_id:'synthetic-receipt'}}];
     await page.goto(origin+'/tasks');
     const groupDetails=page.locator('.group-details');
+    await groupDetails.first().waitFor({state:'attached'});
     for(let i=0;i<await groupDetails.count();i++){
       if(!(await groupDetails.nth(i).evaluate(e=>e.open))) await groupDetails.nth(i).locator('> summary').click();
     }

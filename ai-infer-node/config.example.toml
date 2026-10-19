@@ -13,6 +13,11 @@ max_queued_jobs = 32
 max_concurrent_gpu_jobs = 1
 model_idle_timeout_seconds = 0
 reclaim_model_file_cache = true
+# Resolve this service's own cgroup v2 root; requires systemd Delegate=yes.
+worker_cgroup_root = "auto"
+
+# scripts/install_wsl.sh provisions and pins manifest_file/manifest_sha256 in
+# [asr] and [mineru] after official downloads and byte-for-byte verification.
 
 [mineru]
 python = "~/ai-infer-node/venvs/mineru/bin/python"

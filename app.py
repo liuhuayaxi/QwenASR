@@ -824,7 +824,41 @@ def _summary_abstract_pending(record: RecordingRecord) -> bool:
         return False
 
 
+_idle_ai_task_cache = {}
+
+
 def compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any]]:
+    """Reuse unchanged idle summaries, without holding complete recordings."""
+    signature = getattr(recording_store, 'catalog_signature', None)
+    owned = [*background_summary_tasks.values(), *background_ai_tasks.values(),
+             *finalization_tasks.values()]
+    owned.extend(task for session in live_sessions.values()
+                 for task in session.periodic_tasks.values() if task is not None)
+    busy = bool(record_operations or running_batch_ids or model_manager.active_jobs
+                or any(not task.done() for task in owned))
+    if signature is None or busy:
+        _idle_ai_task_cache.clear()
+        return _build_compact_ai_tasks(include_history)
+    from qwen_asr_app.recording_catalog import file_stamp
+    active = recording_store.active
+    live_version = ((active.id, active.metadata.get('updated_at'), active.metadata.get('status'),
+                     active.metadata.get('sample_count'), len(active.segments)) if active is not None else None)
+    visit = getattr(recording_store, 'iter_records', recording_store.list_records)
+    key = (id(recording_store), signature(), file_stamp(ai_preferences.path), live_version,
+           getattr(visit, '__func__', visit))
+    cached = _idle_ai_task_cache.get(bool(include_history))
+    if cached is not None and cached[0] == key:
+        return copy.deepcopy(cached[1])
+    tasks = _build_compact_ai_tasks(include_history)
+    # Task DTOs contain statuses and counts, never retained transcript objects.
+    if len(json.dumps(tasks, ensure_ascii=False).encode('utf-8')) <= 4 * 1024 * 1024:
+        _idle_ai_task_cache[bool(include_history)] = (key, copy.deepcopy(tasks))
+    else:
+        _idle_ai_task_cache.pop(bool(include_history), None)
+    return tasks
+
+
+def _build_compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any]]:
     tasks: list[dict[str, Any]] = []
     try:
         saved_providers = (ai_preferences.read().get("function_providers") or {})
@@ -849,12 +883,13 @@ def compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any]]:
             "category": str(record.metadata.get("category") or "未分类"),
         }
         pending=record.metadata.get('pending_segments') or {}
-        if pending and any((p.get('config_snapshot') or {}).get('inference_settings',{}).get('asr_provider')=='remote_only' for p in pending.values()):
+        remote_pending = [p for p in pending.values() if (p.get('config_snapshot') or {}).get('inference_settings',{}).get('asr_provider') in {'remote_only', 'remote_preferred'}]
+        if remote_pending:
             backlog=record.metadata.get('remote_backlog') or {}
             status=backlog.get('status','pending')
             tasks.append({**base,'id':f'remote_asr:{record.id}','type':'remote_asr','status':status,
                 'phase':backlog.get('message','录音已保存，等待 Windows 补转'),
-                'total':len(pending),'completed':0,'configured_provider':'remote_only','actual_provider':'remote',
+                'total':len(remote_pending),'completed':0,'configured_provider':remote_pending[0]['config_snapshot']['inference_settings']['asr_provider'],'actual_provider':'remote',
                 'actions':['continue','cancel'] if status in {'paused','cancelled'} else ['pause','cancel'],
                 'updated_at':record.metadata.get('updated_at')})
         summary = record.metadata.get("summary_job") or {}
@@ -1622,8 +1657,11 @@ async def health() -> dict[str, Any]:
         mode = inference_settings.for_task('asr')['asr_provider']
     except (OSError, ValueError):
         mode = 'unknown'
+    worker = model_manager.worker
+    worker_pid = worker.pid if worker is not None and worker.is_alive() else None
     return {
         "service": "workbench", "pid": os.getpid(), "instance": os.getenv("QWEN_ASR_INSTANCE", ""),
+        "cpu_seconds": time.process_time(),
         "status": model_manager.status,
         "detail": model_manager.detail,
         "device": model_manager.device,
@@ -1632,8 +1670,11 @@ async def health() -> dict[str, Any]:
         "model": "Qwen3-ASR-1.7B BF16 (MLX)",
         "model_path": str(MODEL_PATH),
         "asr_provider": mode,
-        "local_model_loaded": bool(model_manager.worker and model_manager.worker.is_alive()),
-        "memory":{'rss_bytes':rss_bytes(),'last_reclaim':dict(last_reclaim)},
+        "local_model_loaded": worker_pid is not None,
+        "asr_worker_pid": worker_pid,
+        "idle_release_seconds": model_manager.idle_release_seconds,
+        "memory":{'rss_bytes':rss_bytes(), 'asr_worker_rss_bytes':rss_bytes(worker_pid) if worker_pid else 0,
+                  'last_reclaim':dict(last_reclaim)},
     }
 
 
@@ -1671,14 +1712,25 @@ async def recording_library(request: Request = None, category: str = '', date: s
     if offset < 0 or not 0 <= limit <= 100 or (date and not re.fullmatch(r'\d{4}-\d{2}-\d{2}', date)):
         raise HTTPException(400, '分页或日期参数无效')
     discover_courses(app_settings)
-    visit=getattr(recording_store,'iter_records',recording_store.list_records)
-    for record in visit():recording_discard.reconcile_restored(record.id)
-    records=visit()
+    visit = getattr(recording_store, 'iter_list_items', None) or getattr(recording_store,'iter_records',recording_store.list_records)
+    def restored_records():
+        # Reconcile only IDs actually present in the library. Looking up a
+        # discarded recording still in Trash would trigger a full store refresh.
+        for record in visit():
+            ident = record.get('id') if isinstance(record, dict) else record.id
+            if (recording_discard.results.get(ident, {}).get('status') == 'discarded'
+                    and recording_discard.reconcile_restored(ident)):
+                restored = recording_store.find(ident)
+                if restored is not None:
+                    record = restored.list_item() if isinstance(record, dict) else restored
+            yield record
+    records = restored_records()
     if ids:
         wanted = ids.split(',')
         if len(wanted) > 100 or any(not re.fullmatch(r'[A-Za-z0-9_-]{6,80}', value) for value in wanted):
             raise HTTPException(400, '录音编号列表无效')
-        records = [record for record in records if record.id in set(wanted)]
+        selected_ids = set(wanted)
+        records = (record for record in records if (record.get('id') if isinstance(record, dict) else record.id) in selected_ids)
     payload = {**(app_settings.public() if include_settings else {'categories': app_settings.categories}),
                **listing(records, category, date, offset, limit)}
     # Legacy callers without pagination still get all records, as small DTOs.
@@ -1848,15 +1900,11 @@ def change_library_category(category: str, name: str | None = None) -> dict[str,
         raise HTTPException(409, "资料或录音仍在处理，请完成或暂停相关任务后再修改分类")
     # Do not yield between this check and the moves: background work must not
     # acquire a category path halfway through changing it.
-    review_changed = False
-    previous_review_state = copy.deepcopy(review_library.state)
     try:
-        review_changed = review_library.reclassify(category, "未分类" if name is None else name)
-        result = change_category(app_settings, recording_store, category, name)
+        with review_library.transaction():
+            review_library.reclassify(category, "未分类" if name is None else name)
+            result = change_category(app_settings, recording_store, category, name)
     except (ValueError, OSError, RuntimeError) as exc:
-        if review_changed:
-            review_library.state = previous_review_state
-            review_library._save()
         raise HTTPException(400, str(exc)) from exc
     for record in records:
         course_stream_manager.jobs.pop(record.id, None)
@@ -2212,7 +2260,7 @@ async def begin_recording_end(session: TranscriptionSession, summary_payload: di
                     task.cancel()
                 await asyncio.gather(*auxiliary, return_exceptions=True)
             remote_pending = bool(record.metadata.get('pending_segments')) and all(
-                (p.get('config_snapshot') or {}).get('inference_settings',{}).get('asr_provider')=='remote_only'
+                (p.get('config_snapshot') or {}).get('inference_settings',{}).get('asr_provider') in {'remote_only', 'remote_preferred'}
                 for p in record.metadata.get('pending_segments',{}).values())
             if record.metadata.get("pending_segments") and not remote_pending:
                 raise RuntimeError("部分录音尚未成功转写，音频已保留，请重试结束保存")

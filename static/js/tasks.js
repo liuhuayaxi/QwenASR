@@ -14,7 +14,7 @@ const labels = {running:'进行中', queued:'排队中', waiting_retry:'等待�
 const actionLabels = {continue:'继续', retry:'重试', regenerate:'重新生成', pause:'暂停', cancel:'取消', download:'仅恢复下载', new_recognition:'新建识别', new_local:'新建本地任务'};
 const filterLabels = {daily:'当前进展', all:'全部课堂与资料', active:'进行中', attention:'需要处理', review:'待核对', pending:'尚未开始', paused:'已暂停', completed:'已完成', cancelled:'已取消', recovered:'有恢复记录'};
 const state = {tasks: [], groups: [], counts: {}, history: {}, filter: 'daily', selected: new Set(), busy: false, loading: false, ready: false, reloadRequested: false, revision: 0, detailState: new Map()};
-let timer, toastTimer, lastPayload = '';
+let timer, toastTimer, lastPayload = '', loadFailed = false;
 
 function notice(id, message) { $(id).textContent = message; $(id).hidden = !message; }
 function toast(message) { notice('toast', message); clearTimeout(toastTimer); toastTimer = setTimeout(() => $('toast').hidden = true, 5000); }
@@ -273,6 +273,7 @@ async function load() {
   try {
     let data = await api('/api/tasks');
     if (!Array.isArray(data.tasks) && !Array.isArray(data.groups)) throw new Error('任务列表响应不完整');
+    loadFailed = false;
     let courseWarning = '';
     if (!Array.isArray(data.groups) && (data.tasks || []).some(task => task.type === 'course_queue')) {
       try {
@@ -295,8 +296,9 @@ async function load() {
     const signature = JSON.stringify(data);
     if (signature !== lastPayload) { render(); lastPayload = signature; }
     notice('loadError', ''); notice('sourceWarning', [...(data.warnings || []), courseWarning].filter(Boolean).join('\n'));
-    $('lastUpdated').textContent = `已同步 ${new Date().toLocaleTimeString('zh-CN')} · 每 3 秒自动更新`;
+    $('lastUpdated').textContent = `已同步 ${new Date().toLocaleTimeString('zh-CN')} · ${state.counts.active ? '每 3 秒自动更新' : '空闲时每分钟校验，返回页面立即更新'}`;
   } catch (error) {
+    loadFailed = true;
     if (revision !== state.revision || state.busy) return;
     notice('loadError', `${error.message}。${state.ready ? '当前保留上次读取的任务。' : ''}`);
     if (!state.ready) $('taskList').innerHTML = '<div class="task-empty">暂时无法读取任务，请稍后刷新。</div>';
@@ -304,7 +306,7 @@ async function load() {
   } finally {
     state.loading = false; $('taskList').setAttribute('aria-busy', 'false');
     if (state.reloadRequested && !state.busy) { state.reloadRequested = false; queueMicrotask(load); }
-    else if (!document.hidden) timer = setTimeout(load, 3000);
+    else if (!document.hidden) timer = setTimeout(load, loadFailed ? 5000 : state.counts.active ? 3000 : 60000);
   }
 }
 function actionFocus() {

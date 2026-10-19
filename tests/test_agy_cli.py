@@ -33,7 +33,7 @@ class AGYCLITests(unittest.TestCase):
         completed = subprocess.CompletedProcess([], 0, json.dumps({
             "event": "result", "result": {"status": "SUCCESS", "response": "OK"}
         }) + "\n", "")
-        with patch("qwen_asr_app.agy_cli.subprocess.run", return_value=completed) as run:
+        with patch("qwen_asr_app.agy_cli.executable", return_value='/test/agy'), patch("qwen_asr_app.agy_cli.subprocess.run", return_value=completed) as run:
             self.assertEqual(run_sync("只输出 OK", {"text": "短文本"}, {
                 "transport": "agy_cli", "cli_model": "gemini-3.8-flash-low", "cli_effort": "low",
             }), "OK")
@@ -48,7 +48,7 @@ class AGYCLITests(unittest.TestCase):
         completed = subprocess.CompletedProcess([], 0, json.dumps({
             "event": "result", "result": {"status": "SUCCESS", "response": "OK"}
         }) + "\n", "")
-        with patch("qwen_asr_app.agy_cli.subprocess.run", return_value=completed) as run:
+        with patch("qwen_asr_app.agy_cli.executable", return_value='/test/agy'), patch("qwen_asr_app.agy_cli.subprocess.run", return_value=completed) as run:
             run_sync("只输出 OK", {"text": "短文本"}, {
                 "transport": "agy_cli", "cli_model": "gemini-3.8-flash-high", "cli_effort": "high",
             })
@@ -98,7 +98,7 @@ class AGYCLITests(unittest.TestCase):
         self.assertFalse(caught.exception.retriable)
 
     def test_terminated_child_without_result_remains_retryable(self):
-        with patch('qwen_asr_app.agy_cli.subprocess.run', return_value=subprocess.CompletedProcess([], -15, '', '')):
+        with patch('qwen_asr_app.agy_cli.executable', return_value='/test/agy'), patch('qwen_asr_app.agy_cli.subprocess.run', return_value=subprocess.CompletedProcess([], -15, '', '')):
             with self.assertRaises(AIRequestError) as caught:
                 run_sync('test', {}, {'cli_model': 'gemini-3.8-flash-high'})
         self.assertEqual(caught.exception.kind, 'network_transport')
@@ -146,9 +146,9 @@ class AGYCancellationTests(unittest.IsolatedAsyncioTestCase):
                                   stdout=SimpleNamespace(readline=readline),
                                   stderr=SimpleNamespace(read=AsyncMock(return_value=b'')),
                                   kill=Mock(), wait=AsyncMock())
-        with patch('qwen_asr_app.agy_cli.asyncio.create_subprocess_exec', new=AsyncMock(return_value=process)):
+        with patch('qwen_asr_app.agy_cli.executable', return_value='/test/agy'), patch('qwen_asr_app.agy_cli.asyncio.create_subprocess_exec', new=AsyncMock(return_value=process)):
             task = asyncio.create_task(request_text('测试', {}, {'cli_model': 'gemini-3.8-flash-high'}))
-            await entered.wait()
+            await asyncio.wait_for(entered.wait(), 1)
             task.cancel()
             with self.assertRaises(asyncio.CancelledError):
                 await task

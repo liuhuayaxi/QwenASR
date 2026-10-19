@@ -147,7 +147,11 @@ export function createLibraryTools({getSession, openRecord, saveNote, renderNote
   player.addEventListener('pause', () => setPlayerState(false));
   player.addEventListener('ended', () => { setPlayerState(false); updatePlayerProgress(); });
   player.addEventListener('error', () => toast('音频暂时无法播放，请确认录音已归档并重试'));
-  $('noteDialog').addEventListener('close', () => player.pause());
+  $('noteDialog').addEventListener('close', () => {
+    player.pause(); pendingSeek = null;
+    player.removeAttribute('src'); player.load();
+    playerRecord = ''; resetPlayer();
+  });
   playToggle.addEventListener('click', async () => {
     const session = getSession();
     if (!session || session.status !== 'completed') { toast('结束并保存后可以回听'); return; }

@@ -20,6 +20,8 @@
 
 本轮修复、测试与清理范围见 [稳定性修复验收](docs/2026-10-13稳定性修复验收.md)。需要独立预览时，可运行 `.venv/bin/python scripts/preview_workspace.py --port 8876`；预览使用项目内独立的 `.workspace-preview/` 数据目录，不加载正式 `.env`。
 
+代码审查修复、空闲模型释放、CPU／内存对照及上机步骤见 [审查修复与空闲资源验收](docs/review-fixes-idle-resources.md)。运行 `python3 scripts/sample_idle_resources.py --seconds 60` 可观测已启动工作台的 CPU 与模型子进程 RSS。
+
 ## 最简单的启动方式
 
 双击 `start_qwen_asr.command`。脚本读取持久化推理配置并检查相应依赖，启动一个后台服务后打开浏览器。仅远程 ASR 使用不含 MLX 的核心依赖，不要求 Mac 本地模型；启动不会下载权重。本地模型在明确准备后、实际转写时加载。关闭终端不会停止服务。双击 `stop_qwen_asr.command` 可安全停止；仍有录音、下载、转写或 AI 任务时会拒绝退出，提示先在页面处理。

@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
+from tests.agy_fixtures import available_material_sandbox
 
 from qwen_asr_app.agy_cli import _error_kind
 from qwen_asr_app.agy_materials import MaterialSessionError, communicate, request_materials, sandbox_profile, parse_json
@@ -32,6 +33,9 @@ def child(events=(), *, stderr=b'', exit_code=0):
 
 
 class MaterialTransportTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.enterContext(available_material_sandbox())
+
     async def test_large_session_requires_every_image_to_be_actually_read(self):
         with tempfile.TemporaryDirectory() as raw:
             folder=Path(raw).resolve();images=[folder/f'page-{n:03d}.png' for n in range(25)]
@@ -300,7 +304,7 @@ class MaterialTransportTests(unittest.IsolatedAsyncioTestCase):
              patch('qwen_asr_app.agy_materials.executable',return_value='/usr/bin/true'), \
              patch('qwen_asr_app.agy_materials.asyncio.create_subprocess_exec',return_value=process):
             task=asyncio.create_task(request_materials('synthetic',Path(raw),PROVIDER))
-            await entered.wait();task.cancel()
+            await asyncio.wait_for(entered.wait(), 1);task.cancel()
             with self.assertRaises(asyncio.CancelledError):await task
         process.terminate.assert_called_once();process.wait.assert_awaited_once()
 

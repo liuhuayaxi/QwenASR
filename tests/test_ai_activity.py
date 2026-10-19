@@ -38,6 +38,11 @@ def event(child, data):
 
 
 class ActivityTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        fixture = patch('qwen_asr_app.agy_cli.executable', return_value='/test/agy')
+        fixture.start()
+        self.addCleanup(fixture.stop)
+
     def test_a_new_connection_does_not_reset_a_silent_output_streams_age(self):
         with patch('qwen_asr_app.ai_activity.time.monotonic', return_value=100) as clock, \
              track_ai_activity('ages'), track_ai_request():

@@ -87,6 +87,7 @@ export function initCourseKnowledge() {
   let isSearching = false;
   let activeJobId = null;
   let jobPollInterval = null;
+  let jobsChecking = false;
 
   function getActiveCategory() {
     const fromUrl = new URLSearchParams(location.search).get("category");
@@ -417,6 +418,8 @@ export function initCourseKnowledge() {
   }
 
   async function checkJobs() {
+    if (document.hidden || jobsChecking) return;
+    jobsChecking = true;
     try {
       const data = await api("/api/knowledge/jobs");
       const jobs = data.jobs || [];
@@ -430,7 +433,7 @@ export function initCourseKnowledge() {
             els.jobsText.textContent = `${runningJob.status === 'queued' ? '索引已排队' : '正在建立索引'}：${runningJob.category || "课程"} · 进度 ${formatProgress(runningJob.progress)}`;
           }
         }
-        if (!jobPollInterval) {
+        if (!document.hidden && !jobPollInterval) {
           jobPollInterval = setInterval(checkJobs, 2500);
         }
       } else {
@@ -444,8 +447,13 @@ export function initCourseKnowledge() {
       }
     } catch {
       // Quiet
-    }
+    } finally { jobsChecking = false; }
   }
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) { clearInterval(jobPollInterval); jobPollInterval = null; }
+    else void checkJobs();
+  });
 
   // ==================== Event Listeners ====================
 
