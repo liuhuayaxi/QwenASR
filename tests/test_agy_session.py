@@ -17,6 +17,41 @@ PROMPT = '唯一请求标记：request-93ab'
 
 
 class SessionRecoveryTests(unittest.TestCase):
+    def test_native_read_file_verifies_path_full_line_content_and_hash(self):
+        source = self.root / 'input.json'
+        source.write_text('{\n  "data": "完整来源"\n}\n')
+        files = {str(source): {'lines': 3, 'sha256': hashlib.sha256(source.read_bytes()).hexdigest()}}
+        read = self.answer(content='', tool_calls=[{'name': 'read_file', 'args': {'Path': str(source)}}])
+        output = 'Created At: synthetic\nShowing lines 1-3 of 3\n1: {\n2:   "data": "完整来源"\n3: }\n'
+        receipt = {'type': 'GENERIC', 'status': 'DONE', 'content': output}
+        self.save([self.user(), read, receipt, self.answer()])
+        recovered = self.recover(allowed_files=files)
+        self.assertEqual(recovered['viewed_files'], [str(source)])
+        self.assertEqual(recovered['tools'], ['read_file'])
+        for bad in [output.replace('1-3 of 3', '1-2 of 3'), output.replace('完整来源', '替换内容'),
+                    output.replace('3: }', ''), output.replace('1-3 of 3', '1-3 of 4')]:
+            self.save([self.user(), read, {**receipt, 'content': bad}, self.answer()])
+            with self.assertRaises(SessionEvidenceError):
+                self.recover(allowed_files=files)
+        for args in [{'Path': str(self.root / 'outside')}, {'Path': str(source), 'Command': 'ignored'},
+                     {'Path': 'input.json'}]:
+            self.save([self.user(), self.answer(content='', tool_calls=[{'name': 'read_file', 'args': args}]), receipt, self.answer()])
+            with self.assertRaises(SessionEvidenceError):
+                self.recover(allowed_files=files)
+
+    def test_native_read_file_image_requires_completed_media_receipt(self):
+        source = self.root / 'image.png'
+        source.write_bytes(b'PNG-fixture')
+        files = {str(source): {'lines': 1, 'sha256': hashlib.sha256(source.read_bytes()).hexdigest()}}
+        read = self.answer(content='', tool_calls=[{'name': 'read_file', 'args': {'Path': str(source)}}])
+        receipt = {'type': 'GENERIC', 'status': 'DONE', 'content': 'image read', 'media': [{'uri': 'fixture-image'}]}
+        self.save([self.user(), read, receipt, self.answer()])
+        self.assertEqual(self.recover(allowed_files=files)['viewed_files'], [str(source)])
+        receipt.pop('media')
+        self.save([self.user(), read, receipt, self.answer()])
+        with self.assertRaisesRegex(SessionEvidenceError, '图片回执'):
+            self.recover(allowed_files=files)
+
     def test_redundant_past_end_read_requires_an_explicit_complete_read_first(self):
         source=self.root/'input-0000.json';source.write_text('{"source":"complete"}')
         files={str(source):{'lines':1,'sha256':hashlib.sha256(source.read_bytes()).hexdigest()}}
@@ -129,21 +164,70 @@ class SessionRecoveryTests(unittest.TestCase):
         read=self.answer(content='',tool_calls=[{'name':'view_file','args':{'AbsolutePath':str(source)}}])
         done={'type':'GENERIC','status':'DONE','content':'source read'}
         limit={'type':'ERROR_MESSAGE','status':'DONE','content':'Error: Your previous response was cut off because it exceeded the output token limit\nRetries remaining: 3'}
-        valid=[self.user(),read,done,self.answer(content='partial'),limit,self.answer()]
+        answer='{"answer":"完整最终答案"}'
+        valid=[self.user(),read,done,self.answer(content='partial'),limit,self.answer(content=answer)]
         self.save(valid)
         stream=json.dumps({'event':'result','result':{'status':'FAILED','conversation_id':SESSION,'error':limit['content']}})
         message=json.dumps({'message':{'content':PROMPT}})
         def saved(session,prompt,**kwargs):return read_session(session,prompt,root=self.root,**kwargs)
         def probe(session,prompt):return output_limit_before_failure(session,prompt,root=self.root)
         with patch('qwen_asr_app.agy_session.read_session',side_effect=saved),patch('qwen_asr_app.agy_session.output_limit_before_failure',side_effect=probe):
-            self.assertEqual(_finish_output(stream,'',self.root,message,1),'完整最终答案')
+            for code in (0,1):
+                for stderr in ('','harmless startup warning','discovery: permission denied for unrelated file',
+                               'not logged in\nPrint mode: silent auth succeeded'):
+                    self.assertEqual(_finish_output(stream,stderr,self.root,message,code),answer)
             for broken in [valid[:-1],valid+[{'type':'ERROR_MESSAGE','status':'DONE','content':'not logged in'}],valid[:1]+valid[3:]]:
                 self.save(broken)
                 with self.assertRaises(AIRequestError):_finish_output(stream,'',self.root,message,1)
             self.save(valid)
             with self.assertRaises(AIRequestError):_finish_output(stream,'HTTP 401 invalid_grant',self.root,message,1)
+            with self.assertRaises(AIRequestError):_finish_output(stream,'Print mode: silent auth succeeded\nHTTP 401 invalid_grant',self.root,message,0)
             source.write_text('changed')
             with self.assertRaises(AIRequestError):_finish_output(stream,'',self.root,message,1)
+
+    def test_json_suffixes_are_joined_verbatim_only_across_explicit_limits(self):
+        limit={'type':'ERROR_MESSAGE','status':'DONE','content':'Your previous response exceeded the output token limit'}
+        first=self.answer(content='{"knowledge":[{"quote":"原文 ')
+        middle=self.answer(content='有空格"}],"coverage":[')
+        last=self.answer(content='1,2]}')
+        entries=[self.user(),first,limit,middle,dict(limit),last]
+        self.save(entries)
+        recovered=self.recover(require_output_continuation=True)
+        self.assertEqual(recovered['response'],first['content']+middle['content']+last['content'])
+        self.assertEqual(recovered['output_continuation_fragments'],3)
+        self.assertEqual(json.loads(recovered['response'])['knowledge'][0]['quote'],'原文 有空格')
+        for broken in (
+            entries[:-1],
+            entries[:3]+[self.answer(content='extra prose')]+entries[3:],
+            entries[:-1]+[self.answer(content='broken suffix')],
+            [self.user(),self.answer(content='{"a":1,'),limit,self.answer(content='"a":2}')],
+        ):
+            self.save(broken)
+            with self.assertRaises(SessionEvidenceError):self.recover(require_output_continuation=True)
+
+    def test_successful_stream_suffix_still_uses_full_verified_continuation(self):
+        first='{"decisions":[';last='{"id":1}]}'
+        self.save([self.user(),self.answer(content=first),
+            {'type':'ERROR_MESSAGE','status':'DONE','content':'Your previous response exceeded the output token limit'},
+            self.answer(content=last)])
+        stream=json.dumps({'event':'result','result':{'status':'SUCCESS','conversation_id':SESSION,'response':last}})
+        message=json.dumps({'message':{'content':PROMPT}})
+        def probe(session,prompt):return output_limit_before_failure(session,prompt,root=self.root)
+        def saved(session,prompt,**kwargs):return read_session(session,prompt,root=self.root,**kwargs)
+        with patch('qwen_asr_app.agy_session.output_limit_before_failure',side_effect=probe),patch('qwen_asr_app.agy_session.read_session',side_effect=saved):
+            self.assertEqual(_finish_output(stream,'ordinary warning',self.root,message,0),first+last)
+            self.save([self.user(),self.answer(content=first),
+                {'type':'ERROR_MESSAGE','status':'DONE','content':'Your previous response exceeded the output token limit'},
+                self.answer(content='still broken')])
+            with self.assertRaises(AIRequestError) as caught:_finish_output(stream,'ordinary warning',self.root,message,0)
+            self.assertEqual(caught.exception.kind,'output_truncated')
+            self.assertTrue(caught.exception.retriable)
+            self.assertNotIn('ordinary warning',next((self.root/'diagnostics').glob('*.json')).read_text())
+
+    def test_limit_probe_requires_exact_request_not_a_matching_substring(self):
+        self.save([self.user('other prefix '+PROMPT),
+            {'type':'ERROR_MESSAGE','status':'DONE','content':'exceeded the output token limit'}])
+        self.assertFalse(output_limit_before_failure(SESSION,PROMPT,root=self.root))
 
     def test_all_file_lines_must_have_successful_reads_and_unchanged_bytes(self):
         source = self.root/'source.json'

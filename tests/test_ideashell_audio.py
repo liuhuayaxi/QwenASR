@@ -70,8 +70,75 @@ class IdeaShellAudioAttachmentTests(unittest.TestCase):
         payload = {'text': '# 笔记\nsummary: 短摘要\n\n## Memos\n**Memo 1: 当前归档**\nsummary: 短摘要\n' + content + '\n\n**Memo 2: 旧上半段**\nsummary: 旧摘要\n旧正文'}
         self.assertEqual(app.ideashell_note_content(payload), content)
 
+    def test_pull_accepts_first_visible_memo_number_after_remote_edits(self):
+        content = '# 完整正文\n\n## AI 总结\n\n完整总结'
+        payload = {'text': '# 笔记\nsummary: 摘要\n\n## Memos\n\n**Memo 3: 当前正文**\nsummary: 摘要\n'
+                   + content + '\n\n## Audios\n音频附件列表'}
+        self.assertEqual(app.ideashell_note_content(payload), content)
+
 
 class IdeaShellPushAudioTests(unittest.IsolatedAsyncioTestCase):
+    async def test_audio_reuse_requires_confirmed_matching_receipt_and_explicit_request(self):
+        scenarios = (
+            ('confirmed', {}, {'reuse_confirmed_audio': True}, True),
+            ('default uploads', {}, {}, False),
+            ('changed audio', {'audio_sha256': '2' * 64}, {'reuse_confirmed_audio': True}, False),
+            ('unconfirmed', {'last_pushed_at': ''}, {'reuse_confirmed_audio': True}, False),
+            ('other region', {'server_url': 'https://api.ideashell.com/ideashell/mcp'}, {'reuse_confirmed_audio': True}, False),
+            ('new note', {}, {'reuse_confirmed_audio': True, 'create_new': True}, False),
+        )
+        for name, receipt_changes, request, expected_reuse in scenarios:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as raw:
+                sync = {'note_id': 'a' * 32, 'server_url': 'https://mcp.ideashell.cn/mcp',
+                        'last_pushed_at': '2026-10-20T12:00:00+08:00', 'audio_sha256': '1' * 64}
+                sync.update(receipt_changes)
+                record = RecordingRecord(Path(raw), {
+                    'id': 'reuse-audio', 'title': '课堂', 'category': '测试课程',
+                    'status': 'completed', 'sample_count': 48_000,
+                    'ai_note_summary': {'summary': '完整总结'}, 'ideashell_sync': sync,
+                })
+                record.segments = [{'id': 1, 'start': 0, 'end': 3, 'raw': '原文'}]
+                audios = [{'name': '课堂.aac', 'data': b'a', 'bytes': 1, 'sha256': '1' * 64}]
+                connection = SimpleNamespace(server_url='https://mcp.ideashell.cn/mcp',
+                    list_tools=AsyncMock(return_value={'note_update': AUDIO_SCHEMA, 'note_create': AUDIO_SCHEMA}),
+                    call_tool=AsyncMock(return_value={'note_id': 'c' * 32}))
+                with patch.object(app.recording_store, 'find', return_value=record), \
+                     patch.object(app, 'ideashell_recording_audio_parts', new=AsyncMock(return_value=audios)), \
+                     patch.object(app.ideashell_manager, 'connection', return_value=connection), \
+                     patch.object(app, 'ensure_ideashell_course_folder', new=AsyncMock(return_value='b' * 32)):
+                    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app.app), base_url='http://test') as client:
+                        response = await client.post(f'/api/recordings/{record.id}/ideashell/push', json=request)
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()['audio_reused'], expected_reuse)
+                sent = next(call.args[1] for call in connection.call_tool.await_args_list
+                            if call.args[0] in {'note_update', 'note_create'})
+                self.assertEqual('audios' in sent, not expected_reuse)
+
+    async def test_material_only_preview_preserves_empty_transcript_and_skips_audio(self):
+        with tempfile.TemporaryDirectory() as raw:
+            record = RecordingRecord(Path(raw), {
+                'id': 'material-only', 'title': '课件笔记', 'category': '测试课程',
+                'status': 'interrupted', 'sample_count': 16000,
+                'material_only_note': {'transcript_policy': 'empty'},
+                'ai_note_summary': {'summary': '# 调频课件笔记\n\n完整课件内容'},
+            })
+            record.segments = []
+            record.save_all()
+            with patch.object(app.recording_store, 'find', return_value=record), \
+                 patch.object(record, 'ensure_aac') as encode:
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app.app), base_url='http://test') as client:
+                    response = await client.post(f'/api/recordings/{record.id}/ideashell/preview', json={'content_mode':'summary'})
+            self.assertEqual(response.status_code, 200, response.text)
+            preview = response.json()
+            self.assertIn('完整课件内容', preview['content'])
+            self.assertNotIn('精修录音原文', preview['content'])
+            self.assertEqual(preview['audio_parts'], [])
+            self.assertIn('按课件整理', preview['audio_error'])
+            encode.assert_not_called()
+            self.assertEqual(record.segments, [])
+            for name in ('transcript.txt', '原始转写.txt', 'AI修正后文本.txt'):
+                self.assertEqual((Path(raw) / name).read_bytes(), b'')
+
     async def test_invisible_old_link_requires_explicit_fresh_note(self):
         with tempfile.TemporaryDirectory() as raw:
             record = RecordingRecord(Path(raw), {

@@ -31,7 +31,7 @@ def outcome(prompt, kwargs):
 
 
 class ReviewBatchConcurrencyTests(unittest.IsolatedAsyncioTestCase):
-    async def test_large_context_reviews_25_pages_together_with_small_serial_renders(self):
+    async def test_large_context_keeps_small_durable_batches_and_serial_renders(self):
         from qwen_asr_app.native_pdf import pdf_operation
         with tempfile.TemporaryDirectory() as raw:
             folder=Path(raw);pdf,export=candidate(folder,25);calls=[];renders=[]
@@ -42,13 +42,14 @@ class ReviewBatchConcurrencyTests(unittest.IsolatedAsyncioTestCase):
                 return pdf_operation(operation,**kwargs)
             async def review(prompt,folder,provider,**kwargs):
                 numbers=json.loads(prompt.rsplit('\n',1)[-1])['pages'];calls.append(numbers)
-                self.assertEqual(len(kwargs['require_images']),25)
+                self.assertLessEqual(len(kwargs['require_images']),9)
                 self.assertTrue(all(path.is_file() for path in kwargs['require_images']))
-                return json.dumps({'status':'passed','issues':[],'viewed_pages':numbers}),{'session_id':'large-review'}
+                return json.dumps({'status':'passed','issues':[],'viewed_pages':numbers}),{'session_id':'review-'+str(numbers[0])}
             with patch('qwen_asr_app.native_pdf.pdf_operation',side_effect=native),patch('qwen_asr_app.review_notes.request_materials',side_effect=review):
                 report=await visual_review(pdf,export,folder,{'transport':'agy_cli','context_window':1048576},[],[])
-            self.assertEqual(calls,[list(range(1,26))]);self.assertEqual(renders,[4,4,4,4,4,4,1])
-            self.assertEqual(report['status'],'passed');self.assertEqual(report['batch_size'],32)
+            self.assertEqual([n for group in calls for n in group],list(range(1,26)))
+            self.assertTrue(all(len(group)<=8 for group in calls));self.assertTrue(all(n<=4 for n in renders))
+            self.assertEqual(report['status'],'passed');self.assertEqual(report['batch_size'],8)
 
     async def test_larger_resume_batches_preserve_previous_small_batch_receipts(self):
         from qwen_asr_app.review_notes import REVIEW_POLICY
@@ -63,7 +64,7 @@ class ReviewBatchConcurrencyTests(unittest.IsolatedAsyncioTestCase):
                 return json.dumps({'status':'passed','issues':[],'viewed_pages':numbers}),{'session_id':'new-'+str(numbers[0])}
             with patch('qwen_asr_app.review_notes.request_materials',side_effect=review):
                 report=await visual_review(pdf,export,folder,{'transport':'agy_cli','context_window':1048576},[],[])
-            self.assertEqual(calls,[[1,2,3,4],list(range(9,21))])
+            self.assertEqual(calls,[[1,2,3,4],[9,10,11,12,13,14,15,16],[17,18,19,20]])
             self.assertIn(previous,report['batches']);self.assertEqual(report['viewed_pages'],list(range(1,21)))
 
     async def test_passed_warning_does_not_start_another_repair_or_export(self):
@@ -83,7 +84,7 @@ class ReviewBatchConcurrencyTests(unittest.IsolatedAsyncioTestCase):
                  patch('qwen_asr_app.note_latex_author.export_direct',AsyncMock(return_value=((pdf,export),{}))) as render, \
                  patch('qwen_asr_app.review_notes.visual_review',AsyncMock(return_value=report)) as review, \
                  patch('qwen_asr_app.note_review_repair.repair_review',AsyncMock()) as repair:
-                result=await upgrade_pdf(record,{'ai':{}})
+                result=await upgrade_pdf(record,{'ai':{},'note_review_enabled':True})
             self.assertEqual(result['status'],'passed');self.assertEqual(render.await_count,1)
             self.assertEqual(review.await_count,1);repair.assert_not_awaited()
             self.assertNotIn('review_warning',record.metadata['ai_note_summary'])
@@ -353,15 +354,48 @@ class ReviewStageProgressTests(unittest.TestCase):
             self.assertEqual(review_start_progress({**task, 'reviewed_pages': bad}, export)['reviewed_pages'], 0)
 
 class ReviewRequestVisibilityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_split_saves_successful_child_and_resume_never_replays_it(self):
+        from qwen_asr_app.agy_materials import MaterialSessionError
+        with tempfile.TemporaryDirectory() as raw:
+            folder=Path(raw);pdf,export=candidate(folder,2);calls=[]
+            async def model(prompt,folder,provider,**kwargs):
+                numbers,result=outcome(prompt,kwargs);calls.append(numbers)
+                if len(numbers)>1:raise MaterialSessionError('read deadline',kind='network_read_timeout',retriable=True)
+                if numbers==[2]:raise MaterialSessionError('temporary',kind='provider_unavailable',retriable=True)
+                return result
+            with patch('qwen_asr_app.review_notes.request_materials',side_effect=model),patch('qwen_asr_app.review_notes.asyncio.sleep',new=AsyncMock()):
+                with self.assertRaises(MaterialSessionError):await visual_review(pdf,export,folder,{'concurrency':1},[],[])
+            report=json.loads((folder/'review.json').read_text())
+            self.assertEqual(report['viewed_pages'],[1]);self.assertEqual(report['active_batches'],{})
+            self.assertEqual(calls,[[1,2],[1],[2],[2],[2]])
+            async def resume(prompt,folder,provider,**kwargs):
+                self.assertEqual(outcome(prompt,kwargs)[0],[2]);return outcome(prompt,kwargs)[1]
+            with patch('qwen_asr_app.review_notes.request_materials',side_effect=resume):
+                report=await visual_review(pdf,export,folder,{},[],[])
+            self.assertEqual(report['status'],'passed');self.assertEqual(report['viewed_pages'],[1,2])
+
+    def test_review_evidence_keeps_full_outline_but_local_quotes_and_objectives(self):
+        from qwen_asr_app.review_notes import review_coverage
+        ledger={'knowledge':[{'id':'local','topic':'polarization','sources':['S1'],'source_quote':'local evidence','objective_ids':['o1']},
+            {'id':'other','topic':'interference','sources':['S2'],'source_quote':'unrelated long evidence','objective_ids':['o2']}],
+            'objective_coverage':[{'objective_id':'o1','sources':['S1']},{'objective_id':'o2','sources':['S2']}]}
+        local=review_coverage(ledger,{'S1'},set())
+        self.assertEqual(local['knowledge'],[ledger['knowledge'][0]])
+        self.assertEqual([row['id'] for row in local['complete_coverage_context']],['local','other'])
+        self.assertEqual([row['objective_id'] for row in local['objective_coverage']],['o1'])
+        self.assertNotIn('unrelated long evidence',json.dumps(local))
+
     async def test_current_page_batch_and_deadline_are_saved_while_waiting(self):
         with tempfile.TemporaryDirectory() as raw:
             folder=Path(raw);pdf,export=candidate(folder,4)
             async def model(prompt,folder,provider,**kwargs):
-                self.assertEqual(provider['cli_timeout_seconds'],300)
+                self.assertEqual(provider['cli_timeout_seconds'],0)
                 report=json.loads((folder/'review.json').read_text())
                 running=list(report['active_batches'].values())
                 self.assertEqual(running[0]['pages'],[1,2,3,4])
                 self.assertEqual(running[0]['attempt'],1)
+                self.assertIsNone(running[0]['timeout_seconds'])
+                self.assertEqual(running[0]['deadline_policy'],'until_completion')
                 return outcome(prompt,kwargs)[1]
             with patch('qwen_asr_app.review_notes.request_materials',side_effect=model):
                 report=await visual_review(pdf,export,folder,{'cli_timeout_seconds':1800},[],[])
@@ -380,11 +414,13 @@ class ReviewRequestVisibilityTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(MaterialSessionError) as caught:
                     await visual_review(pdf,export,folder,{'concurrency':1},[],[])
             self.assertEqual(caught.exception.kind,'review_batch_exhausted')
-            self.assertEqual(len(calls),4)
+            self.assertEqual(calls,[[1,2,3,4],[5,6,7,8],[5,6],[5],[5],[5]])
             report=json.loads((folder/'review.json').read_text())
             self.assertEqual(report['viewed_pages'],[1,2,3,4]);self.assertEqual(report['active_batches'],{})
             async def resume(prompt,folder,provider,**kwargs):
-                self.assertEqual(outcome(prompt,kwargs)[0],[5,6,7,8]);return outcome(prompt,kwargs)[1]
+                self.assertEqual(len(outcome(prompt,kwargs)[0]),1)
+                self.assertGreaterEqual(outcome(prompt,kwargs)[0][0],5)
+                return outcome(prompt,kwargs)[1]
             with patch('qwen_asr_app.review_notes.request_materials',side_effect=resume):
                 report=await visual_review(pdf,export,folder,{},[],[])
             self.assertEqual(report['status'],'passed')

@@ -42,6 +42,25 @@ class RetryStormTests(unittest.TestCase):
         due = due_summary_windows(segments, saved, 600)
         self.assertEqual([(start, end) for start, end, _ in due], [(600, 1200)])
 
+    def test_verification_recovery_respects_explicit_refinement_cancellation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            record = RecordingRecord(Path(directory), {
+                'id': 'failed-summary', 'status': 'completed', 'title': '失败总结',
+                'category': '测试课程',
+                'summary_job': {
+                    'status': 'failed',
+                    'error': 'AGY 文本会话尝试调用未授权工具：read_file',
+                    'error_kind': 'material_tool_violation',
+                },
+                'ai_jobs': {'refinement': {'status': 'cancelled'}},
+            })
+            record.save_metadata()
+            with patch.object(app.recording_store, 'find', return_value=record), \
+                 patch('qwen_asr_app.transcription_assist.routes.active_candidates', return_value=[{'candidate_id': 'x'}]), \
+                 patch.object(app, 'ai_task_action', new=AsyncMock()) as action:
+                asyncio.run(app.queue_correction_verification(record.id))
+            action.assert_not_awaited()
+
     def test_task_center_deduplicates_historical_attempts(self) -> None:
         record = SimpleNamespace(
             id="lesson-1",

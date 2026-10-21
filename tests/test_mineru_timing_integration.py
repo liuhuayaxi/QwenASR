@@ -85,6 +85,36 @@ class TimingIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(s['progress'] < 100 for s in snapshots if s['status']=='running'))
         self.assertEqual(sum(map(len,self.history.read()['profiles'].values())),1)
 
+    async def test_remote_generation_keeps_clean_published_name_and_preserves_previous_bytes(self):
+        output = self.root / 'PDF' / 'sample(AI).pdf'
+        output.parent.mkdir()
+        output.write_bytes(b'%PDF-old-version')
+        item = {'id': 'asset', 'name': 'sample.pdf', 'conversion': {
+            'status': 'queued', 'operation_id': 'a' * 32, 'mineru_settings': self.settings,
+            'inference_settings': {'mineru_provider': 'local'}, 'source_sha256': digest_file(self.source),
+            'operation': {'blob_path': str(self.source), 'receipt_path': str(self.root / 'receipt.json')}}}
+        api = CourseFileAPI.__new__(CourseFileAPI)
+        api.store = Mock()
+        api.store.get.return_value = (item, self.root)
+        api.conversion_lock = asyncio.Lock()
+        api.controls = {('course', 'asset'): {'action': 'interrupted'}}
+        async def worker(fn, source, destination, callback, **kwargs):
+            self.assertTrue(destination.name.startswith('.'))
+            self.assertEqual(output.read_bytes(), b'%PDF-old-version')
+            destination.write_bytes(b'%PDF-new-version')
+            return {'pages': 8, 'source_pages': 8, 'inference': {'provider': 'local'}}
+        with patch('qwen_asr_app.course_file_routes.shared', return_value=False), \
+             patch('qwen_asr_app.course_file_routes.saved_config', return_value={'mineru_provider': 'local'}), \
+             patch('qwen_asr_app.course_file_routes.receipt', return_value={}), \
+             patch('qwen_asr_app.course_file_routes.MineruTiming', side_effect=self.factory), \
+             patch('qwen_asr_app.course_file_routes.conversion_worker', side_effect=worker), \
+             patch('qwen_asr_app.remote_operations.discard_completed_payloads'):
+            await api.run_conversion('course', 'asset', self.source, Event())
+        self.assertEqual(item['conversion']['status'], 'completed')
+        self.assertEqual(item['conversion']['name'], 'sample(AI).pdf')
+        self.assertEqual(output.read_bytes(), b'%PDF-new-version')
+        self.assertEqual(Path(item['conversion']['legacy_output_backup']).read_bytes(), b'%PDF-old-version')
+
 
 if __name__ == '__main__':
     unittest.main()

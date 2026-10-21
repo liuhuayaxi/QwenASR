@@ -1,5 +1,6 @@
 """An early CLI exit must keep the cause and never approve unseen pages."""
 from tests import isolation  # noqa: F401
+from tests.agy_fixtures import available_material_sandbox
 
 import asyncio
 import copy
@@ -11,7 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from qwen_asr_app.agy_cli import _error_kind
-from qwen_asr_app.agy_materials import MaterialSessionError, communicate, request_materials, sandbox_profile, parse_json
+from qwen_asr_app.agy_materials import MaterialSessionError, communicate, request_materials, retry_materials, sandbox_profile, parse_json
 
 
 PROVIDER={'transport':'agy_cli','context_window':256000,'cli_model':'gemini-3.8-flash-high'}
@@ -32,6 +33,44 @@ def child(events=(), *, stderr=b'', exit_code=0):
 
 
 class MaterialTransportTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.enterContext(available_material_sandbox())
+
+    async def test_model_start_failure_retries_without_switching_model_or_approving_images(self):
+        failure='model gemini-3.8-flash-high is not recognized as a known model or custom model in settings'
+        with tempfile.TemporaryDirectory() as raw:
+            folder=Path(raw)
+            success=child([{'event':'init','conversation_id':'new-session'},
+                {'event':'result','result':{'status':'SUCCESS','response':'{"images":[]}'}}])
+            with patch('qwen_asr_app.agy_materials.executable',return_value='/usr/bin/true'), \
+                 patch('qwen_asr_app.agy_materials.asyncio.create_subprocess_exec',side_effect=[child(stderr=failure.encode(),exit_code=1),success]) as run, \
+                 patch('qwen_asr_app.agy_cli.asyncio.sleep',new=AsyncMock()):
+                text,receipt=await request_materials('synthetic',folder,PROVIDER)
+            self.assertEqual(text,'{"images":[]}');self.assertEqual(receipt['session_id'],'new-session')
+            self.assertEqual(run.await_count,2)
+            for call in run.call_args_list:
+                self.assertEqual(call.args[call.args.index('--model')+1],PROVIDER['cli_model'])
+            saved=json.loads(next((folder/'sessions').glob('failed-*.json')).read_text())
+            self.assertEqual(saved['error_kind'],'agy_model_unavailable');self.assertEqual(saved['viewed_files'],[])
+
+    async def test_figure_batch_retry_is_bounded_and_preserves_completed_checkpoint(self):
+        with tempfile.TemporaryDirectory() as raw:
+            folder=Path(raw);checkpoint=folder/'figure-reading-previous.json';checkpoint.write_text('previous success')
+            transient=lambda:MaterialSessionError('temporary',kind='network_transport',retriable=True)
+            with patch('qwen_asr_app.agy_materials.request_materials',side_effect=[transient(),('complete',{'session_id':'new'})]) as call, \
+                 patch('qwen_asr_app.agy_materials.asyncio.sleep',new=AsyncMock()):
+                self.assertEqual((await retry_materials('synthetic',folder,PROVIDER,label='figure-reading'))[0],'complete')
+                self.assertEqual(call.await_count,2)
+            with patch('qwen_asr_app.agy_materials.request_materials',side_effect=lambda *a,**k:(_ for _ in ()).throw(transient())) as call, \
+                 patch('qwen_asr_app.agy_materials.asyncio.sleep',new=AsyncMock()):
+                with self.assertRaises(MaterialSessionError) as caught:await retry_materials('synthetic',folder,PROVIDER)
+                self.assertEqual(call.await_count,3);self.assertFalse(caught.exception.retriable)
+            self.assertEqual(checkpoint.read_text(),'previous success')
+            for kind in ['provider_auth','material_tool_violation','output_truncated']:
+                with patch('qwen_asr_app.agy_materials.request_materials',side_effect=MaterialSessionError('rejected',kind=kind,retriable=True)) as call:
+                    with self.assertRaises(MaterialSessionError):await retry_materials('synthetic',folder,PROVIDER)
+                    self.assertEqual(call.await_count,1)
+
     async def test_large_session_requires_every_image_to_be_actually_read(self):
         with tempfile.TemporaryDirectory() as raw:
             folder=Path(raw).resolve();images=[folder/f'page-{n:03d}.png' for n in range(25)]
@@ -106,6 +145,20 @@ class MaterialTransportTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(set(restore.call_args.kwargs['required_files']),
                              {str(folder/'page-021.png'),str(folder/'page-022.png')})
             self.assertEqual(restore.call_args.kwargs['schema'],schema)
+
+    async def test_truncated_material_response_replays_only_verified_continuation(self):
+        with tempfile.TemporaryDirectory() as raw:
+            folder=Path(raw).resolve();schema,events,expected=self.finish_recovery_fixture(folder)
+            failed=[events[0],{'event':'result','result':{'status':'FAILED','error':'exceeded the output token limit'}}]
+            with patch('qwen_asr_app.agy_session.output_limit_before_failure',return_value=True), \
+                 patch('qwen_asr_app.agy_session.read_session',return_value={'events':events}) as restore, \
+                 patch('qwen_asr_app.agy_materials.executable',return_value='/usr/bin/true'), \
+                 patch('qwen_asr_app.agy_materials.asyncio.create_subprocess_exec',return_value=child(failed,stderr=b'ordinary warning',exit_code=1)):
+                text,receipt=await request_materials('synthetic',folder,PROVIDER,schema=schema,
+                    read_paths=[folder/'page-021.png',folder/'page-022.png'],require_images=[folder/'page-021.png',folder/'page-022.png'])
+            self.assertEqual(json.loads(text),expected)
+            self.assertTrue(receipt['recovered_output_continuation'])
+            self.assertTrue(restore.call_args.kwargs['require_output_continuation'])
 
     async def test_unrecovered_finish_error_cannot_claim_a_completed_review(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -300,7 +353,7 @@ class MaterialTransportTests(unittest.IsolatedAsyncioTestCase):
              patch('qwen_asr_app.agy_materials.executable',return_value='/usr/bin/true'), \
              patch('qwen_asr_app.agy_materials.asyncio.create_subprocess_exec',return_value=process):
             task=asyncio.create_task(request_materials('synthetic',Path(raw),PROVIDER))
-            await entered.wait();task.cancel()
+            await asyncio.wait_for(entered.wait(), 1);task.cancel()
             with self.assertRaises(asyncio.CancelledError):await task
         process.terminate.assert_called_once();process.wait.assert_awaited_once()
 

@@ -46,6 +46,9 @@
 .file-icon { display: grid; place-items: center; width: 44px; height: 52px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface); color: var(--green); font-size: var(--text-xs); font-weight: 600; }
 .file-main { min-width: 0; }
 .file-title { margin: 0 0 8px; font-size: 15px; font-weight: 650; line-height: 1.6; overflow-wrap: anywhere; }
+.file-title-link { padding: 0; border: 0; border-radius: 3px; background: transparent; color: inherit; font: inherit; text-align: left; overflow-wrap: anywhere; cursor: pointer; }
+.file-title-link:hover { color: var(--green-dark); text-decoration: underline; text-underline-offset: 3px; }
+.file-title-link:focus-visible { outline: 2px solid var(--green); outline-offset: 4px; }
 .file-meta { display: flex; gap: 8px 12px; flex-wrap: wrap; color: var(--muted); font-size: var(--text-sm); line-height: 1.6; }
 .badge { border-radius: 5px; background: var(--green-soft); padding: 1px 7px; color: var(--green-dark); }
 .file-status { margin: 12px 0 0; color: var(--green); font-size: var(--text-sm); line-height: 1.7; overflow-wrap: anywhere; }

@@ -225,7 +225,7 @@ async def repair_review(markdown,folder,provenance,provider,ledger,package,image
                 state['attempts']=attempt+1;atomic_json(state_path,state)
                 try:
                     raw,receipt=await request_materials(INSTRUCTIONS+'\n'+json.dumps(payload,ensure_ascii=False),folder,
-                        {**provider,'cli_timeout_seconds':min(600,max(60,int(provider.get('cli_timeout_seconds') or 300)))},
+                        {**provider,'cli_timeout_seconds':0},
                         read_paths=[pdf,*required],require_images=required,label='automatic-note-repair',schema=SCHEMA)
                     atomic_bytes(destination/f'proposal-{attempt+1}.txt',raw.encode())
                     result=parse_json(raw)

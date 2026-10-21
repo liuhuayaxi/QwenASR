@@ -38,6 +38,24 @@ def event(child, data):
 
 
 class ActivityTests(unittest.IsolatedAsyncioTestCase):
+    def test_finished_output_is_not_counted_as_current_request_output(self):
+        with patch('qwen_asr_app.ai_activity.time.monotonic',return_value=100) as clock,track_ai_activity('stages'):
+            with track_ai_request():report_ai_activity('receiving',output_chars=90000)
+            clock.return_value=200
+            with track_ai_request():
+                clock.return_value=215
+                snapshot=task_ai_activity('stages')
+                self.assertEqual(snapshot['output_chars'],90000)
+                self.assertEqual(snapshot['current_output_chars'],0)
+                self.assertEqual(snapshot['request_elapsed_seconds'],15)
+                report_ai_activity('receiving',output_chars=50)
+                self.assertEqual(task_ai_activity('stages')['current_output_chars'],50)
+
+    def setUp(self):
+        fixture = patch('qwen_asr_app.agy_cli.executable', return_value='/test/agy')
+        fixture.start()
+        self.addCleanup(fixture.stop)
+
     def test_a_new_connection_does_not_reset_a_silent_output_streams_age(self):
         with patch('qwen_asr_app.ai_activity.time.monotonic', return_value=100) as clock, \
              track_ai_activity('ages'), track_ai_request():

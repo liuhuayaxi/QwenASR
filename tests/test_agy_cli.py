@@ -14,6 +14,33 @@ from qwen_asr_app.ai import AIRequestError
 
 
 class AGYCLITests(unittest.TestCase):
+    def test_zero_timeout_waits_for_completion_without_a_wall_clock_deadline(self):
+        from qwen_asr_app.agy_cli import timeout_seconds
+        self.assertIsNone(timeout_seconds({'cli_timeout_seconds':0}))
+        self.assertEqual(timeout_seconds({'cli_timeout_seconds':7200}),7200)
+        completed=subprocess.CompletedProcess([],0,json.dumps({'event':'result','result':{'status':'SUCCESS','response':'OK'}}),'')
+        with patch('qwen_asr_app.agy_cli.executable',return_value='/test/agy'),patch('qwen_asr_app.agy_cli.subprocess.run',return_value=completed) as run:
+            self.assertEqual(run_sync('test',{}, {'cli_timeout_seconds':0,'cli_model':'gemini-3.8-flash-high'}), 'OK')
+            self.assertIsNone(run.call_args.kwargs['timeout'])
+
+    def test_model_discovery_retries_same_model_and_stops_after_three_starts(self):
+        failure=subprocess.CompletedProcess([],1,'','model gemini-3.8-flash-high is not recognized as a known model or custom model in settings')
+        success=subprocess.CompletedProcess([],0,json.dumps({'event':'result','result':{'status':'SUCCESS','response':'OK'}}),'')
+        provider={'cli_model':'gemini-3.8-flash-high'}
+        with patch('qwen_asr_app.agy_cli.executable',return_value='/test/agy'),patch('qwen_asr_app.agy_cli.time.sleep') as sleep:
+            with patch('qwen_asr_app.agy_cli.subprocess.run',side_effect=[failure,success]) as run:
+                self.assertEqual(run_sync('test',{},provider),'OK')
+                self.assertEqual(run.call_count,2)
+                for call in run.call_args_list:
+                    command=call.args[0]
+                    self.assertEqual(command[command.index('--model')+1],provider['cli_model'])
+            with patch('qwen_asr_app.agy_cli.subprocess.run',return_value=failure) as run:
+                with self.assertRaises(AIRequestError) as caught:run_sync('test',{},provider)
+                self.assertEqual(run.call_count,3)
+                self.assertEqual(caught.exception.kind,'agy_model_unavailable')
+                self.assertFalse(caught.exception.retriable)
+                self.assertIn('三次',str(caught.exception))
+
     def test_gui_service_path_finds_user_local_installation(self):
         # Model the actual GUI launcher PATH rather than our login-shell PATH.
         with patch("qwen_asr_app.agy_cli.shutil.which", return_value=None), \
@@ -33,7 +60,7 @@ class AGYCLITests(unittest.TestCase):
         completed = subprocess.CompletedProcess([], 0, json.dumps({
             "event": "result", "result": {"status": "SUCCESS", "response": "OK"}
         }) + "\n", "")
-        with patch("qwen_asr_app.agy_cli.subprocess.run", return_value=completed) as run:
+        with patch("qwen_asr_app.agy_cli.executable", return_value='/test/agy'), patch("qwen_asr_app.agy_cli.subprocess.run", return_value=completed) as run:
             self.assertEqual(run_sync("只输出 OK", {"text": "短文本"}, {
                 "transport": "agy_cli", "cli_model": "gemini-3.8-flash-low", "cli_effort": "low",
             }), "OK")
@@ -48,7 +75,7 @@ class AGYCLITests(unittest.TestCase):
         completed = subprocess.CompletedProcess([], 0, json.dumps({
             "event": "result", "result": {"status": "SUCCESS", "response": "OK"}
         }) + "\n", "")
-        with patch("qwen_asr_app.agy_cli.subprocess.run", return_value=completed) as run:
+        with patch("qwen_asr_app.agy_cli.executable", return_value='/test/agy'), patch("qwen_asr_app.agy_cli.subprocess.run", return_value=completed) as run:
             run_sync("只输出 OK", {"text": "短文本"}, {
                 "transport": "agy_cli", "cli_model": "gemini-3.8-flash-high", "cli_effort": "high",
             })
@@ -98,7 +125,7 @@ class AGYCLITests(unittest.TestCase):
         self.assertFalse(caught.exception.retriable)
 
     def test_terminated_child_without_result_remains_retryable(self):
-        with patch('qwen_asr_app.agy_cli.subprocess.run', return_value=subprocess.CompletedProcess([], -15, '', '')):
+        with patch('qwen_asr_app.agy_cli.executable', return_value='/test/agy'), patch('qwen_asr_app.agy_cli.subprocess.run', return_value=subprocess.CompletedProcess([], -15, '', '')):
             with self.assertRaises(AIRequestError) as caught:
                 run_sync('test', {}, {'cli_model': 'gemini-3.8-flash-high'})
         self.assertEqual(caught.exception.kind, 'network_transport')
@@ -136,6 +163,52 @@ class AGYCLITests(unittest.TestCase):
 
 
 class AGYCancellationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_protocol_retry_exhaustion_and_cancellation_preserve_failure(self):
+        error = AIRequestError('unauthorized read_file', kind='material_tool_violation', retriable=False)
+        with patch('qwen_asr_app.agy_cli._request_text_once', new=AsyncMock(side_effect=error)) as call, \
+             patch('qwen_asr_app.agy_cli.asyncio.sleep', new=AsyncMock()):
+            with self.assertRaises(AIRequestError):
+                await request_text('test', {}, {'cli_model': 'gemini-3.8-flash-high'})
+            self.assertEqual(call.await_count, 3)
+        waiting = asyncio.Event()
+        async def sleep(_):
+            waiting.set()
+            await asyncio.Event().wait()
+        with patch('qwen_asr_app.agy_cli._request_text_once', new=AsyncMock(side_effect=error)) as call, \
+             patch('qwen_asr_app.agy_cli.asyncio.sleep', side_effect=sleep):
+            task = asyncio.create_task(request_text('test', {}, {'cli_model': 'gemini-3.8-flash-high'}))
+            await asyncio.wait_for(waiting.wait(), 1)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            self.assertEqual(call.await_count, 1)
+
+    async def test_legacy_read_file_protocol_violation_retries_fresh_turn_twice(self):
+        from qwen_asr_app.agy_cli import request_text
+        error=AIRequestError('AGY 文本会话尝试调用未授权工具：read_file',
+                             kind='material_tool_violation', retriable=False)
+        with patch('qwen_asr_app.agy_cli._request_text_once', new=AsyncMock(side_effect=[error, '完成'])) as call, \
+             patch('qwen_asr_app.agy_cli.asyncio.sleep', new=AsyncMock()) as wait:
+            result=await request_text('测试', {}, {'cli_model':'gemini-3.8-flash-high'})
+        self.assertEqual(result, '完成')
+        self.assertEqual(call.await_count, 2)
+        wait.assert_awaited_once_with(2)
+
+    async def test_model_retry_is_cancellable_and_does_not_retry_a_started_conversation(self):
+        from qwen_asr_app.agy_cli import retry_model_start
+        entered=asyncio.Event()
+        async def wait(_):entered.set();await asyncio.Event().wait()
+        error=AIRequestError('model pending',kind='agy_model_unavailable')
+        operation=AsyncMock(side_effect=error)
+        with patch('qwen_asr_app.agy_cli.asyncio.sleep',side_effect=wait):
+            task=asyncio.create_task(retry_model_start(operation))
+            await asyncio.wait_for(entered.wait(),1);task.cancel()
+            with self.assertRaises(asyncio.CancelledError):await task
+        self.assertEqual(operation.await_count,1)
+        error.session_id='already-started'
+        with self.assertRaises(AIRequestError):await retry_model_start(operation)
+        self.assertEqual(operation.await_count,2)
+
     async def test_cancelled_request_reaps_its_cli_child(self):
         entered = asyncio.Event()
         async def readline():
@@ -146,9 +219,9 @@ class AGYCancellationTests(unittest.IsolatedAsyncioTestCase):
                                   stdout=SimpleNamespace(readline=readline),
                                   stderr=SimpleNamespace(read=AsyncMock(return_value=b'')),
                                   kill=Mock(), wait=AsyncMock())
-        with patch('qwen_asr_app.agy_cli.asyncio.create_subprocess_exec', new=AsyncMock(return_value=process)):
+        with patch('qwen_asr_app.agy_cli.executable', return_value='/test/agy'), patch('qwen_asr_app.agy_cli.asyncio.create_subprocess_exec', new=AsyncMock(return_value=process)):
             task = asyncio.create_task(request_text('测试', {}, {'cli_model': 'gemini-3.8-flash-high'}))
-            await entered.wait()
+            await asyncio.wait_for(entered.wait(), 1)
             task.cancel()
             with self.assertRaises(asyncio.CancelledError):
                 await task

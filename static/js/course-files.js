@@ -50,7 +50,8 @@ const review = initReviewMaterials(data => {
 }, load);
 function reviewCard(item) {
   const sources = (item.source_lessons || []).map(source => `${source.title}（${source.date}）`).join('、');
-  return `<article class="file-card" data-review-id="${esc(item.id)}"><div class="file-icon">PDF</div><div class="file-main"><h3 class="file-title">${esc(item.title || item.filename)}</h3><div class="file-meta"><span class="badge">复习资料</span><span>${esc(String(item.created_at || '').slice(0,10))}</span><span>${esc(item.filename)}</span></div><p class="file-status${item.exists ? '' : ' error'}">${item.exists ? 'PDF 已保存' : '文件已不存在'}${sources ? ` · 来源课次：${esc(sources)}` : ''}</p><div class="actions">${item.exists ? `<a class="ui-button" href="${esc(item.download_url)}" download>下载 PDF</a>` : ''}<button class="ui-button danger" data-delete-review="${esc(item.id)}" type="button">移到废纸篓</button></div></div></article>`;
+  const title = item.exists ? `<button type="button" class="file-title-link" data-open-review="${esc(item.id)}" title="在 Chrome 中查看 PDF">${esc(item.title || item.filename)}</button>` : esc(item.title || item.filename);
+  return `<article class="file-card" data-review-id="${esc(item.id)}"><div class="file-icon">PDF</div><div class="file-main"><h3 class="file-title">${title}</h3><div class="file-meta"><span class="badge">复习资料</span><span>${esc(String(item.created_at || '').slice(0,10))}</span><span>${esc(item.filename)}</span></div><p class="file-status${item.exists ? '' : ' error'}">${item.exists ? 'PDF 已保存' : '文件已不存在'}${sources ? ` · 来源课次：${esc(sources)}` : ''}</p><div class="actions">${item.exists ? `<a class="ui-button" href="${esc(item.download_url)}" download>下载 PDF</a>` : ''}<button class="ui-button danger" data-delete-review="${esc(item.id)}" type="button">移到废纸篓</button></div></div></article>`;
 }
 function renderFiles() {
   const legacyFiles = state.files.filter(file => file.needs_mineru_upgrade);
@@ -81,8 +82,10 @@ function renderFiles() {
     const syncText = latest ? latest.status === 'synced' ? `已上传到 ${latest.title}` : '上次上传结果待核对，请先在闪念贝壳查看附件。' : '尚未上传到闪念贝壳';
     const original = `/api/course-files/${file.id}/download?${query({category: state.category, variant: 'original'})}`;
     const pdf = `/api/course-files/${file.id}/download?${query({category: state.category, variant: 'pdf'})}`;
+    const previewVariant = /\.pdf$/i.test(file.name) ? 'original' : ready ? 'pdf' : '';
+    const title = previewVariant ? `<button type="button" class="file-title-link" data-action="open-pdf" data-variant="${previewVariant}" title="在 Chrome 中查看${previewVariant === 'pdf' ? ' AI 优化后' : ''} PDF">${esc(file.name)}</button>` : esc(file.name);
     const fileControls = state.sharedFolder ? `<button class="ui-button" data-action="rename">重命名</button><button class="ui-button" data-action="replace">替换原件</button><button class="ui-button danger" data-action="delete">移到废纸篓</button>` : '';
-    return `<article class="file-card" data-id="${esc(file.id)}"><div class="file-icon">${esc(file.name.split('.').at(-1).slice(0,6).toUpperCase())}</div><div class="file-main"><h3 class="file-title">${esc(file.name)}</h3><div class="file-meta"><span class="badge">${esc(file.kind)}</span><span>${size(file.size)}</span>${file.relative_path && file.relative_path !== file.name ? `<span>${esc(file.relative_path)}</span>` : ''}<span>${esc(file.created_at.slice(0,10))}</span><span>${esc(syncText)}</span></div><p class="file-status ${failed || pending ? 'error' : ''}">${esc(ready ? `AI 优化后 PDF 已就绪 · ${conversion.pages ? `${conversion.pages} 页` : '已关联文件夹版本'} · ${needsMineru ? '旧版识别结果，可升级为 MinerU 4' : conversion.external ? '与本机 AI 友好型文件同步' : `识别完成${tier ? ` · ${tier}档` : ''}${settingsChanged ? ' · 参数已更新，可重新识别' : ''}`}` : `${conversion.stage || '原件已保存，可生成 AI 友好 PDF'}${working && conversion.progress != null ? ` · ${conversion.progress_estimate?.estimated ? '整体预估 ' : ''}${conversion.progress || 0}%` : ''}`)}${(conversion.warnings || []).map(w => `<br>${esc(w)}`).join('')}</p>${working && conversion.progress != null ? `<progress class="file-progress" max="100" value="${Math.max(0, Math.min(99, Number(conversion.progress) || 0))}" aria-label="识别整体预估进度"></progress>` : ''}${working && conversion.progress_estimate ? `<p class="file-estimate">${esc(mineruEstimateLabel(conversion.progress_estimate, conversion.status))}</p>` : ''}<div class="actions">${taskLink && conversion.status && conversion.status !== 'none' ? `<a class="ui-button" href="/tasks">查看识别任务</a>` : ''}<button class="ui-button" data-action="convert" ${working || (ready && !needsMineru && !settingsChanged) ? 'disabled' : ''}>${needsMineru ? '升级识别版本' : settingsChanged ? '按新参数重新识别' : ready ? '✓ AI 优化后 PDF 已就绪' : working ? '正在转换 PDF…' : failed ? '重新转换 PDF' : '生成 AI 友好 PDF'}</button><a class="ui-button" href="${esc(original)}" download>下载原件</a><button class="ui-button" data-action="copy-original">复制原件</button>${ready ? `<a class="ui-button" href="${esc(pdf)}" download>下载 AI 优化后 PDF</a><button class="ui-button" data-action="copy-pdf">复制 PDF</button>` : ''}${fileControls}<button class="ui-button sync-action" data-action="sync">匹配笔记并上传 ↗</button></div></div></article>`;
+    return `<article class="file-card" data-id="${esc(file.id)}"><div class="file-icon">${esc(file.name.split('.').at(-1).slice(0,6).toUpperCase())}</div><div class="file-main"><h3 class="file-title">${title}</h3><div class="file-meta"><span class="badge">${esc(file.kind)}</span><span>${size(file.size)}</span>${file.relative_path && file.relative_path !== file.name ? `<span>${esc(file.relative_path)}</span>` : ''}<span>${esc(file.created_at.slice(0,10))}</span><span>${esc(syncText)}</span></div><p class="file-status ${failed || pending ? 'error' : ''}">${esc(ready ? `AI 优化后 PDF 已就绪 · ${conversion.pages ? `${conversion.pages} 页` : '已关联文件夹版本'} · ${needsMineru ? '旧版识别结果，可升级为 MinerU 4' : conversion.external ? '与本机 AI 友好型文件同步' : `识别完成${tier ? ` · ${tier}档` : ''}${settingsChanged ? ' · 参数已更新，可重新识别' : ''}`}` : `${conversion.stage || '原件已保存，可生成 AI 友好 PDF'}${working && conversion.progress != null ? ` · ${conversion.progress_estimate?.estimated ? '整体预估 ' : ''}${conversion.progress || 0}%` : ''}`)}${(conversion.warnings || []).map(w => `<br>${esc(w)}`).join('')}</p>${working && conversion.progress != null ? `<progress class="file-progress" max="100" value="${Math.max(0, Math.min(99, Number(conversion.progress) || 0))}" aria-label="识别整体预估进度"></progress>` : ''}${working && conversion.progress_estimate ? `<p class="file-estimate">${esc(mineruEstimateLabel(conversion.progress_estimate, conversion.status))}</p>` : ''}<div class="actions">${taskLink && conversion.status && conversion.status !== 'none' ? `<a class="ui-button" href="/tasks">查看识别任务</a>` : ''}<button class="ui-button" data-action="convert" ${working || (ready && !needsMineru && !settingsChanged) ? 'disabled' : ''}>${needsMineru ? '升级识别版本' : settingsChanged ? '按新参数重新识别' : ready ? '✓ AI 优化后 PDF 已就绪' : working ? '正在转换 PDF…' : failed ? '重新转换 PDF' : '生成 AI 友好 PDF'}</button><a class="ui-button" href="${esc(original)}" download>下载原件</a><button class="ui-button" data-action="copy-original">复制原件</button>${ready ? `<a class="ui-button" href="${esc(pdf)}" download>下载 AI 优化后 PDF</a><button class="ui-button" data-action="copy-pdf">复制 PDF</button>` : ''}${fileControls}<button class="ui-button sync-action" data-action="sync">匹配笔记并上传 ↗</button></div></div></article>`;
   }).join('') + reviews.map(reviewCard).join('');
 }
 async function load() {
@@ -235,6 +238,14 @@ async function upload(files) {
   } finally { state.uploading = false; $('addFiles').disabled = false; updateCategoryControls(); }
 }
 $('files').addEventListener('click', event => {
+  const previewButton = event.target.closest('[data-open-review]');
+  if (previewButton) {
+    busy(previewButton, async () => {
+      await api(`/api/notes/${encodeURIComponent(previewButton.dataset.openReview)}/open-pdf`, {});
+      toast('已在 Chrome 中打开 PDF');
+    });
+    return;
+  }
   const reviewButton = event.target.closest('[data-delete-review]');
   if (reviewButton) {
     if (!window.confirm('将这份复习资料移到废纸篓？')) return;
@@ -247,6 +258,13 @@ $('files').addEventListener('click', event => {
   const button = event.target.closest('button[data-action]'); if (!button) return;
   const file = state.files.find(f => f.id === button.closest('[data-id]').dataset.id); if (!file) return;
   const action = button.dataset.action;
+  if (action === 'open-pdf') {
+    busy(button, async () => {
+      await api(`/api/course-files/${file.id}/open-pdf`, {category: state.category, variant: button.dataset.variant});
+      toast('已在 Chrome 中打开 PDF');
+    });
+    return;
+  }
   if (action === 'sync') { openSync(file); return; }
   if (action === 'rename' || action === 'delete') { openFileDialog(file, action); return; }
   if (action === 'replace') { state.replacing = {category: state.category, file}; $('replaceInput').accept = '.' + file.name.split('.').at(-1); $('replaceInput').click(); return; }

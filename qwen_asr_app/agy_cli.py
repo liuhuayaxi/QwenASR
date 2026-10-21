@@ -19,6 +19,7 @@ import subprocess
 import hashlib
 import sys
 import uuid
+import time
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +36,8 @@ DEFAULT_TIMEOUT = 1800
 # individually bounded, receipt-checked files without dropping source text.
 INLINE_INPUT_BYTES = 80_000
 FILE_INPUT_BYTES = 16_000
+MODEL_START_DELAYS = (2, 5)
+PROTOCOL_RETRY_DELAYS = (2, 5)
 
 
 def _text(value: Any) -> str:
@@ -81,13 +84,15 @@ def model(provider: dict[str, Any]) -> str:
     return value
 
 
-def timeout_seconds(provider: dict[str, Any]) -> int:
+def timeout_seconds(provider: dict[str, Any]) -> int | None:
     try:
-        value = int(provider.get("cli_timeout_seconds") or DEFAULT_TIMEOUT)
+        configured=provider.get("cli_timeout_seconds")
+        value = DEFAULT_TIMEOUT if configured is None or configured=='' else int(configured)
     except (TypeError, ValueError) as exc:
         raise AIRequestError("AGY CLI 超时必须是整数秒", kind="agy_cli_config", retriable=False) from exc
+    if value==0:return None
     if not 30 <= value <= 7200:
-        raise AIRequestError("AGY CLI 超时必须在 30–7200 秒之间", kind="agy_cli_config", retriable=False)
+        raise AIRequestError("AGY CLI 超时必须为 0（等待完成）或在 30–7200 秒之间", kind="agy_cli_config", retriable=False)
     return value
 
 
@@ -131,6 +136,10 @@ def _error_kind(message: str) -> tuple[str, bool]:
         return 'provider_unavailable', True
     if any(marker in value for marker in ("deadline exceeded", "timed out", "timeout")):
         return "network_read_timeout", True
+    if re.search(r'model .+? is not recognized as a known model|invalid model selection', value):
+        return 'agy_model_unavailable', True
+    if re.search(r'unknown (?:flag|option)|--effort.*not supported|invalid.*(?:flag|option)',value):
+        return 'agy_cli_config', False
     # A terminated native language server reports only `interrupted`, without
     # the older "stream was interrupted" sentence. Local task cancellation is
     # handled separately as CancelledError and must never enter this retry path.
@@ -153,6 +162,44 @@ def _error_kind(message: str) -> tuple[str, bool]:
     return "agy_cli_error", False
 
 
+def _blocking_diagnostic(stderr):
+    """Only explicit terminal rejections can override a verified continuation.
+
+    Routine startup warnings (including denied discovery of unrelated files)
+    are not authentication failures. Tool access is checked in the session.
+    """
+    lines=stderr.splitlines()
+    # Native startup can log "not logged in" before restoring the session.
+    # A later explicit successful login resolves those earlier warnings.
+    restored=[i for i,line in enumerate(lines) if re.search(r'silent auth succeeded|OAuth: authenticated successfully',line)]
+    if restored:lines=lines[restored[-1]+1:]
+    for line in lines:
+        if re.search(r'\b(?:401|403)\b|invalid[_ ](?:grant|client)|revoked|bad credentials|'
+                     r'invalid credentials|invalid api key|unauthorized|not logged in|login required|'
+                     r'user location|location is not supported|unknown (?:flag|option)|'
+                     r'invalid model selection',line,re.I):
+            kind,retriable=_error_kind(line)
+            if not retriable or kind=='agy_model_unavailable':return kind
+    return None
+
+
+async def retry_model_start(operation):
+    """Retry only pre-conversation model discovery, keeping the chosen model."""
+    for attempt in range(len(MODEL_START_DELAYS)+1):
+        try:
+            return await operation()
+        except (AIRequestError, RuntimeError) as exc:
+            if (getattr(exc,'kind',None)!='agy_model_unavailable'
+                    or getattr(exc,'session_id',None) or not getattr(exc,'retriable',False)):
+                raise
+            if attempt==len(MODEL_START_DELAYS):
+                exc.retriable=False
+                exc.args=('AGY 启动三次仍无法识别已选模型；请刷新模型列表后重试，已完成进度保留',)
+                raise
+            report_ai_activity('waiting')
+            await asyncio.sleep(MODEL_START_DELAYS[attempt])
+
+
 def _decode_output(stdout: str, stderr: str) -> str:
     """Decode the final stream-json result while tolerating diagnostic lines."""
     result: dict[str, Any] | None = None
@@ -168,7 +215,7 @@ def _decode_output(stdout: str, stderr: str) -> str:
             result = event["result"]
     if result is None:
         message = (stderr or stdout).strip()[-2_000:]
-        kind, retriable = _error_kind(message)
+        kind, retriable = _error_kind(message) if message else ('provider_unavailable',True)
         raise AIRequestError(f"AGY CLI 没有返回最终结果：{message or '空输出'}", kind=kind, retriable=retriable)
     if str(result.get("status") or "").upper() not in {"SUCCESS", "COMPLETED", "OK"}:
         message = _text(result.get("error")) or stderr.strip() or _text(result.get("status")) or "AGY CLI 请求失败"
@@ -183,6 +230,8 @@ def _decode_output(stdout: str, stderr: str) -> str:
             message = '生成连接中断；已完成内容保留，可从断点继续'
         elif kind == 'output_truncated':
             message = '生成达到输出上限；已保存结果保留，本批需要拆小重试'
+        elif kind == 'agy_model_unavailable':
+            message = '启动时尚未识别已选模型，正在进行有限重试'
         else:
             message = re.sub(r'Retries remaining:\s*\d+', 'AGY 内部重试提示（不代表应用重试次数）', message)
         raise AIRequestError(f"AGY CLI 请求失败：{message[:2_000]}", kind=kind, retriable=retriable)
@@ -246,6 +295,8 @@ def _file_prompt(prompt: str, working: Path, *, additional_read_paths=()):
         '每个文件的 content_fragments 按原顺序连接，JSON 字符串转义按正常 JSON 含义理解；'
         '再将所有文件连接，即为完整的同一个请求，不得遗漏末尾片段。'
         '按其中 SYSTEM INSTRUCTIONS 处理 INPUT 数据，直接返回任务要求的完整最终正文。'
+        '外层读取协议优先于文件中“不调用工具”的普通文本模板：必须先读清单。'
+        '旧版可用 view_file(AbsolutePath)，新版可用 read_file(Path)；二者路径均必须来自明确清单。'
         '只允许 view_file 读取清单文件，以及 allowed_additional_files 明确列出的原始资料和图片；'
         f'{reading_rule}'
         '不得执行命令、写文件、访问其他路径、浏览网页、发送消息或委派子代理。'
@@ -261,6 +312,22 @@ def _file_prompt(prompt: str, working: Path, *, additional_read_paths=()):
 
 
 def _finish_output(stdout, stderr, working, message, returncode=0):
+    last_session_id.set('')
+    try:
+        return _checked_output(stdout,stderr,working,message,returncode)
+    except AIRequestError as exc:
+        from .durable import atomic_json
+        exc.session_id=last_session_id.get()
+        # Store correlation and classifications, never raw prompts, responses,
+        # stderr, credentials or account details. Native session remains intact.
+        failure={'session_id':exc.session_id,'error_kind':exc.kind,'retriable':exc.retriable,
+                 'exit_code':returncode,'stderr_bytes':len(stderr.encode()),
+                 'request_sha256':hashlib.sha256(message.encode()).hexdigest()}
+        atomic_json(Path(working)/'diagnostics'/f'failed-{uuid.uuid4().hex}.json',failure)
+        raise
+
+
+def _checked_output(stdout, stderr, working, message, returncode=0):
     """Use stdout normally; verify the exact durable turn on missing output."""
     prompt = json.loads(message)['message']['content']
     manifest = Path(working)/'transport.json'
@@ -277,26 +344,33 @@ def _finish_output(stdout, stderr, working, message, returncode=0):
         except (ValueError, TypeError, AttributeError):
             continue
     last_session_id.set(session)
-    continuation = False
+    from .agy_session import output_limit_before_failure
+    continuation = bool(session and output_limit_before_failure(session,prompt))
     try:
         response = _decode_output(stdout, stderr)
     except AIRequestError as exc:
-        if returncode in {-15, -2, 130, 143} and exc.kind == 'agy_cli_error':
+        if returncode in {-15, -2, 130, 143} and exc.kind in {'agy_cli_error','provider_unavailable'}:
             raise AIRequestError('AGY 生成进程已中断；已保存进度可继续',
                                  kind='network_transport', retriable=True) from exc
-        if files is not None and session and exc.kind in {'output_truncated','network_transport','network_read_timeout','agy_cli_error'}:
-            from .agy_session import output_limit_before_failure
-            continuation = output_limit_before_failure(session,prompt)
+        if exc.kind not in {'output_truncated','network_transport','network_read_timeout','agy_cli_error'}:
+            raise
         if not continuation and (str(exc) != 'AGY CLI 返回了空结果' or not session):
+            if str(exc)=='AGY CLI 返回了空结果' and not session:
+                raise AIRequestError('AGY 未返回正文或会话编号，可重试本批；已保存进度保留',
+                                     kind='provider_unavailable',retriable=True) from exc
             raise
         response = None
-    if returncode or continuation:
+    if continuation:
+        blocked=_blocking_diagnostic(stderr)
+        if blocked:
+            raise AIRequestError('AGY 续写伴随明确的登录、地区或启动配置错误，未采纳结果',
+                                 kind=blocked,retriable=False)
+    elif returncode:
         kind, retriable = _error_kind(stderr)
         if returncode in {-15, -2, 130, 143} and kind == 'agy_cli_error':
             kind, retriable = 'network_transport', True
-        if not continuation or (stderr.strip() and kind not in {'output_truncated','network_transport','network_read_timeout'}):
-            raise AIRequestError(f'AGY CLI 异常退出（退出码 {returncode}），本次结果未采纳', kind=kind, retriable=retriable)
-    if response is not None and files is None:
+        raise AIRequestError(f'AGY CLI 异常退出（退出码 {returncode}），本次结果未采纳', kind=kind, retriable=retriable)
+    if response is not None and files is None and not continuation:
         return response
     from .agy_session import read_session, SessionEvidenceError
     try:
@@ -307,12 +381,16 @@ def _finish_output(stdout, stderr, working, message, returncode=0):
             from .durable import atomic_json
             atomic_json(Path(working)/'failure.json', {'session_id':session,'error':detail})
         incomplete=detail in {'AGY 会话完成记录尚不可用','AGY 未保存完整最终正文','AGY 超限后尚未完成续写','AGY 最终正文尚未完整结束'}
-        kind = 'input_too_long' if '截断' in detail else 'output_truncated' if continuation and incomplete else 'agy_cli_error'
+        kind = ('input_too_long' if '截断' in detail else
+                'output_truncated' if continuation and (incomplete or exc.kind=='output_truncated') else exc.kind)
+        # An unapproved tool or out-of-scope read is a protocol violation.
+        # Keep it separate from transport failures so the task card explains why
+        # no result was accepted and why a retry starts a fresh turn.
         raise AIRequestError(detail, kind=kind, retriable=kind=='output_truncated') from exc
     if files is not None:
         from .durable import atomic_json
         atomic_json(Path(working)/'receipt.json', {k: v for k, v in receipt.items() if k not in {'response','events'}})
-    if response is not None and response.strip() != receipt['response']:
+    if response is not None and not continuation and response.strip() != receipt['response']:
         raise AIRequestError('AGY 最终正文与本次完成记录不一致，未采纳结果', kind='agy_cli_error', retriable=False)
     return receipt['response']
 
@@ -373,6 +451,19 @@ def _request_arguments(instructions: str, payload: dict[str, Any], provider: dic
 
 
 def run_sync(instructions: str, payload: dict[str, Any], provider: dict[str, Any]) -> str:
+    for attempt in range(len(MODEL_START_DELAYS)+1):
+        try:
+            return _run_sync_once(instructions,payload,provider)
+        except AIRequestError as exc:
+            if exc.kind!='agy_model_unavailable' or getattr(exc,'session_id',None) or not exc.retriable:raise
+            if attempt==len(MODEL_START_DELAYS):
+                exc.retriable=False
+                exc.args=('AGY 启动三次仍无法识别已选模型；请刷新模型列表后重试，已完成进度保留',)
+                raise
+            time.sleep(MODEL_START_DELAYS[attempt])
+
+
+def _run_sync_once(instructions: str, payload: dict[str, Any], provider: dict[str, Any]) -> str:
     command, message, working, env, timeout = _request_arguments(instructions, payload, provider)
     try:
         completed = subprocess.run(
@@ -397,6 +488,18 @@ def run_sync(instructions: str, payload: dict[str, Any], provider: dict[str, Any
 
 
 async def request_text(instructions: str, payload: dict[str, Any], provider: dict[str, Any]) -> str:
+    # Unknown tools still invalidate a turn. Read-only view_file/read_file
+    # receipts have their own explicit path/content validators.
+    for attempt in range(len(PROTOCOL_RETRY_DELAYS) + 1):
+        try:
+            return await retry_model_start(lambda: _request_text_once(instructions,payload,provider))
+        except AIRequestError as exc:
+            if exc.kind != 'material_tool_violation' or attempt == len(PROTOCOL_RETRY_DELAYS):
+                raise
+            await asyncio.sleep(PROTOCOL_RETRY_DELAYS[attempt])
+
+
+async def _request_text_once(instructions: str, payload: dict[str, Any], provider: dict[str, Any]) -> str:
     # Own the child in the task. Cancelling to_thread(subprocess.run) leaves
     # AGY alive, so a timed-out connection test previously continued making
     # requests for up to the provider's 30-minute generation timeout.
@@ -422,6 +525,8 @@ async def request_text(instructions: str, payload: dict[str, Any], provider: dic
             if not isinstance(event, dict):
                 continue
             if event.get("event") == "init":
+                from .ai_activity import bind_ai_session
+                bind_ai_session(event.get('conversation_id'))
                 report_ai_activity("processing")
             elif event.get("event") == "step_update":
                 step = event.get("step_update")
@@ -448,7 +553,8 @@ async def request_text(instructions: str, payload: dict[str, Any], provider: dic
                 # structured error. Preserve that result instead of a pipe error.
                 pass
             finally:
-                process.stdin.close()
+                try:process.stdin.close()
+                except (BrokenPipeError,ConnectionResetError):pass
             stdout, stderr = await asyncio.gather(*readers)
             await process.wait()
             return stdout, stderr

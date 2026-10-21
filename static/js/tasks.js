@@ -4,7 +4,7 @@ import {aiTaskPayload} from './task-config.js?v=20260913-tasks-1';
 import {mergeLiveCourseProgress} from './course-progress.js?v=20261018-recovery-1';
 import {mineruEstimateLabel, legacyMineruProgress} from './mineru-progress-view.js?v=20261013-time-2';
 import {resourceStatus} from './resource-status.js?v=20261013-1';
-import {aiActivityView} from './ai-activity-view.js?v=20261016-review-1';
+import {aiActivityView} from './ai-activity-view.js?v=20261019-live-model-activity';
 
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c]));
@@ -63,6 +63,8 @@ function friendlyError(task) {
     provider_region: 'AGY/Gemini 当前账号或地区不可用，请在 AGY CLI 中确认登录状态与地区。',
     agy_cli_unavailable: '本机没有可用的 agy CLI，请检查安装路径。',
     agy_cli_config: 'AGY CLI 配置不完整，请选择模型后保存设置。',
+    material_tool_violation: 'AGY 使用了本次请求未允许的工具，本次结果未采用；已完成检查点保留，可从此处继续。',
+    service_restart: '服务曾退出，已完成检查点保留；继续后会复用已保存内容。',
     invalid_json: '模型返回的 JSON 结构不完整，可继续重新生成。',
     invalid_segment_mapping: '模型返回的段落编号不可靠，可继续重新处理。',
   };
@@ -180,6 +182,7 @@ function groupCard(group) {
     <div class="group-focus" data-id="${esc(task.id || '')}"><div class="focus-heading"><div><span class="focus-kind">${esc(task.label || '')}</span><p class="focus-stage">${esc(view.label)}</p></div><b class="focus-count">${esc(count)}</b></div>
     ${phaseRail}${meter}
     ${view.detail?`<p class="focus-note">${esc(view.detail)}</p>`:''}
+    ${activity?.detail?`<p class="focus-note focus-live-detail" role="status">${esc(activity.detail)}</p>`:''}
     <div class="focus-footer"><p class="focus-activity">${activity?`<i class="live-dot"></i>${esc(activity.label)}`:group.status==='paused'?'进度已保存，可随时继续':group.status==='completed'?'结果已保存':''}${time?`<span>${esc(time)}</span>`:''}</p><div class="focus-actions">
     ${primary && !review?`<button data-action="${primary}" class="ui-button ${primary==='continue'?'primary':''}" ${state.busy?'disabled':''}>${esc(actionLabels[primary])}</button>`:''}
     ${group.result_url?`<a class="ui-button ${review?'primary':''}" href="${esc(group.result_url)}">${review?'去核对':group.recording_id?'查看笔记':'查看结果'}</a>`:''}</div></div></div>

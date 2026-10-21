@@ -143,6 +143,12 @@ class WrappedProviderErrorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(task['error_kind'],'network_transport')
             self.assertEqual(record.meta_path.read_bytes(), before)
 
+    def test_unauthorized_agy_tool_has_a_stable_non_transport_category(self):
+        self.assertEqual(
+            app._task_error_kind('AGY 文本会话尝试调用未授权工具：read_file'),
+            'material_tool_violation',
+        )
+
     async def test_transient_abstract_failure_retries_only_abstract_and_preserves_note(self):
         with tempfile.TemporaryDirectory() as directory:
             record = self.record(directory)

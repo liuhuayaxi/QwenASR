@@ -10,7 +10,7 @@ import time
 import weakref
 
 from .ai import request_ai_text, provider_for_mode, context_window_for, estimate_tokens, AIRequestError
-from .agy_materials import request_materials, parse_json, MaterialSessionError
+from .agy_materials import request_materials, retry_materials, parse_json, MaterialSessionError
 from .durable import atomic_bytes, atomic_json
 from .note_content import transcript_blocks, clock
 from .note_pdf import export_pdf, digest
@@ -72,16 +72,43 @@ REVIEW='''你是独立审查者，未参与写作，不接受生成者的自我�
 
 
 def review_batch_size(provider, ledger, evidence, transcript, *, figures=False):
-    """Budget a conversation independently of the four-page render/read unit."""
-    small=2 if figures else 4
-    window=int(provider.get('context_window') or 32768)
-    if provider.get('transport')!='agy_cli' or window<262144:return small
-    # Reserve all source text conservatively, plus protocol, output, original
-    # figures and neighboring pages. The transport validates the exact prompt
-    # again before sending; source material is never truncated to fit.
-    text=estimate_tokens(json.dumps([ledger,evidence,transcript],ensure_ascii=False))
-    slots=(window-text-100000)//12000
-    return max(small,min(32,slots))
+    """Bound time to a durable receipt, independently of the input window.
+
+    A million-token window does not make dozens of sequential image reads
+    finish before the CLI deadline. Reserve space for original/adjacent images.
+    """
+    if provider.get('transport')=='agy_cli' and int(provider.get('context_window') or 32768)>=262144:return 8
+    return 2 if figures else 4
+
+
+def note_runtime_config(config):
+    """Keep note identity/model stable; wait for completion unless cancelled."""
+    result=copy.deepcopy(config)
+    provider=provider_for_mode(result.get('ai',{}),'summary')
+    if provider.get('transport')=='agy_cli':
+        result.setdefault('ai',{})['summary_provider']={**provider,'cli_timeout_seconds':0}
+    return result
+
+
+def review_coverage(ledger, cited_sources, terms):
+    """Send local detailed evidence and an explicit whole-note outline.
+
+    Unrelated source quotes are not evidence for these pages. Keep every topic
+    in the outline so the reviewer can distinguish a local absence from an
+    absent chapter, without rereading the entire proposal in every batch.
+    """
+    if not isinstance(ledger,dict):return ledger
+    knowledge=ledger.get('knowledge',[])
+    selected=[item for item in knowledge if set(item.get('sources',[]))&cited_sources]
+    if not selected:
+        selected=sorted(knowledge,key=lambda item:-len(terms&tokens(item.get('topic',''))))[:4]
+    objectives={oid for item in selected for oid in item.get('objective_ids',[])}
+    return {'knowledge':selected,
+        'objective_coverage':[row for row in ledger.get('objective_coverage',[])
+            if row.get('objective_id') in objectives or set(row.get('sources',[]))&cited_sources],
+        'complete_coverage_context':[{key:item[key] for key in
+            ('id','topic','kind','sources','target_section','objective_ids') if key in item} for item in knowledge],
+        'evidence_scope':'详细证据仅属于本批相关知识；complete_coverage_context 是全文提纲，不能据此宣称读过其他页面。'}
 
 
 def blocking_review(report):
@@ -208,7 +235,9 @@ def timestamp_references(markdown, blocks):
 
 
 def stage(record, manifest, folder, name, **values):
-    if values.get('status')=='running':manifest.pop('error',None)
+    if values.get('status')=='running':
+        manifest.pop('error',None)
+        manifest.pop('error_kind',None)
     manifest.update(stage=name,updated_at=local_now(),**values)
     atomic_json(folder/'task.json',manifest)
     if record.meta_path.exists():record.metadata.update(json.loads(record.meta_path.read_text()))
@@ -216,6 +245,12 @@ def stage(record, manifest, folder, name, **values):
     draft.update(phase=name,total_parts=manifest.get('total_parts',0),review_task=manifest['id'])
     if name=='识别本节新内容':
         draft['parts']={p.stem.rsplit('-',1)[-1]:'已保存知识清单' for p in Path(folder).glob('coverage-part-*.json')}
+    record.metadata.setdefault('summary_job', {})['checkpoint'] = {
+        'review_task': manifest['id'], 'phase': name,
+        'total_parts': draft.get('total_parts', 0),
+        'completed_parts': len(draft.get('parts') or []),
+        'updated_at': manifest['updated_at'],
+    }
     record.save_metadata()
 
 
@@ -238,15 +273,37 @@ class PlanResponseError(ValueError):
 async def model_json(instructions, payload, config, output=32768, *, response_path=None):
     # Include source text, history, all evidence and protocol/output reserves.
     require_budget(instructions,payload,config,output,label='知识清单资料',window=context_window_for(config,'summary'))
-    response=await request_ai_text(instructions=instructions,payload=payload,config=config,mode='summary',max_output_tokens=output)
-    if response_path is not None:atomic_bytes(Path(response_path),response.encode())
+    from .agy_cli import last_session_id
+    request_hash = hashlib.sha256(json.dumps([instructions, payload, summary_signature(config), output],
+        sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    path = Path(response_path) if response_path is not None else None
+    receipt_path = path.with_suffix('.receipt.json') if path else None
+    response = None
+    session = ''
+    if path is not None and path.is_file() and receipt_path.is_file():
+        receipt = json.loads(receipt_path.read_text())
+        response = path.read_text()
+        if (receipt.get('request_sha256') != request_hash
+                or receipt.get('response_sha256') != hashlib.sha256(response.encode()).hexdigest()):
+            raise ValueError('知识清单响应检查点与当前请求不一致，原响应已保留')
+        session = receipt.get('session_id') or ''
+    if response is None:
+        last_session_id.set('')
+        response=await request_ai_text(instructions=instructions,payload=payload,config=config,mode='summary',max_output_tokens=output)
+        session=last_session_id.get()
+        if path is not None:
+            if path.exists():
+                original=path.read_bytes()
+                atomic_bytes(path.with_name(path.stem+'.unbound-'+hashlib.sha256(original).hexdigest()[:12]+path.suffix),original)
+            atomic_bytes(path,response.encode())
+            atomic_json(receipt_path,{'request_sha256':request_hash,
+                'response_sha256':hashlib.sha256(response.encode()).hexdigest(), 'session_id':session})
     try:
         result=parse_json(response)
         if not isinstance(result,dict):raise ValueError('顶层必须是JSON对象')
     except ValueError as exc:
         raise PlanResponseError(response,str(exc)) from exc
-    from .agy_cli import last_session_id
-    if last_session_id.get():result['_provider_session_id']=last_session_id.get()
+    if session:result['_provider_session_id']=session
     return result
 
 
@@ -287,11 +344,25 @@ def coverage_batches(folder, source_blocks, payload_for, instructions, config):
         if part:parts.append(part)
         policy='legacy-checkpoint-groups'
     else:
-        parts=pack_complete_items(source_blocks,payload_for,instructions,config,
-            lambda group:sum(max(160,estimate_tokens(b['text'])*2.5) for b in group),
-            window=context_window_for(config,'summary'))
-        policy=BATCH_POLICY
+        window = context_window_for(config, 'summary')
+        output_estimate = lambda group: sum(max(160, estimate_tokens(b['text']) * 2.5) for b in group)
+        from .ai import uses_agy_gemini
+        long_context = uses_agy_gemini(config, 'summary')
+        whole_budget = request_budget(instructions, payload_for(source_blocks), config, window=window)
+        # AGY has no hard max_output_tokens flag. Reserve expected output plus
+        # a repair proposal within the saved window; split on a real output
+        # limit through validated_plan_part, rather than inventing a 64K cap.
+        expected = max(whole_budget['output_reserve'], int(output_estimate(source_blocks)))
+        whole_total = whole_budget['input_tokens'] + 2 * expected + whole_budget['protocol_reserve']
+        if long_context and source_blocks and whole_total <= window:
+            parts = [source_blocks]
+            policy = BATCH_POLICY + '-long-context-one-turn'
+        else:
+            parts=pack_complete_items(source_blocks,payload_for,instructions,config,
+                output_estimate, window=window)
+            policy=BATCH_POLICY
     atomic_json(path,{'policy':policy,'batches':[[b['source'] for b in part] for part in parts],
+        'reason':'complete_lesson_fits_saved_context' if policy.endswith('-long-context-one-turn') else 'input_and_expected_output_budget',
         'budgets':[request_budget(instructions,payload_for(part),config,window=context_window_for(config,'summary')) for part in parts]})
     return parts
 
@@ -306,6 +377,24 @@ def validate_plan(plan, source_ids, package):
         if not source or type(request.get('page')) is not int or not 1<=request['page']<=len(source['pages']):raise ValueError('选图请求来源或页码无效')
     review_scope.validate_plan(plan,source_ids,package.get('learning_scope',{}),package.get('_scope_transcript_blocks',[]))
     return plan
+
+
+def missing_mastery_repair(previous, error, payload, package):
+    """Bind a small additive repair to explicit missing objectives and sources."""
+    prefix='本节涉及的掌握要求缺少知识覆盖：'
+    if not previous or not str(error).startswith(prefix):return None
+    ids=set(str(error)[len(prefix):].split(','))
+    scope=package.get('learning_scope',{})
+    items=[item for item in scope.get('items',[]) if item['id'] in ids]
+    rows=[row for row in previous.get('objective_coverage',[]) if row.get('objective_id') in ids]
+    sources={source for row in rows for source in row.get('sources',[])}
+    blocks=[block for block in payload.get('transcript',[]) if block['source'] in sources]
+    if {item['id'] for item in items}!=ids or not blocks:return None
+    local=coverage_payload(blocks,payload,package,payload.get('history',[]))
+    local['learning_scope']={**scope,'items':items}
+    return {'missing_objective_ids':sorted(ids),'source_input':local,'objective_coverage':rows,
+        'existing_knowledge_outline':[{key:item[key] for key in ('id','topic','objective_ids','sources') if key in item}
+            for item in previous.get('knowledge',[])]}
 
 
 async def validated_plan_part(instructions, payload, config, source_ids, package, folder, index, *, max_repairs=2):
@@ -340,19 +429,49 @@ async def validated_plan_part(instructions, payload, config, source_ids, package
         if start>max_repairs:
             raise ValueError('知识清单已达到自动修复上限，全部提案与校验依据已保留：'+error)
     for attempt in range(start,max_repairs+1):
+        targeted=None
         try:
             response_path=folder/f'coverage-response-{index}-attempt-{attempt}.txt'
             if previous is None:
                 result=await model_json(instructions,payload,config,response_path=response_path)
             else:
-                repair_instructions=instructions+'''
-修复此前完整提案中未通过程序校验的字段，返回完整JSON，保留已经正确的知识项、分类、选图及覆盖结果。
-如果invalid_proposal含unparsed_json，那是完整原始返回文本；先修复JSON语法和转义，再核对内容。必须返回一个完整、有效的JSON对象，不要解释或代码围栏。
-原始source_input是唯一证据。evidence_quote必须从sources列出的某一个S来源直接复制连续原文，逐字一致；不能用同义概括、拼接多个来源或把课件要求当转写原话。
-如果当前来源没有证据，重新核实该要求与本批课堂的相关性并诚实写明，不能为通过校验把真实相关的掌握要求随意改成not_this_part，不能编造来源。
-严格执行原课件掌握/理解/了解层级，修复validation_diagnostics所指条目并复核其他条目；不要删除有效内容或修改原始输入。'''
-                result=await model_json(repair_instructions,{'source_input':payload,'invalid_proposal':previous,
-                    'validation_error':error,'validation_diagnostics':diagnostics,'repair_attempt':attempt},config,response_path=response_path)
+                targeted=missing_mastery_repair(previous,error,payload,package)
+                if targeted is not None:
+                    patch=await model_json('只补齐 missing_objective_ids 对应的知识覆盖，不重写已通过的完整提案。'
+                        'source_input 是本批完整原始转写及关联课件，不能编造课堂证据或降低掌握要求。'
+                        '返回 JSON {"objective_links":[{"knowledge_id":"已存在的知识ID","objective_ids":[缺失要求ID]}],"knowledge":[确实需要新增的完整知识对象]}。'
+                        '已有知识已经讲到该要求时，优先返回 objective_links，仅补要求关联，不重复新增相同主题。'
+                        '新增知识每项填写 topic、kind、sources、history_evidence、'
+                        'explanation_needed、teacher_emphasis、source_quote、target_section、objective_ids、scope_level、formula_policy。'
+                        'objective_ids 只能来自 missing_objective_ids，sources 只能来自 source_input.transcript。'
+                        '保留必要公式、推导和题目条件，不重复已存在的知识。不要返回或改写其他清单字段。',
+                        targeted,config,output=8192,response_path=response_path)
+                    additions=patch.get('knowledge',[]);links=patch.get('objective_links',[])
+                    if not isinstance(additions,list) or not isinstance(links,list) or not (additions or links):
+                        raise PlanResponseError(json.dumps(patch,ensure_ascii=False),'补充知识清单为空')
+                    allowed=set(targeted['missing_objective_ids'])
+                    if any(not isinstance(item,dict) or not set(item.get('objective_ids',[])) or not set(item['objective_ids']).issubset(allowed)
+                           or not set(item.get('sources',[])).issubset({b['source'] for b in targeted['source_input']['transcript']})
+                           for item in additions):
+                        raise PlanResponseError(json.dumps(patch,ensure_ascii=False),'补充知识超出本次修补范围')
+                    result=copy.deepcopy(previous)
+                    by_id={item['id']:item for item in result['knowledge']}
+                    rows={row['objective_id']:row for row in targeted['objective_coverage']}
+                    for link in links:
+                        item=by_id.get(link.get('knowledge_id')) if isinstance(link,dict) else None
+                        objectives=link.get('objective_ids',[]) if isinstance(link,dict) else []
+                        if (item is None or not objectives or not set(objectives).issubset(allowed)
+                                or any(not set(rows[oid].get('sources',[]))&set(item.get('sources',[])) for oid in objectives)):
+                            raise PlanResponseError(json.dumps(patch,ensure_ascii=False),'知识关联超出原来源与本次修补范围')
+                        item['objective_ids']=list(dict.fromkeys([*item.get('objective_ids',[]),*objectives]))
+                    result['knowledge'].extend({**item,'id':f'repair-{index}-{attempt}-{number}'}
+                        for number,item in enumerate(additions))
+                    if patch.get('_provider_session_id'):
+                        result['_provider_session_ids']=list(dict.fromkeys([
+                            *(previous.get('_provider_session_ids') or ([previous['_provider_session_id']] if previous.get('_provider_session_id') else [])),
+                            patch['_provider_session_id']]))
+                else:
+                    result=await _repair_full_plan(instructions,payload,previous,error,diagnostics,attempt,config,response_path)
         except AIRequestError as exc:
             if exc.kind!='output_truncated' or len(payload.get('transcript',[]))<2:
                 raise
@@ -362,7 +481,10 @@ async def validated_plan_part(instructions, payload, config, source_ids, package
             atomic_json(split_path,split)
             return await _split_plan_part(instructions,payload,config,source_ids,package,folder,index,split,max_repairs=max_repairs)
         except PlanResponseError as exc:
-            error=str(exc);previous={'unparsed_json':exc.raw};diagnostics={'response_format':'invalid_json'}
+            if targeted is not None:
+                diagnostics={**diagnostics,'patch_error':str(exc)}
+            else:
+                error=str(exc);previous={'unparsed_json':exc.raw};diagnostics={'response_format':'invalid_json'}
             atomic_json(folder/f'coverage-validation-{index}-attempt-{attempt}.json',{
                 'attempt':attempt,'max_repairs':max_repairs,'validation_error':error,
                 'diagnostics':diagnostics,'proposal':previous,'created_at':local_now()})
@@ -386,6 +508,17 @@ async def validated_plan_part(instructions, payload, config, source_ids, package
             if attempt==max_repairs:
                 raise ValueError('知识清单自动修复后仍未通过校验，全部提案与校验依据已保留：'+error) from exc
     raise ValueError('知识清单自动修复状态无效，已有成果已保留')
+
+
+async def _repair_full_plan(instructions,payload,previous,error,diagnostics,attempt,config,response_path):
+    repair_instructions=instructions+'''
+修复此前完整提案中未通过程序校验的字段，返回完整JSON，保留已经正确的知识项、分类、选图及覆盖结果。
+如果invalid_proposal含unparsed_json，那是完整原始返回文本；先修复JSON语法和转义，再核对内容。必须返回一个完整、有效的JSON对象，不要解释或代码围栏。
+原始source_input是唯一证据。evidence_quote必须从sources列出的某一个S来源直接复制连续原文，逐字一致；不能用同义概括、拼接多个来源或把课件要求当转写原话。
+如果当前来源没有证据，重新核实该要求与本批课堂的相关性并诚实写明，不能为通过校验把真实相关的掌握要求随意改成not_this_part，不能编造来源。
+严格执行原课件掌握/理解/了解层级，修复validation_diagnostics所指条目并复核其他条目；不要删除有效内容或修改原始输入。'''
+    return await model_json(repair_instructions,{'source_input':payload,'invalid_proposal':previous,
+        'validation_error':error,'validation_diagnostics':diagnostics,'repair_attempt':attempt},config,response_path=response_path)
 
 
 async def _split_plan_part(instructions,payload,config,source_ids,package,folder,index,split,*,max_repairs=2):
@@ -492,7 +625,7 @@ async def _visual_review_owned(pdf, export, folder, provider, ledger, evidence, 
     transcript_path=Path(folder)/'transcript.json'
     transcript=json.loads(transcript_path.read_text()) if transcript_path.exists() else {'blocks':[],'segments':[]}
     batch_size=review_batch_size(provider,ledger,evidence,transcript,figures=bool(figures))
-    if batch_size<=4:
+    if batch_size<=4 or report.get('adaptive_splits'):
         batch_size=max(1,min(batch_size,int(report.get('batch_size') or batch_size)))
     report['batch_size']=batch_size
     # Keep attested old batches even when the new plan uses larger groups.
@@ -512,9 +645,8 @@ async def _visual_review_owned(pdf, export, folder, provider, ledger, evidence, 
             batch_pages.append([])
         batch_pages[-1].append(number)
     report['active_batches']={}
-    request_timeout=max(30,min(600 if batch_size>4 else 300,
-        int(provider.get('cli_timeout_seconds') or max(300,batch_size*15))))
-    review_provider={**provider,'cli_timeout_seconds':request_timeout}
+    request_timeout=None
+    review_provider={**provider,'cli_timeout_seconds':0}
 
     def merge_completed(*,notify=True):
         # No await in the merge/save: successful siblings cannot overwrite a
@@ -579,26 +711,44 @@ async def _visual_review_owned(pdf, export, folder, provider, ledger, evidence, 
         scope_review_instructions='''
 必须明确参考原课件每章最前面的学习重点范围写作要求核查：掌握项本节涉及则必须有，了解项只简述，不得在重点公式、推导、计算题、必背清单中展开。了解参数仅作为掌握公式必要符号时允许定义。不能以转写提到某式作为必须展开的理由。
 返回 scope_policy_checked:true 和 scope_findings:[{objective_id:真实要求ID,status:appropriate|not_in_batch|mastery_missing|familiarity_expanded|unconfirmed,page:本批页码,evidence:具体页面证据,suggestion:修订建议}]。至少逐一核对 required_scope_ids，另主动报告本批任何了解内容展开过深和掌握遗漏。学习范围问题必须列为 blocking，不得只返回通用passed。''' if scope.get('enabled') else ''
-        prompt=REVIEW+scope_review_instructions+review_scope.instructions(scope)+'\n按本批页码检查相应内容，并用全文知识清单核对章节范围；不将本批未显示的前后页直接判为遗漏。native_page_text 是本次最终 PDF 的原生文字层，仅用于核对文字和公式拼写，避免看图误读；排版、裁切、图像和公式位置仍必须以实际页面图为准，不能用文字层代替看图。判断标题重复时须实际指出两处排版位置，原课件图片自带标题与规范图注同名不算重复排版。完整教学图因前页空间不足而独占末页的自然留白不算内容遗漏，不得为了填空白增加来源未要求的新内容。figure_pdf_locations 是通过原 PNG 像素摘要与最终 PDF 内嵌图像匹配得到的全文实际位置。图在其他页出现，不能仅因本批没有显示而称为全文缺图。context_pages 为相邻最终页面，须实际查看并用来核对跨页的图注、推导与例题步骤；下一页已有完整步骤时不得把正常续页判为掌握内容缺失。上下文页不计入本批 viewed_pages，问题页码也只能填本批 pages。\n'+json.dumps({'pages':numbers,'native_page_text':[{'page':number,'text':row['text']} for number,row in zip(numbers,rows)],'coverage':ledger,'transcript_evidence':transcript_evidence,
+        local_ledger=review_coverage(ledger,cited_sources,terms)
+        local_scope_ids=set(required_scope_ids)|{oid for item in local_ledger.get('knowledge',[]) for oid in item.get('objective_ids',[])} if isinstance(local_ledger,dict) else set(required_scope_ids)
+        local_scope={**scope,'items':[item for item in scope.get('items',[]) if item['id'] in local_scope_ids]}
+        prompt=REVIEW+scope_review_instructions+review_scope.instructions(scope)+'\n按本批页码检查相应内容，并用全文知识提纲核对章节范围；详细来源仅包含本批相关内容，不将本批未显示的前后页直接判为遗漏。native_page_text 是本次最终 PDF 的原生文字层，仅用于核对文字和公式拼写，避免看图误读；排版、裁切、图像和公式位置仍必须以实际页面图为准，不能用文字层代替看图。判断标题重复时须实际指出两处排版位置，原课件图片自带标题与规范图注同名不算重复排版。完整教学图因前页空间不足而独占末页的自然留白不算内容遗漏，不得为了填空白增加来源未要求的新内容。figure_pdf_locations 是通过原 PNG 像素摘要与最终 PDF 内嵌图像匹配得到的全文实际位置。图在其他页出现，不能仅因本批没有显示而称为全文缺图。context_pages 为相邻最终页面，须实际查看并用来核对跨页的图注、推导与例题步骤；下一页已有完整步骤时不得把正常续页判为掌握内容缺失。上下文页不计入本批 viewed_pages，问题页码也只能填本批 pages。\n'+json.dumps({'pages':numbers,'native_page_text':[{'page':number,'text':row['text']} for number,row in zip(numbers,rows)],'coverage':local_ledger,'transcript_evidence':transcript_evidence,
             'figure_pdf_locations':figure_pdf_locations,'figure_location_method':'原图 Pixmap.digest 匹配最终 PDF get_image_info(hashes=True).digest',
             'context_pages':([{'page':context_number,'path':str(context_paths[0]),'figure_ids':[ident for ident,locations in figure_pdf_locations.items() if context_number in locations]}] if context_paths else []),
             'source_evidence':relevant_evidence,'original_figures':refs,'source_scope':'本批相关原页，含不作正文配图的原公式页；OCR仅用于导航，公式以实际原图为准。全文知识清单另附',
             'prior_adjudication_context':{'use':'仅定位先前争议，须独立对照本批实际页面与来源，不接受任何自称通过结论',
                 'findings':[row for row in report.get('adjudication_findings',[]) if row.get('page') in numbers]},
-            'pdf':str(pdf),'pdf_sha256':export['pdf_sha256'],'learning_scope':scope,'required_scope_ids':required_scope_ids},ensure_ascii=False)
+            'pdf':str(pdf),'pdf_sha256':export['pdf_sha256'],'learning_scope':local_scope,'required_scope_ids':required_scope_ids},ensure_ascii=False)
+        async def split_unfinished(kind):
+            middle=len(numbers)//2
+            report['active_batches'].pop('-'.join(map(str,numbers)),None)
+            report.setdefault('adaptive_splits',[]).append({'pages':numbers,'reason':kind,'at':local_now()})
+            report['batch_size']=min(report['batch_size'],max(1,middle))
+            atomic_json(report_path,report)
+            # Persist each successful child before attempting its sibling.
+            for child in (numbers[:middle],numbers[middle:]):
+                batch=await review_batch(child)
+                if batch is not None:
+                    completed[tuple(child)]=batch
+                    merge_completed()
         for attempt in range(3):
             key='-'.join(map(str,numbers))
             report['active_batches'][key]={'pages':numbers,'attempt':attempt+1,
-                'started_at':local_now(),'timeout_seconds':request_timeout,'state':'waiting'}
+                'started_at':local_now(),'timeout_seconds':request_timeout,'deadline_policy':'until_completion','state':'waiting'}
             atomic_json(report_path,report)
             try:
                 release_pdf_cache()
-                async with asyncio.timeout(request_timeout+5):
-                    response,receipt=await request_materials(prompt,folder,review_provider,read_paths=[pdf,*required],require_images=required,label='review',schema=({**REVIEW_SCHEMA,'required':[*REVIEW_SCHEMA['required'],'scope_policy_checked','scope_findings'],'properties':{**REVIEW_SCHEMA['properties'],'scope_policy_checked':{'type':'boolean'},'scope_findings':{'type':'array','items':{'type':'object'}}}} if scope.get('enabled') else REVIEW_SCHEMA))
+                async with asyncio.timeout(None):
+                    response,receipt=await request_materials(prompt,folder,{**review_provider,'_review_pages':numbers},read_paths=[pdf,*required],require_images=required,label='review',schema=({**REVIEW_SCHEMA,'required':[*REVIEW_SCHEMA['required'],'scope_policy_checked','scope_findings'],'properties':{**REVIEW_SCHEMA['properties'],'scope_policy_checked':{'type':'boolean'},'scope_findings':{'type':'array','items':{'type':'object'}}}} if scope.get('enabled') else REVIEW_SCHEMA))
                 result=parse_json(response)
                 review_scope.validate_review(result,scope,required_scope_ids)
                 break
             except MaterialSessionError as exc:
+                if exc.kind in {'network_read_timeout','output_truncated'} and len(numbers)>1:
+                    await split_unfinished(exc.kind)
+                    return None
                 if not exc.retriable:raise
                 if attempt==2:raise MaterialSessionError('本批审查三次请求未完成；已审批次保留，请稍后继续',kind='review_batch_exhausted') from exc
                 if exc.kind=='material_read_path':
@@ -607,6 +757,9 @@ async def _visual_review_owned(pdf, export, folder, provider, ledger, evidence, 
                     prompt='前次会话读取了错误路径，其结论全部丢弃。本次仅按以下真实文件清单重新审查，不得拼接或猜测文件名。页面/原图：'+json.dumps([str(p) for p in required],ensure_ascii=False)+'。input-*.json 是文字资料，不能改成 .png。\n'+prompt
                 await asyncio.sleep(2*(attempt+1))
             except TimeoutError:
+                if len(numbers)>1:
+                    await split_unfinished('network_read_timeout')
+                    return None
                 if attempt==2:raise MaterialSessionError('本批审查已达到等待上限；已审批次保留，请稍后继续',kind='review_batch_exhausted') from None
             except json.JSONDecodeError:
                 if attempt==2:raise ValueError('独立审查未返回合法结构化结果，已保留已审批次；未判为通过') from None
@@ -624,8 +777,9 @@ async def _visual_review_owned(pdf, export, folder, provider, ledger, evidence, 
     async def worker():
         for numbers in remaining:
             batch=await review_batch(numbers)
-            completed[tuple(numbers)]=batch
-            merge_completed()
+            if batch is not None:
+                completed[tuple(numbers)]=batch
+                merge_completed()
 
     concurrency=max(1,min(2,int(provider.get('concurrency') or 1)))
     workers=[asyncio.create_task(worker()) for _ in range(min(concurrency,len(batch_pages)))]
@@ -681,6 +835,7 @@ async def generate(record, config):
     identity=budget_compatible_identity(record.directory/'.review-notes',
         [pipeline_version,record.id,blocks,selection,corpus,historical_versions,saved_notes_markdown(record)],config,history_index=5)
     relative=f'.review-notes/{identity}';folder=record.directory/relative;folder.mkdir(parents=True,exist_ok=True,mode=0o700)
+    config=note_runtime_config(config)
     from .note_review_repair import resume_install
     resume_install(folder)
     task_path=folder/'task.json'
@@ -808,11 +963,13 @@ async def generate(record, config):
                 cached=folder/f'figure-reading-{key}.json'
                 if cached.exists():return json.loads(cached.read_text())
                 paths=[safe_path(folder,i['path']) for i in batch]
-                text,receipt=await request_materials(('请参考原课件每章最前面的学习重点范围，按掌握、理解、了解的深度核对教学用途。'+review_scope.POLICY+'\n'+json.dumps(scope,ensure_ascii=False)+'\n' if scope.get('enabled') else '')+'逐图解释关键对象、箭头、标签、坐标、图例及支持的知识；判断完整清晰和是否教学图，不能仅复述文件名。返回 JSON {"images":[{"image_id":"必须原样使用清单图ID","caption":"原件名和页码","reading":"读图说明","suitable":true,"reason":"是否适合及原因"}],"conflicts":[]}。图被裁断、只有装饰或纯文字时 suitable=false 并给出原因。\n'+json.dumps(batch,ensure_ascii=False),folder,provider,read_paths=paths,require_images=paths,label='figure-reading')
+                text,receipt=await retry_materials(('请参考原课件每章最前面的学习重点范围，按掌握、理解、了解的深度核对教学用途。'+review_scope.POLICY+'\n'+json.dumps(scope,ensure_ascii=False)+'\n' if scope.get('enabled') else '')+'逐图解释关键对象、箭头、标签、坐标、图例及支持的知识；判断完整清晰和是否教学图，不能仅复述文件名。返回 JSON {"images":[{"image_id":"必须原样使用清单图ID","caption":"原件名和页码","reading":"读图说明","suitable":true,"reason":"是否适合及原因"}],"conflicts":[]}。图被裁断、只有装饰或纯文字时 suitable=false 并给出原因。\n'+json.dumps(batch,ensure_ascii=False),folder,provider,read_paths=paths,require_images=paths,label='figure-reading',
+                    on_retry=lambda attempt,delay:stage(record,task,folder,f'准备配图 · {delay} 秒后重试本批（{attempt}/2）'))
+                stage(record,task,folder,'准备配图')
                 value={'reading':parse_json(text),'receipt':receipt}
-                atomic_json(cached,value)
                 if {x.get('image_id') for x in value['reading'].get('images',[])}!={i['image_id'] for i in batch}:
                     raise ValueError('看图回执中的图片 ID 不一致；诊断和已读文件已保存')
+                atomic_json(cached,value)
                 return value
             for start in range(0,len(images),4):
                 batch=images[start:start+4];value=await inspect(batch);readings.append(value)
@@ -980,13 +1137,16 @@ async def generate(record, config):
         record.metadata.pop('ai_note_summary_draft',None);record.save_metadata()
         return record.metadata['ai_note_summary']
     except BaseException as exc:
-        task.update(status='cancelled' if isinstance(exc,asyncio.CancelledError) else 'pending',error=str(exc),updated_at=local_now())
+        task.update(status='interrupted' if isinstance(exc,asyncio.CancelledError) else 'pending',
+                    error=str(exc),error_kind='service_interrupted' if isinstance(exc,asyncio.CancelledError) else getattr(exc,'kind',''),
+                    updated_at=local_now())
         atomic_json(task_path,task)
         raise
 
 
 async def upgrade_pdf(record, config):
     """Historical or edited Markdown: export/review on demand, preserving text."""
+    config=note_runtime_config(config)
     note=copy.deepcopy(record.metadata.get('ai_note_summary') or {})
     if not note.get('summary'):raise ValueError('请先保存复习笔记')
     initial=body_hash(note)

@@ -493,7 +493,9 @@
 <button type="button" data-ai-tab="global">长文本复核</button>
 <button type="button" data-ai-tab="summary">课后复习笔记</button>
 <button type="button" data-ai-tab="chat">课堂问答</button>
-</nav><div class="provider-stack">
+</nav>
+<p class="muted">最大输出 tokens：API 按此限制输出；AGY 的课后笔记按此规划批次，实际输出上限由模型决定。超限时会尝试恢复完整续写，无法恢复则拆批继续，保留已完成结果。</p>
+<div class="provider-stack">
               <details class="provider-settings" data-ai-section="sentence" open>
                 <summary>
                   <b>逐句实时修正</b>
@@ -880,6 +882,7 @@
             <span>编辑后自动保存 · ⌘/Ctrl+Enter 完成 · Esc 撤销该段</span>
             <button id="toggleNoteSource" class="mini-button" type="button">Markdown 源码</button>
           </div>
+          <div id="noteSavedPdfs" class="reader-toolbar" hidden></div>
           <div id="markdownToolbar" class="markdown-toolbar hidden" aria-label="Markdown 编辑工具">
             <button type="button" data-markdown-prefix="## " data-markdown-placeholder="小标题">H2</button>
             <button type="button" data-markdown-wrap="**" data-markdown-placeholder="重点">粗体</button>
@@ -902,7 +905,7 @@
       <div id="pushReconcile" class="push-options" hidden><p>上次新建结果未知。请先在 IdeaShell 查找笔记；填入 ID 后仅核对正文并关联。</p><input id="pushReconcileId" class="field-input" placeholder="IdeaShell 笔记 ID"><button id="pushReconcileButton" type="button" class="secondary-button">核对并关联</button></div>
       <div class="push-options"><label for="pushDestination">目标笔记</label><select id="pushDestination" class="field-select"><option value="update">普通推送／核对上次结果</option><option value="new">明确新建另一篇</option></select></div>
       <div id="pushPreview" class="push-preview markdown-body"></div>
-      <div class="push-footer"><span>下方按钮会推送当前预览的内容，并自动附带录音文件</span><button id="confirmPush" class="mini-button primary-mini-button" type="button" disabled>推送此内容</button></div>
+      <div class="push-footer"><span id="pushFooterHint">推送当前预览的内容，附件以预览结果为准</span><button id="confirmPush" class="mini-button primary-mini-button" type="button" disabled>推送此内容</button></div>
     </dialog>
 
     <dialog aria-label="批量转写" id="batchDialog" class="batch-dialog">
@@ -921,6 +924,6 @@
     </dialog>
 
     <div id="toast" class="toast" role="status"></div>
-    <script src="/static/app.js?v=20261018-drive-simple-3" type="module"></script>
+    <script src="/static/app.js?v=20261020-note-attachments" type="module"></script>
   </body>
 </html>

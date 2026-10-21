@@ -64,6 +64,8 @@ from qwen_asr_app.note_content import compose_push, compose_push_part, summary_f
 from qwen_asr_app.live_session import TranscriptionSession
 from qwen_asr_app.ideashell_sync import ideashell_manager
 from qwen_asr_app.ideashell_attachments import MAX_AUDIO_BYTES, audio_attachment_arguments_many, audio_file_metadata
+from qwen_asr_app.ideashell_attachments import image_attachment_batches, document_attachment_arguments
+from qwen_asr_app.ideashell_note_assets import prepare_push_assets, restore_image_markdown
 from qwen_asr_app.model_runtime import ModelManager
 from qwen_asr_app.ai_activity import track_ai_activity, task_ai_activity
 from qwen_asr_app.request_security import websocket_origin_allowed, http_request_allowed
@@ -123,6 +125,7 @@ model_manager = ModelManager(MODEL_PATH)
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     with recording_store.service_startup():
+        await asyncio.to_thread(review_library._archive_lesson_pdfs)
         # The course page used to run as a second uvicorn process on port 8766.
         # It now mounts below /course in this app, so enter its lifecycle here as
         # well.  This keeps credential recovery and the durable course queue alive
@@ -622,6 +625,19 @@ async def note_asset(session_id: str, task_id: str, asset: str):
     return FileResponse(path,media_type='image/png',headers={'Cache-Control':'private, max-age=31536000, immutable'})
 
 
+@app.get('/api/recordings/{session_id}/note-pdfs/{ident}')
+async def download_saved_lesson_pdf(session_id: str, ident: str):
+    from qwen_asr_app.lesson_pdfs import lesson_pdfs, lesson_pdf_path
+    record = recording_store.find(session_id)
+    if record is None:
+        raise HTTPException(404, '课堂笔记不存在')
+    entry = next((item for item in lesson_pdfs(record) if item['id'] == ident), None)
+    if entry is None:
+        raise HTTPException(404, '笔记 PDF 不存在')
+    return FileResponse(lesson_pdf_path(record, ident), media_type='application/pdf',
+                        filename=entry['filename'], headers={'Cache-Control': 'no-store'})
+
+
 @app.post("/api/recordings/{session_id}/cancel-summary")
 async def cancel_summary(session_id: str) -> dict[str, Any]:
     record = recording_store.find(session_id)
@@ -681,6 +697,8 @@ def _task_error_kind(error: str) -> str:
     value = str(error or "").lower()
     # These are the redacted material-channel messages, not raw CLI output.
     # Keep their transport category when a public HTTP boundary wraps them.
+    if "未授权工具" in value or "material_tool_violation" in value:
+        return "material_tool_violation"
     if "agy 资料会话" in value:
         if "连接中断" in value:
             return "network_transport"
@@ -717,12 +735,15 @@ def _review_batch_activity(folder, task):
     if not path.resolve().is_relative_to(folder.resolve()) or not path.is_file():return []
     report=json.loads(path.read_text())
     if report.get('pdf_sha256')!=task.get('pdf_sha256'):return []
-    return [{key:value[key] for key in ('pages','attempt','started_at','timeout_seconds','state') if key in value}
+    return [{key:value[key] for key in ('pages','attempt','started_at','timeout_seconds','deadline_policy','state') if key in value}
             for value in report.get('active_batches',{}).values() if isinstance(value,dict)]
 
 
 def _summary_phase_progress(record, draft):
     """Show the actual current writing phase, never an earlier plan's 6/6."""
+    from qwen_asr_app.note_checkpoints import checkpoint_draft
+    if (record.metadata.get('summary_job') or {}).get('status') != 'completed':
+        draft = checkpoint_draft(record) or draft
     value = {'phase': str(draft.get('phase') or ''),
              'completed_parts': len(draft.get('parts') or []),
              'total_parts': draft.get('total_parts') or 0}
@@ -783,6 +804,16 @@ def _error_kind(exc: BaseException) -> str:
     if isinstance(exc, HTTPException):
         return _task_error_kind(str(exc.detail))
     return str(getattr(exc, "kind", "") or _task_error_kind(str(exc)))
+
+
+def _may_auto_retry(exc: BaseException) -> bool:
+    current, seen = exc, set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if getattr(current, 'retriable', None) is False:
+            return False
+        current = current.__cause__
+    return _error_kind(exc) in AUTO_RETRY_KINDS
 
 
 def _automatic_retry_delay(attempt: int) -> int:
@@ -1055,7 +1086,7 @@ def _start_aux_ai_job(record: RecordingRecord, kind: str, runner: Any) -> bool:
                 except Exception as exc:
                     error_kind = _error_kind(exc)
                     automatic_attempt += 1
-                    if error_kind in AUTO_RETRY_KINDS and automatic_attempt <= MAX_AUTOMATIC_RETRIES:
+                    if _may_auto_retry(exc) and automatic_attempt <= MAX_AUTOMATIC_RETRIES:
                         delay = _automatic_retry_delay(automatic_attempt)
                         _update_ai_job(
                             record, kind, status="waiting_retry", error=str(exc),
@@ -1076,8 +1107,8 @@ def _start_aux_ai_job(record: RecordingRecord, kind: str, runner: Any) -> bool:
             _update_ai_job(
                 record, kind,
                 status="paused" if paused else "cancelled" if task_id in cancel_requested_tasks else "interrupted",
-                error="任务已暂停；已完成内容保留，可继续" if paused else "任务已取消；已完成内容保留，可继续",
-                error_kind="paused" if paused else "cancelled",
+                error="任务已暂停；已完成内容保留，可继续" if paused else "任务已取消；已完成内容保留，可继续" if task_id in cancel_requested_tasks else "任务已中断；已完成内容保留，可继续",
+                error_kind="paused" if paused else "cancelled" if task_id in cancel_requested_tasks else "service_interrupted",
                 retry_in_seconds=0,
                 pause_requested=False,
             )
@@ -1105,8 +1136,8 @@ def _start_aux_ai_job(record: RecordingRecord, kind: str, runner: Any) -> bool:
             if current_record is not None:
                 _update_ai_job(
                     current_record, kind, status="paused" if paused else "cancelled" if task_id in cancel_requested_tasks else "interrupted",
-                    error="任务已暂停，可继续" if paused else "任务已取消，可继续",
-                    error_kind="paused" if paused else "cancelled",
+                    error="任务已暂停，可继续" if paused else "任务已取消，可继续" if task_id in cancel_requested_tasks else "任务已中断，可继续",
+                    error_kind="paused" if paused else "cancelled" if task_id in cancel_requested_tasks else "service_interrupted",
                     retry_in_seconds=0, pause_requested=False,
                 )
 
@@ -1495,6 +1526,7 @@ async def ai_task_action(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
     if kind == "summary":
         summary_payload = {
             "config": config,
+            "custom_prompt": (record.metadata.get('summary_job') or {}).get('custom_prompt', ''),
             "_resume_abstract": resume_abstract,
             "_pdf_only": (record.metadata.get('summary_job') or {}).get('resume_stage') == 'pdf',
             "summary_system_prompt": config.get("_note_summary_system_prompt") or DEFAULT_NOTE_SUMMARY_PROMPT,
@@ -2030,8 +2062,17 @@ async def generate_library_summary(
 def start_summary_job(record: RecordingRecord, payload: dict[str, Any], *, automatic: bool = False) -> None:
     """Own generation on the server so losing the browser cannot cancel it."""
     session_id = record.id
-    if session_id in background_summary_tasks or session_id in summary_jobs:
-        return
+    running = background_summary_tasks.get(session_id)
+    if running is not None:
+        if not running.done():
+            return
+        background_summary_tasks.pop(session_id, None)
+    direct = summary_jobs.get(session_id)
+    if direct is not None:
+        direct_task = direct.get('task') if isinstance(direct, dict) else None
+        if direct_task is not None and not direct_task.done():
+            return
+        summary_jobs.pop(session_id, None)
     require_recording_available(session_id, owner=asyncio.current_task())
     try:
         _remember_ai_keys(payload.get("config"))
@@ -2052,6 +2093,8 @@ def start_summary_job(record: RecordingRecord, payload: dict[str, Any], *, autom
         "auto_retry_count": 0, "retry_in_seconds": 0, "pause_requested": False,
         "resume_stage": "pdf" if payload.get('_pdf_only') else "abstract" if resume_abstract else "",
         "previous_error": previous_error,
+        "checkpoint": copy.deepcopy(previous.get('checkpoint') or {}),
+        "custom_prompt": str(payload.get('custom_prompt') or '')[:20_000],
     }
     record.save_metadata()
 
@@ -2098,7 +2141,7 @@ def start_summary_job(record: RecordingRecord, payload: dict[str, Any], *, autom
                     error = str(exc.detail) if isinstance(exc, HTTPException) else str(exc)
                     error_kind = _error_kind(exc)
                     automatic_attempt += 1
-                    if error_kind in AUTO_RETRY_KINDS and automatic_attempt <= MAX_AUTOMATIC_RETRIES:
+                    if _may_auto_retry(exc) and automatic_attempt <= MAX_AUTOMATIC_RETRIES:
                         delay = _automatic_retry_delay(automatic_attempt)
                         save_state(
                             "waiting_retry", error, error_kind=error_kind,
@@ -2123,7 +2166,7 @@ def start_summary_job(record: RecordingRecord, payload: dict[str, Any], *, autom
             save_state(
                 "paused" if paused else "cancelled" if task_id in cancel_requested_tasks else "interrupted",
                 "生成已暂停，已完成内容保留，可以继续" if paused else "生成已中断，已完成内容保留，可以重新生成",
-                error_kind="paused" if paused else "cancelled",
+                error_kind="paused" if paused else "cancelled" if task_id in cancel_requested_tasks else "service_interrupted",
                 retry_in_seconds=0,
                 pause_requested=False,
             )
@@ -2152,8 +2195,8 @@ def start_summary_job(record: RecordingRecord, payload: dict[str, Any], *, autom
                     pause_requested_tasks.discard(task_id)
                     job.update(
                         status="paused" if paused else "cancelled" if task_id in cancel_requested_tasks else "interrupted",
-                        error="生成已暂停，可以继续" if paused else "生成已取消，可以重新生成",
-                        error_kind="paused" if paused else "cancelled",
+                        error="生成已暂停，可以继续" if paused else "生成已取消，可以重新生成" if task_id in cancel_requested_tasks else "生成已中断，已完成内容保留，可以继续",
+                        error_kind="paused" if paused else "cancelled" if task_id in cancel_requested_tasks else "service_interrupted",
                         pause_requested=False,
                         retry_in_seconds=0,
                         updated_at=local_now(),
@@ -2390,9 +2433,10 @@ def ideashell_note_content(payload: dict[str, Any]) -> str:
     if not value:
         raise RuntimeError("IdeaShell 笔记没有可拉取的 Markdown 正文")
     # Current MCP brief responses contain only title/summary. Full responses
-    # expose the current body as Memo 1, followed by retained older memos.
+    # expose the current body as the first visible memo (its stored number may
+    # exceed 1 after edits), followed by retained older memos.
     # Pull only the primary body, never the older half-note or attachment text.
-    primary = re.search(r"^\*\*Memo 1:[^\n]*\*\*\s*\n(?:summary:[^\n]*\n)?", value, re.M)
+    primary = re.search(r"^\*\*Memo \d+:[^\n]*\*\*[ \t]*\n(?:summary:[^\n]*\n)?", value, re.M)
     if primary and "\n## Memos\n" in value:
         value = value[primary.end():]
         boundary = re.search(r"^(?:\*\*Memo \d+:[^\n]*\*\*|## (?:Audios|Links|Images|Documents))\s*$", value, re.M)
@@ -2442,6 +2486,8 @@ def ideashell_note_title(record: RecordingRecord, max_length: int = 30) -> str:
 
 async def ideashell_recording_audio_parts(record: RecordingRecord) -> list[dict[str, Any]]:
     """Prepare attachments in a temporary directory, returning only bytes."""
+    if record.metadata.get('material_only_note') and not record.segments:
+        raise ValueError('本次按课件整理，录音附件已略过')
     from qwen_asr_app.media_retention import file_worker
     try:
         source = Path(await file_worker(record.ensure_aac))
@@ -2593,7 +2639,7 @@ async def preview_ideashell_push(session_id: str, payload: dict[str, Any] = Body
         except (ValueError, OSError) as exc:
             audio_parts = []
             audio_error = str(exc)
-        archive = compose_push(record, mode)
+        archive, images, documents, bindings = await asyncio.to_thread(prepare_push_assets, record, compose_push(record, mode))
         archive.update(note_count=1, split=len(audio_parts) > 1,
                        audio_parts=[ideashell_audio_preview(audio) for audio in audio_parts])
         if audio_parts:
@@ -2624,7 +2670,9 @@ async def push_recording_summary_to_ideashell(
         except (ValueError, OSError) as exc:
             audio_parts = []
             audio_error = str(exc)
-        archive = compose_push(record, mode)
+        archive, images, documents, bindings = await asyncio.to_thread(prepare_push_assets, record, compose_push(record, mode))
+        if (images or documents) and payload.get('assets_digest') != archive['assets_digest']:
+            raise ValueError('图片或 PDF 附件已更新，请重新预览后推送')
         legacy_preview = payload.get("split_parts") or []
         if len(audio_parts) == 2 and legacy_preview:
             midpoint = max(1.0, float(record.duration) / 2.0)
@@ -2684,11 +2732,29 @@ async def push_recording_summary_to_ideashell(
         excerpt = str(summary.get("abstract") or "").strip() if isinstance(summary, dict) else ""
         excerpt = excerpt[:100] or record._compact_summary(archive["content"], 180)
         schema = schemas.get("note_update" if note_id else "note_create", {})
+        image_batches = image_attachment_batches(schema, images)
+        # Validate all later batches before the first remote write.
+        first_image_count = len(image_batches[0]['images']) if image_batches else 0
+        remaining_batches = image_attachment_batches(schemas.get('note_update', {}), images[first_image_count:])
+        if remaining_batches and set(schemas.get('note_update', {}).get('required') or []) - {'note_id', 'images'}:
+            raise ValueError('当前闪念贝壳接口不支持仅追加图片附件，请重新连接后重试')
         max_title = schema.get("properties", {}).get("title", {}).get("maxLength", 30)
         title = ideashell_note_title(record, int(max_title or 30))
         arguments = {"title": title, "content": archive["content"], "summary": excerpt}
-        if audio_parts:
+        from qwen_asr_app.ideashell_sync import same_server
+        previous_audio = sync.get('audio_sha256') or []
+        if isinstance(previous_audio, str):previous_audio = [previous_audio]
+        reuse_audio = (payload.get('reuse_confirmed_audio') is True and bool(audio_parts)
+                      and bool(note_id) and not create_new and sync.get('note_id') == note_id
+                      and bool(sync.get('last_pushed_at'))
+                      and same_server(str(sync.get('server_url') or ''), connection.server_url)
+                      and previous_audio == [item['sha256'] for item in audio_parts])
+        if audio_parts and not reuse_audio:
             arguments.update(audio_attachment_arguments_many(schema, audio_parts))
+        if image_batches:
+            arguments.update(image_batches[0])
+        if documents:
+            arguments.update(document_attachment_arguments(schema, documents))
         if note_id:
             arguments["note_id"] = note_id
             result = await connection.call_tool("note_update", arguments)
@@ -2701,6 +2767,8 @@ async def push_recording_summary_to_ideashell(
                          'content_digest': archive['digest'],
                          'reconcile_digest': hashlib.sha256(archive['content'].strip().encode()).hexdigest(),
                          'audio_sha256s': [audio['sha256'] for audio in audio_parts],
+                         'assets_digest': archive['assets_digest'],
+                         'images_total': len(images), 'image_bindings': bindings, 'content_mode': mode,
                          'title': title, 'started_at': local_now()}
             sync.update(status='sending', create_operation=operation)
             record.metadata['ideashell_sync'] = sync
@@ -2721,8 +2789,15 @@ async def push_recording_summary_to_ideashell(
         old_ids = list(dict.fromkeys([*(sync.get("legacy_note_ids") or []), *(previous_ids if create_new else previous_ids[1:])]))
         sync.update({"note_ids": note_ids, "note_id": note_ids[0], "status": "partial",
                      "server_url": connection.server_url, "legacy_note_ids": old_ids})
+        sync.update(image_bindings=bindings, assets_digest=archive['assets_digest'],
+                    images_uploaded=first_image_count,
+                    images_total=len(images))
         record.metadata["ideashell_sync"] = sync
         record.save_metadata()
+        for batch in remaining_batches:
+            await connection.call_tool('note_update', {'note_id': note_id, **batch})
+            sync['images_uploaded'] += len(batch['images'])
+            record.save_metadata()
         # Persist the created/updated note before moving it. A failed move
         # must not lose the note id and cause a duplicate on the next push.
         await connection.call_tool("note_move", {"note_ids": [note_id], "folder_id": folder_id})
@@ -2737,6 +2812,8 @@ async def push_recording_summary_to_ideashell(
                 "folder_name": str(record.metadata.get("category") or "未分类"),
                 "content_mode": mode,
                 "content_digest": archive["digest"],
+                "image_sha256s": [item['sha256'] for item in images],
+                "document_sha256s": [item['sha256'] for item in documents],
                 "audio_pushed_at": local_now(),
                 "split_parts": max(1, len(audio_parts)),
             }
@@ -2761,8 +2838,11 @@ async def push_recording_summary_to_ideashell(
             "parts": max(1, len(audio_parts)),
             "note_count": 1,
             "audio_attached": bool(audio_parts),
+            "audio_reused": reuse_audio,
             "audio": [ideashell_audio_preview(item) for item in audio_parts] if len(audio_parts) > 1 else (ideashell_audio_preview(audio_parts[0]) if audio_parts else None),
             "audio_error": audio_error,
+            "images_attached": len(images),
+            "documents_attached": len(documents),
             "session": record.public(include_segments=False),
         }
     except HTTPException:
@@ -2805,6 +2885,9 @@ async def reconcile_ideashell_create(session_id: str, payload: dict[str, Any] = 
                                                  *(value for value in previous_ids if value != note_id)]))
     sync.update(note_id=note_id, note_ids=[note_id], server_url=operation['server_url'],
                 folder_id=operation['folder_id'], status='partial', create_operation=operation)
+    if operation.get('image_bindings'):
+        sync.update(image_bindings=operation['image_bindings'], images_total=operation.get('images_total', 0),
+                    assets_digest=operation.get('assets_digest'), content_mode=operation.get('content_mode'))
     record.metadata['ideashell_sync'] = sync
     record.save_metadata()
     return {'linked': True, 'session': record.public(include_segments=False)}
@@ -2829,7 +2912,7 @@ async def pull_recording_summary_from_ideashell(
         )
         result = await connection.call_tool("note_detail", {"note_id": note_id, "scope": "full"})
         markdown = ideashell_note_content(result)
-        summary = record.update_note_summary(summary_from_archive(markdown, sync), source="ideashell_pull")
+        summary = record.update_note_summary(restore_image_markdown(summary_from_archive(markdown, sync), sync.get('image_bindings')), source="ideashell_pull")
         sync.update(
             {
                 "note_id": note_id,

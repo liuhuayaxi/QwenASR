@@ -20,6 +20,14 @@ def config(window=1048576, transport='agy_cli'):
 
 
 class NoteBudgetTests(unittest.TestCase):
+    def test_note_runtime_wait_policy_does_not_mutate_saved_settings_or_model(self):
+        from qwen_asr_app.review_notes import note_runtime_config
+        original=config();original['ai']['summary_provider']['cli_timeout_seconds']=1800
+        runtime=note_runtime_config(original)
+        self.assertEqual(original['ai']['summary_provider']['cli_timeout_seconds'],1800)
+        self.assertEqual(runtime['ai']['summary_provider']['cli_timeout_seconds'],0)
+        self.assertEqual(runtime['ai']['summary_provider']['cli_model'],original['ai']['summary_provider']['cli_model'])
+
     def test_history_rename_preserves_legacy_checkpoint_and_new_task_identity(self):
         from qwen_asr_app.review_notes import history_with_saved_titles
         from qwen_asr_app.review_materials import history_content_signature
@@ -64,16 +72,20 @@ class NoteBudgetTests(unittest.TestCase):
     def test_output_budget_still_bounds_batches_with_one_million_input_tokens(self):
         items=list(range(100))
         groups=pack_complete_items(items,lambda group:{'ids':group},'',config(),lambda group:len(group)*1000)
-        self.assertEqual([len(group) for group in groups],[26,26,26,22])
+        self.assertEqual([item for group in groups for item in group],items)
+        self.assertTrue(all(len(group)*1000<=16384*.8 for group in groups))
+        smaller=config();smaller['ai']['summary_provider']['max_output_tokens']=8000
+        small_groups=pack_complete_items(items,lambda group:{'ids':group},'',smaller,lambda group:len(group)*1000)
+        self.assertGreater(len(small_groups),len(groups))
         with self.assertRaisesRegex(ValueError,'单个完整'):
             pack_complete_items([1],lambda group:{'evidence':'原文'*600000},'',config(),lambda group:1000)
 
-    def test_new_coverage_has_larger_batches_and_resume_keeps_boundaries(self):
+    def test_new_coverage_uses_whole_context_and_resume_keeps_boundaries(self):
         blocks=[{'source':'S'+str(i),'text':'完整课堂'*100} for i in range(93)]
         with tempfile.TemporaryDirectory() as raw:
             folder=Path(raw);payload=lambda group:{'transcript':group}
             groups=coverage_batches(folder,blocks,payload,'识别知识',config())
-            self.assertEqual([len(group) for group in groups],[26,26,26,15])
+            self.assertEqual(groups, [blocks])
             self.assertEqual(coverage_batches(folder,blocks,payload,'识别知识',config(256000)),groups)
             self.assertEqual([b for group in groups for b in group],blocks)
         with tempfile.TemporaryDirectory() as raw:
@@ -81,6 +93,31 @@ class NoteBudgetTests(unittest.TestCase):
             groups=coverage_batches(folder,blocks,payload,'识别知识',config())
             self.assertEqual(len(groups[0]),12)
             self.assertEqual(json.loads((folder/'coverage-batch-plan.json').read_text())['policy'],'legacy-checkpoint-groups')
+
+    def test_long_agy_context_uses_one_coverage_conversation_when_output_fits(self):
+        blocks=[{'source':'S'+str(i),'text':'完整课堂内容 '*30} for i in range(90)]
+        with tempfile.TemporaryDirectory() as raw:
+            folder=Path(raw)
+            groups=coverage_batches(folder,blocks,lambda group:{'transcript':group},'识别知识',config())
+            self.assertEqual(len(groups),1)
+            self.assertEqual(len(groups[0]),90)
+            self.assertEqual(json.loads((folder/'coverage-batch-plan.json').read_text())['policy'],
+                             'complete-evidence-input-and-output-v2-long-context-one-turn')
+
+    def test_whole_coverage_uses_saved_window_including_output_and_repair_space(self):
+        blocks=[{'source':'S'+str(i),'text':'完整课堂内容 '*80} for i in range(90)]
+        with tempfile.TemporaryDirectory() as raw:
+            # More than the former 64K target is allowed when the full
+            # source, response and repair proposal fit a 1M context.
+            groups=coverage_batches(Path(raw),blocks,lambda group:{'transcript':group},'知识',config())
+            self.assertEqual(groups, [blocks])
+        with tempfile.TemporaryDirectory() as raw:
+            groups=coverage_batches(Path(raw),blocks,lambda group:{'transcript':group},'知识',config(131072))
+            self.assertGreater(len(groups), 1)
+            self.assertEqual([b for g in groups for b in g], blocks)
+        with tempfile.TemporaryDirectory() as raw:
+            groups=coverage_batches(Path(raw),blocks,lambda group:{'transcript':group},'知识',config(1048576,'api'))
+            self.assertGreater(len(groups), 1)
 
     def test_budget_increase_reuses_exact_task_but_model_prompt_or_source_change_does_not(self):
         inputs=['pipeline','record',{'sources':'unaltered'}]
@@ -114,7 +151,8 @@ class NoteBudgetTests(unittest.TestCase):
         knowledge=[{'id':'k'+str(i),'topic':'主题','sources':[]} for i in range(86)]
         ledger={'knowledge':knowledge}
         plans,payload,_=author.plan_latex_batches('完整参考稿',config(),ledger,{},[],[],[],{},None)
-        self.assertEqual([len(group) for group in plans],[43,43])
+        self.assertTrue(all(10<len(group)<=21 for group in plans[:-1]))
+        self.assertEqual(sum(map(len,plans)),86)
         self.assertEqual([item for group in plans for item in group],knowledge)
         self.assertEqual(payload(plans[0])['content_reference'],'完整参考稿')
         with tempfile.TemporaryDirectory() as raw:
@@ -127,6 +165,71 @@ class NoteBudgetTests(unittest.TestCase):
 
 
 class PlanJSONRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_missing_objective_can_link_existing_knowledge_without_duplicating_content(self):
+        from tests.test_review_scope import lesson_scope,plan,BLOCKS
+        from qwen_asr_app.review_notes import validated_plan_part
+        original=plan();previous=json.loads(json.dumps(original));previous['knowledge'][0]['objective_ids']=[]
+        previous['knowledge'][0]['scope_level']='unconfirmed';previous['knowledge'][0]['formula_policy']='unconfirmed'
+        previous['knowledge'][0].pop('parameter_only_objective_ids')
+        package={'sources':[],'associations':[],'relevant_pages':[],'history_scope':'原历史范围',
+                 'learning_scope':lesson_scope(),'_scope_transcript_blocks':BLOCKS}
+        with tempfile.TemporaryDirectory() as raw:
+            folder=Path(raw)
+            (folder/'coverage-validation-0-attempt-0.json').write_text(json.dumps({'attempt':0,'proposal':previous,
+                'validation_error':'本节涉及的掌握要求缺少知识覆盖：gain'}))
+            with patch('qwen_asr_app.review_notes.request_ai_text',AsyncMock(return_value=json.dumps({
+                    'objective_links':[{'knowledge_id':'k1','objective_ids':['gain']}],'knowledge':[]}))):
+                result=await validated_plan_part('知识清单',{'transcript':BLOCKS,'history':[]},config(),{'S1'},package,folder,0)
+            self.assertEqual(len(result['knowledge']),2)
+            self.assertEqual(result['knowledge'][0]['objective_ids'],['gain'])
+            self.assertEqual(result['knowledge'][0]['topic'],previous['knowledge'][0]['topic'])
+            self.assertEqual(result['objective_coverage'],previous['objective_coverage'])
+
+    async def test_missing_mastery_adds_only_bound_knowledge_and_keeps_valid_proposal(self):
+        from tests.test_review_scope import lesson_scope,plan,BLOCKS
+        from qwen_asr_app.review_notes import validated_plan_part
+        complete=plan();previous={**complete,'knowledge':complete['knowledge'][1:]}
+        package={'sources':[],'associations':[],'relevant_pages':[],'history_scope':'此前课次范围',
+                 'learning_scope':lesson_scope(),'_scope_transcript_blocks':BLOCKS}
+        payload={'transcript':BLOCKS,'history':[],'learning_scope':lesson_scope()}
+        addition={**complete['knowledge'][0]};addition.pop('parameter_only_objective_ids')
+        with tempfile.TemporaryDirectory() as raw:
+            folder=Path(raw)
+            (folder/'coverage-validation-0-attempt-0.json').write_text(json.dumps({
+                'attempt':0,'max_repairs':2,'proposal':previous,
+                'validation_error':'本节涉及的掌握要求缺少知识覆盖：gain'}))
+            with patch('qwen_asr_app.review_notes.request_ai_text',AsyncMock(return_value=json.dumps({'knowledge':[addition]}))) as request:
+                result=await validated_plan_part('知识清单',payload,config(),{'S1'},package,folder,0)
+            self.assertEqual(request.await_count,1)
+            sent=request.await_args.kwargs['payload']
+            self.assertNotIn('invalid_proposal',sent)
+            self.assertEqual(sent['missing_objective_ids'],['gain'])
+            self.assertEqual([item['id'] for item in sent['source_input']['learning_scope']['items']],['gain'])
+            self.assertEqual(result['knowledge'][0],previous['knowledge'][0])
+            self.assertEqual(result['objective_coverage'],previous['objective_coverage'])
+            self.assertEqual(result['knowledge'][-1]['id'],'repair-0-1-0')
+
+    async def test_invalid_targeted_patch_keeps_original_proposal_for_next_attempt(self):
+        from tests.test_review_scope import lesson_scope,plan,BLOCKS
+        from qwen_asr_app.review_notes import validated_plan_part
+        complete=plan();previous={**complete,'knowledge':complete['knowledge'][1:]}
+        package={'sources':[],'associations':[],'relevant_pages':[],'history_scope':'原历史范围',
+                 'learning_scope':lesson_scope(),'_scope_transcript_blocks':BLOCKS}
+        payload={'transcript':BLOCKS,'history':[]};addition={**complete['knowledge'][0]}
+        addition.pop('parameter_only_objective_ids')
+        with tempfile.TemporaryDirectory() as raw:
+            folder=Path(raw)
+            (folder/'coverage-validation-0-attempt-0.json').write_text(json.dumps({
+                'attempt':0,'max_repairs':2,'proposal':previous,
+                'validation_error':'本节涉及的掌握要求缺少知识覆盖：gain'}))
+            with patch('qwen_asr_app.review_notes.request_ai_text',AsyncMock(side_effect=[
+                '{"knowledge":[]}',json.dumps({'knowledge':[addition]})])) as request:
+                result=await validated_plan_part('知识清单',payload,config(),{'S1'},package,folder,0)
+            self.assertEqual(request.await_count,2)
+            failed=json.loads((folder/'coverage-validation-0-attempt-1.json').read_text())
+            self.assertEqual(failed['proposal'],previous)
+            self.assertEqual(result['knowledge'][0],previous['knowledge'][0])
+
     async def test_output_limit_splits_complete_sources_and_resumes_children(self):
         from qwen_asr_app.review_notes import validated_plan_part
         blocks=[{'source':'S'+str(i),'text':'完整原文','start':i,'end':i+1} for i in range(1,5)]

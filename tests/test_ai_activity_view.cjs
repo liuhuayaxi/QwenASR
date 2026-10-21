@@ -7,6 +7,36 @@ const source = fs.readFileSync(path.join(__dirname, '../static/js/ai-activity-vi
 const modulePromise = import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 const task = activity => ({family: 'ai', status: 'running', ai_activity: activity});
 
+test('a new request separates earlier intermediate output from current text', async () => {
+  const {aiActivityView} = await modulePromise;
+  const view = aiActivityView(task({phase:'processing',elapsed_seconds:1800,idle_seconds:20,
+    output_chars:90000,current_output_chars:0,request_elapsed_seconds:35,requests:6}));
+  assert.match(view.detail,/当前请求尚未收到结果正文/);
+  assert.match(view.detail,/本轮累计接收 90,000 字符（含清单、读图和中间结果）/);
+  assert.match(view.detail,/当前请求已用时 35 秒/);
+  assert.match(view.detail,/本轮已发起 6 次请求/);
+});
+
+test('review waits until completion without claiming a fixed timeout', async () => {
+  const {aiActivityView}=await modulePromise;
+  const view=aiActivityView({...task(null),completed:8,total:31,
+    review_batches:[{pages:[9,10,11,12,13,14,15,16],started_at:new Date().toISOString(),deadline_policy:'until_completion',timeout_seconds:null,attempt:1}]});
+  assert.match(view.label,/第 9–16 页/);
+  assert.match(view.detail,/持续等待模型完成，不按固定时长中断/);
+  assert.doesNotMatch(view.detail,/最多等待|超时会/);
+});
+
+test('review shows real per-request reads and thinking metadata in the main label',async()=>{
+  const {aiActivityView}=await modulePromise;
+  const activity={request_activity:[{pages:[1,2,3,4,5,6,7,8],phase:'reading',read_files:12,
+    opened_pages:[1,2,3],image_reads:4,model_turns:14,thinking_chars:600,idle_seconds:2}]};
+  const view=aiActivityView({...task(activity),completed:0,total:31,review_batches:[{
+    pages:[1,2,3,4,5,6,7,8],started_at:new Date().toISOString(),deadline_policy:'until_completion'}]});
+  assert.match(view.label,/模型正在读取资料/);assert.match(view.label,/已打开 3\/8 页/);
+  assert.match(view.label,/思考活动累计 600 字符/);assert.match(view.label,/最近活动 2 秒前/);
+  assert.doesNotMatch(view.label,/已等待/);
+});
+
 test('waiting for a model has elapsed time without pretending text is being streamed', async () => {
   const {aiActivityView} = await modulePromise;
   const view = aiActivityView(task({phase: 'processing', elapsed_seconds: 74, idle_seconds: 70, output_chars: 0}));

@@ -87,7 +87,7 @@ def inventory(settings, recordings, notes, options):
         def failed(error):
             raise DriveError("有资料目录无法读取，请检查本地文件权限") from error
         for directory, dirs, files in os.walk(folder, followlinks=False, onerror=failed):
-            dirs[:] = sorted(d for d in dirs if not d.startswith('.') and d not in EXCLUDED
+            dirs[:] = sorted(d for d in dirs if (not d.startswith('.') or d == '.note-pdfs') and d not in EXCLUDED
                              and not (Path(directory) / d).is_symlink())
             for name in sorted(files):
                 if name.startswith('.'):

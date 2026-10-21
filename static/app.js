@@ -1485,6 +1485,9 @@ function renderNoteSummary(session) {
   els.regenerateNoteAbstract.disabled = !markdown;
   els.downloadNoteSummary.href = session.downloads?.ai_summary || "#";
   els.downloadNoteSummary.classList.toggle("disabled-download", !markdown);
+  const savedPdfs = $('#noteSavedPdfs');
+  savedPdfs.hidden = !session.note_pdfs?.length;
+  savedPdfs.innerHTML = (session.note_pdfs || []).map(item => `<a class="mini-button" href="${escapeHtml(item.download_url)}" download>已存 PDF：${escapeHtml(item.title || item.filename)}</a>`).join('');
   if (markdown) {
     const edited = summary.source === "edited" ? " · 已手动编辑" : summary.source === "ideashell_pull" ? " · 来自 IdeaShell" : "";
     const syncState = session.ideashell_sync?.status === "local_changes"
@@ -1525,7 +1528,7 @@ els.downloadNoteSummary.addEventListener('click', async event => {
 
 document.addEventListener('click', async event => {
   const link = event.target.closest?.('a[data-review-pdf]');
-  if (!link || link.dataset.reviewed === 'true' || link.classList.contains('disabled-download')) return;
+  if (!link || link.dataset.pdfReady === 'true' || link.classList.contains('disabled-download')) return;
   event.preventDefault();
   try {
     const response = await fetch(`/api/recordings/${encodeURIComponent(link.dataset.reviewPdf)}/review-pdf`,{method:'POST'});
@@ -1672,6 +1675,13 @@ async function ensureIdeashellConnected(serverUrl = currentIdeashellServer()) {
 let pushRecord = null;
 let pushPreviewData = null;
 let previewRequest = 0;
+function configurePushContent(record) {
+  const hasTranscript = record.has_transcript ?? (Array.isArray(record.segments)
+    ? record.segments.some(item => String(item.corrected || item.raw || '').trim()) : undefined);
+  const select = $("#pushContentMode");
+  for (const option of select.options) option.disabled = hasTranscript === false && option.value !== 'summary';
+  select.value = hasTranscript === false ? 'summary' : 'combined';
+}
 function renderPushTarget() {
   if (!pushRecord) return;
   $("#pushTarget").textContent = `${pushRecord.title || "未命名录音"} · ${$("#pushDestination").value === "new" ? "创建一条新笔记" : "更新已关联的远端笔记"}`;
@@ -1706,11 +1716,26 @@ async function refreshPushPreview() {
     $("#pushReconcile").hidden = !unknown;
     if (unknown || pushRecord.ideashell_sync?.note_id) $("#pushDestination").value = "update";
     renderPushTarget();
-    $("#pushPreview").innerHTML = renderMarkdown(data.content);
+    const packageId = String(record.ai_note_summary?.review_package || '').split('/').pop();
+    const assetBase = packageId ? `/api/recordings/${encodeURIComponent(record.id)}/note-assets/${encodeURIComponent(packageId)}/` : '';
+    $("#pushPreview").innerHTML = renderMarkdown(data.content, assetBase);
+    for (const item of data.image_previews || []) {
+      const figure = document.createElement('figure');
+      const picture = document.createElement('img');
+      picture.src = item.url;
+      picture.alt = item.name;
+      picture.loading = 'lazy';
+      const caption = document.createElement('figcaption');
+      caption.textContent = item.name;
+      figure.append(picture, caption);
+      $("#pushPreview").append(figure);
+    }
     const audioValues = data.audio_parts || (data.audio ? [data.audio] : []);
-    const audioHint = audioValues.length ? ` · 附带${audioValues.length}个录音文件（${audioValues.map(audio => `${(audio.bytes / 1024 / 1024).toFixed(1)} MB`).join(" + ")}）` : data.audio_error ? " · 录音附件不可用，仍可推送文字" : "";
+    const audioHint = audioValues.length ? ` · 附带${audioValues.length}个录音文件（${audioValues.map(audio => `${(audio.bytes / 1024 / 1024).toFixed(1)} MB`).join(" + ")}）` : record.material_only_note && !record.has_transcript ? ' · 课件笔记，不附带录音' : data.audio_error ? " · 录音附件不可用，仍可推送文字" : "";
+    const imageHint = data.images?.length ? ` · ${data.images.length} 张图片附件${data.documents?.length ? '＋图文 PDF' : ''}。${data.image_note}。${data.pdf_warning || ''}` : '';
     const characters = Number(data.characters || 0).toLocaleString();
-    $("#pushPreviewStatus").textContent = `1 篇笔记 · ${characters} 字符${data.unrefined_blocks ? ` · ${data.unrefined_blocks} 个片段尚未精修，已在正文标注` : " · 内容已就绪"}${audioHint}${data.split ? " · 上下半段录音保存到同一篇笔记" : ""}`;
+    $("#pushPreviewStatus").textContent = `1 篇笔记 · ${characters} 字符${data.unrefined_blocks ? ` · ${data.unrefined_blocks} 个片段尚未精修，已在正文标注` : " · 内容已就绪"}${audioHint}${imageHint}${data.split ? " · 上下半段录音保存到同一篇笔记" : ""}`;
+    $("#pushFooterHint").textContent = `推送当前预览的正文和列出的附件${audioValues.length ? '' : '；本次不附带录音'}${data.images?.length ? '；图片分批保存到同一篇笔记' : ''}`;
     $("#confirmPush").textContent = "推送到同一篇笔记";
     $("#confirmPush").disabled = false;
   } catch (error) { if (request === previewRequest) $("#pushPreviewStatus").textContent = error.message; }
@@ -1718,10 +1743,25 @@ async function refreshPushPreview() {
 async function pushSummaryToIdeashell(record) {
   if (!requireCurrentBackend()) return;
   pushRecord = record;
-  $("#pushContentMode").value = "combined";
+  configurePushContent(record);
+  $("#pushFooterHint").textContent = '正在检查正文和录音附件…';
   $("#pushDestination").value = record.ideashell_sync?.note_id ? "update" : "new";
   renderPushTarget();
   $("#pushDialog").showModal();
+  $("#confirmPush").disabled = true;
+  $("#pushPreview").replaceChildren();
+  $("#pushPreviewStatus").textContent = '正在读取笔记…';
+  try {
+    const response = await fetch(`/api/recordings/${encodeURIComponent(record.id)}`, {cache:'no-store'});
+    const data = await readIdeashellResponse(response, '无法读取课堂笔记');
+    if (pushRecord !== record || !$("#pushDialog").open) return;
+    if (!response.ok || !data.session) throw new Error(data.detail || '无法读取课堂笔记');
+    pushRecord = data.session;
+    configurePushContent(pushRecord);
+  } catch (error) {
+    if (pushRecord === record) $("#pushPreviewStatus").textContent = error.message;
+    return;
+  }
   await refreshPushPreview();
 }
 $("#pushReconcileButton").addEventListener("click", async () => {
@@ -1761,6 +1801,7 @@ async function confirmPush() {
         preview_digest: preview.digest,
         audio_sha256: preview.audio?.sha256 || "",
         audio_sha256s: (preview.audio_parts || (preview.audio ? [preview.audio] : [])).map(audio => audio.sha256),
+        assets_digest: preview.assets_digest,
       }),
     });
     const payload = await readIdeashellResponse(response, "IdeaShell 推送接口返回异常");
@@ -1771,7 +1812,8 @@ async function confirmPush() {
     }
     $("#pushDialog").close();
     await loadLibrary();
-    toast(payload.audio_attached ? `1 篇笔记和 ${payload.parts} 个录音文件已推送到 IdeaShell（录音不会自动转写）` : "正文已推送到 1 篇 IdeaShell 笔记，录音附件未上传", 5200);
+    const attachmentHint = `${payload.images_attached ? ` · ${payload.images_attached} 张图片` : ''}${payload.documents_attached ? ' · 图文 PDF' : ''}`;
+    toast((payload.audio_attached ? `1 篇笔记和 ${payload.parts} 个录音文件已推送到 IdeaShell（录音不会自动转写）` : "正文已推送到 1 篇 IdeaShell 笔记，录音附件未上传") + attachmentHint, 5200);
   } catch (error) { await refreshPushPreview(); $("#pushPreviewStatus").textContent = error.message; }
   finally { button.disabled = false; button.textContent = "推送到同一篇笔记"; $("#pushContentMode").disabled = false; $("#pushDestination").disabled = false; }
 }

@@ -388,6 +388,91 @@ async function fixtures(route) {
     await page.screenshot({path:path.join(output,'merged-materials-mobile.png')});
     await page.locator('.file-section').screenshot({path:path.join(output,'merged-materials-list-mobile.png')});
   });
+  await scenario('资料 PDF 标题点击后请求 Chrome 查看并保留下载',async(page,context,origin)=>{
+    courseFixtureFiles=[
+      {id:'original-pdf',name:'合成课程-第01章-课件.pdf',kind:'课件',size:20,created_at:'2026-10-20',conversion:{status:'completed'},sync:[]},
+      {id:'converted-office',name:'合成课程-第02章-课件.pptx',kind:'课件',size:20,created_at:'2026-10-20',conversion:{status:'completed'},sync:[]},
+      {id:'unconverted-office',name:'合成课程-作业.docx',kind:'作业',size:20,created_at:'2026-10-20',conversion:{status:'none'},sync:[]},
+    ];
+    await page.goto(origin+'/course-files?category='+encodeURIComponent(record.category));
+    const original=page.locator('[data-id="original-pdf"] .file-title-link');
+    await original.waitFor();
+    await original.click();
+    await page.waitForFunction(()=>document.getElementById('toast')?.textContent.includes('Chrome'));
+    const request=requests.find(item=>item.path==='/api/course-files/original-pdf/open-pdf');
+    assert.equal(request.method,'POST');assert.equal(JSON.parse(request.body).variant,'original');
+    await page.locator('[data-id="converted-office"] .file-title-link').click();
+    await page.waitForTimeout(100);
+    const converted=requests.find(item=>item.path==='/api/course-files/converted-office/open-pdf');
+    assert.equal(JSON.parse(converted.body).variant,'pdf');
+    assert.equal(await page.locator('[data-id="unconverted-office"] .file-title-link').count(),0);
+    assert.equal(await page.locator('[data-id="original-pdf"] a[download]').count(),2);
+    await page.locator('[data-review-id="review-old"] .file-title-link').click();
+    await page.waitForTimeout(100);
+    assert.ok(requests.some(item=>item.path==='/api/notes/review-old/open-pdf' && item.method==='POST'));
+    await page.screenshot({path:path.join(output,'course-pdf-title-chrome.png'),fullPage:true});
+  });
+  await scenario('课件笔记无转写时自动预览正文和插图',async(page,context,origin)=>{
+    const old=structuredClone(record);
+    try {
+      record.segments=[];record.has_transcript=false;
+      record.ai_note_summary={summary:'# 合成课件笔记\n\nFM 与频分复用。',abstract:'课件摘要',review_package:'.review-notes/'+'a'.repeat(24)};
+      const asset='fig-'+'b'.repeat(16)+'.png';
+      await page.route('**/ideashell/preview',async route=>{
+        const body=route.request().postDataJSON();
+        assert.equal(body.content_mode,'summary');
+        await route.fulfill({contentType:'application/json',body:JSON.stringify({mode:'summary',content:'# 合成课件笔记\n\nFM 与频分复用。\n\n![课件原图](assets/'+asset+')',note_count:1,characters:30,digest:'material-only',audio_parts:[],audio_error:'本次按课件整理，录音附件已略过'})});
+      });
+      await page.goto(origin+'/library?recording='+record.id);
+      await page.locator('#noteDialog[open]').waitFor();
+      await page.locator('#pushNoteSummary').click();
+      await page.waitForFunction(()=>document.getElementById('pushPreviewStatus').textContent.includes('1 篇笔记'));
+      assert.equal(await page.locator('#pushContentMode').inputValue(),'summary');
+      assert.equal(await page.locator('#pushContentMode option[value=combined]').isDisabled(),true);
+      assert.equal(await page.locator('#pushContentMode option[value=transcript]').isDisabled(),true);
+      assert.match(await page.locator('#pushPreview').innerText(),/FM 与频分复用/);
+      assert.equal(await page.locator('#pushPreview img').getAttribute('src'),`/api/recordings/${record.id}/note-assets/${'a'.repeat(24)}/${asset}`);
+      assert.match(await page.locator('#pushFooterHint').innerText(),/本次不附带录音/);
+      assert.equal(await page.locator('#confirmPush').isEnabled(),true);
+      assert.equal(requests.some(request=>request.path.endsWith('/ideashell/push')),false);
+      await page.screenshot({path:path.join(output,'ideashell-material-only-preview.png'),fullPage:true});
+    } finally {
+      for(const key of Object.keys(record))delete record[key];
+      Object.assign(record,old);
+    }
+  });
+  await scenario('图文笔记预览包含图片附件与 PDF 并校验附件摘要',async(page,context,origin)=>{
+    const diagram='data:image/svg+xml,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="640" height="180" viewBox="0 0 640 180"><rect width="640" height="180" rx="12" fill="#e9f4ef"/><path d="M80 90H560" stroke="#317b5c" stroke-width="6"/><circle cx="120" cy="90" r="30" fill="#317b5c"/><rect x="430" y="55" width="70" height="70" fill="#317b5c"/><text x="220" y="70" font-size="24" fill="#204331">Synthetic figure</text></svg>');
+    await page.route('**/ideashell/preview',async route=>{
+      await route.fulfill({contentType:'application/json',body:JSON.stringify({content:'# 图文笔记\n\n【配图 1：光路；图片附件：配图-01.png】',characters:40,digest:'figures',assets_digest:'bound-figures',images:[{name:'配图-01.png',bytes:100,sha256:'figure-hash'}],documents:[{name:'课后复习笔记.pdf',bytes:200,sha256:'pdf-hash'}],image_previews:[{name:'配图-01.png',url:diagram}],image_note:'图片保存在笔记附件中，PDF 保留原图文排版',audio_parts:[]})});
+    });
+    await page.route('**/ideashell/push',async route=>{
+      const body=route.request().postDataJSON();assert.equal(body.assets_digest,'bound-figures');
+      await route.fulfill({contentType:'application/json',body:JSON.stringify({session:record,images_attached:1,documents_attached:1})});
+    });
+    await page.goto(origin+'/library?recording='+record.id);
+    await page.locator('#noteDialog[open]').waitFor();
+    await page.locator('#pushNoteSummary').click();
+    await page.waitForFunction(()=>document.getElementById('pushPreviewStatus').textContent.includes('图片附件'));
+    assert.match(await page.locator('#pushPreviewStatus').innerText(),/1 张图片附件＋图文 PDF/);
+    assert.equal(await page.locator('#pushPreview figure img').getAttribute('alt'),'配图-01.png');
+    await page.waitForFunction(()=>document.querySelector('#pushPreview figure img')?.naturalWidth===640);
+    await page.screenshot({path:path.join(output,'ideashell-figure-attachments-preview.png'),fullPage:true});
+    await page.locator('#confirmPush').click();
+    await page.waitForFunction(()=>!document.getElementById('pushDialog').open);
+  });
+  await scenario('已存笔记 PDF 在对应课堂提供下载',async(page,context,origin)=>{
+    const previous=record.note_pdfs;
+    try {
+      record.note_pdfs=[{id:'a'.repeat(32),title:'图文复习笔记',filename:'note.pdf',download_url:'/api/recordings/smoke-class/note-pdfs/'+'a'.repeat(32)}];
+      await page.goto(origin+'/library?recording='+record.id);
+      await page.locator('#noteDialog[open]').waitFor();
+      const link=page.locator('#noteSavedPdfs a');
+      assert.match(await link.innerText(),/图文复习笔记/);
+      assert.equal(await link.getAttribute('href'),record.note_pdfs[0].download_url);
+      assert.equal(await link.isVisible(),true);
+    } finally {if(previous===undefined)delete record.note_pdfs;else record.note_pdfs=previous;}
+  });
   await scenario('录音拆为两个附件并推送同一篇笔记',async(page,context,origin)=>{
     await page.goto(origin+'/library?recording='+record.id);
     await page.locator('#noteDialog[open]').waitFor();

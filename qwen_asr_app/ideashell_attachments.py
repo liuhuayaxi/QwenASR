@@ -51,16 +51,21 @@ def audio_attachment_arguments_many(
     The server has changed attachment support over time, so inspect the schema
     instead of blindly sending a field that an older grant would reject.
     """
+    return attachment_arguments(schema, attachments, AUDIO_FIELDS, "录音", 5)
+
+
+def attachment_arguments(schema, attachments, fields, label, default_limit):
+    """Encode attachments using the currently advertised parameter shape."""
     if not isinstance(schema, dict):
-        raise ValueError("闪念贝壳未返回录音附件参数，请重新连接后重试")
+        raise ValueError(f"闪念贝壳未返回{label}附件参数，请重新连接后重试")
     properties = schema.get("properties") or {}
-    for field in AUDIO_FIELDS:
+    for field in fields:
         definition = _resolve(schema, properties.get(field))
         if not definition:
             continue
         item_schema: dict[str, Any]
         if definition.get("type") == "array":
-            if len(attachments) > int(definition.get("maxItems") or 5):
+            if len(attachments) > int(definition.get("maxItems") or default_limit):
                 continue
             item_schema = _resolve(schema, definition.get("items"))
         elif definition.get("type") == "object":
@@ -107,7 +112,22 @@ def audio_attachment_arguments_many(
             items.append(item)
         if items:
             return {field: items if definition.get("type") == "array" else items[0]}
-    raise ValueError("当前闪念贝壳接口未提供可用的录音附件参数，请重新连接后重试")
+    raise ValueError(f"当前闪念贝壳接口未提供可用的{label}附件参数，请重新连接后重试")
+
+
+def image_attachment_batches(schema, attachments):
+    if not attachments:
+        return []
+    definition = _resolve(schema, (schema.get('properties') or {}).get('images'))
+    limit = min(9, int(definition.get('maxItems') or 9))
+    if limit < 1:
+        raise ValueError('当前闪念贝壳接口不接受图片附件')
+    return [attachment_arguments(schema, attachments[index:index + limit], ('images',), '图片', 9)
+            for index in range(0, len(attachments), limit)]
+
+
+def document_attachment_arguments(schema, attachments):
+    return attachment_arguments(schema, attachments, ('documents',), '文档', 5)
 
 
 def audio_file_metadata(path: Path, *, filename: str | None = None) -> dict[str, Any]:

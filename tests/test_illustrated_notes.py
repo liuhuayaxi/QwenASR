@@ -250,6 +250,8 @@ class ReviewTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(record.metadata['status'],'completed')
 
     async def test_agy_vision_requires_actual_tool_read_and_fresh_cli_invocation(self):
+        from tests.agy_fixtures import available_material_sandbox
+        self.enterContext(available_material_sandbox())
         from qwen_asr_app.agy_materials import request_materials
         from types import SimpleNamespace
         with tempfile.TemporaryDirectory() as raw:

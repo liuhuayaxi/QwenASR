@@ -743,7 +743,8 @@ class RecordingRecord:
                     blocks.extend([f"- {point}" for point in points])
                 blocks.append("")
         ai_note_summary = self.metadata.get("ai_note_summary")
-        if isinstance(ai_note_summary, dict) and ai_note_summary.get("summary"):
+        if (isinstance(ai_note_summary, dict) and ai_note_summary.get("summary")
+                and not (self.metadata.get('material_only_note') and not self.segments)):
             blocks.extend(
                 ["===== 笔记完成后 AI 总结 =====", "", str(ai_note_summary["summary"]), ""]
             )
@@ -1008,11 +1009,13 @@ class RecordingRecord:
         return result
 
     def public(self, include_segments: bool = True) -> dict[str, Any]:
+        from .lesson_pdfs import lesson_pdfs
         library_summary, summary_source = self.library_summary()
         payload = {
             **self.metadata,
             "duration": round(self.duration, 1),
             "directory": str(self.directory),
+            "note_pdfs": lesson_pdfs(self),
             "library_summary": library_summary,
             "summary_source": summary_source,
             "library_summary_error": self.library_summary_error(),
@@ -1155,10 +1158,20 @@ class RecordingStore:
                     active_records.append(record)
                 if mark_interrupted:
                     changed = False
+                    # Disk receipts are authoritative even if the process
+                    # ended between writing a batch and refreshing the UI.
+                    from .note_checkpoints import checkpoint_draft
+                    summary_job = record.metadata.get('summary_job') or {}
+                    if summary_job.get('status') not in {'completed'}:
+                        draft = checkpoint_draft(record)
+                        if draft and draft != record.metadata.get('ai_note_summary_draft'):
+                            record.metadata['ai_note_summary_draft'] = draft
+                            changed = True
                     for key in ("summary_job", "finalization"):
                         job = record.metadata.get(key)
                         if isinstance(job, dict) and job.get("status") in {"queued", "running", "waiting_retry"}:
-                            job.update(status="interrupted", error="本地服务曾关闭，已保存的内容保留，可以重新生成或继续结束保存")
+                            job.update(status="interrupted", error="本地服务曾关闭；已完成检查点保留，可从任务中心继续",
+                                       error_kind='service_restart', retry_in_seconds=0)
                             changed = True
                     ai_jobs = record.metadata.get("ai_jobs")
                     if isinstance(ai_jobs, dict):

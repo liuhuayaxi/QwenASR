@@ -7,17 +7,13 @@ from .ai import context_window_for, estimate_tokens, output_limit_for, provider_
 
 PROTOCOL_RESERVE = 16_000
 NOTE_OUTPUT_TOKENS = 32_768
-BATCH_POLICY = 'complete-evidence-input-and-output-v1'
+BATCH_POLICY = 'complete-evidence-input-and-output-v2'
 
 
 def output_budget(config, requested=NOTE_OUTPUT_TOKENS):
     provider = provider_for_mode(config.get('ai', {}), 'summary')
-    # AGY does not implement the API's max_output_tokens setting. Keep a 32k
-    # text target, below Gemini 3.8 Flash's documented 65,536 output limit,
-    # leaving room for thinking. Do not confuse its 1M input with output.
-    # https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash
-    # Official input/output limits verified 2026-10-16; saved limits remain
-    # authoritative so this helper never silently changes another provider.
+    # Context must still reserve room for AGY output beyond the target: the
+    # CLI has no output-token flag and thinking also consumes output tokens.
     if provider_transport(provider) == 'agy_cli':
         return min(requested, NOTE_OUTPUT_TOKENS)
     return output_limit_for(config, 'summary', requested)
@@ -51,7 +47,9 @@ def pack_complete_items(items, payload_for, instructions, config, output_estimat
     """
     plans = []
     current = []
-    target_output = int(output_budget(config) * .8)
+    # Respect the saved output budget when planning complete note batches.
+    # This is a target, never an upstream hard limit or permission to truncate.
+    target_output = int(min(output_budget(config),output_limit_for(config,'summary',NOTE_OUTPUT_TOKENS)) * .8)
 
     def fits(group):
         budget = request_budget(instructions, payload_for(group), config, window=window)

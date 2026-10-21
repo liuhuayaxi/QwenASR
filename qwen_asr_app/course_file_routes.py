@@ -206,6 +206,16 @@ class CourseFileAPI:
     def routes(self):
         router, store = self.router, self.store
 
+        @router.post('/{asset_id}/open-pdf')
+        async def open_pdf(asset_id: str, request: Request, payload: dict = Body(...)):
+            self.guard(request)
+            try:
+                from .pdf_preview import open_pdf_in_chrome
+                _, path = store.file(str(payload.get('category') or ''), asset_id, str(payload.get('variant') or 'original'))
+                return await asyncio.to_thread(open_pdf_in_chrome, path)
+            except (ValueError, OSError) as exc:
+                raise HTTPException(400, str(exc)) from exc
+
         @router.get("")
         async def listing(category: str = "未分类"):
             try:
@@ -682,18 +692,32 @@ class CourseFileAPI:
                           else directory / "PDF" / (Path(item["name"]).stem + "(AI).pdf"))
                 previous_state = dict(item.get("conversion", {}))
                 legacy_backup = None
+                published_output = output
                 if operation:
-                    output = output.with_name(output.stem + '-' + generation[:12] + output.suffix)
+                    output = output.with_name('.' + output.stem + '-' + generation[:12] + output.suffix)
                 update('正在准备 MinerU 识别', 1)
                 report = await conversion_worker(convert, source, output,
                     lambda stage, percent: loop.call_soon_threadsafe(update, stage, percent), stop=stop, settings=settings,
                     inference_config=provider, receipt_path=PRIVATE_ROOT/'remote-operations'/operation_id/'receipt.json',
                     local_guard=LocalComputeGuard(self.conversion_lock, loop) if provider['mineru_provider'] != 'local' else None)
-                if legacy_backup:
-                    report["legacy_output_backup"] = str(legacy_backup)
                 item, _ = self.store.get(category, asset_id)
                 if item['conversion'].get('operation_id') != generation:
                     return
+                if operation:
+                    # Keep generation identifiers in hidden work/history paths.
+                    # Publishing a new version must not discard the old PDF.
+                    if published_output.is_file():
+                        previous_digest = digest_file(published_output)
+                        legacy_backup = directory / '.qwenasr-files' / 'versions' / asset_id / (previous_digest + '.pdf')
+                        legacy_backup.parent.mkdir(parents=True, exist_ok=True)
+                        if not legacy_backup.exists():
+                            shutil.copy2(published_output, legacy_backup)
+                        if digest_file(legacy_backup) != previous_digest:
+                            raise ValueError('旧版 PDF 备份校验失败，未替换已有版本')
+                    output.replace(published_output)
+                    output = published_output
+                if legacy_backup:
+                    report['legacy_output_backup'] = str(legacy_backup)
                 changed = digest_file(source) != source_digest
                 report['progress_estimate'] = timing.finish(learn=not changed)
                 if provider['mineru_provider'] != 'local':
