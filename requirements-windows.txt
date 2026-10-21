@@ -1,0 +1,7 @@
+# Windows 10/11 local runtime, Python 3.12.
+-r requirements-core.lock
+# Native Transformers backend from the official Qwen3-ASR repository.
+qwen-asr @ git+https://github.com/QwenLM/Qwen3-ASR.git
+torch>=2.6,<3
+transformers>=4.51,<5
+accelerate>=1.6,<2

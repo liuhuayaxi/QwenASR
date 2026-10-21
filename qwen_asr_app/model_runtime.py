@@ -4,6 +4,7 @@ import asyncio
 import multiprocessing as mp
 import queue
 import time
+import os
 from collections import deque
 from pathlib import Path
 from typing import Any
@@ -18,15 +19,35 @@ np = lazy_module("numpy")
 
 
 def model_worker_main(model_path: str, requests: Any, results: Any) -> None:
-    """Own MLX and all model memory in a disposable child process."""
+    """Own the platform-specific ASR runtime and model memory in a disposable child process."""
     try:
-        from mlx_audio.stt import load
+        if os.name == "nt":
+            import torch
+            from qwen_asr import Qwen3ASRModel
 
-        print(f"Qwen 子进程正在加载 {model_path}…", flush=True)
-        from .local_compute import metal_lease
-        with metal_lease(realtime=True, timeout=180):
-            model = load(model_path, lazy=False)
-        results.put({"type": "ready"})
+            use_cuda = bool(torch.cuda.is_available())
+            device = "cuda:0" if use_cuda else "cpu"
+            dtype = torch.bfloat16 if use_cuda else torch.float32
+            print(
+                f"Qwen Windows 子进程正在加载 {model_path} · device={device} · dtype={dtype}",
+                flush=True,
+            )
+            model = Qwen3ASRModel.from_pretrained(
+                model_path,
+                dtype=dtype,
+                device_map=device,
+                max_inference_batch_size=1,
+                max_new_tokens=4096,
+            )
+            results.put({"type": "ready", "device": device, "runtime": "transformers"})
+        else:
+            from mlx_audio.stt import load
+
+            print(f"Qwen 子进程正在加载 {model_path}…", flush=True)
+            from .local_compute import metal_lease
+            with metal_lease(realtime=True, timeout=180):
+                model = load(model_path, lazy=False)
+            results.put({"type": "ready", "device": "Apple Silicon GPU (MLX · BF16)", "runtime": "mlx"})
     except Exception as exc:
         results.put({"type": "load_error", "message": str(exc)})
         return
@@ -40,20 +61,34 @@ def model_worker_main(model_path: str, requests: Any, results: Any) -> None:
             asr_params = normalize_asr_params(
                 request.get("asr_params"), int(request.get("max_tokens", 384))
             )
-            generated = model.generate(
-                np.asarray(request["audio"], dtype=np.float32),
-                language=request.get("language"),
-                system_prompt=request.get("context") or None,
-                **asr_params,
-            )
-            detected = generated.language
+            if os.name == "nt":
+                # The official Transformers wrapper exposes max_new_tokens as
+                # a model-level setting; generation is greedy for ASR.
+                model.max_new_tokens = int(asr_params["max_tokens"])
+                generated = model.transcribe(
+                    audio=[(np.asarray(request["audio"], dtype=np.float32), 16_000)],
+                    language=request.get("language") or None,
+                    context=request.get("context") or "",
+                    return_time_stamps=False,
+                )[0]
+                detected = generated.language
+                text = generated.text
+            else:
+                generated = model.generate(
+                    np.asarray(request["audio"], dtype=np.float32),
+                    language=request.get("language"),
+                    system_prompt=request.get("context") or None,
+                    **asr_params,
+                )
+                detected = generated.language
+                text = generated.text
             if isinstance(detected, list):
                 detected = detected[0] if detected else ""
             results.put(
                 {
                     "type": "result",
                     "id": request_id,
-                    "text": generated.text.strip(),
+                    "text": str(text or "").strip(),
                     "language": str(detected or ""),
                 }
             )
@@ -70,7 +105,7 @@ class ModelManager:
         self.next_request_id = 1
         self.status = "idle"
         self.detail = "Qwen3-ASR 已待命 · 点击转写时按需加载"
-        self.device = "Apple Silicon GPU (MLX · BF16)"
+        self.device = "Windows · Transformers (CUDA/CPU)" if os.name == "nt" else "Apple Silicon GPU (MLX · BF16)"
         self.load_seconds: float | None = None
         self.infer_lock = asyncio.Lock()
         self.scheduler = PriorityGate()
@@ -147,7 +182,7 @@ class ModelManager:
             target=model_worker_main,
             args=(str(self.model_path), self.request_queue, self.result_queue),
             daemon=True,
-            name="qwen-asr-mlx-worker",
+            name="qwen-asr-worker",
         )
         self.worker.start()
         try:
@@ -235,6 +270,10 @@ class ModelManager:
         return str(message.get("text") or ""), str(message.get("language") or "")
 
     def _infer_sync(self, audio, language, context, max_tokens, asr_params, timeout_seconds):
+        from .local_compute import metal_lease
+        with metal_lease(realtime=True, timeout=timeout_seconds):
+            if os.name == "nt":
+            return self._infer_with_lease(audio, language, context, max_tokens, asr_params, timeout_seconds)
         from .local_compute import metal_lease
         with metal_lease(realtime=True, timeout=timeout_seconds):
             return self._infer_with_lease(audio, language, context, max_tokens, asr_params, timeout_seconds)
