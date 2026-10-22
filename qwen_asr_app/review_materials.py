@@ -141,7 +141,19 @@ def native_pages(path):
     raise ValueError('原件暂不支持原生读取，请补选 PDF 或 PPTX；未使用转写排版 PDF 作为原图')
 
 
-def collect(record, folder, selected=None, settings=None):
+def _retrieval_by_source(blocks, originals):
+    """Each file's summed top-2 page-match score over all transcript blocks."""
+    indexed=[(source,page,tokens(page['text'])) for source in originals for page in source['pages']]
+    totals={s['source_id']:0.0 for s in originals}
+    for block in blocks:
+        terms=tokens(block['text'])
+        ranked=sorted(((len(terms&v)/max(1,len(v)**.5),s) for s,p,v in indexed),key=lambda x:-x[0])
+        for score,source in ranked[:2]:
+            if score>0:totals[source['source_id']]+=score
+    return totals
+
+
+def collect(record, folder, selected=None, settings=None, lesson_title=None):
     settings=settings or app_settings
     folder=Path(folder);folder.mkdir(parents=True,exist_ok=True,mode=0o700)
     category=record.metadata.get('category')
@@ -206,6 +218,16 @@ def collect(record, folder, selected=None, settings=None):
             excluded.append({'id':item['id'],'reason':str(exc)})
     if selected is not None and set(selected)-{s['source_id'] for s in originals}:
         raise ValueError('补选课件不属于本课程、已过期或无法读取')
+    # Lesson scope: keep only this lesson's files (chapter / 雨课堂 title /
+    # transcript retrieval), not every chapter of the course.
+    from . import material_scope
+    if lesson_title is None:lesson_title=material_scope.lesson_title_for(record)
+    chosen_ids,decisions=material_scope.choose(originals,_retrieval_by_source(blocks,originals),lesson_title,selected)
+    for row in decisions:
+        if not row['chosen']:excluded.append({'id':row['source_id'],'reason':'not_in_lesson_scope','detail':'；'.join(row['reasons'])})
+    originals=[s for s in originals if s['source_id'] in set(chosen_ids)]
+    material_selection={'version':material_scope.VERSION,'lesson_title':lesson_title,'files':decisions,
+        'summary':material_scope.summary(decisions,lesson_title)}
     # Score every real transcript block, including the middle and final blocks.
     associations=[];page_scores={}
     indexed=[(source,page,tokens(page['text'])) for source in originals for page in source['pages']]
@@ -238,6 +260,7 @@ def collect(record, folder, selected=None, settings=None):
         relevant.append({'source_id':sid,'page':number,'score':score,'text':page['text'],'visual_source':page['visual_source']})
     package={'format':FORMAT,'recording_id':record.id,'course_id':cid,'category':category,'lesson_date':cutoff,
         'sources':originals,'excluded':excluded,'associations':associations,'relevant_pages':relevant,
+        'material_selection':material_selection,
         'history_count':len(history),'history_scope':'仅已收录且早于本节的转写；未收录不能证明此前未讲',
         'warnings':([] if originals else ['没有可读课件，请补选本课程资料'])+([] if history else ['缺少此前课次，首次引入的判断范围有限'])}
     package['learning_scope_candidates']=learning_scope_candidates(originals)

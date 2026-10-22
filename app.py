@@ -538,6 +538,7 @@ async def summary_status(session_id: str) -> dict[str, Any]:
             "completed_parts": progress['completed_parts'],
             "total_parts": progress['total_parts'], "progress_unit": progress.get('unit', '批'),
             "phase": (job or {}).get("phase") or progress['phase'],
+            "material_selection": str(draft.get("material_selection") or ""),
             "elapsed_seconds": round(time.monotonic() - job["started"]) if job else 0,
             "has_summary": bool(record.metadata.get("ai_note_summary", {}).get("summary")),
             "review_status": (record.metadata.get('ai_note_summary') or {}).get('review_status','unreviewed')}
@@ -916,9 +917,12 @@ def compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any]]:
 def _build_compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any]]:
     tasks: list[dict[str, Any]] = []
     try:
-        saved_providers = (ai_preferences.read().get("function_providers") or {})
+        saved_preferences = ai_preferences.read()
+        saved_providers = (saved_preferences.get("function_providers") or {})
+        note_review_enabled = saved_preferences.get("note_review_enabled") is True
     except (OSError, ValueError):
         saved_providers = {}
+        note_review_enabled = False
 
     def ai_provider_snapshot(kind: str) -> dict[str, Any]:
         mode = {"summary": "summary", "refinement": "correction", "live_summary": "review"}.get(kind, "sentence")
@@ -929,6 +933,9 @@ def _build_compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any
             "configured_ai_transport": transport,
             "configured_ai_model": str(provider.get("cli_model") or provider.get("model") or ""),
             "configured_ai_effort": str(provider.get("cli_effort") or ""),
+            # The saved 逐页审核 switch (default off); the task view hides the
+            # 逐页审查 step when it is off.
+            **({"note_review_enabled": note_review_enabled} if kind == "summary" else {}),
         }
 
     for record in getattr(recording_store,'iter_records',recording_store.list_records)():

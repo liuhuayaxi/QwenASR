@@ -125,3 +125,11 @@ test('an explicitly unknown PDF progress is not inferred from file totals',async
  const unknown=taskProgressView({type:'course_pdf',family:'mineru',status:'running',progress:null,total:1,completed:0});
  assert.equal(unknown.percent,null);
 });
+test('disabled AI 逐页审核 is not listed as a pending summary step',async()=>{
+ const {taskProgressView}=await modulePromise;
+ const off=taskProgressView({type:'summary',status:'running',stage:'LaTeX 排版 · 第 2/4 批',completed:1,total:4,progress_unit:'批',note_review_enabled:false});
+ assert.deepEqual(off.steps,['核对资料','梳理知识','编写图文','排版（PDF）','保存']);assert.equal(off.index,3);
+ assert.equal(taskProgressView({type:'summary',status:'running',stage:'录音库短摘要',note_review_enabled:false}).index,4);
+ const on=taskProgressView({type:'summary',status:'running',stage:'LaTeX 排版',note_review_enabled:true});
+ assert.ok(on.steps.includes('逐页审查'));
+});

@@ -55,3 +55,17 @@ class ReviewToggleTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(reviewed_pdf(record),pdf)
                     with patch('qwen_asr_app.note_pdf.export_pdf',return_value=(pdf,{**export,'pdf_sha256':'changed'})):
                         with self.assertRaisesRegex(ValueError,'已改变'):reviewed_pdf(record)
+
+
+class TaskListReviewSwitchTests(unittest.TestCase):
+    def test_summary_task_reports_saved_review_switch(self):
+        import app
+        root=Path(tempfile.mkdtemp())
+        record=SimpleNamespace(id='r1',directory=root,meta_path=root/'session.json',segments=[],
+            metadata={'title':'t','category':'c','summary_job':{'status':'running'},
+            'ai_note_summary_draft':{'phase':'LaTeX 排版'}})
+        store=SimpleNamespace(list_records=lambda:[record])
+        for saved,expected in (({'note_review_enabled':False},False),({'note_review_enabled':True},True),({},False)):
+            with patch.object(app,'recording_store',store),patch.object(app.ai_preferences,'read',return_value=saved):
+                task=next(t for t in app._build_compact_ai_tasks() if t['type']=='summary')
+            self.assertIs(task['note_review_enabled'],expected)

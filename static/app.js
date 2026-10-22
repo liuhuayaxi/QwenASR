@@ -3011,7 +3011,8 @@ async function refreshSummaryStatus(id) {
       summaryStatuses.set(id, job);
       $("#summaryJobStatus").classList.toggle("hidden", !job.running);
       if (job.running) {
-        $("#summaryJobText").textContent = `${job.phase || "准备生成"} · 已完成 ${job.completed_parts}/${job.total_parts || "…"} 段 · 已用时 ${formatDuration(job.elapsed_seconds)}`;
+        $("#summaryJobText").textContent = `${job.phase || "准备生成"}${job.material_selection ? ` · ${job.material_selection.split("：")[0]}` : ""} · 已完成 ${job.completed_parts}/${job.total_parts || "…"} 段 · 已用时 ${formatDuration(job.elapsed_seconds)}`;
+        $("#summaryJobText").title = job.material_selection || "";
         els.generateNoteSummary.disabled = true;
       } else if (!state.summaryGenerating.has(id)) {
         els.generateNoteSummary.disabled = state.noteSession.status !== "completed";

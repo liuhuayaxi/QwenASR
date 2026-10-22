@@ -843,7 +843,9 @@ async def generate(record, config):
     source_blocks=[{'source':'S'+str(i),'start':b['start'],'end':b['end'],'text':b['text']} for i,b in enumerate(blocks,1)]
     from .batch_ai import _yuketang_questions
     yuketang_questions=await _yuketang_questions(record,source_blocks)
-    identity_inputs=[pipeline_version,record.id,blocks,selection,corpus,historical_versions,saved_notes_markdown(record)]
+    from .material_scope import VERSION as MATERIAL_SCOPE_VERSION
+    identity_inputs=[pipeline_version,record.id,blocks,selection,corpus,historical_versions,saved_notes_markdown(record),
+        {'material_scope':MATERIAL_SCOPE_VERSION}]
     if yuketang_questions:
         # A completed task is reused only for the same 雨课堂 question set;
         # newly bound or newly published questions start a fresh note task.
@@ -867,6 +869,11 @@ async def generate(record, config):
     try:
         stage(record,task,folder,'匹配课件',status='running')
         package=await owned_thread(collect,record,folder,selection)
+        if package.get('material_selection'):
+            task['material_selection']=package['material_selection']
+            stage(record,task,folder,'匹配课件')
+            record.metadata.setdefault('ai_note_summary_draft',{})['material_selection']=package['material_selection']['summary']
+            record.save_metadata()
         stage(record,task,folder,'核对学习范围')
         scope=await review_scope.prepare(package,folder,provider)
         package['learning_scope']=scope
