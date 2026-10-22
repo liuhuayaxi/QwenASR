@@ -53,9 +53,8 @@ async def generate_fast(record, config):
     from .batch_ai import _yuketang_questions
     from .note_pdf import export_pdf
     started = time.monotonic()
-    blocks = transcript_blocks(record)
-    if not blocks:
-        raise ValueError('录音还没有可用于生成笔记的转写')
+    from . import note_prompts
+    blocks = note_prompts.speech_blocks(transcript_blocks(record))
     initial = body_hash(record.metadata.get('ai_note_summary'))
     config = note_runtime_config(config)
     source_blocks = [{'source': 'S' + str(i), 'start': b['start'], 'end': b['end'], 'text': b['text']} for i, b in enumerate(blocks, 1)]
@@ -83,6 +82,9 @@ async def generate_fast(record, config):
     package = await await_owned_task(asyncio.create_task(asyncio.to_thread(collect, record, folder, selection)))
     if package.get('material_selection'):
         task['material_selection'] = package['material_selection']
+    if not blocks and not package.get('sources'):
+        raise ValueError('录音没有可用转写，也没有选中课件，无法生成笔记')
+    package['_has_transcript'] = bool(blocks)
     scope = await review_scope.prepare(package, folder, provider_for_mode(config.get('ai', {}), 'summary'))
     mark('materials')
 
@@ -143,6 +145,7 @@ async def generate_fast(record, config):
     markdown = re.sub(r'\[[^\]]*\]\(#source-(\d+)\)', source_reference, markdown)
     from . import note_prompts
     markdown, cleaning = note_prompts.clean(markdown)
+    markdown = note_prompts.readable_ranges(markdown if blocks else note_prompts.material_only(markdown))
     task['cleaning'] = cleaning
     markdown = re.sub(r'^# [^\n]*\n?', '', markdown, count=1, flags=re.M) if markdown.lstrip().startswith('# ') else markdown
     markdown = (f'# {record.metadata.get("title", "课堂复习笔记")}\n\n课程：{package["category"]}　课次：{note_prompts.human_date(package["lesson_date"])}\n\n'

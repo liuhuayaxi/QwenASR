@@ -44,6 +44,21 @@ OUTLINE = '''
 PREVIEW = '''
 本节含课前预习/翻转课堂材料：把预习课件中的知识点与课堂讲解合并到同一个知识点下讲清（课堂讲到的以课堂为主，预习材料补充定义、图和例题），不要单列“预习”与“课堂”两套内容；预习中的思考题若课堂作了解答，就在对应知识点给出答案。'''
 
+MATERIAL_ONLY = '''
+本节没有可用的课堂转写（transcript 为空）：只依据课件整理。不写“老师强调”，不引用课堂时间或 [课堂 S…]，不按时间给标题加时间段，也不要提及转写缺失。'''
+
+
+def speech_blocks(blocks: list[dict]) -> list[dict]:
+    """Drop ASR hotword echoes: when audio has no speech the recogniser can
+    return the hotword list verbatim for every chunk."""
+    def key(text):
+        return re.sub(r'[\s。．.，,；;]+$', '', str(text or '').strip())
+    counts: dict[str, int] = {}
+    for block in blocks:
+        counts[key(block.get('text'))] = counts.get(key(block.get('text')), 0) + 1
+    return [b for b in blocks if key(b.get('text')) and not (counts[key(b.get('text'))] >= 3 and key(b.get('text')).count('；') >= 5)]
+
+
 PREVIEW_PATTERN = re.compile(r'翻转|预习|课前|自学|导学')
 
 
@@ -54,6 +69,7 @@ def features(package: dict, scope: dict, questions: list) -> dict:
         'learning_requirements': bool(scope.get('enabled') and scope.get('items')),
         'yuketang': bool(questions),
         'preview': bool(any(PREVIEW_PATTERN.search(n) for n in names) or PREVIEW_PATTERN.search(title)),
+        'transcript': bool(package.get('_has_transcript', True)),
     }
 
 
@@ -61,6 +77,8 @@ def compose(found: dict, custom_prompt: str = '') -> str:
     parts = [BASE, FIGURES, REQUIREMENTS if found['learning_requirements'] else OUTLINE]
     if found['preview']:
         parts.append(PREVIEW)
+    if not found.get('transcript', True):
+        parts.append(MATERIAL_ONLY)
     if found['yuketang']:
         from .yuketang.retrieval import instructions
         parts.append(instructions(write_section=True))
@@ -128,3 +146,20 @@ def human_date(value: str) -> str:
         return str(value or '')
     text = f'{int(m[1])}年{int(m[2])}月{int(m[3])}日'
     return text + (f' {m[4]}:{m[5]}' if m[4] else '')
+
+
+def _clock(seconds: float) -> str:
+    seconds = int(seconds)
+    return f'{seconds // 60:02d}:{seconds % 60:02d}' if seconds < 3600 else f'{seconds // 3600}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}'
+
+
+def readable_ranges(markdown: str) -> str:
+    """[373.4s - 663.4s] -> [06:13 - 11:03]."""
+    return re.sub(r'\[(\d+(?:\.\d+)?)s\s*[-–]\s*(\d+(?:\.\d+)?)s\]',
+                  lambda m: f'[{_clock(float(m[1]))} - {_clock(float(m[2]))}]', markdown)
+
+
+def material_only(markdown: str) -> str:
+    markdown = re.sub(r'\s*\[课堂 S[^\]]*\]\(#source-\d+\)', '', markdown)
+    markdown = re.sub(r'^(#{1,4} .*?)\s*\[\d[\d:.s\s\-–]*\]\s*$', r'\1', markdown, flags=re.M)
+    return re.sub(r'老师强调[：:]\s*', '', markdown)
