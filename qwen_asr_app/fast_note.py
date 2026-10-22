@@ -48,6 +48,10 @@ def _pages(package):
     return out
 
 
+class ProposalKept(ValueError):
+    """The edited body was kept; the new note is saved as a proposal (not a failure)."""
+
+
 async def generate_fast(record, config):
     from .review_notes import TEACHING, note_runtime_config, stage, body_hash, timestamp_references, disabled_review, pdf_failed_review
     from .batch_ai import _yuketang_questions
@@ -186,7 +190,7 @@ async def generate_fast(record, config):
         record.metadata.update(current)
         record.metadata['ai_note_proposal'] = {'task_id': identity, 'review_status': report['status'], 'pdf_sha256': note['pdf_sha256']}
         record.save_metadata()
-        raise ValueError('生成期间或此前正文被人工修改；新版已保留为候选，未覆盖人工编辑')
+        raise ProposalKept('生成期间或此前正文被人工修改；新版已保留为候选，未覆盖人工编辑')
     record.metadata.update(current)
     record.metadata['ai_note_summary'] = note
     record.save_all()

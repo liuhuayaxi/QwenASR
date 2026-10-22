@@ -2151,6 +2151,14 @@ async def generate_library_summary(
         record.save_metadata()
         return {"summary": summary, "session": record.public(include_segments=False)}
     except ValueError as exc:
+        from qwen_asr_app.fast_note import ProposalKept
+        if isinstance(exc, ProposalKept):
+            # The user's edited body stays; the new version waits as a proposal.
+            record = recording_store.find(session_id) or record
+            record.metadata.pop('ai_note_summary_draft', None)
+            record.save_metadata()
+            return {"summary": {**(record.metadata.get("ai_note_summary") or {}), "proposal_kept": True},
+                    "session": record.public(include_segments=False)}
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except (RuntimeError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
