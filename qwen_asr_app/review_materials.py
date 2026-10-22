@@ -169,7 +169,7 @@ def collect(record, folder, selected=None, settings=None, lesson_title=None):
     from .classroom_intelligence.integrations import saved_notes_markdown
     notes=saved_notes_markdown(record)
     (folder/'accepted-notes.md').write_text(notes,encoding='utf-8')
-    originals=[];seen=set();excluded=[]
+    originals=[];seen=set();excluded=[];ai_warnings=[]
     for item in files.list(category):
         if selected is not None and item['id'] not in selected:continue
         if item.get('status') in {'deleted','superseded','excluded'} or item.get('superseded_by'):
@@ -197,7 +197,11 @@ def collect(record, folder, selected=None, settings=None, lesson_title=None):
             conversion=item.get('conversion') or {}
             # Reuse a successful existing OCR layer strictly for navigation.
             # Page markers bind it to the original; scans remain image-primary.
-            if suffix=='.pdf' and any(p['image_primary'] for p in pages) and conversion.get('status')=='completed' and conversion.get('source_sha256')==digest:
+            # Prefer the up-to-date AI友好型 text (headings, formulas, OCR'd
+            # scans) for every page, not only scans; the original page image
+            # stays primary for figures and page numbers via the page markers.
+            ai_friendly=False
+            if suffix=='.pdf' and conversion.get('status')=='completed' and conversion.get('source_sha256')==digest:
                 try:
                     _,derived=files.file(category,item['id'],'pdf')
                     derived_digest=digest_file(derived)
@@ -211,8 +215,15 @@ def collect(record, folder, selected=None, settings=None, lesson_title=None):
                                 original_page['text']=text
                                 original_page['text_authority']='existing_ocr_navigation_only; original image is primary'
                                 original_page['text_lineage']={'derived_sha256':derived_digest,'original_page':int(marker[1])}
+                                ai_friendly=True
                 except (OSError,ValueError):pass
+            if suffix=='.pdf' and not ai_friendly:
+                state='已过期' if conversion.get('status')=='completed' else '缺少'
+                ai_warnings.append(f'{item["name"]}：AI友好型版本{state}，本次使用原件文字层')
+                import logging
+                logging.getLogger(__name__).warning('AI-friendly PDF %s for %s; using original text',state,item['name'])
             originals.append({'source_id':item['id'],'name':item['name'],'sha256':digest,'path':relative,
+                'text_source':'ai_friendly' if ai_friendly else 'original',
                 'course_id':cid,'pages':pages,'origin':'original','kind':item.get('kind'),'asset_created_at':item.get('created_at')})
         except (OSError,ValueError,zipfile.BadZipFile) as exc:
             excluded.append({'id':item['id'],'reason':str(exc)})
@@ -262,7 +273,8 @@ def collect(record, folder, selected=None, settings=None, lesson_title=None):
         'sources':originals,'excluded':excluded,'associations':associations,'relevant_pages':relevant,
         'material_selection':material_selection,
         'history_count':len(history),'history_scope':'仅已收录且早于本节的转写；未收录不能证明此前未讲',
-        'warnings':([] if originals else ['没有可读课件，请补选本课程资料'])+([] if history else ['缺少此前课次，首次引入的判断范围有限'])}
+        'warnings':([] if originals else ['没有可读课件，请补选本课程资料'])+([] if history else ['缺少此前课次，首次引入的判断范围有限'])
+            +[w for w in ai_warnings if any(w.startswith(s['name']+'：') for s in originals)]}
     package['learning_scope_candidates']=learning_scope_candidates(originals)
     atomic_json(folder/'materials.json',package)
     return package

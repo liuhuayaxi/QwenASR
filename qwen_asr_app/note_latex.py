@@ -212,6 +212,31 @@ def normalize_table_floats(body):
     return body
 
 
+_DISPLAY_OPEN = re.compile(r'\\begin\{(equation|align|gather|multline|displaymath|eqnarray)\*?\}')
+_DISPLAY_CLOSE = re.compile(r'\\end\{(equation|align|gather|multline|displaymath|eqnarray)\*?\}')
+
+
+def normalize_display_math(body):
+    """Wrap a bare aligned/cases block that is not inside math mode in \\[ \\].
+
+    A single misplaced ``\\begin{aligned}`` used to fail compilation and send
+    the whole LaTeX stage back through AI repair (another full pass).
+    """
+    out=[];position=0
+    for match in re.finditer(r'\\begin\{(aligned|gathered|cases)\}.*?\\end\{\1\}',body,re.S):
+        before=body[:match.start()]
+        clean=re.sub(r'(?<!\\)%.*','',before)
+        inline=re.sub(r'\\\$','',clean)
+        in_math=(clean.count('\\[')>clean.count('\\]') or clean.count('\\(')>clean.count('\\)')
+                 or inline.count('$$')%2==1 or (inline.replace('$$','').count('$')%2==1)
+                 or len(_DISPLAY_OPEN.findall(clean))>len(_DISPLAY_CLOSE.findall(clean)))
+        out.append(body[position:match.start()])
+        out.append(match[0] if in_math else '\\['+match[0]+'\\]')
+        position=match.end()
+    out.append(body[position:])
+    return ''.join(out)
+
+
 def normalize_course_names(body):
     """Use plain Latin spelling without modifying mathematical accent macros.
 
@@ -219,6 +244,7 @@ def normalize_course_names(body):
     Match only a single complete letter argument; malformed or executable TeX
     remains in the body and is rejected by the normal validator.
     """
+    body=normalize_display_math(body)
     body=re.sub(r'''\\["'`^~=](?:\{([A-Za-z])\}|([A-Za-z]))''',lambda match:match[1] or match[2],body)
     def plain(match):
         value=unicodedata.normalize('NFKD',match[0])

@@ -9,6 +9,7 @@ from __future__ import annotations
 from contextvars import ContextVar
 
 last_session_id = ContextVar('agy_last_session_id', default='')
+last_prompt = ContextVar('agy_last_prompt', default='')
 
 import json
 import asyncio
@@ -311,10 +312,10 @@ def _file_prompt(prompt: str, working: Path, *, additional_read_paths=()):
     return transport_prompt, request
 
 
-def _finish_output(stdout, stderr, working, message, returncode=0):
+def _finish_output(stdout, stderr, working, message, returncode=0, prior_prompts=(), conversation=''):
     last_session_id.set('')
     try:
-        return _checked_output(stdout,stderr,working,message,returncode)
+        return _checked_output(stdout,stderr,working,message,returncode,prior_prompts=prior_prompts,conversation=conversation)
     except AIRequestError as exc:
         from .durable import atomic_json
         exc.session_id=last_session_id.get()
@@ -327,7 +328,7 @@ def _finish_output(stdout, stderr, working, message, returncode=0):
         raise
 
 
-def _checked_output(stdout, stderr, working, message, returncode=0):
+def _checked_output(stdout, stderr, working, message, returncode=0, prior_prompts=(), conversation=''):
     """Use stdout normally; verify the exact durable turn on missing output."""
     prompt = json.loads(message)['message']['content']
     manifest = Path(working)/'transport.json'
@@ -344,8 +345,11 @@ def _checked_output(stdout, stderr, working, message, returncode=0):
         except (ValueError, TypeError, AttributeError):
             continue
     last_session_id.set(session)
+    if conversation and session and session != conversation:
+        raise AIRequestError('AGY 没有续接本节会话，结果未采纳', kind='agy_cli_error', retriable=False)
     from .agy_session import output_limit_before_failure
-    continuation = bool(session and output_limit_before_failure(session,prompt))
+    continuation = bool(session and (output_limit_before_failure(session,prompt,prior_prompts=prior_prompts)
+                                     if prior_prompts else output_limit_before_failure(session,prompt)))
     try:
         response = _decode_output(stdout, stderr)
     except AIRequestError as exc:
@@ -374,7 +378,8 @@ def _checked_output(stdout, stderr, working, message, returncode=0):
         return response
     from .agy_session import read_session, SessionEvidenceError
     try:
-        receipt = read_session(session, prompt, allowed_files=files, require_output_continuation=continuation)
+        receipt = read_session(session, prompt, allowed_files=files, require_output_continuation=continuation,
+                               **({'prior_prompts': prior_prompts} if prior_prompts else {}))
     except SessionEvidenceError as exc:
         detail = str(exc)
         if files is not None:
@@ -395,7 +400,7 @@ def _checked_output(stdout, stderr, working, message, returncode=0):
     return receipt['response']
 
 
-def _request_arguments(instructions: str, payload: dict[str, Any], provider: dict[str, Any]):
+def _request_arguments(instructions: str, payload: dict[str, Any], provider: dict[str, Any], conversation: str = ''):
     prompt = compose_prompt(instructions, payload)
     window = normalize_context_window(provider.get('context_window'))
     estimated = estimate_tokens(prompt) + 16_000
@@ -432,6 +437,9 @@ def _request_arguments(instructions: str, payload: dict[str, Any], provider: dic
         "--mode", "plan",
         "--disable-slash-commands",
     ]
+    if conversation:
+        # Continue this lesson's conversation; earlier turns stay in context.
+        command[1:1] = ["--conversation", conversation]
     # Current AGY fixes Gemini thinking in its model id, including the High
     # variant. Passing --effort now fails before inference. Keep the same ID.
     if selected_model.endswith("-high") and not selected_model.startswith('gemini-'):
@@ -487,23 +495,59 @@ def _run_sync_once(instructions: str, payload: dict[str, Any], provider: dict[st
     return _finish_output(completed.stdout, completed.stderr, working, message, completed.returncode)
 
 
+# Kinds where a failed continued turn is retried once as a fresh conversation.
+SESSION_FALLBACK_KINDS = {'agy_cli_error', 'material_read_path', 'material_tool_violation', 'input_too_long'}
+
+
 async def request_text(instructions: str, payload: dict[str, Any], provider: dict[str, Any]) -> str:
+    from .agy_lesson_session import current
+    session = current.get()
+    if session is None or session.lock.locked():
+        return await _request_text_fresh(instructions, payload, provider)
+    async with session.lock:
+        text, shaped, conversation = session.plan(instructions, payload)
+        if conversation:
+            try:
+                response, prompt = await _request_text_retrying(text, shaped, provider, conversation, list(session.prompts))
+                session.record(session_id=last_session_id.get() or conversation, prompt=prompt, instructions=instructions,
+                               payload=payload, response=response, continued=True)
+                return response
+            except AIRequestError as exc:
+                session.reset('continue_failed:' + str(exc.kind))
+                if exc.kind not in SESSION_FALLBACK_KINDS:
+                    raise
+                session.stats['fallbacks'] += 1
+        response, prompt = await _request_text_retrying(instructions, payload, provider, '', [])
+        if last_session_id.get():
+            session.record(session_id=last_session_id.get(), prompt=prompt, instructions=instructions,
+                           payload=payload, response=response, continued=False)
+        return response
+
+
+async def _request_text_fresh(instructions, payload, provider):
+    return (await _request_text_retrying(instructions, payload, provider, '', []))[0]
+
+
+async def _request_text_retrying(instructions, payload, provider, conversation, prior_prompts):
     # Unknown tools still invalidate a turn. Read-only view_file/read_file
     # receipts have their own explicit path/content validators.
     for attempt in range(len(PROTOCOL_RETRY_DELAYS) + 1):
         try:
-            return await retry_model_start(lambda: _request_text_once(instructions,payload,provider))
+            response = await retry_model_start(lambda: _request_text_once(instructions,payload,provider,conversation,prior_prompts))
+            return response, last_prompt.get()
         except AIRequestError as exc:
             if exc.kind != 'material_tool_violation' or attempt == len(PROTOCOL_RETRY_DELAYS):
                 raise
             await asyncio.sleep(PROTOCOL_RETRY_DELAYS[attempt])
 
 
-async def _request_text_once(instructions: str, payload: dict[str, Any], provider: dict[str, Any]) -> str:
+async def _request_text_once(instructions: str, payload: dict[str, Any], provider: dict[str, Any],
+                             conversation: str = '', prior_prompts=()):
     # Own the child in the task. Cancelling to_thread(subprocess.run) leaves
     # AGY alive, so a timed-out connection test previously continued making
     # requests for up to the provider's 30-minute generation timeout.
-    command, message, working, env, timeout = _request_arguments(instructions, payload, provider)
+    command, message, working, env, timeout = _request_arguments(instructions, payload, provider, conversation)
+    started = time.monotonic()
     try:
         process = await asyncio.create_subprocess_exec(
             *command, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
@@ -580,7 +624,35 @@ async def _request_text_once(instructions: str, payload: dict[str, Any], provide
                 pass
             await process.wait()
     decoded=stdout.decode('utf-8',errors='replace')
-    return _finish_output(decoded, stderr.decode("utf-8", errors="replace"), working, message, process.returncode)
+    prompt = json.loads(message)['message']['content']
+    ok = False
+    try:
+        response = _finish_output(decoded, stderr.decode("utf-8", errors="replace"), working, message, process.returncode,
+                                  prior_prompts=prior_prompts, conversation=conversation)
+        ok = True
+        last_prompt.set(prompt)
+        return response
+    finally:
+        _record_metrics(decoded, started, message, conversation, ok)
+
+
+def _record_metrics(stdout, started, message, conversation, ok):
+    """Per-request timing and token usage for the pipeline benchmark (no content)."""
+    usage = {}
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict) and event.get('event') == 'result':
+            usage = (event.get('result') or {}).get('usage') or {}
+    try:
+        with open(PRIVATE_ROOT / 'agy-cli' / 'metrics.jsonl', 'a', encoding='utf-8') as handle:
+            handle.write(json.dumps({'at': time.time(), 'seconds': round(time.monotonic() - started, 1), 'ok': ok,
+                                     'continued': bool(conversation), 'message_bytes': len(message.encode()),
+                                     'session_id': last_session_id.get(), 'usage': usage}) + '\n')
+    except OSError:
+        pass
 
 
 def status(provider: dict[str, Any]) -> dict[str, Any]:

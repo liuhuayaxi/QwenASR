@@ -866,6 +866,10 @@ async def generate(record, config):
     if 'generation_config' in task:
         task.setdefault('identity_generation_config',copy.deepcopy(task['generation_config']))
     task['generation_config']={k:provider[k] for k in ('transport','model','cli_model','cli_effort','context_window','max_output_tokens') if k in provider}
+    # One AGY conversation for this lesson: materials are sent once, later
+    # steps are further turns (see agy_lesson_session).
+    from .agy_lesson_session import current as lesson_session_var, open_session
+    lesson_session_token=lesson_session_var.set(open_session(folder,config))
     try:
         stage(record,task,folder,'匹配课件',status='running')
         package=await owned_thread(collect,record,folder,selection)
@@ -992,8 +996,9 @@ async def generate(record, config):
                     raise ValueError('看图回执中的图片 ID 不一致；诊断和已读文件已保存')
                 atomic_json(cached,value)
                 return value
-            for start in range(0,len(images),4):
-                batch=images[start:start+4];value=await inspect(batch);readings.append(value)
+            figure_batch=max(1,min(16,int(config.get('figure_batch_size') or 8)))
+            for start in range(0,len(images),figure_batch):
+                batch=images[start:start+figure_batch];value=await inspect(batch);readings.append(value)
                 verdict={x['image_id']:x for x in value['reading']['images']}
                 for image in batch:
                     decision=verdict[image['image_id']]
@@ -1181,6 +1186,8 @@ async def generate(record, config):
                     updated_at=local_now())
         atomic_json(task_path,task)
         raise
+    finally:
+        lesson_session_var.reset(lesson_session_token)
 
 
 async def upgrade_pdf(record, config):

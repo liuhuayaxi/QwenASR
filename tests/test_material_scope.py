@@ -81,3 +81,41 @@ class ChooseTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AIFriendlyTextTests(unittest.TestCase):
+    def run_collect(self, conversion):
+        import tempfile
+        from pathlib import Path
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from qwen_asr_app import review_materials as rm
+        tmp = Path(tempfile.mkdtemp())
+        original = tmp / 'orig.pdf'; original.write_bytes(b'%PDF original')
+        derived = tmp / 'ai.pdf'; derived.write_bytes(b'%PDF ai')
+        digest = rm.digest_file(original)
+        item = {'id': 'f1', 'name': '第01章-课件.pdf', 'sha256': digest, 'conversion': {**conversion, 'source_sha256': digest}}
+        files = SimpleNamespace(list=lambda c: [item], file=lambda c, i, v: (None, original if v == 'original' else derived))
+        settings = SimpleNamespace(categories=['课'], storage_root=tmp)
+        record = SimpleNamespace(id='r', metadata={'category': '课', 'started_at': ''}, segments=[], audio_path=tmp / 'none.m4a')
+        blocks = [{'start': 0, 'end': 1, 'text': '麦克斯韦方程组'}]
+        with patch.object(rm, 'CourseFiles', return_value=files), \
+             patch.object(rm, 'native_page_cache', return_value=[{'page': 1, 'text': '原件文字' * 20, 'visual_source': True, 'image_primary': False}]), \
+             patch('qwen_asr_app.native_pdf.pdf_operation', return_value=[{'text': '[[AI_TRANSCRIPT_PAGE:1]] # 麦克斯韦方程组'}]), \
+             patch('qwen_asr_app.knowledge.ingest.ensure_course_id', return_value='cid'), \
+             patch('qwen_asr_app.knowledge.store.KnowledgeStore'), \
+             patch.object(rm, 'transcript_blocks', return_value=blocks), \
+             patch('qwen_asr_app.classroom_intelligence.integrations.saved_notes_markdown', return_value=''), \
+             patch('qwen_asr_app.material_scope.lesson_title_for', return_value=''):
+            return rm.collect(record, tmp / 'out', settings=settings)
+
+    def test_up_to_date_ai_friendly_text_is_used_for_text_pages(self):
+        package = self.run_collect({'status': 'completed'})
+        self.assertEqual(package['sources'][0]['text_source'], 'ai_friendly')
+        self.assertIn('麦克斯韦方程组', package['sources'][0]['pages'][0]['text'])
+        self.assertFalse(any('AI友好型' in w for w in package['warnings']))
+
+    def test_missing_ai_friendly_version_falls_back_with_visible_warning(self):
+        package = self.run_collect({'status': 'failed'})
+        self.assertEqual(package['sources'][0]['text_source'], 'original')
+        self.assertTrue(any('AI友好型版本缺少' in w for w in package['warnings']))
