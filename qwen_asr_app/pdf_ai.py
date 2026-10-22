@@ -12,7 +12,7 @@ import zipfile
 import contextlib
 from pathlib import Path
 from typing import Callable, Iterable
-from .mineru_settings import RUNTIME_ROOT, mineru_settings, normalize_mineru_settings, runtime_info
+from .mineru_settings import mineru_settings, normalize_mineru_settings, runtime_info
 from .conversion_control import check_stopped
 
 
@@ -30,9 +30,9 @@ def find_mineru_binary() -> Path | None:
     configured = os.getenv("QWEN_ASR_MINERU", "").strip()
     candidates = [
         Path(configured).expanduser() if configured else None,
-        RUNTIME_ROOT / "bin" / "mineru-kit",
-        Path(shutil.which("mineru")) if shutil.which("mineru") else None,
-        Path.home() / ".local" / "bin" / "mineru",
+        # The one system install: `uv tool install mineru==4.0.10`.
+        Path.home() / ".local" / "bin" / "mineru-kit",
+        Path(shutil.which("mineru-kit")) if shutil.which("mineru-kit") else None,
     ]
     for candidate in candidates:
         if candidate and candidate.is_file() and os.access(candidate, os.X_OK):

@@ -8,7 +8,6 @@ from .durable import atomic_json
 from .paths import PRIVATE_ROOT
 
 MINERU_VERSION = "4.0.10"
-RUNTIME_ROOT = PRIVATE_ROOT / "runtimes" / "mineru4"
 DEFAULT_MINERU_SETTINGS = {
     "tier": "standard", "ocr_mode": "auto", "image_analysis": True,
     "small_backend": "auto", "vlm_engine": "llama-cpp", "model_source": "modelscope",
