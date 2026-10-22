@@ -119,3 +119,41 @@ class AIFriendlyTextTests(unittest.TestCase):
         package = self.run_collect({'status': 'failed'})
         self.assertEqual(package['sources'][0]['text_source'], 'original')
         self.assertTrue(any('AI友好型版本缺少' in w for w in package['warnings']))
+
+
+def cov(**values):
+    return {sid: {"coverage": c, "votes": v, "pages": list(range(1, v + 1))} for sid, (c, v) in values.items()}
+
+
+class CoverageTests(unittest.TestCase):
+    PLAIN = [src("p1", "物理光学课件01.pdf"), src("p2", "物理光学课件02.pdf"), src("p3", "物理光学课件03.pdf")]
+
+    def test_without_yuketang_coverage_picks_lectured_files(self):
+        ids, rows = ms.choose(self.PLAIN, {"p1": 1.0, "p2": 0.9, "p3": 0.8}, "",
+                              coverage=cov(p1=(0.1, 2), p2=(0.7, 14), p3=(0.2, 4)))
+        self.assertEqual(ids, ["p2"])
+        self.assertEqual(rows[0]["mode"], "coverage")
+        self.assertIn("按转写段落覆盖", ms.summary(rows))
+
+    def test_previous_lesson_breaks_a_near_tie(self):
+        ids, rows = ms.choose(self.PLAIN, {"p1": 1.0, "p2": 1.0}, "",
+                              coverage=cov(p1=(0.2, 4), p2=(0.18, 4), p3=(0.0, 0)), prior={"p2"})
+        self.assertEqual(ids, ["p2"])
+        self.assertTrue(any("上一节课" in x for x in rows[1]["reasons"]))
+
+    def test_few_votes_fall_back_to_retrieval(self):
+        _, rows = ms.choose(self.PLAIN, {"p1": 1.0, "p2": 0.1}, "", coverage=cov(p2=(1.0, 1)))
+        self.assertEqual(rows[0]["mode"], "retrieval_top_k")
+
+    def test_stale_yuketang_title_is_corrected_by_dominant_coverage(self):
+        ids, rows = ms.choose(COURSE, {"c1": 0.1, "c4": 1.0}, "第一章 半导体中光子与电子的互作用 3",
+                              coverage=cov(c1=(0.02, 1), c4=(0.85, 30)))
+        self.assertEqual(ids, ["c1", "c4"])  # lectured file added, titled file kept
+        reasons = {r["source_id"]: r["reasons"] for r in rows}
+        self.assertTrue(any("沿用旧课次" in x for x in reasons["c4"]))
+
+    def test_title_kept_when_coverage_agrees_or_is_weak(self):
+        ids, _ = ms.choose(COURSE, {"c4": 1.0}, "第四章 半导体激光器的性能 1", coverage=cov(c4=(0.93, 40), c3=(0.05, 2)))
+        self.assertEqual(ids, ["c4"])
+        ids, _ = ms.choose(COURSE, {"c1": 1.0}, "第一章 半导体中光子与电子的互作用 1", coverage=cov(c1=(1.0, 1)))
+        self.assertEqual(ids, ["c1"])

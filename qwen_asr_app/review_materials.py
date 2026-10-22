@@ -233,7 +233,11 @@ def collect(record, folder, selected=None, settings=None, lesson_title=None):
     # transcript retrieval), not every chapter of the course.
     from . import material_scope
     if lesson_title is None:lesson_title=material_scope.lesson_title_for(record)
-    chosen_ids,decisions=material_scope.choose(originals,_retrieval_by_source(blocks,originals),lesson_title,selected)
+    try:coverage=material_scope.coverage_scores(blocks,originals,tokens)
+    except Exception:coverage=None
+    try:prior=material_scope.previous_lesson_files(record,settings)
+    except Exception:prior=set()
+    chosen_ids,decisions=material_scope.choose(originals,_retrieval_by_source(blocks,originals),lesson_title,selected,coverage,prior)
     for row in decisions:
         if not row['chosen']:excluded.append({'id':row['source_id'],'reason':'not_in_lesson_scope','detail':'；'.join(row['reasons'])})
     originals=[s for s in originals if s['source_id'] in set(chosen_ids)]

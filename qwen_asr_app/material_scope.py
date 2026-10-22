@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import re
 
-VERSION = "lesson-scope-v1"
+VERSION = "lesson-scope-v2"
 MAX_SOURCES = 4          # sensible cap on files per lesson
 FALLBACK_TOP_K = 2       # retrieval-only fallback
 RECAP_SHARE = 0.5        # extra file kept beside a chapter match when its retrieval share is this strong
@@ -60,8 +60,14 @@ def _bigrams(text: str) -> set[str]:
     return out
 
 
+COVERAGE_MIN_VOTES = 5     # fewer voted transcript blocks: coverage is noise
+COVERAGE_KEEP = 0.25       # without 雨课堂: keep files covering >= 25% of blocks
+COVERAGE_STALE = 0.6       # with 雨课堂: another file this dominant means a stale title
+
+
 def choose(sources: list[dict], retrieval: dict[str, float], lesson_title: str = "",
-           selected: list | None = None) -> tuple[list[str], list[dict]]:
+           selected: list | None = None, coverage: dict | None = None,
+           prior: set | None = None) -> tuple[list[str], list[dict]]:
     """Return (chosen source ids in original order, per-file decisions).
 
     ``retrieval`` maps source_id to its summed transcript page-match score.
@@ -97,14 +103,20 @@ def choose(sources: list[dict], retrieval: dict[str, float], lesson_title: str =
             reasons.append(f"文件名与课次标题相近（{title_score:.0%}）")
         reasons.append(f"转写关键词检索占比 {share:.0%}")
         has_text = sum(len(str(p.get("text") or "").strip()) for p in source.get("pages") or []) >= 500
+        cover = (coverage or {}).get(source["source_id"]) or {}
         rows.append({"source_id": source["source_id"], "name": name, "chapter_match": matched, "has_text": has_text,
-                     "title_score": title_score, "retrieval_share": share, "reasons": reasons})
+                     "title_score": title_score, "retrieval_share": share, "reasons": reasons,
+                     "coverage": float(cover.get("coverage") or 0), "votes": int(cover.get("votes") or 0),
+                     "pages": list(cover.get("pages") or [])[:40], "previous_lesson": source["source_id"] in (prior or set())})
+        if coverage:
+            reasons.append(f"转写段落覆盖 {rows[-1]['coverage']:.0%}（{rows[-1]['votes']} 段）")
     if selected is not None:
         for row in rows:
             row["chosen"] = True
             row["reasons"].insert(0, "用户手动补选")
         return [row["source_id"] for row in rows], rows
     order = sorted(rows, key=lambda r: (not r["chapter_match"], -(r["title_score"] >= 0.3), -r["retrieval_share"]))
+    reliable = sum(r["votes"] for r in rows) >= COVERAGE_MIN_VOTES
     if not any(r["retrieval_share"] for r in rows) and not any(r["chapter_match"] for r in rows):
         # No usable signal at all: keep the old whole-course behaviour.
         for row in rows:
@@ -131,6 +143,29 @@ def choose(sources: list[dict], retrieval: dict[str, float], lesson_title: str =
             for r in stale:
                 r["reasons"].append("课次标题章节与转写几乎不相关（标题可能沿用旧课次）")
             chosen = [r for r in chosen if r not in stale]
+        if reliable:
+            # Cross-check the 雨课堂 title with transcript coverage: a file the
+            # lecture clearly covers is added. The titled files stay (slides
+            # that are mostly images give coverage no evidence either way).
+            dominant = [r for r in rows if r["coverage"] >= COVERAGE_STALE and r["votes"] >= COVERAGE_MIN_VOTES]
+            for r in dominant:
+                if not r["chapter_match"]:
+                    r["reasons"].append("转写主要讲这份课件，雨课堂课次标题可能沿用旧课次")
+                if r not in chosen:
+                    chosen.insert(0, r)
+    elif reliable:
+        mode = "coverage"
+        order = sorted(rows, key=lambda r: (-r["coverage"], not r["previous_lesson"], -r["retrieval_share"]))
+        chosen = [r for r in order if r["coverage"] >= COVERAGE_KEEP][:FALLBACK_TOP_K]
+        if not chosen:
+            top = order[0]
+            # Lesson-order prior as tiebreak: a near-tie goes to the file the
+            # previous lesson used.
+            near = [r for r in order if top["coverage"] - r["coverage"] <= 0.05]
+            chosen = [next((r for r in near if r["previous_lesson"]), top)]
+        for r in chosen:
+            if r["previous_lesson"]:
+                r["reasons"].append("上一节课也使用了这份课件")
     else:
         mode = "retrieval_top_k"
         chosen = [r for r in order if r["retrieval_share"] >= FALLBACK_SHARE][:FALLBACK_TOP_K] or order[:1]
@@ -148,8 +183,84 @@ def choose(sources: list[dict], retrieval: dict[str, float], lesson_title: str =
 
 def summary(rows: list[dict], lesson_title: str = "") -> str:
     chosen = [r["name"] for r in rows if r.get("chosen")]
-    head = f"按雨课堂课次「{lesson_title}」" if lesson_title else "按转写检索"
+    head = (f"按雨课堂课次「{lesson_title}」" if lesson_title
+            else "按转写段落覆盖" if any(r.get("mode") == "coverage" for r in rows) else "按转写检索")
     return f"{head}选用 {len(chosen)}/{len(rows)} 份课件：" + "、".join(chosen)
+
+
+def coverage_scores(blocks, sources, tokenize, *, k1: float = 1.2, b: float = 0.75) -> dict[str, dict]:
+    """Per-file transcript coverage, independent of any 雨课堂 binding.
+
+    BM25 over the course's pages (IDF across all pages of this course, so
+    shared course vocabulary is down-weighted). Each transcript block votes for
+    the file of its best page when that page clearly beats the best page of
+    every other file. Returns per file: coverage (share of voted blocks), the
+    voted pages and the longest contiguous run of voted pages.
+    """
+    import math
+    pages = [(s["source_id"], p.get("page"), tokenize(p.get("text") or "")) for s in sources for p in s.get("pages") or []]
+    result = {s["source_id"]: {"coverage": 0.0, "pages": [], "run": 0} for s in sources}
+    pages = [row for row in pages if row[2]]
+    if not pages or not blocks:
+        return result
+    df: dict[str, int] = {}
+    for _, _, terms in pages:
+        for term in terms:
+            df[term] = df.get(term, 0) + 1
+    n = len(pages)
+    idf = {t: math.log(1 + (n - c + 0.5) / (c + 0.5)) for t, c in df.items()}
+    avg = sum(len(t) for _, _, t in pages) / n
+    norms = [k1 * (1 - b + b * len(t) / avg) for _, _, t in pages]
+    votes: dict[str, list[int]] = {sid: [] for sid in result}
+    voted = 0
+    for block in blocks:
+        query = tokenize(block.get("text") or "")
+        if len(query) < 4:
+            continue
+        best: dict[str, tuple[float, int]] = {}
+        for (sid, number, terms), norm in zip(pages, norms):
+            score = sum(idf[t] for t in query & terms) * (k1 + 1) / (1 + norm)
+            if score > best.get(sid, (0, 0))[0]:
+                best[sid] = (score, number)
+        ranked = sorted(best.items(), key=lambda kv: -kv[1][0])
+        if not ranked or ranked[0][1][0] <= 0:
+            continue
+        if len(ranked) > 1 and ranked[0][1][0] < 1.1 * ranked[1][1][0]:
+            continue  # ambiguous block: no vote
+        votes[ranked[0][0]].append(ranked[0][1][1])
+        voted += 1
+    for sid, numbers in votes.items():
+        unique = sorted(set(numbers))
+        run = longest = 0
+        for i, number in enumerate(unique):
+            run = run + 1 if i and number - unique[i - 1] <= 2 else 1
+            longest = max(longest, run)
+        result[sid] = {"coverage": round(len(numbers) / voted, 4) if voted else 0.0, "pages": unique, "run": longest,
+                       "votes": len(numbers)}
+    return result
+
+
+def previous_lesson_files(record, settings) -> set[str]:
+    """Files the closest earlier lesson of this course chose (sequence prior)."""
+    import json
+    from pathlib import Path
+    from .review_materials import prior_lessons
+    best = None
+    for meta, data in prior_lessons(record, settings):
+        if best is None or str(data.get("started_at")) > str(best[1].get("started_at")):
+            best = (meta, data)
+    if best is None:
+        return set()
+    packages = sorted(Path(best[0]).parent.glob(".review-notes/*/materials.json"), key=lambda p: p.stat().st_mtime)
+    for path in reversed(packages):
+        try:
+            selection = json.loads(path.read_text()).get("material_selection") or {}
+        except (OSError, ValueError):
+            continue
+        chosen = {f["source_id"] for f in selection.get("files", []) if f.get("chosen")}
+        if chosen:
+            return chosen
+    return set()
 
 
 def lesson_title_for(record) -> str:
