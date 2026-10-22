@@ -423,3 +423,37 @@ def ensure_section(markdown: str, items: list[dict[str, Any]]) -> str:
     addition = "\n".join(lines).rstrip() + "\n"
     head, tail = markdown[:cut].rstrip(), markdown[cut:]
     return head + "\n" + addition + ("\n" + tail.lstrip("\n") if tail.strip() else "")
+
+
+_OPTION_LINE = re.compile(r"^\s*(?:[-*]\s+)?([A-H])\s*[.．、:：]\s*(.*)$")
+
+
+def normalize_section(markdown: str) -> str:
+    """Give every 课上习题 entry the same readable layout: stem paragraph,
+    options as a list, then 答案 and 解析 each as their own paragraph."""
+    match = _SECTION.search(markdown)
+    if not match:
+        return markdown
+    start = match.start() + len(match.group(0).rstrip())
+    following = re.search(r"^##\s", markdown[start:], re.M)
+    end = start + following.start() if following else len(markdown)
+    out: list[str] = []
+    for line in markdown[start:end].splitlines():
+        option = _OPTION_LINE.match(line)
+        if option and line.strip():
+            if out and out[-1].strip() and not out[-1].lstrip().startswith("- "):
+                out.append("")
+            out.append(f"- {option[1]}. {option[2].strip()}")
+            continue
+        stripped = line.strip()
+        if stripped.startswith(("**答案**", "**解析**", "### ", "<!-- yuketang:")) or (
+                stripped and out and out[-1].lstrip().startswith("- ")):
+            if out and out[-1].strip():
+                out.append("")
+            out.append(line)
+            if stripped.startswith(("### ", "<!-- yuketang:")):
+                out.append("")
+            continue
+        out.append(line)
+    body = re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip()
+    return markdown[:start] + "\n\n" + body + "\n" + ("\n" + markdown[end:] if following else "")

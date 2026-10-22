@@ -148,8 +148,8 @@ async def generate_fast(record, config):
     markdown = (f'# {record.metadata.get("title", "课堂复习笔记")}\n\n课程：{package["category"]}　课次：{note_prompts.human_date(package["lesson_date"])}\n\n'
                 + markdown.lstrip())
     if questions:
-        from .yuketang.retrieval import ensure_section
-        markdown = ensure_section(markdown, questions)
+        from .yuketang.retrieval import ensure_section, normalize_section
+        markdown = normalize_section(ensure_section(markdown, questions))
     markdown = note_prompts.bold_cjk_safe(markdown)
     markdown = timestamp_references(markdown, blocks)
     atomic_bytes(draft_path, markdown.encode())

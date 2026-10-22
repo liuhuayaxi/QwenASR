@@ -29,5 +29,15 @@ class NotePromptTests(unittest.TestCase):
         self.assertEqual(np.human_date('2026-10-14T08:00:00+08:00'), '2026年10月14日 08:00')
 
 
+    def test_exercise_section_layout_is_normalized(self):
+        from qwen_asr_app.yuketang.retrieval import normalize_section
+        md = '## 课上习题\n### 第1题\n<!-- yuketang:Y1 -->\n题干\nA. m>1\nB. m<1\n**答案**：B\n**解析**：因为 $m<1$\n\n## 其他\n正文'
+        out = normalize_section(md)
+        self.assertIn('题干\n\n- A. m>1\n- B. m<1\n\n**答案**：B\n\n**解析**', out)
+        self.assertTrue(out.endswith('## 其他\n正文'))
+        self.assertEqual(normalize_section(out), out)
+        self.assertEqual(np.bold_cjk_safe('受**效率（$\\eta$）**定义'), '受<strong>效率（$\\eta$）</strong>定义')
+
+
 if __name__ == '__main__':
     unittest.main()

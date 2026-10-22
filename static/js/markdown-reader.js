@@ -85,7 +85,7 @@ marked.use({ gfm: true, breaks: false, extensions: [
 // when CJK text touches it (e.g. **俄歇复合（Auger）**的); render those as <strong>.
 export function cjkSafeStrong(markdown) {
   return String(markdown || "").split(/(^```[\s\S]*?^```|\$\$[\s\S]*?\$\$)/m).map((part, index) => index % 2 ? part
-    : part.replace(/\*\*([^*\n$]{1,80}?)\*\*/g, (raw, inner) => !isObviousMath(inner) &&
+    : part.replace(/\*\*([^*\n]{1,120}?)\*\*/g, (raw, inner) => !isObviousMath(inner.replace(/\$[^$]*\$/g, '')) &&
       (/^[\s（(“"《【\[]/.test(inner) || /[）)”"》】\]：:，。；、！？]$/.test(inner) ) ? `<strong>${inner}</strong>` : raw)).join("");
 }
 

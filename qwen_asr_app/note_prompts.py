@@ -114,12 +114,12 @@ def bold_cjk_safe(markdown: str) -> str:
     (CommonMark flanking rules); use <strong> for those spans only."""
     def fix(match):
         inner = match.group(1)
-        if re.search(r'[=√∑∫≈≤≥±×÷]', inner):
+        if re.search(r'[=√∑∫≈≤≥±×÷]', re.sub(r'\$[^$]*\$', '', inner)):
             return match.group(0)
         if re.match(r'^[\s（(“"《【\[]', inner) or re.search(r'[）)”"》】\]：:，。；、！？]$', inner):
             return f'<strong>{inner}</strong>'
         return match.group(0)
-    return re.sub(r'\*\*([^*\n$]{1,80}?)\*\*', fix, markdown)
+    return re.sub(r'\*\*([^*\n]{1,120}?)\*\*', fix, markdown)
 
 
 def human_date(value: str) -> str:
