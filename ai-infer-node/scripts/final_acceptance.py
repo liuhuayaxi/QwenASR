@@ -16,7 +16,7 @@ parser=argparse.ArgumentParser()
 parser.add_argument('--fixtures',type=Path,required=True)
 parser.add_argument('--report',type=Path,required=True)
 parser.add_argument('--endpoint',default='http://100.81.62.69:8765')
-parser.add_argument('--token-file',default=str(Path.home()/'.qwenasr/remote-infer/token'))
+parser.add_argument('--token-file',default=str(Path(__file__).resolve().parents[2]/'local-data/remote-infer/token'))
 args=parser.parse_args()
 client=RemoteClient({'base_url':args.endpoint,'token_file':args.token_file,'connect_timeout_seconds':5,
     'request_timeout_seconds':1800,'job_timeout_seconds':14400,'poll_seconds':1,'network_recovery_seconds':60})

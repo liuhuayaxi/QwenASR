@@ -41,7 +41,7 @@ def _targets(store: BankStore, args) -> list[dict]:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="python -m qwen_asr_app.yuketang", description="雨课堂题库导入（只读）")
-    parser.add_argument("--store", type=Path, help="题库保存目录（默认 ~/.qwenasr/yuketang）")
+    parser.add_argument("--store", type=Path, help="题库保存目录（默认 <项目>/local-data/yuketang）")
     parser.add_argument("--profile", type=Path, help="Chrome 登录资料目录（默认 <store>/browser-profile）")
     sub = parser.add_subparsers(dest="command", required=True)
     login = sub.add_parser("login", help="打开 Chrome 窗口扫码登录")

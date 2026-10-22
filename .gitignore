@@ -48,3 +48,6 @@ scripts/note-export/node_modules/
 # 雨课堂题库 and its logged-in browser profile live in the private data dir; never commit copies.
 .yuketang/
 yuketang-profile/
+
+# Private app state: settings, secrets, OAuth tokens, logins, backups, runtimes.
+/local-data/

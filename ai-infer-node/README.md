@@ -29,7 +29,7 @@ WSL 网关只监听 `127.0.0.1:8765`，通过 Windows/WSL 已有 localhost forwa
 powershell.exe -NoProfile -File "$env:LOCALAPPDATA\AIInferNode\install_tailnet_serve.ps1"
 ```
 
-令牌位于 WSL `~/ai-infer-node/private/token` 和 Mac `~/.qwenasr/remote-infer/token`，权限 600；其他设备安全复制到自己的受保护文件即可。裸浏览器请求无 Bearer 返回 401，这是正常鉴权。正式地址与 SSH 管理地址是两个不同的 Tailscale 节点，Syncthing 也使用 Windows 原生节点。
+令牌位于 WSL `~/ai-infer-node/private/token` 和 Mac `<项目>/local-data/remote-infer/token`，权限 600；其他设备安全复制到自己的受保护文件即可。裸浏览器请求无 Bearer 返回 401，这是正常鉴权。正式地址与 SSH 管理地址是两个不同的 Tailscale 节点，Syncthing 也使用 Windows 原生节点。
 
 Mac 默认模式仍为 local。客户端对短暂连接/网关失败做有限重试，提交时复用同一个 key，轮询时复用 Job ID。连续断线超过 `network_recovery_seconds=60` 后保留操作收据。Preferred 仅在收据证明远端尚未接受时回退；已经提交、已接受或响应丢失的操作继续按原 ID 恢复。冷启动和正常排队继续等待正式 job_timeout。
 
@@ -41,7 +41,7 @@ Mac 默认模式仍为 local。客户端对短暂连接/网关失败做有限重
 .venv/bin/python ai-infer-node/client/provider_config.py --mineru local --asr local
 ```
 
-设置保存在 `~/.qwenasr/inference-providers.json`。浏览器不接触远程令牌。`remote_only` 的错误保留资料等待远程恢复；`remote_preferred` 在明确未提交时使用原始本机输入回退，结果记录实际 provider、fallback 和错误类型。两种远程模式都会恢复已持久化的课堂待转片段。崩溃后尚未分段的尾音继承录音时保存的路由和省电策略；恢复后新增录音使用当前设置。
+设置保存在 `<项目>/local-data/inference-providers.json`。浏览器不接触远程令牌。`remote_only` 的错误保留资料等待远程恢复；`remote_preferred` 在明确未提交时使用原始本机输入回退，结果记录实际 provider、fallback 和错误类型。两种远程模式都会恢复已持久化的课堂待转片段。崩溃后尚未分段的尾音继承录音时保存的路由和省电策略；恢复后新增录音使用当前设置。
 
 ## 重复部署
 
@@ -145,7 +145,7 @@ venvs/gateway/bin/python -m unittest discover -s tests -v
 
 独立 Worker 实测可用 `scripts/standalone.py`，它与服务共享 GPU 文件锁。详细指标写到输出目录 `benchmark.json`。真实推理测试和显存采样不能由 mock 测试替代。
 
-回滚先将 Mac 两项模式切回 local，再停止远程服务。`scripts/uninstall.sh` 仅停止、禁用并移除 systemd 单元，保留模型、凭据、历史任务和源码。Windows 可 `Unregister-ScheduledTask -TaskName 'AI Infer WSL Gateway' -Confirm:$false`；需要撤销 Tailnet 入口时，仅关闭 Serve 的 TCP 8765 配置，保留其他端口。Mac 的历史 SSH 隧道已禁用。项目源码和旧 MinerU 配置的备份位于 `~/.qwenasr/backups/ai-infer-20261008-203532`；本轮入口和集成修改备份位于 `~/.qwenasr/backups/native-tailnet-stability-20261009-002231`。
+回滚先将 Mac 两项模式切回 local，再停止远程服务。`scripts/uninstall.sh` 仅停止、禁用并移除 systemd 单元，保留模型、凭据、历史任务和源码。Windows 可 `Unregister-ScheduledTask -TaskName 'AI Infer WSL Gateway' -Confirm:$false`；需要撤销 Tailnet 入口时，仅关闭 Serve 的 TCP 8765 配置，保留其他端口。Mac 的历史 SSH 隧道已禁用。项目源码和旧 MinerU 配置的备份位于 `<项目>/local-data/backups/ai-infer-20261008-203532`；本轮入口和集成修改备份位于 `<项目>/local-data/backups/native-tailnet-stability-20261009-002231`。
 
 模型输入只发送到你选择的 Windows 节点；模型下载来源不会收到 PDF 或录音。未添加云端推理、公开端口或全局 SSH 凭据修改。
 

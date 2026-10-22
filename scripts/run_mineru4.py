@@ -22,7 +22,8 @@ def main():
     for key in tuple(os.environ):
         if key.startswith("MINERU_"):
             os.environ.pop(key)
-    home = Path.home() / ".qwenasr" / "mineru4"
+    private = os.getenv("QWEN_ASR_PRIVATE_DIR") or str(Path(__file__).resolve().parents[1] / "local-data")
+    home = Path(private).expanduser() / "mineru4"
     os.environ["MINERU_HOME"] = str(home)
     config_path = args.output.parent / "mineru-config.json"
     config_path.write_text(json.dumps({"model": {

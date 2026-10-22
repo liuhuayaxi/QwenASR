@@ -1,6 +1,6 @@
 """Local, private storage for the Yuketang question bank.
 
-Layout (default root ``~/.qwenasr/yuketang``; ``QWEN_ASR_DATA_DIR`` and
+Layout (default root ``<project>/local-data/yuketang``; ``QWEN_ASR_DATA_DIR`` and
 ``QWEN_ASR_YUKETANG_DIR`` relocate it)::
 
     browser-profile/                 persistent Chrome profile (login session)

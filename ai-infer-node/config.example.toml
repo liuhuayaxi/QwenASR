@@ -42,11 +42,11 @@ chunk_seconds = 25
 overlap_seconds = 1
 max_new_tokens = 512
 
-# Mac settings live in ~/.qwenasr/inference-providers.json, separate from local
+# Mac settings live in <项目>/local-data/inference-providers.json, separate from local
 # MinerU model/quality options. The UI and client CLI edit the same file.
 [client]
 base_url = "http://100.81.62.69:8765"
-token_file = "~/.qwenasr/remote-infer/token"
+token_file = "<项目>/local-data/remote-infer/token"
 connect_timeout_seconds = 10
 request_timeout_seconds = 1800
 job_timeout_seconds = 14400

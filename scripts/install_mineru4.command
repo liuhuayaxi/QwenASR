@@ -1,8 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
-RUNTIME_DIR="$HOME/.qwenasr/runtimes/mineru4"
-MODEL_HOME="$HOME/.qwenasr/mineru4"
+PRIVATE_DIR="${QWEN_ASR_PRIVATE_DIR:-$(cd "$(dirname "$0")/.." && pwd)/local-data}"
+RUNTIME_DIR="$PRIVATE_DIR/runtimes/mineru4"
+MODEL_HOME="$PRIVATE_DIR/mineru4"
 UV="$(command -v uv || true)"
 if [ -z "$UV" ] && [ -x /opt/homebrew/bin/uv ]; then UV=/opt/homebrew/bin/uv; fi
 if [ -z "$UV" ]; then echo '请先安装 uv：https://docs.astral.sh/uv/'; exit 1; fi
