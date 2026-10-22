@@ -35,8 +35,13 @@ DEFAULT_TIMEOUT = 1800
 # AGY's user-request envelope truncates near 192 KB, independently of the
 # model's token window. Keep inline turns small; transport larger inputs as
 # individually bounded, receipt-checked files without dropping source text.
-INLINE_INPUT_BYTES = 80_000
-FILE_INPUT_BYTES = 16_000
+INLINE_INPUT_BYTES = 150_000
+# view_file returns a file completely up to ~30k characters (probed with AGY
+# 1.4.5: a 20.7k-character file was complete, a 30k-character view was cut).
+# Size chunks by characters, not bytes: CJK text is 3 bytes per character, so
+# the old 16 KB byte limit produced ~5k-character files and 14+ tool reads.
+FILE_INPUT_BYTES = 72_000
+FILE_INPUT_CHARS = 22_000
 MODEL_START_DELAYS = (2, 5)
 PROTOCOL_RETRY_DELAYS = (2, 5)
 
@@ -270,7 +275,8 @@ def _file_prompt(prompt: str, working: Path, *, additional_read_paths=()):
     current = []
     for fragment in fragments:
         candidate = [*current, fragment]
-        if current and len(json.dumps(candidate, ensure_ascii=False, indent=2).encode()) > FILE_INPUT_BYTES:
+        encoded = json.dumps(candidate, ensure_ascii=False, indent=2)
+        if current and (len(encoded) > FILE_INPUT_CHARS or len(encoded.encode()) > FILE_INPUT_BYTES):
             groups.append(current)
             current = []
         current.append(fragment)

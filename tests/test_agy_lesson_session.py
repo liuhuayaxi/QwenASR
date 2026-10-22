@@ -124,3 +124,22 @@ class DisplayMathTests(unittest.TestCase):
         for inside in (r'\[\begin{aligned}x\end{aligned}\]', r'$x=\begin{cases}1\end{cases}$',
                        r'\begin{equation}\begin{aligned}x\end{aligned}\end{equation}'):
             self.assertEqual(fix(inside), inside)
+
+
+class ChunkSizeTests(unittest.TestCase):
+    def test_cjk_prompt_uses_few_large_files_within_view_limit(self):
+        import tempfile
+        from qwen_asr_app.agy_cli import _file_prompt, FILE_INPUT_CHARS
+        prompt = '课堂转写内容' * 22000  # 132k CJK characters (~400 KB)
+        with tempfile.TemporaryDirectory() as raw:
+            _, request = _file_prompt(prompt, Path(raw))
+            files = sorted(request.glob('input-*.json'))
+            self.assertLessEqual(len(files), 8)
+            self.assertTrue(all(len(f.read_text()) <= FILE_INPUT_CHARS + 800 for f in files))
+
+    def test_same_value_under_another_field_name_is_referenced(self):
+        with tempfile.TemporaryDirectory() as raw:
+            session = LessonSession(Path(raw))
+            session.record(session_id=SID, prompt='p1', instructions='i', payload={'pages': [BIG]}, response='r', continued=False)
+            _, shaped, _ = session.plan('w', {'source_pages': [BIG]})
+            self.assertIn('INPUT.pages 完全相同', shaped['source_pages'])

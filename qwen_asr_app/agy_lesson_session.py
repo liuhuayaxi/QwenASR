@@ -51,7 +51,7 @@ class LessonSession:
         self.lock = asyncio.Lock()
         self.session_id = ""
         self.prompts: list[str] = []
-        self.sent: dict[str, int] = {}  # field digest -> turn number
+        self.sent: dict[str, list] = {}  # value digest -> [turn number, field name]
         self.tokens = 0
         self.stats = {"continued_turns": 0, "fresh_turns": 0, "fallbacks": 0, "restarts": 0,
                       "deduplicated_fields": 0, "deduplicated_tokens": 0}
@@ -70,7 +70,7 @@ class LessonSession:
         if state.get("version") != VERSION or _sha(prompts) != state.get("prompts_sha256"):
             return
         self.session_id, self.prompts = state["session_id"], prompts
-        self.sent = {k: int(v) for k, v in state.get("sent", {}).items()}
+        self.sent = {k: list(v) for k, v in state.get("sent", {}).items() if isinstance(v, list)}
         self.tokens = int(state.get("tokens", 0))
         self.stats.update(state.get("stats", {}))
 
@@ -107,9 +107,9 @@ class LessonSession:
         shaped: dict[str, Any] = {}
         saved = 0
         for key, value in payload.items():
-            earlier = self.sent.get(_sha([key, value]))
+            earlier = self.sent.get(_sha(value))
             if earlier and estimate_tokens(json.dumps(value, ensure_ascii=False)) > 200:
-                shaped[key] = f"〔与本会话第 {earlier} 轮 INPUT.{key} 完全相同，内容见上文，未重复发送〕"
+                shaped[key] = f"〔与本会话第 {earlier[0]} 轮 INPUT.{earlier[1]} 完全相同，内容见上文，未重复发送〕"
                 saved += estimate_tokens(json.dumps(value, ensure_ascii=False))
                 self.stats["deduplicated_fields"] += 1
             else:
@@ -117,7 +117,7 @@ class LessonSession:
         text = instructions
         earlier = self.sent.get(_sha(["__instructions__", instructions]))
         if earlier and estimate_tokens(instructions) > 200:
-            text = f"〔SYSTEM INSTRUCTIONS 与本会话第 {earlier} 轮完全相同，按上文执行；只处理本轮 INPUT〕"
+            text = f"〔SYSTEM INSTRUCTIONS 与本会话第 {earlier[0]} 轮完全相同，按上文执行；只处理本轮 INPUT〕"
             saved += estimate_tokens(instructions)
         self.stats["deduplicated_tokens"] += saved
         del turn
@@ -132,8 +132,8 @@ class LessonSession:
         self.prompts.append(prompt)
         turn = len(self.prompts)
         for key, value in payload.items():
-            self.sent.setdefault(_sha([key, value]), turn)
-        self.sent.setdefault(_sha(["__instructions__", instructions]), turn)
+            self.sent.setdefault(_sha(value), [turn, key])
+        self.sent.setdefault(_sha(["__instructions__", instructions]), [turn, "instructions"])
         self.tokens += estimate_tokens(prompt) + estimate_tokens(response)
         self.stats["continued_turns" if continued else "fresh_turns"] += 1
         self._save()

@@ -315,6 +315,15 @@ async def model_json(instructions, payload, config, output=32768, *, response_pa
     return result
 
 
+def compact_matches(associations):
+    """Page matches without per-hit boilerplate (was ~1/4 of the plan input)."""
+    return [{'source':a['source'],'pages':[f"{p['source_id']}#{p['page']}" for p in a.get('pages',[])]}
+            for a in associations if a.get('pages')]
+
+
+PAGE_MATCH_NOTE='page_matches 为转写片段与课件页的关键词主题匹配（source_id#页码），仅供定位；不代表停留时间。'
+
+
 def coverage_payload(group, payload, package, history_evidence):
     terms=tokens(' '.join(b['text'] for b in group))
     ranked=sorted(history_evidence,key=lambda b:-len(terms&tokens(b['text']))/max(1,len(tokens(b['text']))**.5))
@@ -329,7 +338,7 @@ def coverage_payload(group, payload, package, history_evidence):
     nearby={(sid,p+d) for sid,p in matched for d in (-1,0,1)}
     selected_pages=[p for p in package['relevant_pages'] if (p['source_id'],p['page']) in nearby]
     return {**payload,'transcript':group,'history':chosen_history,'pages':selected_pages,
-        'page_matches':[a for a in package['associations'] if a['source'] in ids],
+        'page_matches':compact_matches([a for a in package['associations'] if a['source'] in ids]),
         'history_scope':package['history_scope']+f'；本批只提供相关的 {len(chosen_history)} 个历史片段，其余 {len(history_evidence)-len(chosen_history)} 个未参与判断，不代表未讲过'}
 
 
@@ -908,7 +917,7 @@ async def generate(record, config):
                     else:omitted+=1
             payload={'transcript':source_blocks,'history':history_evidence,'history_scope':package['history_scope'],
                 'history_unmatched_blocks':omitted,'accepted_student_notes':accepted,
-                'page_matches':package['associations'],'pages':package['relevant_pages'],
+                'page_matches':compact_matches(package['associations']),'page_match_note':PAGE_MATCH_NOTE,'pages':package['relevant_pages'],
                 'learning_scope':scope,
                 'source_directory':[{'source_id':s['source_id'],'name':s['name'],'pages':len(s['pages'])} for s in package['sources']]}
             plan_instructions='''完整建立本节知识与覆盖清单。区分 recap 回顾、first_introduction 本节首次引入、new_development 本节新增展开、material_supplement 课件补充。不能用未收录历史证明从未讲过，不读未来课次。
