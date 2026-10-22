@@ -405,6 +405,161 @@ class NoteInjectionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(saved.metadata["ai_note_summary"]["yuketang_question_ids"], ["lesson:1:2"])
 
 
+# ------------------------------------------------ forced lesson questions
+
+def ms(text):
+    from datetime import datetime
+    return int(datetime.fromisoformat(text + "+08:00").timestamp() * 1000)
+
+
+class Recording:
+    def __init__(self, started, minutes, category="通信原理 C"):
+        self.metadata = {"category": category, "started_at": started + "+08:00", "sample_count": 16000 * 60 * minutes}
+        self.duration = 60 * minutes
+
+
+def lesson_store(root, *, problems=16):
+    """A classroom with three lessons and tests around them (sanitized shapes)."""
+    store = BankStore(Path(root) / "bank")
+    store.bind("通信原理 C", "100", university_id="1")
+    acts = [
+        ("L1", 14, "第五章 模拟调制系统", "2026-10-19T08:00:00"),
+        ("T_after1", 5, "第五章 模拟调制系统 课后测", "2026-10-19T10:00:00"),   # gray zone, closer to L1
+        ("T_pre", 5, "第六章 数字基带传输 课前测", "2026-10-19T10:30:00"),      # gray zone, closer to L2
+        ("T_mid", 4, "第六章 预习测验", "2026-10-20T20:00:00"),
+        ("L2a", 14, "第六章 数字基带传输", "2026-10-21T08:00:00"),
+        ("L2b", 14, "第六章 数字基带传输（2）", "2026-10-21T08:06:00"),          # restarted lesson
+        ("T_in", 5, "第六章 课堂小测", "2026-10-21T08:20:00"),                  # published during the lesson
+        ("T_late", 5, "第七章 课前测", "2026-10-21T12:00:00"),                  # after this lesson ended
+        ("L3", 14, "第七章 数字带通", "2026-10-21T14:00:00"),
+    ]
+    for aid, kind, title, created in acts:
+        store.save_activity_state("100", aid, {"activity": {"id": aid, "type": kind, "title": title, "create_time": ms(created)}})
+        day, clock = created[:10], created[11:16]
+        if kind == 14 and aid == "L2a":
+            store.save_questions("100", aid, [bank_question(
+                id=f"lesson:L2a:{n}", activity_id=aid, source="lesson", source_label="课上习题", activity_title=title,
+                date=day, time=f"{8 + (5 + n * 4) // 60:02d}:{(5 + n * 4) % 60:02d}", page=n,
+                body=f"第 {n} 题：HDB3 码第 {n} 种情况下的连零替换规则是什么？" + "很长的解析" * 20,
+                remark="详细解析" * 200, options=[{"key": k, "value": f"选项{k}{n}" * 10} for k in "ABCD"],
+                student_answer=["B"], correct=n % 3 != 0) for n in range(1, problems + 1)]
+                + [bank_question(id="lesson:L2a:img", activity_id=aid, source="lesson", source_label="课上习题",
+                                 activity_title=title, date=day, time="08:50", page=99, body="", needs_vision=True)])
+        elif kind == 14:
+            store.save_questions("100", aid, [bank_question(id=f"lesson:{aid}:1", activity_id=aid, source="lesson", source_label="课上习题",
+                                                            activity_title=title, date=day, time=clock, body=f"{title} 的课上题目内容")])
+        else:
+            store.save_questions("100", aid, [bank_question(id=f"exam:{aid}:1", activity_id=aid, activity_title=title, date=day,
+                                                            time=clock, body=f"{title} 的测试题目内容一")])
+    return store
+
+
+class LessonMatchTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.store = lesson_store(temporary.name)
+        self.lessons = retrieval.lesson_catalog(self.store, "100")
+
+    def test_overlapping_lessons_merge_and_closest_fallback(self):
+        from datetime import datetime
+        match = retrieval.lesson_for_recording(self.lessons, datetime(2026, 10, 21, 8, 2), datetime(2026, 10, 21, 9, 40))
+        self.assertEqual(match["activity_ids"], ["L2a", "L2b"])
+        self.assertIn("（2）", match["title"])
+        # No overlap: the lesson starting closest to the recording, same day only.
+        match = retrieval.lesson_for_recording(self.lessons, datetime(2026, 10, 21, 17, 0), datetime(2026, 10, 21, 17, 30))
+        self.assertEqual(match["activity_ids"], ["L3"])
+        self.assertIsNone(retrieval.lesson_for_recording(self.lessons, datetime(2026, 10, 22, 8, 0), datetime(2026, 10, 22, 9, 0)))
+
+    def test_pre_class_window_and_title_tie_break(self):
+        from datetime import datetime
+        match = retrieval.lesson_for_recording(self.lessons, datetime(2026, 10, 21, 8, 2), datetime(2026, 10, 21, 9, 40))
+        tests = retrieval.pre_class_tests(self.store, "100", match, self.lessons)
+        # T_after1 stays with L1 (title closer, inside the gray zone); T_late is after this lesson.
+        self.assertEqual(sorted(tests), ["T_in", "T_mid", "T_pre"])
+        first = retrieval.lesson_for_recording(self.lessons, datetime(2026, 10, 19, 8, 0), datetime(2026, 10, 19, 9, 30))
+        self.assertEqual(retrieval.pre_class_tests(self.store, "100", first, self.lessons), [])
+        third = retrieval.lesson_for_recording(self.lessons, datetime(2026, 10, 21, 14, 0), datetime(2026, 10, 21, 15, 30))
+        self.assertEqual(retrieval.pre_class_tests(self.store, "100", third, self.lessons), ["T_late"])
+
+    def test_forced_questions_survive_limits_and_a_tight_budget(self):
+        record = Recording("2026-10-21T08:02:00", 98)
+        lesson, forced = retrieval.forced_for_record(record, self.store, "通信原理 C")
+        self.assertEqual(lesson["pre_class_activity_ids"], ["T_in", "T_mid", "T_pre"])
+        self.assertEqual(len(forced), 16 + 1 + 1 + 3)  # 16 problems + image-only + restarted lesson + 3 tests
+        self.assertEqual([q["_forced_kind"] for q in forced[:3]], ["pre_class"] * 3)
+        items = retrieval.questions_for_record(record, store=self.store, transcript="HDB3 码", limit=2, budget=3000)
+        marked = [item for item in items if item.get("必含")]
+        self.assertEqual({item["id"] for item in marked}, {q["id"] for q in forced})
+        self.assertEqual(len(items), len(marked), "optional extras give way to the budget first")
+        self.assertTrue(all(item.get("题号") for item in marked))
+        self.assertTrue(any(item.get("本节课前测") for item in marked))
+        # With room to spare, unrelated optional questions join after the forced ones.
+        roomy = retrieval.questions_for_record(record, store=self.store, transcript="HDB3 码", budget=10 ** 6)
+        self.assertGreater(len(roomy), len(marked))
+        self.assertLessEqual(len(roomy) - len(marked), retrieval.MAX_OPTIONAL)
+
+    def test_missing_forced_questions_are_appended_to_the_section(self):
+        items = retrieval.questions_for_record(Recording("2026-10-21T08:02:00", 98), store=self.store, transcript="", budget=4000)
+        forced = [item for item in items if item.get("必含")]
+        image_only = next(item for item in forced if item["id"] == "lesson:L2a:img")
+        by_text = forced[3]
+        # The model wrote one question by marker, one by its text, and skipped the rest.
+        note = (f"# 笔记\n\n## 相关习题与答案\n\n### 〔{image_only['题号']}〕 课件图片题\n\n解答……\n\n"
+                f"### 题目\n\n{by_text['题干'][:40]}\n\n## 课后总结\n\n结束")
+        self.assertEqual(len(retrieval.missing_forced(note, items)), len(forced) - 2)
+        fixed = retrieval.ensure_section(note, items)
+        self.assertEqual(retrieval.missing_forced(fixed, items), [])
+        self.assertEqual(fixed.count("## 相关习题与答案"), 1)
+        self.assertIn("### 补充：本节习题（程序核对后补全）", fixed)
+        self.assertLess(fixed.index("补充：本节习题"), fixed.index("## 课后总结"))
+        self.assertTrue(fixed.rstrip().endswith("结束"))
+        self.assertNotIn(f"〔{by_text['题号']}〕", fixed, "a question found by text is not duplicated")
+        self.assertIn("- 我的答案：B（", fixed)
+        self.assertEqual(retrieval.ensure_section(fixed, items), fixed)
+        # No section at all: the full appendix is added.
+        self.assertEqual(retrieval.missing_forced(retrieval.ensure_section("# 笔记", items), items), [])
+
+
+class CourseListTests(unittest.TestCase):
+    PAYLOAD = {"errcode": 0, "data": {"list": [
+        {"classroom_id": 100, "name": "班级甲", "term": 202601, "time": 1, "course": {"name": "通信原理C", "university_id": 1},
+         "teacher": {"name": "教师甲", "avatar": "https://example.invalid/a.png", "user_id": 5}},
+        {"classroom_id": 100, "name": "班级甲", "course": {"name": "通信原理C", "university_id": 1}, "teacher": {"name": "教师甲"}},
+        {"classroom_id": 200, "name": "", "course": {"name": "光电子学"}, "teacher": {"name": "教师乙"}}]}}
+
+    def test_parse_cache_suggest_and_rebind(self):
+        from qwen_asr_app.yuketang.service import YuketangService
+        courses = parsing.parse_course_list(self.PAYLOAD)
+        self.assertEqual([c["classroom_id"] for c in courses], ["100", "200"])
+        self.assertEqual(courses[1]["university_id"], "0")
+        self.assertNotIn("avatar", json.dumps(courses))
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        store = BankStore(Path(temporary.name) / "bank")
+        store.save_course_list(courses)
+        service = YuketangService(store)
+        self.assertEqual(service.courses("通信原理 C")["suggested"], "100")
+        self.assertEqual(service.courses("光电子学")["suggested"], "200")
+        store.bind("通信原理 C", "100", university_id="1")
+        store.bind("通信原理 C", "200", university_id="0", replace=True)
+        self.assertEqual([c["classroom_id"] for c in store.classrooms_for("通信原理 C")], ["200"])
+
+    def test_ranked_search_covers_answers_vision_and_my_answers(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        store = BankStore(Path(temporary.name) / "bank")
+        store.bind("光电子学", "200")
+        store.save_questions("200", "1", [
+            bank_question(id="a", body="", vision={"text": "半导体激光器的远场发散角", "answer_text": "垂直方向更大"}),
+            bank_question(id="b", body="其他题", student_answer=["阈值电流随温度升高而增大"]),
+            bank_question(id="c", body="无关内容", remark="特征温度 T0")])
+        self.assertEqual([q["id"] for q in store.search_ranked("光电子学", "发散角")], ["a"])
+        self.assertEqual([q["id"] for q in store.search_ranked("光电子学", "阈值电流 温度")], ["b"])
+        self.assertEqual([q["id"] for q in store.search("光电子学", "T0")], ["c"])
+        self.assertEqual(store.search_ranked("光电子学", "完全不相关的查询词语"), [])
+
+
 class RouteTests(unittest.TestCase):
     def test_bind_status_questions_and_guard(self):
         from fastapi import FastAPI, HTTPException
@@ -433,6 +588,18 @@ class RouteTests(unittest.TestCase):
         image = next(i for q in listed["questions"] for i in q["images"] if i.get("path"))
         self.assertEqual(client.get(f"/api/yuketang/image/26260946/{image['path']}").status_code, 200)
         self.assertEqual(client.get("/api/yuketang/image/26260946/bindings.json").status_code, 404)
+        store.save_course_list([{"classroom_id": "26260946", "university_id": "3278", "course_name": "通信原理C", "classroom_name": "班级甲", "teacher": "教师甲"}])
+        listed = client.get("/api/yuketang/courses", params={"category": "通信原理 C"}).json()
+        self.assertEqual(listed["suggested"], "26260946")
+        self.assertEqual(client.post("/api/yuketang/courses/refresh", json={}).status_code, 403)
+        ranked = client.get("/api/yuketang/questions", params={"category": "通信原理 C", "q": listed_body(store), "mode": "rank"}).json()
+        self.assertTrue(ranked["questions"])
+        rebound = client.post("/api/yuketang/bind", headers=headers, json={"category": "通信原理 C", "classroom_id": "26549233", "university_id": "0", "replace": True}).json()
+        self.assertEqual([c["classroom_id"] for c in rebound["classrooms"]], ["26549233"])
+
+
+def listed_body(store):
+    return next(q["body"] for q in store.questions("26260946") if len(q.get("body") or "") > 6)[:12]
 
 
 if __name__ == "__main__":

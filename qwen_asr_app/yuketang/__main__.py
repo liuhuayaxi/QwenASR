@@ -4,6 +4,7 @@
     bind --course 通信原理 C --classroom 26260946 [--university 3278]
     sync [--course NAME | --classroom ID ...] [--refresh] [--transcribe]
     transcribe [--course NAME | --classroom ID] [--limit N]
+    courses [--refresh]           list the student's classrooms (cached for the UI)
     status [--course NAME]
     list --course NAME [--query 关键词]
 """
@@ -49,6 +50,7 @@ def main(argv=None) -> int:
     bind.add_argument("--course", required=True)
     bind.add_argument("--classroom", required=True)
     bind.add_argument("--university")
+    bind.add_argument("--replace", action="store_true", help="替换这门课已有的绑定（改绑）")
     unbind = sub.add_parser("unbind")
     unbind.add_argument("--course", required=True)
     unbind.add_argument("--classroom", required=True)
@@ -64,6 +66,8 @@ def main(argv=None) -> int:
             command.add_argument("--transcribe", action="store_true", help="同步后转写题目图片")
         else:
             command.add_argument("--limit", type=int)
+    courses = sub.add_parser("courses", help="列出（--refresh 时重新读取）雨课堂课程")
+    courses.add_argument("--refresh", action="store_true")
     status = sub.add_parser("status")
     status.add_argument("--course")
     listing = sub.add_parser("list")
@@ -82,7 +86,7 @@ def main(argv=None) -> int:
         print("登录成功，登录状态保存在", profile)
         return 0
     if args.command == "bind":
-        _print(store.bind(args.course, args.classroom, university_id=args.university))
+        _print(store.bind(args.course, args.classroom, university_id=args.university, replace=args.replace))
         return 0
     if args.command == "unbind":
         _print({"removed": store.unbind(args.course, args.classroom)})
@@ -107,6 +111,20 @@ def main(argv=None) -> int:
         from .vision import transcribe_classroom
         _print([asyncio.run(transcribe_classroom(store, item["classroom_id"], limit=args.limit, progress=print))
                 for item in _targets(store, args)])
+        return 0
+    if args.command == "courses":
+        if args.refresh:
+            from .client import LoginRequired
+            from .sync import fetch_course_list
+            try:
+                fetch_course_list(store, profile_dir=profile)
+            except LoginRequired as exc:
+                print(f"{exc}。请先运行：python -m qwen_asr_app.yuketang login", file=sys.stderr)
+                return 2
+        listed = store.course_list()
+        print(f"课程列表更新于 {listed['fetched_at'] or '从未'}")
+        for c in listed["courses"]:
+            print(f"{c['classroom_id']}\t{c['course_name']}\t{c['classroom_name']}\t{c['teacher']}\t学校 {c['university_id']}")
         return 0
     if args.command == "status":
         from .service import YuketangService

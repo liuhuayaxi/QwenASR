@@ -5,11 +5,11 @@
   <meta name="theme-color" content="#f5f7f5"><title>PDF 资料库 · QwenASR</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <script src="/static/js/theme.js?v=20261011-ui-final"></script>
-  <link rel="stylesheet" href="/static/course-files.css?v=20261020-chrome-preview">
+  <link rel="stylesheet" href="/static/course-files.css?v=20261022-ykt-3">
   <link rel="stylesheet" href="/static/course-knowledge.css?v=20261014-knowledge-1">
   <link rel="stylesheet" href="/static/vendor/katex/katex.min.css">
   <script src="/static/vendor/katex/katex.min.js" defer></script>
-  <link rel="stylesheet" href="/static/yuketang-bank.css?v=20261022-ykt-2">
+  <link rel="stylesheet" href="/static/yuketang-bank.css?v=20261022-ykt-3">
   <link rel="stylesheet" href="/static/review-materials.css?v=20261013">
   <link rel="stylesheet" href="/static/ui.css?v=20261011-ui-final">
   <link rel="stylesheet" href="/static/custom-controls.css?v=20261014-selection-hover">
@@ -48,28 +48,6 @@
       <input id="filesInput" type="file" multiple hidden><input id="replaceInput" type="file" hidden>
     </section>
     <p id="uploadStatus" class="notice" role="status" hidden></p>
-<section class="review-tools" aria-label="复习资料工具">
-<p id="review-loadError" class="notice error" role="alert" hidden></p>
-      <details class="storage-disclosure"><summary>保存位置</summary><section class="path-card" aria-label="笔记保存位置"><div><b>当前课程的 AI 笔记</b><p id="review-storagePath" class="muted"></p><p class="muted">随课程保存在“AI生成笔记”文件夹内。更换资料库位置时，笔记会一起迁移。</p></div></section></details>
-      <details class="external-import"><summary>导入复习资料</summary><div class="notes-grid">
-        <section class="panel lesson-panel" aria-labelledby="review-lessonHeading"><div class="panel-heading"><div><h2 id="review-lessonHeading">选择课次</h2></div><span id="review-lessonCount" class="count-badge">0</span></div><div id="review-lessons" class="lesson-list"></div><p id="review-lessonEmpty" class="empty-inline" hidden>这门课还没有保存的录音课次。</p><div class="selection-bar"><span id="review-selectionText">尚未选择课次</span><button id="review-clearSelection" class="ui-button" type="button">清除选择</button></div></section>
-        <section class="panel prompt-panel" aria-labelledby="review-promptHeading"><div class="panel-heading"><div><h2 id="review-promptHeading">生成提示词</h2></div><button id="review-copyPrompt" class="ui-button primary" type="button" disabled>复制提示词</button></div><label class="field-label" for="review-promptTemplate">提示词模板 <small>可使用 {{course}} 和 {{lessons}}</small></label><textarea id="review-promptTemplate" class="ui-field prompt-editor" rows="16" spellcheck="false"></textarea><div class="prompt-actions"><button id="review-saveTemplate" class="ui-button" type="button">保存模板</button><button id="review-generatePrompt" class="ui-button primary" type="button">生成并复制</button></div><p id="review-promptStatus" class="notice" role="status" hidden></p><label class="field-label" for="review-promptOutput">本次生成结果</label><textarea id="review-promptOutput" class="ui-field prompt-output" rows="8" readonly placeholder="选择课次后点击“生成并复制”"></textarea></section>
-      </div>
-      <section class="panel upload-panel" aria-labelledby="review-uploadHeading"><div class="panel-heading"><div><h2 id="review-uploadHeading">上传外部复习资料</h2></div><span id="review-selectedForUpload" class="muted"></span></div><form id="review-uploadForm"><div class="upload-fields"><label class="field-label">资料名称<input id="review-noteTitle" class="ui-field" maxlength="120" placeholder="例如：物理光学·期中复习" required></label><label class="field-label">PDF 文件<input id="review-noteFile" class="ui-field" type="file" accept="application/pdf,.pdf" required></label></div><div class="upload-actions"><button class="ui-button primary" type="submit">保存复习资料</button><span id="review-uploadStatus" class="muted" role="status"></span></div></form></section>
-      </details>
-
-</section>
-    <details id="yuketangSection" class="yuketang-section" aria-label="雨课堂题库" hidden>
-      <summary>雨课堂题库 <small id="ykt-summary"></small></summary>
-      <p class="muted">只读导入本课程在雨课堂的考试/测试、课上习题和课件习题，生成笔记时自动附上相关题目与答案。题库只保存在本机私有数据目录。</p>
-      <ul id="ykt-classrooms" class="ykt-classrooms"></ul>
-      <form id="ykt-bindForm" class="ykt-row"><label class="sr-only" for="ykt-classroom">雨课堂班级编号</label><input id="ykt-classroom" class="ui-field" inputmode="numeric" placeholder="班级编号，如 26260946"><label class="sr-only" for="ykt-university">学校编号</label><input id="ykt-university" class="ui-field" inputmode="numeric" placeholder="学校编号（可留空）"><button id="ykt-bind" class="ui-button" type="submit">绑定班级</button></form>
-      <div class="ykt-row"><button id="ykt-login" class="ui-button" type="button">登录雨课堂</button><button id="ykt-sync" class="ui-button primary" type="button">同步雨课堂题库</button><label class="muted"><input id="ykt-refresh" type="checkbox"> 全部重新读取</label><button id="ykt-transcribe" class="ui-button" type="button">转写题目图片</button><button id="ykt-stop" class="ui-button" type="button" hidden>停止</button><span id="ykt-job" class="muted" role="status"></span></div>
-      <p id="ykt-notice" class="notice" role="alert" hidden></p>
-      <pre id="ykt-log" class="ykt-log" hidden></pre>
-      <div class="ykt-row"><label class="sr-only" for="ykt-search">搜索题目</label><input id="ykt-search" class="ui-field" type="search" placeholder="搜索题干、答案…"><label class="sr-only" for="ykt-source">题目来源</label><select id="ykt-source" class="ui-field"><option value="">全部来源</option><option value="exam">课前/课后测试与考试</option><option value="lesson">课上习题</option><option value="courseware">课件习题</option></select></div>
-      <div id="ykt-questions" class="ykt-questions"></div>
-    </details>
     <section id="knowledgeSection" class="knowledge-search-section" aria-label="课程知识库检索与索引">
       <div class="knowledge-section-header">
         <div class="knowledge-title-group">
@@ -126,6 +104,26 @@
         </details>
       </div>
     </section>
+    <section id="yuketangSection" class="knowledge-search-section yuketang-section" aria-label="雨课堂习题" hidden>
+      <div class="ykt-head">
+        <h2>雨课堂习题</h2>
+        <span id="ykt-line" class="ykt-line"></span>
+        <button id="ykt-rebind" class="ghost-button mini-button" type="button" data-ykt="rebind" hidden>改绑</button>
+        <span id="ykt-job" class="muted ykt-job" role="status"></span>
+        <button id="ykt-sync" class="ui-button primary mini-button" type="button" data-ykt="sync" title="读取新题目，并自动转写图片题" hidden>同步</button>
+        <button id="ykt-stop" class="ghost-button mini-button" type="button" data-ykt="stop" hidden>停止</button>
+        <details id="ykt-more" class="ykt-more" hidden><summary class="ghost-button mini-button" aria-label="更多雨课堂操作">⋯</summary>
+          <div id="ykt-menu" class="ykt-menu" role="menu"><button type="button" role="menuitem" data-ykt="refresh-all">全部重新读取</button><button type="button" role="menuitem" data-ykt="transcribe">只转写图片题</button><button type="button" role="menuitem" data-ykt="courses">刷新课程列表</button><button type="button" role="menuitem" data-ykt="unbind">解除绑定</button></div>
+        </details>
+      </div>
+      <div id="ykt-bind" class="ykt-bind" hidden></div>
+      <p id="ykt-notice" class="notice" role="alert" hidden></p>
+      <details id="ykt-details" class="ykt-details" hidden><summary id="ykt-detailsSummary">同步详情</summary><ul id="ykt-pending" class="ykt-pending"></ul><pre id="ykt-log" class="ykt-log" hidden></pre></details>
+      <details id="ykt-browse" class="ykt-browse" hidden><summary id="ykt-browseSummary">浏览题目</summary>
+        <div class="ykt-row"><label class="sr-only" for="ykt-search">筛选题目</label><input id="ykt-search" class="ui-field" type="search" placeholder="筛选题干、答案…"><label class="sr-only" for="ykt-source">题目来源</label><select id="ykt-source" class="ui-field"><option value="">全部来源</option><option value="exam">课前/课后测试与考试</option><option value="lesson">课上习题</option><option value="courseware">课件习题</option></select></div>
+        <div id="ykt-questions" class="ykt-questions"></div>
+      </details>
+    </section>
     <section class="file-section">
       <div class="section-toolbar"><h2>全部资料 <span id="fileCount">0</span></h2><div><button id="upgradeLegacy" class="ui-button primary" type="button" hidden>升级旧版识别</button><label for="search" class="sr-only">搜索文件</label><input id="search" type="search" placeholder="搜索文件名…" class="ui-field"><label class="sr-only" for="kindFilter">筛选类型</label><select id="kindFilter" class="ui-field"><option value="">所有类型</option><option>课件</option><option>讲义</option><option>作业</option><option>参考资料</option><option>复习资料</option><option>其他</option></select><button id="refresh" aria-label="刷新文件" class="ui-button">刷新</button></div></div>
       <p id="loadError" class="notice error" role="alert" hidden></p>
@@ -171,8 +169,8 @@
   </dialog>
   <div id="toast" role="status" hidden></div>
   <script type="module" src="/static/js/knowledge-settings.js"></script>
-  <script type="module" src="/static/js/course-files.js?v=20261022-local-main-1"></script>
-  <script type="module" src="/static/js/course-knowledge.js?v=20261022-merged-pr6"></script>
-  <script type="module" src="/static/js/yuketang-bank.js?v=20261022-ykt-2"></script>
+  <script type="module" src="/static/js/course-files.js?v=20261022-ykt-3"></script>
+  <script type="module" src="/static/js/course-knowledge.js?v=20261022-ykt-3"></script>
+  <script type="module" src="/static/js/yuketang-bank.js?v=20261022-ykt-3"></script>
 </body>
 </html>

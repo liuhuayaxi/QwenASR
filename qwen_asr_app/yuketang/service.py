@@ -83,7 +83,9 @@ class YuketangService:
     def login_state(self) -> dict[str, Any]:
         state = self.job.get("login_state") if isinstance(self.job.get("login_state"), dict) else {}
         has_profile = (self.store.profile_dir / "Default").is_dir()
-        return {"profile_exists": has_profile, **state}
+        listed = self.store.course_list()
+        return {"profile_exists": has_profile, "course_list_at": listed["fetched_at"],
+                "course_count": len(listed["courses"]), **state}
 
     # ------------------------------------------------------------ jobs
     def _start(self, kind: str, target) -> dict[str, Any]:
@@ -121,10 +123,42 @@ class YuketangService:
             self._log("已打开 Chrome 窗口，请用微信扫码登录雨课堂（10 分钟内有效）")
             with YuketangSession(self.store.profile_dir, headless=False) as session:
                 user = session.interactive_login(timeout=timeout)
+                try:
+                    from .sync import refresh_course_list
+                    listed = refresh_course_list(session, self.store)
+                    self._log(f"已读取 {len(listed['courses'])} 门雨课堂课程")
+                except Exception as exc:
+                    self._log(f"课程列表读取失败：{exc}")
             self.job["login_state"] = {"logged_in": True, "checked_at": now_iso()}
             self._log("雨课堂登录成功，登录状态已保存在本机")
             return {"logged_in": True, "user_id_known": bool(user.get("user_id"))}
         return self._start("login", target)
+
+    def start_courses(self) -> dict[str, Any]:
+        def target():
+            from .sync import fetch_course_list
+            listed = fetch_course_list(self.store)
+            self.job["login_state"] = {"logged_in": True, "checked_at": now_iso()}
+            self._log(f"已读取 {len(listed['courses'])} 门雨课堂课程")
+            return {"courses": len(listed["courses"])}
+        return self._start("courses", target)
+
+    def courses(self, category: str | None = None) -> dict[str, Any]:
+        """Cached course list, best match for ``category`` first."""
+        listed = self.store.course_list()
+        courses = listed["courses"]
+        if category:
+            from .retrieval import _tokens
+            want = _tokens(category)
+            def score(course):
+                name = course.get("course_name", "")
+                exact = name.replace(" ", "").lower() == category.replace(" ", "").lower()
+                overlap = len(want & _tokens(name)) / max(1, len(want))
+                return (exact, overlap)
+            ranked = sorted(courses, key=score, reverse=True)
+            best = ranked[0] if ranked and score(ranked[0])[1] >= 0.5 else None
+            listed = {**listed, "suggested": best["classroom_id"] if best else ""}
+        return listed
 
     def start_sync(self, category: str | None = None, classroom_ids: list[str] | None = None, *,
                    refresh: bool = False, transcribe: bool = False) -> dict[str, Any]:

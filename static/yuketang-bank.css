@@ -1,6 +1,27 @@
-.yuketang-section { margin: 16px 0; padding: 14px 16px; border: 1px solid var(--line); border-radius: var(--radius-sm, 10px); background: var(--card, var(--surface)); }
-.yuketang-section > summary { cursor: pointer; font-weight: 700; }
-.yuketang-section > summary small { margin-left: 8px; color: var(--muted); font-weight: 500; }
+.yuketang-section { padding-top: 14px; padding-bottom: 14px; }
+.ykt-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; }
+.ykt-head h2 { margin: 0; font-size: 16px; }
+.ykt-line { color: var(--muted); font-size: 13px; }
+.ykt-job { margin-left: auto; font-size: 12px; }
+.ykt-job:empty { display: none; }
+.ykt-head #ykt-sync { margin-left: auto; }
+.ykt-job:not(:empty) ~ #ykt-sync { margin-left: 0; }
+.ykt-more { position: relative; }
+.ykt-more > summary { list-style: none; cursor: pointer; }
+.ykt-more > summary::-webkit-details-marker { display: none; }
+.ykt-menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; display: grid; min-width: 9.5em; padding: 4px; border: 1px solid var(--line); border-radius: 8px; background: var(--card, var(--surface, #fff)); box-shadow: 0 8px 24px rgba(0,0,0,.12); }
+.ykt-menu button { padding: 6px 10px; border: 0; border-radius: 6px; background: none; color: inherit; font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
+.ykt-menu button:hover:not(:disabled) { background: var(--surface, rgba(0,0,0,.05)); }
+.ykt-menu button:disabled { opacity: .5; cursor: default; }
+.ykt-bind { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
+.ykt-bind select { min-width: min(100%, 26em); width: auto; }
+.ykt-details, .ykt-browse { margin-top: 10px; }
+.ykt-details > summary, .ykt-browse > summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+.ykt-pending { margin: 6px 0; padding-left: 1.2em; color: var(--muted); font-size: 13px; }
+.ykt-pending:empty { display: none; }
+.ykt-hit { border-left: 3px solid #e6a23c; }
+.ykt-hit-label { display: inline-block; padding: 1px 6px; border-radius: 4px; background: rgba(230,162,60,.15); color: #b26b00; font-size: 12px; font-weight: 600; }
+.yuketang-section .notice { margin: 10px 0 0; }
 .ykt-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 10px 0; }
 .ykt-row .ui-field { width: auto; min-width: 9em; }
 .ykt-classrooms { list-style: none; margin: 8px 0; padding: 0; }
@@ -17,3 +38,5 @@
 .ykt-ok { color: #1f8a4c; font-weight: 600; }
 .ykt-wrong { color: #c0392b; font-weight: 600; }
 .ykt-mine { max-height: 9em; overflow: auto; white-space: pre-wrap; }
+.ykt-hits { display: grid; gap: 10px; margin-bottom: 10px; }
+.ykt-hits .ykt-question { padding: 12px 14px; }

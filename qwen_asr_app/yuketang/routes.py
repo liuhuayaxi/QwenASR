@@ -28,7 +28,8 @@ def yuketang_router(service: YuketangService, guard: Callable[[Request], None], 
         category = known(payload.get("category"))
         try:
             entry = service.store.bind(category, payload.get("classroom_id"),
-                                       university_id=payload.get("university_id"), name=str(payload.get("name") or ""))
+                                       university_id=payload.get("university_id"), name=str(payload.get("name") or ""),
+                                       replace=bool(payload.get("replace")))
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         return {"binding": entry, **service.status(category)}
@@ -50,6 +51,15 @@ def yuketang_router(service: YuketangService, guard: Callable[[Request], None], 
             raise HTTPException(400, str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(409, str(exc)) from exc
+
+    @router.get("/courses")
+    def courses(category: str | None = Query(None)) -> dict[str, Any]:
+        return service.courses(known(category) if category else None)
+
+    @router.post("/courses/refresh")
+    def refresh_courses(request: Request) -> dict[str, Any]:
+        guard(request)
+        return {"job": start(service.start_courses)}
 
     @router.post("/login")
     def login(request: Request) -> dict[str, Any]:
@@ -77,9 +87,10 @@ def yuketang_router(service: YuketangService, guard: Callable[[Request], None], 
 
     @router.get("/questions")
     def questions(category: str = Query(...), q: str = Query(""), source: str = Query(""),
-                  limit: int = Query(200)) -> dict[str, Any]:
+                  limit: int = Query(200), mode: str = Query("filter")) -> dict[str, Any]:
         category = known(category)
-        items = service.store.search(category, q, source, limit)
+        # mode=rank serves the course 检索 box (natural-language query).
+        items = service.store.search_ranked(category, q, limit) if mode == "rank" else service.store.search(category, q, source, limit)
         return {"category": category, "questions": items, "counts": service.store.counts(service.store.course_questions(category))}
 
     @router.get("/image/{classroom_id}/{path:path}")

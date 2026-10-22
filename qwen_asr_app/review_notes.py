@@ -1059,6 +1059,11 @@ async def generate(record, config):
             *[r['receipt']['session_id'] for r in readings],*([task['writer_session_id']] if task.get('writer_session_id') else [])]))
         report=None;feedback=None
         for revision in range(min(2,max(0,int(task.get('revision',0)))),3):
+            if yuketang_questions:
+                # Resumed drafts and automatic repairs must still list every
+                # forced 雨课堂 question of this lesson.
+                from .yuketang.retrieval import ensure_section
+                markdown=ensure_section(markdown,yuketang_questions)
             markdown=timestamp_references(bind_markdown_images(markdown,folder,images,rejected),blocks)
             if not accepted:markdown=markdown.replace('学生手记整理','课堂转写整理')
             if any(']('+image['path']+')' not in markdown for image in images):

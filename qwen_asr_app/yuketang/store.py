@@ -28,7 +28,7 @@ from typing import Any, Iterable
 
 from ..durable import atomic_bytes, atomic_json
 from ..paths import PRIVATE_ROOT
-from .parsing import question_text
+from .parsing import search_text
 
 _LOCK = threading.RLock()
 CLASSROOM_ID = re.compile(r"^\d{1,15}$")
@@ -102,7 +102,26 @@ class BankStore:
     def classrooms_for(self, category: str) -> list[dict[str, Any]]:
         return list(self.bindings().get(str(category), []))
 
-    def bind(self, category: str, cid: Any, *, university_id: Any = None, name: str = "") -> dict[str, Any]:
+    # ------------------------------------------------------------ course list
+    @property
+    def course_list_path(self) -> Path:
+        return self.root / "courses.json"
+
+    def save_course_list(self, courses: list[dict[str, Any]]) -> dict[str, Any]:
+        value = {"version": 1, "fetched_at": now_iso(), "courses": courses}
+        with _LOCK:
+            self.ensure()
+            atomic_json(self.course_list_path, value)
+        return value
+
+    def course_list(self) -> dict[str, Any]:
+        data = _read(self.course_list_path, {})
+        if not isinstance(data, dict) or not isinstance(data.get("courses"), list):
+            return {"fetched_at": "", "courses": []}
+        return {"fetched_at": str(data.get("fetched_at") or ""), "courses": [c for c in data["courses"] if isinstance(c, dict)]}
+
+    def bind(self, category: str, cid: Any, *, university_id: Any = None, name: str = "",
+             replace: bool = False) -> dict[str, Any]:
         category = str(category or "").strip()
         if not category:
             raise ValueError("请先选择 QwenASR 课程")
@@ -110,7 +129,8 @@ class BankStore:
         with _LOCK:
             self.ensure()
             data = self.bindings()
-            items = [item for item in data.get(category, []) if str(item.get("classroom_id")) != cid]
+            # 改绑 replaces every earlier classroom of this course.
+            items = [] if replace else [item for item in data.get(category, []) if str(item.get("classroom_id")) != cid]
             entry = {"classroom_id": cid, "bound_at": now_iso()}
             if university_id not in (None, ""):
                 entry["university_id"] = str(int(str(university_id)))
@@ -249,12 +269,31 @@ class BankStore:
             counts["wrong"] += question.get("correct") is False
         return counts
 
+    def search_ranked(self, category: str, query: str, limit: int = 8) -> list[dict[str, Any]]:
+        """Natural-language search for the course 检索 box: CJK-bigram overlap
+        with the query, exact substring hits first."""
+        from .retrieval import _tokens
+        query = str(query or "").strip()
+        wanted = _tokens(query)
+        if not query or not wanted:
+            return []
+        compact_query = re.sub(r"\s+", "", query).lower()
+        scored = []
+        for question in self.course_questions(category):
+            text = search_text(question).lower()
+            exact = compact_query in re.sub(r"\s+", "", text)
+            overlap = len(wanted & _tokens(text)) / len(wanted)
+            if exact or overlap >= 0.6:
+                scored.append((exact, overlap, question))
+        scored.sort(key=lambda item: (item[0], item[1], item[2].get("date") or ""), reverse=True)
+        return [{**question, "_score": round(overlap + exact, 3)} for exact, overlap, question in scored[:max(1, min(50, int(limit)))]]
+
     def search(self, category: str, query: str = "", source: str = "", limit: int = 200) -> list[dict[str, Any]]:
         questions = self.course_questions(category)
         terms = [term for term in re.split(r"\s+", str(query or "").strip().lower()) if term]
         if source:
             questions = [q for q in questions if q.get("bank_category") == source or q.get("source") == source]
         if terms:
-            questions = [q for q in questions if all(term in question_text(q).lower() for term in terms)]
+            questions = [q for q in questions if all(term in search_text(q).lower() for term in terms)]
         questions.sort(key=lambda q: (q.get("date") or "", q.get("activity_id") or "", q.get("page") or q.get("index") or 0), reverse=True)
         return questions[:max(1, min(1000, int(limit)))]

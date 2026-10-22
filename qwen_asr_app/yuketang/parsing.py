@@ -214,6 +214,33 @@ def image_ref(kind: str, url: Any) -> dict[str, str] | None:
     return {"kind": kind, "url": text, "source": strip_url(text)}
 
 
+def parse_course_list(payload: Any) -> list[dict[str, Any]]:
+    """Student classrooms from ``/v2/api/web/courses/list?identity=2``.
+
+    Keeps only what the binding dropdown needs: no avatars or user ids.
+    """
+    data = body_data(payload) or {}
+    items = data.get("list") if isinstance(data, dict) else data
+    result, seen = [], set()
+    for item in items or []:
+        if not isinstance(item, dict) or item.get("classroom_id") in (None, ""):
+            continue
+        cid = str(item["classroom_id"])
+        if cid in seen:
+            continue
+        seen.add(cid)
+        course = item.get("course") if isinstance(item.get("course"), dict) else {}
+        teacher = item.get("teacher") if isinstance(item.get("teacher"), dict) else {}
+        uv = course.get("university_id")
+        result.append({"classroom_id": cid, "university_id": str(uv if uv is not None else 0),
+                       "course_name": str(course.get("name") or item.get("name") or "").strip(),
+                       "classroom_name": str(item.get("name") or "").strip(),
+                       "teacher": str(teacher.get("name") or "").strip(),
+                       "term": str(item.get("term") or ""),
+                       "created": ms_to_local(item.get("time"))[0]})
+    return result
+
+
 def parse_activities(payload: Any) -> tuple[list[dict[str, Any]], bool, Any]:
     data = body_data(payload) or {}
     activities = [item for item in data.get("activities") or [] if isinstance(item, dict)]
@@ -493,4 +520,14 @@ def question_text(question: dict[str, Any]) -> str:
     parts = [question.get("activity_title"), question.get("body")]
     parts += [f"{o.get('key')}. {o.get('value')}" for o in question.get("options") or []]
     parts += [question.get("remark"), (question.get("vision") or {}).get("text")]
+    return "\n".join(str(part) for part in parts if part)
+
+
+def search_text(question: dict[str, Any]) -> str:
+    """Everything a student may search for: text, options, answers, remarks,
+    vision transcriptions and the student's own answers."""
+    vision = question.get("vision") or {}
+    parts = [question_text(question), *(question.get("answer") or []), vision.get("answer_text"),
+             *(str(value) for value in question.get("student_answer") or []), question.get("type_text"),
+             question.get("source_label")]
     return "\n".join(str(part) for part in parts if part)

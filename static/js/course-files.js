@@ -1,4 +1,3 @@
-import { initReviewMaterials } from './review-materials.js?v=20261019-idle-lifecycle-1';
 import { IDEASHELL_SERVERS as servers } from './ideashell-config.js?v=20261007';
 import {mineruEstimateLabel} from './mineru-progress-view.js?v=20261013-time-1';
 import {createVisiblePoll} from './visible-poll.js';
@@ -48,11 +47,20 @@ function updateCategoryControls() {
     $(id).title = fixed ? '“未分类”是默认分类，不能重命名或删除' : working ? '请等待当前操作完成' : '';
   }
 }
-const review = initReviewMaterials(data => {
-  state.reviewNotes = data.notes || [];
-  state.categories = [...new Set([...state.categories, ...(data.categories || [])])];
-  renderCourses(); renderFiles();
-}, load);
+// Saved review PDFs still appear in the file list; the old lesson-selection,
+// prompt and storage panels were removed from this page.
+let reviewEpoch = 0;
+const review = {async load(category) {
+  const epoch = ++reviewEpoch;
+  try {
+    const response = await fetch(`/api/notes?${new URLSearchParams({category})}`, {cache: 'no-store'});
+    const data = await response.json();
+    if (!response.ok || epoch !== reviewEpoch) return;
+    state.reviewNotes = data.category === category ? data.notes || [] : [];
+    state.categories = [...new Set([...state.categories, ...(data.categories || [])])];
+    renderCourses(); renderFiles();
+  } catch { /* The file list stays usable without review PDFs. */ }
+}};
 function reviewCard(item) {
   const sources = (item.source_lessons || []).map(source => `${source.title}（${source.date}）`).join('、');
   const title = item.exists ? `<button type="button" class="file-title-link" data-open-review="${esc(item.id)}" title="在 Chrome 中查看 PDF">${esc(item.title || item.filename)}</button>` : esc(item.title || item.filename);
@@ -244,7 +252,7 @@ async function upload(files) {
       try {
         if (file.size > 200 * 1024 ** 2) throw new Error('超过 200 MB');
         const body = new FormData(); body.append('category', category); body.append('kind', kind); body.append('file', file);
-        if (kind === '复习资料') { body.append('title', file.name.replace(/\.pdf$/i, '')); body.append('source_ids', JSON.stringify([...review.selected])); }
+        if (kind === '复习资料') { body.append('title', file.name.replace(/\.pdf$/i, '')); body.append('source_ids', '[]'); }
         const result = await api(kind === '复习资料' ? '/api/notes/upload' : '/api/course-files/upload', body);
         result.duplicate ? duplicates++ : saved++;
       } catch (error) { errors.push(`${file.name}：${error.message}`); }

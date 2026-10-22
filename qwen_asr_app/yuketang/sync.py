@@ -308,6 +308,12 @@ def sync_classrooms(store: BankStore, classrooms: list[dict[str, Any]], *, headl
     results = []
     with YuketangSession(profile_dir or store.profile_dir, headless=headless, delay=delay) as session:
         session.check_login()
+        try:
+            refresh_course_list(session, store)
+        except LoginRequired:
+            raise
+        except Exception as exc:  # the binding dropdown is a convenience
+            progress(f"课程列表未更新：{exc}")
         for item in classrooms:
             cid = str(item["classroom_id"])
             progress(f"同步雨课堂班级 {cid}")
@@ -315,3 +321,19 @@ def sync_classrooms(store: BankStore, classrooms: list[dict[str, Any]], *, headl
                                    progress=progress, refresh=refresh, should_stop=should_stop)
             results.append(runner.run())
     return results
+
+
+COURSE_LIST = HOST + "/v2/api/web/courses/list?identity=2"
+
+
+def refresh_course_list(session, store: BankStore) -> dict[str, Any]:
+    """Cache the student's classrooms (identity=2) for the binding dropdown."""
+    payload = session.get_json(COURSE_LIST, {"x-client": "web", "xt-agent": "web", "xtbz": "ykt"})
+    return store.save_course_list(parsing.parse_course_list(payload))
+
+
+def fetch_course_list(store: BankStore, *, headless: bool = True, profile_dir=None) -> dict[str, Any]:
+    from .client import YuketangSession
+    with YuketangSession(profile_dir or store.profile_dir, headless=headless) as session:
+        session.check_login()
+        return refresh_course_list(session, store)

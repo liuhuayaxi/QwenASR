@@ -587,6 +587,7 @@ async def _build_text_note_summary(
         "knowledge_source_validation": knowledge_validation,
         "student_notes_included": bool(accepted_notes),
         "yuketang_question_ids": [item.get("id") for item in yuketang_questions],
+        "yuketang_forced_ids": [item.get("id") for item in yuketang_questions if item.get("必含")],
     }
     draft["phase"] = "录音库短摘要"
     # Persist the detailed Markdown before the independent short-abstract call.
