@@ -6,13 +6,26 @@ from qwen_asr_app import note_prompts as np
 class NotePromptTests(unittest.TestCase):
     def test_modules_follow_lesson_features(self):
         scope = {'enabled': True, 'items': [{'level': 'mastery', 'text': '掌握P-I特性'}]}
-        package = {'sources': [{'name': '翻转课堂第二次课课件.pdf'}]}
+        package = {'category': '光电子学', 'sources': [{'name': 'x.pdf', 'pages': [{'text': '第四章 信道 翻转课堂课件'}, {'text': '正文'}]}]}
         found = np.features(package, scope, [{'id': 'q'}])
-        self.assertEqual(found, {'learning_requirements': True, 'yuketang': True, 'preview': True, 'transcript': True})
+        self.assertEqual(found, {'learning_requirements': True, 'yuketang': True, 'preview': True, 'transcript': True, 'course': 'guangdianzi'})
         text = np.compose(found)
         self.assertIn('## 本章学习要求', text); self.assertIn('预习', text); self.assertIn('## 课上习题', text)
-        plain = np.compose(np.features({'sources': [{'name': '第02章.pdf'}]}, {}, []))
+        plain = np.compose(np.features({'sources': [{'name': '翻转课堂第02章.pdf', 'pages': [{'text': '2.1 节 LED 结构'}]}]}, {}, []))
         self.assertNotIn('## 本章学习要求', plain); self.assertNotIn('课上习题', plain); self.assertIn('章节标题', plain)
+
+    def test_course_detection_uses_category_and_preview_uses_structure(self):
+        self.assertEqual(np.course_for('通信原理 C'), 'tongxin')
+        self.assertEqual(np.course_for('通信原理（C）'), 'tongxin')
+        self.assertEqual(np.course_for('微型计算机原理与接口技术'), 'weiji')
+        self.assertIsNone(np.course_for('未分类'))
+        for slug in ('tongxin', 'guangdianzi', 'weiji', 'jiguang', 'wuliguangxue', 'guangdianziqijian'):
+            self.assertIn(slug, np.course_modules())
+        text = np.compose({'learning_requirements': False, 'yuketang': False, 'preview': False, 'course': 'weiji'})
+        self.assertIn('指令表', text); self.assertIn('## 复习清单', text); self.assertIn('★', text)
+        questions = {'pages': [{'text': '1、什么是映射？\n2、为什么要成形？'}, {'text': '思考题1：解释 AM'}, {'text': '正文'}]}
+        lecture = {'pages': [{'text': '正文'}] * 9 + [{'text': '思考题1：为什么？'}]}
+        self.assertTrue(np.is_preview_source(questions)); self.assertFalse(np.is_preview_source(lecture))
 
     def test_clean_removes_meta_ascii_diagrams_and_internal_comments(self):
         md = ('> 新旧内容判断范围：本节完整转写。不能证明老师此前没有讲过。\n\n## P-I 特性\n\n'
@@ -27,6 +40,8 @@ class NotePromptTests(unittest.TestCase):
         self.assertEqual(np.bold_cjk_safe('受**俄歇复合（Auger）**几率'), '受<strong>俄歇复合（Auger）</strong>几率')
         self.assertEqual(np.bold_cjk_safe('**定义**：x'), '**定义**：x')
         self.assertEqual(np.human_date('2026-10-14T08:00:00+08:00'), '2026年10月14日 08:00')
+        from qwen_asr_app.note_content import _date
+        self.assertEqual(_date('2026-10-12T09:50:00+08:00'), '2026年10月12日 09:50'); self.assertEqual(_date(None), '未知')
 
 
     def test_exercise_section_layout_is_normalized(self):

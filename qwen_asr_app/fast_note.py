@@ -26,7 +26,7 @@ from .review_materials import collect, extract_image, bind_markdown_images
 from .storage import local_now
 from . import review_scope
 
-VERSION = 'fast-one-turn-v2'
+VERSION = 'fast-one-turn-v3'
 MAX_PAGE_CHARS = 1800
 LOCATOR = re.compile(r'!\[[^\]]*\]\(\.?/?figures/([a-f0-9]{32})_p(\d+)\.png\)')
 
@@ -67,7 +67,7 @@ async def generate_fast(record, config):
         # Without speech there is nothing to rank optional questions against;
         # keep this lesson's own exercises so the note stays on topic.
         questions = [q for q in questions if q.get('必含')]
-    identity = hashlib.sha256(json.dumps([VERSION, record.id, blocks, questions, record.metadata.get('review_material_ids')],
+    identity = hashlib.sha256(json.dumps([VERSION, note_prompts.fingerprint(), record.id, blocks, questions, record.metadata.get('review_material_ids')],
                                          sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()[:24]
     relative = f'.review-notes/{identity}'
     folder = record.directory / relative
