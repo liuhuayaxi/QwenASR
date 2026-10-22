@@ -54,14 +54,126 @@ def cleanup_legacy_course_listener():
             continue
 
 
-def request(name, path, method='GET', token=None):
+def request(name, path, method='GET', token=None, timeout=3):
     # Origin is scheme + host only; the mounted course path is not part of an
     # HTTP origin and would be rejected by the service's request guard.
     headers = {'X-QwenASR-Control': token or '', 'X-QwenASR-Client': 'smartclass', 'Origin': BASE_URL}
     req = urllib.request.Request(ENDPOINTS[name] + path, method=method, headers=headers)
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    with opener.open(req, timeout=3) as response:
+    with opener.open(req, timeout=timeout) as response:
         return json.load(response)
+
+
+def process_snapshot():
+    """OS evidence remains available even when the HTTP event loop is stuck."""
+    output = subprocess.check_output(
+        ['/bin/ps', '-axo', 'pid=,ppid=,stat=,lstart=,command='], text=True, timeout=2)
+    rows = {}
+    for line in output.splitlines():
+        fields = line.split(None, 8)
+        if len(fields) == 9:
+            rows[int(fields[0])] = {'parent': int(fields[1]), 'state': fields[2],
+                                   'started': ' '.join(fields[3:8]), 'command': fields[8]}
+    return rows
+
+
+def owned_process(saved, snapshot):
+    pid, token = saved.get('pid'), saved.get('token')
+    row = snapshot.get(pid)
+    if not row or row['state'].startswith('Z'):
+        return False
+    if not token or (saved.get('started') and saved['started'] != row['started']):
+        raise RuntimeError('服务进程标识已变化，已拒绝停止其他程序')
+    expected = f'{sys.executable} -m uvicorn app:app --host 127.0.0.1 --port {PORT}'
+    if not (row['command'] == expected or row['command'].startswith(expected + ' ')):
+        raise RuntimeError('服务进程路径不匹配，已拒绝停止其他程序')
+    # Check the launch token without printing environment variables or secrets.
+    environment = subprocess.check_output(
+        ['/bin/ps', 'eww', '-p', str(pid), '-o', 'command='], text=True, timeout=2)
+    if f'QWEN_ASR_INSTANCE={token}' not in environment.split():
+        raise RuntimeError('服务启动标识不匹配，已拒绝停止未知进程')
+    return True
+
+
+def terminate_processes(roots, snapshot, grace_seconds=2):
+    """Stop owned roots and their children, including detached worker sessions."""
+    targets = set(roots)
+    while True:
+        children = {pid for pid, row in snapshot.items() if row['parent'] in targets}
+        if children <= targets:
+            break
+        targets.update(children)
+    def alive():
+        current = process_snapshot()
+        living = {pid for pid in targets if pid in current
+                and current[pid]['started'] == snapshot[pid]['started']
+                and not current[pid]['state'].startswith('Z')}
+        # Include workers created while the stop request was in flight.
+        while True:
+            children = {pid for pid, row in current.items() if row['parent'] in living
+                        and pid not in targets and not row['state'].startswith('Z')}
+            if not children:
+                break
+            for pid in children:
+                snapshot[pid] = current[pid]
+            targets.update(children)
+            living.update(children)
+        return living
+    def send(pids, sig):
+        for pid in pids:
+            try:
+                os.kill(pid, sig)
+            except ProcessLookupError:
+                pass
+    # Signal immediately; neither API readiness nor running work is a veto.
+    send(alive(), signal.SIGTERM)
+    deadline = time.monotonic() + grace_seconds
+    remaining = alive()
+    while remaining and time.monotonic() < deadline:
+        time.sleep(.05)
+        remaining = alive()
+    forced = bool(remaining)
+    if remaining:
+        send(remaining, signal.SIGKILL)
+        deadline = time.monotonic() + 1
+        while remaining and time.monotonic() < deadline:
+            time.sleep(.05)
+            remaining = alive()
+    if remaining:
+        raise RuntimeError('系统尚未结束服务进程：' + ', '.join(map(str, sorted(remaining))))
+    return forced
+
+
+def stop_services(instances):
+    snapshot = process_snapshot()
+    owned = {}
+    for name, saved in instances.items():
+        if name in ENDPOINTS and owned_process(saved, snapshot):
+            owned.setdefault(saved['pid'], (name, saved))
+    if not owned:
+        print('QwenASR 已停止。')
+        return
+    # Best-effort persistence is bounded and cannot prevent process termination.
+    for name, saved in owned.values():
+        try:
+            request(name, '/api/service/request-stop', 'POST', saved['token'], timeout=.5)
+        except (OSError, ValueError):
+            pass
+    forced = terminate_processes(owned, snapshot)
+    # The event loop may have been too stuck to persist /request-stop. Only
+    # touch this journal after all owned writers are gone, retaining all items.
+    queue_path = PRIVATE_ROOT / 'smartclass' / 'queue.json'
+    if queue_path.exists():
+        try:
+            queue = json.loads(queue_path.read_text())
+            queue['paused'] = True
+            for item in queue['items']:
+                if item.get('state') in {'queued', 'running', 'interrupted'}:
+                    item['state'] = 'paused'
+            atomic_json(queue_path, queue)
+        except (OSError, ValueError, KeyError, TypeError):
+            print('服务已退出，但未能更新课程暂停标记；下次启动请检查队列。', file=sys.stderr)
+    print('QwenASR 已停止（超时任务已强制结束）。' if forced else 'QwenASR 已停止。')
 
 
 def health(name):
@@ -78,7 +190,9 @@ def main():
     run = PRIVATE_ROOT / 'services'
     run.mkdir(parents=True, exist_ok=True)
     with (run / 'controller.lock').open('a') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        # A stuck start/controller must not hold the stop action hostage.
+        if args.action != 'stop':
+            fcntl.flock(lock, fcntl.LOCK_EX)
         path = run / 'instances.json'
         try:
             instances = json.loads(path.read_text())
@@ -111,7 +225,8 @@ def main():
             with (ROOT / 'server.log').open('ab') as output:
                 process = subprocess.Popen(command, cwd=ROOT, env=env, stdin=subprocess.DEVNULL,
                                            stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
-            instances = {name: {'pid': process.pid, 'token': token} for name in ENDPOINTS}
+            started = process_snapshot().get(process.pid, {}).get('started')
+            instances = {name: {'pid': process.pid, 'token': token, 'started': started} for name in ENDPOINTS}
             atomic_json(path, instances)
             for _ in range(90):
                 if process.poll() is not None:
@@ -125,31 +240,7 @@ def main():
                 raise RuntimeError('QwenASR 启动超时，请查看 server.log')
             print('QwenASR 已就绪（工作台和课程回放共用一个端口）。')
             return
-        # Freeze new work only when both services are idle; otherwise reopen any
-        # previously prepared service. Never signal an unverified/stale PID.
-        prepared = []
-        try:
-            for name in ('courses', 'workbench'):
-                current = health(name)
-                if not current:
-                    continue
-                saved = instances.get(name, {})
-                if not saved or current.get('instance') != saved.get('token') or current.get('pid') != saved.get('pid'):
-                    raise RuntimeError('服务由其他启动器启动，已拒绝停止未知进程')
-                request(name, '/api/service/prepare-stop', 'POST', saved['token'])
-                prepared.append((name, saved))
-        except Exception:
-            for name, saved in prepared:
-                request(name, '/api/service/cancel-stop', 'POST', saved['token'])
-            raise RuntimeError('仍有录音或任务正在进行，请先在页面暂停队列、完成录音及 AI 任务，再停止服务') from None
-        killed = set()
-        for name, saved in prepared:
-            current = health(name)
-            if (current and current.get('instance') == saved['token'] and current.get('pid') == saved['pid']
-                    and saved['pid'] not in killed):
-                os.kill(saved['pid'], signal.SIGTERM)
-                killed.add(saved['pid'])
-        print('已安全请求停止服务。')
+        stop_services(instances)
 
 
 if __name__ == '__main__':

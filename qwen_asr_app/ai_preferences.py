@@ -15,7 +15,7 @@ SETTINGS_FIELDS = {'base_url', 'model', 'context_window', 'summary_interval', 's
                    'title_prompt', 'detailed_summary_prompt', 'abstract_prompt',
                    'review_base_url', 'review_model', 'review_api_mode', 'review_context_window',
                    'review_extra_params', 'summary_base_url', 'summary_model', 'summary_api_mode',
-                   'summary_context_window', 'summary_extra_params', 'classroom_chat_context'}
+                   'summary_context_window', 'summary_extra_params', 'classroom_chat_context','note_review_enabled'}
 
 
 def _saved_providers(settings):
@@ -62,6 +62,8 @@ class AIPreferences:
             raise ValueError('AI 配置格式无效')
         if len(json.dumps(settings, ensure_ascii=False)) > 512_000:
             raise ValueError('AI 配置过大，未保存')
+        if 'note_review_enabled' in settings and type(settings['note_review_enabled']) is not bool:
+            raise ValueError('笔记审核开关必须是布尔值')
         previous = self.read()
         # A function-specific settings save updates only the submitted modes.
         # DELETE /api/ai/settings remains the explicit way to clear all choices.
@@ -181,6 +183,7 @@ class AIPreferences:
             ai['history_chars'] = 2000
         result['ai'] = ai
         result['_ai_settings_source'] = 'local_saved'
+        result['note_review_enabled'] = saved.get('note_review_enabled') is True
         # These are global settings, not per-request overrides. Only task
         # controls (e.g. "generate a summary now") may enable an operation.
         # Normal browser task actions use the durable global switches. Local

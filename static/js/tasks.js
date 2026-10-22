@@ -5,6 +5,7 @@ import {mergeLiveCourseProgress} from './course-progress.js?v=20261018-recovery-
 import {mineruEstimateLabel, legacyMineruProgress} from './mineru-progress-view.js?v=20261013-time-2';
 import {resourceStatus} from './resource-status.js?v=20261013-1';
 import {aiActivityView} from './ai-activity-view.js?v=20261019-live-model-activity';
+import {asrResourceView} from './asr-resource-view.js?v=20261022-local-main-1';
 
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c]));
@@ -15,6 +16,32 @@ const actionLabels = {continue:'继续', retry:'重试', regenerate:'重新生�
 const filterLabels = {daily:'当前进展', all:'全部课堂与资料', active:'进行中', attention:'需要处理', review:'待核对', pending:'尚未开始', paused:'已暂停', completed:'已完成', cancelled:'已取消', recovered:'有恢复记录'};
 const state = {tasks: [], groups: [], counts: {}, history: {}, filter: 'daily', selected: new Set(), busy: false, loading: false, ready: false, reloadRequested: false, revision: 0, detailState: new Map()};
 let timer, toastTimer, lastPayload = '', loadFailed = false;
+let asrResources = {}, resourceRequest = null, lastResourceCheck = 0;
+const asrResourceText = view => view.text.replace(/\b(CPU|GPU) /g, '$1\u00a0');
+
+function applyAsrResources() {
+  for (const node of $('taskList').querySelectorAll('[data-asr-resource]')) {
+    const phase = {state: 'running', execution: {provider: node.dataset.asrProvider,
+      fallback: node.dataset.asrFallback === 'true', updated_at: Number(node.dataset.asrUpdated || 0)}};
+    const view = asrResourceView(phase, asrResources[node.dataset.asrResource]);
+    node.textContent = asrResourceText(view); node.title = view.title;
+  }
+}
+function refreshAsrResources() {
+  const nodes = [...$('taskList').querySelectorAll('[data-asr-resource]')];
+  if (document.hidden || resourceRequest || !nodes.length || Date.now() - lastResourceCheck < 5000) return;
+  lastResourceCheck = Date.now();
+  resourceRequest = (async () => {
+    try {
+      const response = await fetch('/course/api/resources', {cache: 'no-store', signal: AbortSignal.timeout(4500)});
+      if (!response.ok) throw Error('资源状态暂不可用');
+      const data = await response.json();
+      asrResources = data.lessons || {};
+    } catch { asrResources = {}; }
+    if (document.hidden) return;
+    applyAsrResources();
+  })().finally(() => { resourceRequest = null; });
+}
 
 function notice(id, message) { $(id).textContent = message; $(id).hidden = !message; }
 function toast(message) { notice('toast', message); clearTimeout(toastTimer); toastTimer = setTimeout(() => $('toast').hidden = true, 5000); }
@@ -95,7 +122,9 @@ function courseQueueDetails(task) {
     const phases = (item.phases || []).map(phase => {
       const percent = Math.max(0, Math.min(100, Number(phase.percent) || 0));
       const phaseState = phase.state === 'completed' ? 'completed' : phase.state === 'running' ? 'running' : 'pending';
-      return `<div class="course-phase" data-state="${esc(phaseState)}"><div class="course-phase-head"><span>${esc(phase.label)}</span><b>${percent.toFixed(percent % 1 ? 1 : 0)}%</b></div><progress max="100" value="${percent}"></progress><small>${esc(phase.detail || (phase.state === 'completed' ? '已完成' : '等待处理'))}</small></div>`;
+      const execution = phase.key === 'asr' ? asrResourceView({...phase, state: item.state === 'running' ? phase.state : 'paused'}, asrResources[item.id]) : null;
+      const monitor = phase.key === 'asr' && phase.state === 'running' && item.state === 'running';
+      return `<div class="course-phase" data-state="${esc(phaseState)}"><div class="course-phase-head"><span ${execution ? 'class="course-asr-resource"' : ''} ${monitor ? `data-asr-resource="${esc(item.id)}" data-asr-provider="${esc(phase.execution?.provider || '')}" data-asr-fallback="${!!phase.execution?.fallback}" data-asr-updated="${esc(phase.execution?.updated_at || 0)}"` : ''} title="${esc(execution?.title || '')}">${esc(execution ? asrResourceText(execution) : phase.label)}</span><b>${percent.toFixed(percent % 1 ? 1 : 0)}%</b></div><progress max="100" value="${percent}"></progress><small>${esc(phase.detail || (phase.state === 'completed' ? '已完成' : '等待处理'))}</small></div>`;
     }).join('');
     const window = item.start && item.stop ? ` · ${item.start}–${item.stop}` : '';
     return `<article class="course-queue-item"><div class="course-queue-item-head"><b>${esc(item.title)}</b><span>${esc(item.state === 'running' ? '进行中' : item.state === 'paused' ? '已暂停' : '排队中')}</span></div><p>${esc(item.course || '')}${esc(window)}</p><div class="course-phases">${phases || `<small>${esc(item.message || '等待课程回放处理')}</small>`}</div></article>`;
@@ -298,11 +327,13 @@ async function load() {
     if ([...$('categoryFilter').options].some(option => option.value === categoryValue)) $('categoryFilter').value = categoryValue;
     const signature = JSON.stringify(data);
     if (signature !== lastPayload) { render(); lastPayload = signature; }
+    refreshAsrResources();
     notice('loadError', ''); notice('sourceWarning', [...(data.warnings || []), courseWarning].filter(Boolean).join('\n'));
     $('lastUpdated').textContent = `已同步 ${new Date().toLocaleTimeString('zh-CN')} · ${state.counts.active ? '每 3 秒自动更新' : '空闲时每分钟校验，返回页面立即更新'}`;
   } catch (error) {
     loadFailed = true;
     if (revision !== state.revision || state.busy) return;
+    asrResources = {}; applyAsrResources();
     notice('loadError', `${error.message}。${state.ready ? '当前保留上次读取的任务。' : ''}`);
     if (!state.ready) $('taskList').innerHTML = '<div class="task-empty">暂时无法读取任务，请稍后刷新。</div>';
     $('lastUpdated').textContent = '连接中断，正在自动重连';

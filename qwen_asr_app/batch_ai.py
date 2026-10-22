@@ -392,8 +392,12 @@ async def build_note_summary(
         from .review_notes import generate
         return await generate(record, config)
     result = await _build_text_note_summary(record, config)
-    result['review_status'] = 'unreviewed'
-    result['review_warning'] = '当前提供商没有已验证的图文审查能力；完整 Markdown 已保存，未完成视觉审查'
+    if config.get('note_review_enabled') is True:
+        result['review_status'] = 'unreviewed'
+        result['review_warning'] = '当前提供商没有已验证的图文审查能力；完整 Markdown 已保存，未完成视觉审查'
+    else:
+        result.update(review_status='skipped',review_enabled=False,review_policy='disabled_by_settings')
+        result.pop('review_warning',None)
     record.save_metadata()
     return result
 

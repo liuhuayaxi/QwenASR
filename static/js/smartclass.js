@@ -4,6 +4,7 @@ const selectedLessonIds = new Set();
 let busy = false, submitting = false, loadingCourse = '', loadSerial = 0, accountCollapsed = false;
 let replayLoginSubmitted = false;
 let sessionCheckInFlight = false, lastSessionCheck = 0;
+let autoSessionPaused = false, cancellingConnection = false;
 let refreshInFlight = null, refreshQueued = false, statusSignature = '', importsSignature = '', refreshFailed = false;
 function notice(message = '', kind = 'error') { $('notice').textContent = message; $('notice').dataset.kind = kind; }
 function courseTimingText(metrics) {
@@ -37,7 +38,7 @@ function continuePendingReplay(status) {
 async function post(path, body) {
   const r = await fetch(path, {
     method: 'POST', headers: {'Content-Type':'application/json','X-QwenASR-Client':'smartclass'},
-    body: JSON.stringify(body || {})
+    body: JSON.stringify(body || {}), signal: globalThis.AbortSignal?.timeout?.(15000)
   });
   const value = await r.json();
   if (!r.ok) throw Error(typeof value.detail === 'string' ? value.detail : '提交失败');
@@ -130,7 +131,8 @@ async function loadLessons() {
   $('lessonsStatus').hidden = false;
   updateSelection(); notice();
   try {
-    const response = await fetch('/api/lessons?course=' + encodeURIComponent(key));
+    const response = await fetch('/api/lessons?course=' + encodeURIComponent(key),
+      {signal: globalThis.AbortSignal?.timeout?.(35000)});
     const result = await response.json();
     if (serial !== loadSerial) return;
     if (!response.ok) throw Error(result.detail);
@@ -149,7 +151,9 @@ async function loadLessons() {
 function renderCourseState(s) {
   busy = ['connecting','syncing'].includes(s.state);
   $('refresh').disabled = busy || !s.identity;
-  $('courses').disabled = busy;
+  $('courses').disabled = busy && !s.courses.length;
+  $('cancelConnection').hidden = !busy && s.session_check !== 'checking';
+  $('cancelConnection').disabled = cancellingConnection;
   $('stop').hidden = s.state !== 'running';
   $('resumeQueue').hidden = busy || s.state === 'running' || !(s.queue?.remaining);
   $('resumeQueue').disabled = !s.identity;
@@ -269,7 +273,14 @@ async function refresh() {
       $('accountLabel').textContent = s.identity?.name && s.authenticated ? '账号已连接 · ' + s.identity.name : '统一身份认证';
       window.courseStatus = s;
       renderCourseState(s);
-    } catch { refreshFailed = true; statusSignature = ''; $('state').textContent = '本机课程同步服务尚未连接'; }
+    } catch {
+      refreshFailed = true; statusSignature = ''; busy = false;
+      $('state').textContent = '本机服务已停止或连接中断，请启动 QwenASR 后重试';
+      $('connect').disabled = $('reconnect').disabled = false;
+      $('courses').disabled = false;
+      $('cancelConnection').hidden = true;
+      updateSelection();
+    }
   })().finally(() => {
     refreshInFlight = null;
     if (refreshQueued && !document.hidden) { refreshQueued = false; void refresh(); }
@@ -278,7 +289,7 @@ async function refresh() {
   return refreshInFlight;
 }
 async function checkSession() {
-  if (sessionCheckInFlight || Date.now() - lastSessionCheck < 60000) return;
+  if (autoSessionPaused || sessionCheckInFlight || Date.now() - lastSessionCheck < 60000) return;
   sessionCheckInFlight = true;
   lastSessionCheck = Date.now();
   try {
@@ -289,6 +300,7 @@ async function checkSession() {
   finally { sessionCheckInFlight = false; }
 }
 $('login').addEventListener('submit', async e => {
+  autoSessionPaused = false;
   e.preventDefault(); notice();
   try {
     await post('/api/connect', {username:$('username').value,password:$('password').value,save:$('save').checked,
@@ -298,6 +310,7 @@ $('login').addEventListener('submit', async e => {
   } catch (e) { notice(e.message); }
 });
 $('reconnect').onclick = async () => {
+  autoSessionPaused = false;
   notice();
   try { await post('/api/reconnect', {replay_only:!!pendingReplayURL()}); replayLoginSubmitted = true; await refresh(); } catch (e) { notice(e.message); }
 };
@@ -306,6 +319,7 @@ $('courses').onchange = () => { clearLessons(); if ($('courses').value) loadLess
 $('loadLessons').onclick = loadLessons;
 $('allowSingle').onchange = renderLessons;
 $('refresh').onclick = async () => {
+  autoSessionPaused = false;
   notice();
   try { await post('/api/refresh'); await refresh(); } catch (e) { notice(e.message); }
 };
@@ -364,6 +378,18 @@ $('import').onclick = async () => {
 };
 $('stop').onclick = async () => {
   try { await post('/api/stop'); notice('正在暂停队列，已保存的转写进度会保留…', 'success'); await refresh(); } catch (e) { notice(e.message); }
+};
+$('cancelConnection').onclick = async () => {
+  if (cancellingConnection) return;
+  autoSessionPaused = true;
+  replayLoginSubmitted = false;
+  cancellingConnection = true; $('cancelConnection').disabled = true;
+  try {
+    await post('/api/cancel-connection');
+    notice('已取消登录或课程刷新，已有课程列表已保留。', 'success');
+    await refresh();
+  } catch (error) { notice(error.message); }
+  finally { cancellingConnection = false; $('cancelConnection').disabled = false; }
 };
 let refreshTimer = 0;
 function scheduleRefresh() {

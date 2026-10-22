@@ -262,16 +262,22 @@ class CourseStreamJob:
                     operation_dir=None
                     if routing.get('asr_provider','local')!='local':
                         operation_dir=self.record.directory/'.course-operations'/f'{index:05d}-{start}-{end}'
+                    def on_provider(value):
+                        self.state['asr_execution'] = {**value, 'updated_at': time.time()}
+                        self.record.save_metadata()
                     inference = asyncio.create_task(self.model.transcribe(
                         audio[start:end], self.config.get("language"),
                         asr_terminology_context(self.config.get("context", ""), self.config.get("terminology")),
                         max_tokens=min(1536, max(256, int(seconds * 10) + 128)),
                         asr_params=asr_params_with_terminology(self.config.get("asr_params"), self.config.get("terminology")),
                         timeout_seconds=180, metrics=metrics,
-                        inference_config=routing,operation_dir=operation_dir,
+                        inference_config=routing,operation_dir=operation_dir,on_provider=on_provider,
                     ))
                     try:
                         text, language, latency = await asyncio.shield(inference)
+                        if metrics.get('provider') in {'local', 'remote'}:
+                            self.state['asr_execution'] = {'provider': metrics['provider'], 'state': 'observed',
+                                                         'fallback': bool(metrics.get('fallback')), 'updated_at': time.time()}
                         if has_repetitive_tail(text):
                             if seconds > 35:
                                 raise ValueError("检测到重复输出")

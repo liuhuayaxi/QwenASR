@@ -419,6 +419,27 @@ class RecordingRecord:
         self._last_meta_write = 0.0
         self._persisted_note = copy.deepcopy(metadata.get("ai_note_summary"))
 
+    def complete_material_only_note(self) -> bool:
+        """Finish explicit empty-transcript work without retrying silent audio.
+
+        A saved note alone never completes a failed recording. Both the user's
+        material-only decision and a completed material-derived note are needed.
+        """
+        choice=self.metadata.get('material_only_note') or {}
+        note=self.metadata.get('ai_note_summary') or {}
+        if (choice.get('transcript_policy')!='empty' or self.segments
+                or note.get('source')!='course_material_only' or not note.get('summary')
+                or self.metadata.get('status') not in {'interrupted','failed'}):return False
+        stream=self.metadata.get('course_stream') or {}
+        if stream.get('error'):choice.setdefault('previous_audio_error',stream['error'])
+        choice.update(status='completed',asr_status='skipped_by_user',completed_at=local_now())
+        self.metadata.update(status='completed',ended_at=self.metadata.get('ended_at') or
+            (self.metadata.get('course_time') or {}).get('end') or local_now())
+        if stream:
+            stream.update(stage='completed_material_only',error='',paused=False)
+        self.save_metadata()
+        return True
+
     @classmethod
     def create_live(cls, title: str, category: str, storage_root: Path, recorded_at: str | None = None) -> "RecordingRecord":
         started = datetime.now().astimezone()
@@ -1129,6 +1150,7 @@ class RecordingStore:
                 stamp = tuple((p.stat().st_mtime_ns, p.stat().st_size) if p.exists() else None for p in (meta_path, meta_path.parent / "transcript.json"))
                 cached = self._read_cache.get(meta_path)
                 record = cached[1] if cached and cached[0] == stamp else RecordingRecord.load(meta_path.parent)
+                record.complete_material_only_note()
                 self._read_cache[meta_path] = (stamp, record)
                 # Bound the peak as well as the final cache. Keeping every
                 # decoded transcript until the sweep ends inflated idle RSS.

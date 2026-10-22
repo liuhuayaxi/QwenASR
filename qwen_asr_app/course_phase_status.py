@@ -16,7 +16,11 @@ def lesson_phases(entry, record=None):
         phases[key]={'label':label,'percent':percent,'state':state,'detail':detail}
     if asr_done:
         put('download','获取回放音频',100,'completed','回放音频已保存')
-        put('asr','本地语音转写',100,'completed',f'已保存 {len(record.segments)} 段转写')
+        put('asr','语音转写',100,'completed',f'已保存 {len(record.segments)} 段转写')
+    if 'asr' in phases:
+        from .asr_resources import execution
+        placement, _ = execution(record)
+        phases['asr'].update(label=placement['label'], execution=placement)
     progress=saved_progress(record)
     pending=len(active_candidates(record))
     if 'correction' in phases:

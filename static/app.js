@@ -39,6 +39,7 @@ const els = {
   partialCard: $("#partialCard"), partialText: $("#partialText"), copyButton: $("#copyButton"),
   clearButton: $("#clearButton"), language: $("#language"), aiCorrection: $("#aiCorrection"),
   summaryEnabled: $("#summaryEnabled"),
+  noteReviewEnabled: $("#noteReviewEnabled"),
   translation: $("#translation"), aiBaseUrl: $("#aiBaseUrl"),
   aiModel: $("#aiModel"), reviewBaseUrl: $("#reviewBaseUrl"), reviewModel: $("#reviewModel"),
   reviewApiKey: $("#reviewApiKey"), reviewApiMode: $("#reviewApiMode"),
@@ -471,6 +472,7 @@ function saveApiSettings() {
     base_url: els.aiBaseUrl.value, model: els.aiModel.value,
     context_window: els.contextWindow.value, summary_interval: els.summaryInterval.value,
     summary_enabled: els.summaryEnabled.checked, api_key: els.aiApiKey.value,
+    note_review_enabled: els.noteReviewEnabled.checked,
     extra_params: els.apiParams.value, ai_correction: els.aiCorrection.checked,
     api_mode: els.aiApiMode.value, history_chars: els.historyChars.value,
     translation: els.translation.value, title_prompt: els.titlePrompt.value,
@@ -532,6 +534,7 @@ async function restoreApiSettings() {
     els.contextWindow.value = saved.context_window || String(DEFAULT_CONTEXT_TOKENS);
     els.summaryInterval.value = saved.summary_interval || "10";
     els.summaryEnabled.checked = Boolean(saved.summary_enabled);
+    els.noteReviewEnabled.checked = saved.note_review_enabled === true;
     els.aiApiMode.value = saved.api_mode || "auto";
     els.aiApiKey.value = saved.api_key || "";
     els.historyChars.value = saved.history_chars ?? "2000";
@@ -1105,7 +1108,7 @@ function renderLibrary() {
         <a href="${record.downloads.audio}">AAC</a>
         <a href="${record.downloads.raw_transcript || record.downloads.transcript}">原始转写 TXT</a>
         <a href="${record.downloads.corrected_transcript || record.downloads.transcript}">AI 修正 TXT</a>
-        <a data-review-pdf="${escapeHtml(record.id)}" data-reviewed="${record.ai_note_summary?.review_status === 'passed'}" class="${detailedSummary ? "" : "disabled-download"}" href="${record.downloads.ai_summary}">复习笔记 PDF</a>
+        <a data-review-pdf="${escapeHtml(record.id)}" data-pdf-ready="${record.ai_note_summary?.review_status === 'passed' || (record.ai_note_summary?.review_status === 'skipped' && !els.noteReviewEnabled.checked)}" class="${detailedSummary ? "" : "disabled-download"}" href="${record.downloads.ai_summary}">复习笔记 PDF${record.ai_note_summary?.review_status === 'skipped'?'（未审核）':''}</a>
         ${courseReplayLinks(record).map((link) => `<a class="library-replay-link" href="${link.url}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(link.title || "在南邮 Smart Class 打开对应回放")}">${escapeHtml(link.label)}</a>`).join("")}
         <button class="library-regenerate-summary" type="button" ${canGenerateSummary ? "" : "disabled"}>重新生成复习笔记</button>
       </div>` : ""}`;
@@ -1511,7 +1514,7 @@ function renderNoteSummary(session) {
       : session.ideashell_sync?.note_id ? " · 已关联 IdeaShell" : "";
     const abstractNotice = summary.abstract_error ? ` · 课堂记录短摘要失败：${summary.abstract_error}` : "";
     const titleNotice = summary.title_error ? " · 自动取名未完成，可在课堂记录点击“AI 取名”重试" : "";
-    const reviewNotice = summary.review_status === 'passed' ? ' · PDF 已逐页独立审查' : ' · 未完成当前版本的视觉审查，点击下载可继续导出与审查';
+    const reviewNotice = summary.review_status === 'passed' ? ' · PDF 已逐页独立审查' : summary.review_status === 'skipped' ? ' · 未审核（审核已关闭），可直接下载 PDF' : ' · 当前版本未审核，下载时按已保存的审核开关处理';
     els.noteSummaryHint.textContent = `图文复习笔记${edited}${syncState}${abstractNotice}${titleNotice}${reviewNotice}${summary.updated_at ? ` · ${new Date(summary.updated_at).toLocaleString()}` : ""}`;
   } else {
     els.noteSummaryHint.textContent = summary.abstract_error
@@ -1531,14 +1534,14 @@ els.downloadNoteSummary.addEventListener('click', async event => {
   try {
     if (!await saveNoteSummary({quiet:true})) return;
     if (state.noteSession?.id !== session.id) return;
-    if (state.noteSession.ai_note_summary?.review_status === 'passed') {
+    if (state.noteSession.ai_note_summary?.review_status === 'passed' || (state.noteSession.ai_note_summary?.review_status === 'skipped' && !els.noteReviewEnabled.checked)) {
       window.location.assign(state.noteSession.downloads.ai_summary);
       return;
     }
     const response = await fetch(`/api/recordings/${encodeURIComponent(session.id)}/review-pdf`, {method:'POST'});
     const result = await response.json();
     if (!response.ok) throw new Error(result.detail || 'PDF 审查启动失败');
-    toast('正在后台导出并逐页独立审查，可在任务中心查看；通过后再次点击下载 PDF');
+    toast(els.noteReviewEnabled.checked?'正在后台导出并逐页审核，可在任务中心查看':'正在后台导出 PDF，审核已关闭；保存后即可下载');
   } catch (error) { toast(error.message); }
 });
 
@@ -1549,7 +1552,7 @@ document.addEventListener('click', async event => {
   try {
     const response = await fetch(`/api/recordings/${encodeURIComponent(link.dataset.reviewPdf)}/review-pdf`,{method:'POST'});
     const result = await response.json(); if (!response.ok) throw new Error(result.detail || '无法导出 PDF');
-    toast('已安排 PDF 导出与逐页审查，请在任务中心查看，通过后即可下载');
+    toast(els.noteReviewEnabled.checked?'已安排 PDF 导出与逐页审核，请在任务中心查看':'已安排 PDF 导出，审核已关闭；保存后即可下载');
   } catch (error) { toast(error.message); }
 });
 
@@ -2686,6 +2689,7 @@ els.summaryEnabled.addEventListener("change", () => {
   sendLiveConfigUpdate(els.summaryEnabled.checked ? "课堂实时提纲已开启" : "课堂实时提纲已关闭");
   if (els.summaryEnabled.checked && !els.reviewApiKey.value && !els.reviewKeyHint.textContent) openAdvancedSettings(els.reviewApiKey);
 });
+els.noteReviewEnabled.addEventListener('change',scheduleApiSave);
 [els.aiBaseUrl, els.aiModel, els.contextWindow, els.aiApiKey, els.apiParams, $("#sentenceTransport"), $("#sentenceEffort"), $("#sentenceMaxOutput"),
   els.reviewBaseUrl, els.reviewModel, els.reviewContextWindow, els.reviewApiKey, els.reviewApiParams,
   els.summaryBaseUrl, els.summaryModel, els.summaryContextWindow, els.summaryApiKey, els.summaryApiParams, $("#reviewTransport"), $("#reviewEffort"), $("#reviewMaxOutput"), $("#summaryTransport"), $("#summaryEffort"), $("#summaryMaxOutput"),
@@ -2741,6 +2745,7 @@ els.clearApiConfig.addEventListener("click", async () => {
   els.summaryApiParams.value = JSON.stringify(DEFAULT_API_PARAMS, null, 2);
   els.aiCorrection.checked = false;
   els.summaryEnabled.checked = false;
+  els.noteReviewEnabled.checked = false;
   els.translation.value = "off";
   els.saveApiConfig.checked = true;
   restoreFunctionProviders({});

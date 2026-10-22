@@ -81,7 +81,7 @@
 
 </div>
 <section class="card replay-status">
-        <h2>运行状态</h2><div id="state" role="status" aria-live="polite">正在读取状态…</div><p id="identity"></p><div id="actions"></div><div id="result"></div>
+        <h2>运行状态</h2><div id="state" role="status" aria-live="polite">正在读取状态…</div><p id="identity"></p><div id="actions"><button id="cancelConnection" class="ui-button secondary" type="button" hidden>取消登录 / 刷新</button></div><div id="result"></div>
         </section>
 
     </div>
@@ -97,6 +97,6 @@
       return nativeFetch(input, init);
     };
   </script>
-  <script src="/static/js/smartclass.js?v=20261019-idle-lifecycle-1"></script>
+  <script src="/static/js/smartclass.js?v=20261019-cancellable-2"></script>
 </body>
 </html>

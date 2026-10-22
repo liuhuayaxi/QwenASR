@@ -589,6 +589,8 @@ async def lifespan(app):
 
 
 app = FastAPI(title="AI inference node", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+from .host_usage import install as install_host_usage
+install_host_usage(app)
 from .classroom import install as install_classroom
 install_classroom(app)
 

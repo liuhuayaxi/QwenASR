@@ -3,10 +3,13 @@ from tests import isolation
 import asyncio
 import json
 import tempfile
+import threading
 import unittest
+import time
 from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
+import httpx
 
 from qwen_asr_app.smartclass import SmartClassClient, LoginRequired, SmartClassError, course_key, lesson_groups
 from qwen_asr_app import smartclass_service as service
@@ -79,8 +82,80 @@ class CatalogTests(unittest.TestCase):
             self.assertEqual(self.client.ensure_login()['name'], '测试')
             login.assert_not_called()
 
+    def test_cancelled_http_response_does_not_start_retries_or_follow_redirects(self):
+        cancelled = threading.Event()
+        requests = []
+        def handle(request):
+            requests.append(request)
+            cancelled.set()
+            return httpx.Response(302, headers={'location': '/next'})
+        client = SmartClassClient(transport=httpx.MockTransport(handle))
+        try:
+            with client.operation(cancelled, time.monotonic() + 30):
+                with self.assertRaisesRegex(SmartClassError, '已取消'):
+                    client.request('GET', 'https://njupt.smartclass.cn/start')
+            self.assertEqual(len(requests), 1)
+            cancelled.clear()
+            with client.operation(cancelled, time.monotonic() - 1):
+                with self.assertRaisesRegex(SmartClassError, '超时'):
+                    client.request('GET', 'https://njupt.smartclass.cn/start')
+            self.assertEqual(len(requests), 1)
+        finally:
+            client.close()
+
 
 class SessionEntryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cancel_is_prompt_preserves_catalog_and_serializes_late_worker(self):
+        entered, release = threading.Event(), threading.Event()
+        def slow_courses():
+            entered.set()
+            release.wait(2)
+            return [{'CourseName': 'late', 'replay_catalog': True, 'term': '2026-2027-1'}]
+        with patch.object(service, 'status', {'state': 'connected', 'authenticated': True}), \
+                patch.object(service, 'catalog_job', None), patch.object(service, 'job', None), \
+                patch.object(service, 'last_session_check', 0), patch.object(service, 'course_rows', {'saved': {}}), \
+                patch.object(service, 'platform_lock', asyncio.Lock()), \
+                patch.object(service.client, 'ensure_login', return_value={'name': 'test'}), \
+                patch.object(service.client, 'courses', side_effect=slow_courses), \
+                patch.object(service, 'save_queue') as save:
+            try:
+                await service.ensure_session()
+                async with asyncio.timeout(1):
+                    while not entered.is_set(): await asyncio.sleep(.005)
+                await asyncio.wait_for(service.cancel_connection(), .2)
+                self.assertEqual(service.status['session_check'], 'cancelled')
+                self.assertNotIn(service.status['state'], {'connecting', 'syncing'})
+                self.assertEqual(service.course_rows, {'saved': {}})
+                self.assertTrue(service.platform_lock.locked())
+                second = Mock(return_value='next')
+                retry = asyncio.create_task(service.platform_call(second))
+                await asyncio.sleep(.01)
+                second.assert_not_called()
+                release.set()
+                self.assertEqual(await retry, 'next')
+                self.assertEqual(service.course_rows, {'saved': {}})
+                save.assert_not_called()
+            finally:
+                release.set()
+                await asyncio.gather(*service.platform_workers, return_exceptions=True)
+
+    async def test_timeout_unlocks_ui_and_does_not_accept_late_catalog(self):
+        release = threading.Event()
+        with patch.object(service, 'status', {'state': 'connected', 'authenticated': True}), \
+                patch.object(service, 'catalog_job', None), patch.object(service, 'last_session_check', 0), \
+                patch.object(service, 'course_rows', {'saved': {}}), patch.object(service, 'platform_lock', asyncio.Lock()), \
+                patch.object(service, 'PLATFORM_TIMEOUT', .02), \
+                patch.object(service.client, 'ensure_login', side_effect=lambda: release.wait(2)):
+            try:
+                await service.ensure_session()
+                await service.catalog_job
+                self.assertEqual(service.status['state'], 'error')
+                self.assertIn('超时', service.status['message'])
+                self.assertEqual(service.course_rows, {'saved': {}})
+            finally:
+                release.set()
+                await asyncio.gather(*service.platform_workers, return_exceptions=True)
+
     async def test_page_entry_singleflight_preserves_queue_and_replaces_catalog(self):
         with ExitStack() as stack:
             for name, value in {'status': {'state': 'running', 'authenticated': True}, 'catalog_job': None,

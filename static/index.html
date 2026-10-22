@@ -11,7 +11,7 @@
     <link rel="stylesheet" href="/static/ui.css?v=20261011-ui-final" />
     <link rel="stylesheet" href="/static/classroom-chat.css?v=20261011-ui-final" />
     <link rel="stylesheet" href="/static/classroom-intelligence.css?v=20261014-knowledge-1" />
-    <link rel="stylesheet" href="/static/settings-layout.css?v=20261011-ui-final" />
+    <link rel="stylesheet" href="/static/settings-layout.css?v=20261020-note-review-switch" />
     <link rel="stylesheet" href="/static/custom-controls.css?v=20261014-selection-hover" />
     <link rel="stylesheet" href="/static/vendor/katex/katex.min.css" />
   <script src="/static/vendor/katex/katex.min.js" defer></script>
@@ -592,6 +592,7 @@
   "store": false
 }</textarea></label>
 
+<label class="wide toggle-row note-review-toggle"><span><b>生成后开启 AI 逐页审核</b><small>默认关闭。仅在你明确开启后，生成或重新导出笔记才会进行审核；关闭时直接保存可下载的未审核版本。</small></span><input id="noteReviewEnabled" type="checkbox" /><span class="toggle" aria-hidden="true"></span></label>
 <label class="wide">
                 <span>课后复习笔记提示词 </span>
                 <textarea id="summarySystemPrompt" rows="10">你是大学课堂复习笔记编辑。基于课堂转写生成详细、准确、可独立复习的 Markdown 笔记。
@@ -924,6 +925,6 @@
     </dialog>
 
     <div id="toast" class="toast" role="status"></div>
-    <script src="/static/app.js?v=20261022-merged-pr6" type="module"></script>
+    <script src="/static/app.js?v=20261022-local-main-1" type="module"></script>
   </body>
 </html>

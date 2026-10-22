@@ -63,6 +63,10 @@
 #settingsDialog #clearApiConfig { color: var(--danger); border-color: var(--danger-line); }
 #settingsDialog .setting-hint { font-size: 12px; line-height: 1.7; }
 #settingsDialog .settings-group-grid .settings-checkbox { display: flex; align-items: center; justify-content: space-between; min-height: 40px; }
+#settingsDialog .settings-group-grid > .note-review-toggle { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; }
+#settingsDialog .note-review-toggle > span:first-child { flex: 1; min-width: 0; }
+#settingsDialog .note-review-toggle b { display: block; color: var(--ink); font-size: 14px; }
+#settingsDialog .note-review-toggle small { display: block; margin-top: 5px; line-height: 1.6; }
 #settingsDialog .settings-checkbox input { width: 17px; height: 17px; }
 @media (max-width: 740px) {
   #settingsDialog.settings-dialog { width: calc(100vw - 20px); height: calc(100dvh - 20px); border-radius: var(--radius); }

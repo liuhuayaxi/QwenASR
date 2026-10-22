@@ -73,6 +73,7 @@
 .course-phase { min-width: 0; }
 .course-phase-head { display: flex; justify-content: space-between; gap: 6px; margin-bottom: 5px; color: var(--ink); font-size: var(--text-xs); }
 .course-phase-head span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.course-phase-head .course-asr-resource { white-space: normal; overflow-wrap: normal; line-height: 1.5; }
 .course-phase-head b { flex: 0 0 auto; font-weight: 600; }
 .course-phase progress { display: block; width: 100%; height: 5px; border: 0; border-radius: 99px; background: var(--line); accent-color: var(--green); }
 .course-phase progress::-webkit-progress-bar { background: var(--line); border-radius: 99px; }
@@ -102,6 +103,7 @@
 @media (max-width: 1100px) { .tasks-layout { grid-template-columns: 180px minmax(0, 1fr); } .task-sidebar { padding-right: 16px; } .task-content { padding-left: 24px; } .task-filters { justify-content: flex-start; flex-basis: 100%; } .task-stats button { padding: 14px; } }
 @media (max-width: 760px) { .tasks-layout { width: calc(100% - 32px); display: block; } .task-sidebar { padding: 16px 0 0; border: 0; } .nav-label, .sidebar-note { display: none; } .task-nav { display: flex; overflow-x: auto; } .task-nav button { white-space: nowrap; flex: 0 0 auto; padding: 8px 10px; } .task-content { padding: 24px 0; } .task-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } .task-filters input { width: 100%; } .task-filters select { flex: 1; min-width: 0; max-width: none; } .task-card { padding: 16px; } .task-bulk > div { margin: 4px 0 0; flex-basis: 100%; } .task-title h3 { font-size: var(--text-body); } .task-status { margin-left: 0; } }
 @media (max-width: 760px) { .course-phases { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 480px) { .course-phases { grid-template-columns: minmax(0, 1fr); } }
 
 /* One card is one lesson or source. Processing receipts are nested steps. */
 .task-intro { max-width: 680px; margin: 9px 0 0; font-size: var(--text-sm); line-height: 1.7; color: var(--muted); }

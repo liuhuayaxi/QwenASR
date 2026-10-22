@@ -199,6 +199,10 @@ def reviewed_pdf(record):
     if not relative:raise ValueError('历史 Markdown 尚未导出并完成独立视觉审查，请在笔记页升级 PDF')
     folder=safe_path(record.directory,relative)
     pdf,export=export_pdf(markdown,folder,note.get('material_version'))
+    if note.get('review_status')=='skipped' and note.get('review_enabled') is False and note.get('review_policy')=='disabled_by_settings':
+        if note.get('pdf_sha256')!=export['pdf_sha256']:
+            raise ValueError('笔记或 PDF 已改变，请重新导出当前未审核版本')
+        return pdf
     report=pdf.parent/'review.json'
     if not report.exists():raise ValueError('未完成视觉审查，候选 PDF 已保留，请在笔记页继续审查')
     review=json.loads(report.read_text())

@@ -6,7 +6,9 @@ import hashlib
 import os
 import re
 import tempfile
+import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime
 from fractions import Fraction
 from pathlib import Path
@@ -265,6 +267,25 @@ class SmartClassClient:
         self.platform_token = ""
         self.csrf_key = ""
         self.time_offset = 0
+        self._operation = threading.local()
+
+    @contextmanager
+    def operation(self, cancelled, deadline):
+        self._operation.cancelled = cancelled
+        self._operation.deadline = deadline
+        try:
+            yield
+        finally:
+            self._operation.__dict__.clear()
+
+    def check_operation(self):
+        cancelled = getattr(self._operation, 'cancelled', None)
+        if cancelled is not None and cancelled.is_set():
+            raise SmartClassError('已取消登录或课程刷新')
+        remaining = getattr(self._operation, 'deadline', float('inf')) - time.monotonic()
+        if remaining <= 0:
+            raise SmartClassError('学校响应超时，请稍后重试')
+        return remaining
 
     def _new_http(self):
         cookies = self.http.cookies if hasattr(self, "http") else None
@@ -285,8 +306,12 @@ class SmartClassClient:
                 raise SmartClassError("认证跳转到了未配置的域名，已停止")
             url = urlunsplit(("https", parts.hostname, parts.path, parts.query, ""))
             for attempt in range(3 if method.upper() == "GET" else 1):
+                remaining = self.check_operation()
                 try:
+                    if remaining != float('inf'):
+                        kwargs['timeout'] = min(15, remaining)
                     response = self.http.request(method, url, **kwargs)
+                    self.check_operation()
                     # A temporary gateway failure is not a rejected login.
                     # Retry only reads; never loop credential POSTs on a 4xx.
                     if method.upper() == "GET" and response.status_code in {429, 502, 503, 504} and attempt < 2:

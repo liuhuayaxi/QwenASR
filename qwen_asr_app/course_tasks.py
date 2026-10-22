@@ -39,6 +39,7 @@ def course_tasks():
             if not isinstance(phase, dict):
                 continue
             phase_data.append({
+                **phase,
                 'key': key, 'label': phase.get('label', key),
                 'percent': round(float(phase.get('percent', 0) or 0), 1),
                 'detail': phase.get('detail') or '',

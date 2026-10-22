@@ -113,12 +113,16 @@ class ClassroomFallbackTests(unittest.IsolatedAsyncioTestCase):
             with patch('qwen_asr_app.remote_classroom.capabilities', side_effect=httpx.ConnectError('offline')), \
                  patch('qwen_asr_app.remote_classroom.request') as compute:
                 metrics = {}
+                placements = []
                 result = await manager.transcribe(np.zeros(1600), None, '', operation_dir=folder,
-                    inference_config={**DEFAULTS, 'asr_provider': 'remote_preferred'}, metrics=metrics)
+                    inference_config={**DEFAULTS, 'asr_provider': 'remote_preferred'}, metrics=metrics,
+                    on_provider=placements.append)
             self.assertEqual(result[0], 'local result')
             manager._transcribe_local.assert_awaited_once()
             compute.assert_not_called()
             self.assertTrue(metrics['fallback'])
+            self.assertEqual([value['provider'] for value in placements], ['remote', 'local'])
+            self.assertTrue(placements[-1]['fallback'])
             self.assertEqual(json.loads((folder/'classroom-receipt.json').read_text())['state'], 'local_fallback')
             # A persisted local decision cannot be switched back to remote by retry.
             with patch('qwen_asr_app.remote_classroom.capabilities') as caps:

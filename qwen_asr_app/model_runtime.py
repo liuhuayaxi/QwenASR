@@ -337,14 +337,20 @@ class ModelManager:
         return result
 
     async def transcribe(self, audio, language, context, max_tokens=384, asr_params=None,
-                         timeout_seconds=180.0, priority=10, metrics=None, is_current=None, inference_config=None, operation_dir=None):
+                         timeout_seconds=180.0, priority=10, metrics=None, is_current=None, inference_config=None, operation_dir=None,
+                         on_provider=None):
         from .inference_providers import inference_settings, LocalASRProvider, RemoteASRProvider, normalize
         cfg = inference_settings.for_task('asr', inference_config)
         mode = cfg["asr_provider"]
+        def report(provider, *, fallback=False):
+            if on_provider is not None:
+                on_provider({'provider': provider, 'state': 'requested' if provider == 'remote' else 'running',
+                             'fallback': fallback})
         async def local():
             return await self._transcribe_local(audio, language, context, max_tokens, asr_params,
                                                 timeout_seconds, priority, metrics, is_current)
         if mode == "local":
+            report('local')
             result = await LocalASRProvider().transcribe(local)
             if metrics is not None:
                 metrics.update(provider="local", fallback=False, config_snapshot=cfg,
@@ -355,6 +361,7 @@ class ModelManager:
             return "", "", 0.0
         self.active_jobs += 1
         try:
+            report('remote')
             remote = RemoteASRProvider()
             if operation_dir is None:
                 result, metadata = await remote.transcribe(audio, language, context, max_tokens, cfg)
@@ -371,6 +378,7 @@ class ModelManager:
             from .remote_operations import mark_local_fallback
             mark_local_fallback(Path(operation_dir)/'receipt.json')
             self.detail = '远程确认未接受，正在回退本机 Qwen3-ASR'
+            report('local', fallback=True)
             result = await LocalASRProvider().transcribe(local)
             if metrics is not None:
                 metrics.update(provider="local", fallback=True, fallback_reason=type(exc).__name__,

@@ -8,7 +8,7 @@ import time
 import unittest
 from fake_scope import FakeScope, config as synthetic_config
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -82,6 +82,20 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(self.submit(filename='../secret.wav').status_code,400)
         self.assertEqual(self.submit(body=b'x'*1001).status_code,413)
         self.assertEqual(self.client.get('/v1/jobs/nope/result',headers=self.headers).status_code,404)
+
+    def test_host_utilization_requires_existing_auth_and_shares_read_only_probe(self):
+        from server import host_usage
+        self.assertEqual(self.client.get('/v1/resources/usage').status_code, 401)
+        with patch.object(host_usage, 'observe', AsyncMock(return_value={
+                'device': 'Windows', 'scope': 'host', 'cpu_percent': 25, 'gpu_percent': 74,
+                'sampled_at': time.time()})) as observe:
+            first = self.client.get('/v1/resources/usage', headers=self.headers)
+            second = self.client.get('/v1/resources/usage', headers=self.headers)
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.json()['data']['gpu_percent'], 74)
+        self.assertEqual(second.json()['data']['cpu_percent'], 25)
+        observe.assert_awaited_once()
+        self.assertIsNone(self.client.app.state.gateway.current)
 
     def test_idempotency_and_conflict(self):
         first=self.submit().json()['data']['id']

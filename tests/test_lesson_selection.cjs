@@ -5,7 +5,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '../static/js/smartclass.js'), 'utf8')
   .replace(/\ncheckSession\(\);\nscheduledRefresh\(\);\s*$/, `
-globalThis.selection = {loadLessons, renderLessons, renderCourseState,
+globalThis.selection = {loadLessons, renderLessons, renderCourseState, checkSession, refresh,
   groups(value) { currentGroups = value; renderLessons(); },
   ids() { return [...selectedLessonIds]; }};`);
 
@@ -60,7 +60,7 @@ function environment(groups = [group('a'), group('b')]) {
       requests.push({url, body: init?.body ? JSON.parse(init.body) : null});
       const data = url.startsWith('/api/lessons?') ? await env.lessonResponse(url)
         : url === '/api/import' ? await env.importResponse()
-        : url.startsWith('/api/status') ? status() : {saved: true};
+        : url.startsWith('/api/status') ? env.status() : {saved: true};
       return {ok: true, json: async () => data};
     },
   };
@@ -89,6 +89,30 @@ test('checking a lesson updates the count and polling keeps the same checkbox an
   env.choose('a', false);
   assert.deepEqual(env.ids(), []);
   assert.equal(env.element('import').disabled, true);
+});
+
+test('login refresh exposes cancel and keeps the cached course selector available', async () => {
+  const env = environment();
+  env.api.renderCourseState({...env.status(), state:'syncing', session_check:'checking'});
+  assert.equal(env.element('courses').disabled, false);
+  assert.equal(env.element('cancelConnection').hidden, false);
+  await env.element('cancelConnection').onclick();
+  assert.equal(env.requests[0].url, '/api/cancel-connection');
+  await env.api.checkSession();
+  assert.equal(env.requests.some(r => r.url === '/api/ensure-session'), false);
+  assert.equal(env.element('cancelConnection').disabled, false);
+});
+
+test('lost service releases disabled login controls and explains shutdown', async () => {
+  const env = environment();
+  env.element('connect').disabled = env.element('reconnect').disabled = true;
+  env.api.renderCourseState({...env.status(), state:'syncing'});
+  env.status = () => { throw Error('offline'); };
+  await env.api.refresh();
+  assert.equal(env.element('connect').disabled, false);
+  assert.equal(env.element('reconnect').disabled, false);
+  assert.equal(env.element('courses').disabled, false);
+  assert.match(env.element('state').textContent, /已停止或连接中断/);
 });
 
 test('refresh leaves the list visible and retains choices made while its request is pending', async () => {

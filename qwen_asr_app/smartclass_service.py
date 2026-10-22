@@ -41,6 +41,38 @@ group_rows = {}
 stop_event = threading.Event()
 WORKBENCH = "http://127.0.0.1:" + os.getenv("QWEN_ASR_PORT", "8765")
 service_draining = False
+PLATFORM_TIMEOUT = 30
+platform_workers = set()
+
+
+async def platform_call(function, *args):
+    """Cancel the caller promptly while the worker retains exclusive client access."""
+    cancelled = threading.Event()
+    deadline = time.monotonic() + PLATFORM_TIMEOUT
+    current_client = client
+    def call():
+        with current_client.operation(cancelled, deadline):
+            current_client.check_operation()
+            return function(*args)
+    async def work():
+        async with platform_lock:
+            if not cancelled.is_set():
+                return await asyncio.to_thread(call)
+    worker = asyncio.create_task(work())
+    platform_workers.add(worker)
+    def finished(task):
+        platform_workers.discard(task)
+        if not task.cancelled():
+            task.exception()
+    worker.add_done_callback(finished)
+    try:
+        return await asyncio.wait_for(asyncio.shield(worker), PLATFORM_TIMEOUT)
+    except asyncio.TimeoutError:
+        cancelled.set()
+        raise SmartClassError('学校响应超时，已结束本次检查，可以重试；已有课程列表已保留') from None
+    except asyncio.CancelledError:
+        cancelled.set()
+        raise
 
 
 def read_json(path, default):
@@ -93,7 +125,7 @@ PHASE_WEIGHTS = {"download": 25, "asr": 45, "correction": 10, "verification": 5,
 def begin_import_progress(entry, run_options):
     phases = {
         "download": {"label": "获取回放音频", "percent": 0, "detail": "等待开始", "state": "pending"},
-        "asr": {"label": "本地语音转写", "percent": 0, "detail": "等待音频", "state": "pending"},
+        "asr": {"label": "转写设备待确认", "percent": 0, "detail": "等待音频", "state": "pending"},
     }
     if run_options.get("ai_correction", True):
         phases["correction"] = {"label": "首轮文字修正", "percent": 0, "detail": "等待转写", "state": "pending"}
@@ -259,6 +291,10 @@ async def service_stop_guard(action: str, request: Request):
     if action == "cancel-stop":
         service_draining = False
         return {"ready": False}
+    if action == "request-stop":
+        service_draining = True
+        await stop()
+        return {"ready": True}
     if action != "prepare-stop":
         raise HTTPException(404, "操作不存在")
     if (job and not job.done()) or (catalog_job and not catalog_job.done()):
@@ -281,6 +317,14 @@ async def get_status(course: str = ''):
             "lesson_course": course, "lesson_statuses": await import_statuses(groups)}
 
 
+@app.get('/api/resources')
+async def get_resources():
+    from .asr_resources import course_resources
+    entries = [dict(entry, id=ident) for ident, entry in list(imports.items())
+               if entry.get('state') in {'running', 'queued'}]
+    return {'lessons': await course_resources(entries, getattr(app.state, 'recording_store', None))}
+
+
 async def import_statuses(groups):
     if not groups:
         return {}
@@ -300,8 +344,7 @@ async def connect(username, password, save, replay_only=False):
     status.update(state="connecting", message="正在通过南邮统一身份认证登录…", identity=None,
                   authenticated=False, session_check="checking")
     try:
-        async with platform_lock:
-            identity = await asyncio.to_thread(client.login, username, password)
+        identity = await platform_call(client.login, username, password)
         if save:
             private_json(STATE_DIR / "credentials.json", {"username": username, "password": password})
         status.update(state="connected" if replay_only else "syncing", identity=identity, authenticated=True, session_check="ready",
@@ -328,7 +371,7 @@ async def connect(username, password, save, replay_only=False):
 @app.post("/api/connect")
 async def connect_account(data: Credentials):
     global job
-    if job and not job.done():
+    if (job and not job.done()) or (catalog_job and not catalog_job.done()):
         raise HTTPException(409, "已有任务正在进行")
     password = data.password.get_secret_value()
     if not password or len(password) > 2000:
@@ -341,7 +384,7 @@ async def connect_account(data: Credentials):
 @app.post("/api/reconnect")
 async def reconnect(data: ReconnectOptions = ReconnectOptions()):
     global job
-    if job and not job.done():
+    if (job and not job.done()) or (catalog_job and not catalog_job.done()):
         raise HTTPException(409, "已有任务正在进行")
     try:
         saved = json.loads((STATE_DIR / "credentials.json").read_text())
@@ -358,11 +401,12 @@ def check_idle():
 
 
 async def load_courses(*, verify_session=False):
-    async with platform_lock:
-        if verify_session:
-            status["identity"] = await asyncio.to_thread(client.ensure_login)
-            status["authenticated"] = True
-        rows = await asyncio.to_thread(client.courses)
+    def load():
+        identity = client.ensure_login() if verify_session else None
+        return identity, client.courses()
+    identity, rows = await platform_call(load)
+    if verify_session:
+        status.update(identity=identity, authenticated=True)
     course_rows.clear()
     group_rows.clear()
     for row in rows:
@@ -388,8 +432,7 @@ async def ensure_session(data: ReconnectOptions = ReconnectOptions()):
             status.update(state="syncing", message="正在检查登录并更新课程…")
         try:
             if data.replay_only:
-                async with platform_lock:
-                    identity = await asyncio.to_thread(client.ensure_login)
+                identity = await platform_call(client.ensure_login)
                 status.update(identity=identity, authenticated=True)
                 if not running:
                     status.update(state="connected", message="登录已确认，可以返回学校页面")
@@ -411,6 +454,24 @@ async def ensure_session(data: ReconnectOptions = ReconnectOptions()):
     return {"started": True}
 
 
+@app.post("/api/cancel-connection")
+async def cancel_connection():
+    global last_session_check
+    tasks = [catalog_job] if catalog_job and not catalog_job.done() else []
+    if status.get('state') in {'connecting', 'syncing'} and job and not job.done():
+        tasks.append(job)
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    last_session_check = time.monotonic()
+    status['session_check'] = 'cancelled'
+    if status.get('state') != 'running':
+        status.update(state='connected' if status.get('authenticated') else 'idle',
+                      message='已取消登录或课程刷新，已有课程列表已保留')
+    return {'cancelled': True}
+
+
 @app.post("/api/refresh")
 async def refresh_courses():
     global catalog_job
@@ -425,6 +486,9 @@ async def refresh_courses():
             status.update(state="syncing", message="正在刷新本学期课程…")
         try:
             await load_courses(verify_session=True)
+        except SmartClassError as exc:
+            if status.get("state") != "running":
+                status.update(state="error", message=str(exc))
         except Exception:
             if status.get("state") != "running":
                 status.update(state="error", message="刷新课程失败，请重新连接账号后重试")
@@ -437,10 +501,10 @@ async def lessons(course: str):
     if course not in course_rows:
         raise HTTPException(404, "请先选择本学期课程")
     try:
-        async with platform_lock:
-            status["identity"] = await asyncio.to_thread(client.ensure_login)
-            status["authenticated"] = True
-            videos = await asyncio.to_thread(client.videos, course_rows[course])
+        def load():
+            return client.ensure_login(), client.videos(course_rows[course])
+        identity, videos = await platform_call(load)
+        status.update(identity=identity, authenticated=True)
         groups = lesson_groups(videos, course_rows[course])
         course_rows[course]["VideoTotal"] = len(videos)
         group_rows.update({g["id"]: g for g in groups})
@@ -820,11 +884,34 @@ class Selection(BaseModel):
     ids: list[str] = Field(min_length=1, max_length=30)
 
 
-async def run_queue():
+@app.post('/api/queue/remove')
+async def remove_queue_items(data: Selection):
+    """Remove selected idle queue entries, keeping lesson files and import history."""
+    wanted = set(data.ids)
+    selected = [item for item in queue_state['items'] if item['group']['id'] in wanted]
+    if any(item.get('state') in {'queued', 'running'} for item in selected):
+        raise HTTPException(409, '课次仍在运行或排队，请先暂停该任务')
+    if not selected:
+        return {'removed': [], 'queue': queue_view()}
+    receipt_path = STATE_DIR / 'removed-queue-items.json'
+    receipts = read_json(receipt_path, {'items': []})
+    receipts['items'].append({'removed_at': time.time(), 'entries': selected})
+    private_json(receipt_path, receipts)
+    previous = queue_state['items']
+    queue_state['items'] = [item for item in previous if item['group']['id'] not in wanted]
+    try:
+        save_queue()
+    except BaseException:
+        queue_state['items'] = previous
+        raise
+    return {'removed': [item['group']['id'] for item in selected], 'queue': queue_view()}
+
+
+async def run_queue(*, retry_interrupted=True):
     """Keep a bounded pipeline alive, including selections appended during a run."""
     active = {}
     for item in queue_state["items"]:
-        if item["state"] == "interrupted":
+        if retry_interrupted and item["state"] == "interrupted":
             item["state"] = "queued"
 
     async def execute(item):
@@ -927,7 +1014,7 @@ async def start_import(data: Selection):
     status.update(state="running", message="选中课次已加入队列")
     queue_wakeup.set()
     if not running:
-        job = asyncio.create_task(run_queue())
+        job = asyncio.create_task(run_queue(retry_interrupted=False))
     return {"started": True, "added": added}
 
 

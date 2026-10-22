@@ -12,7 +12,7 @@ const record = {id:'smoke-class',title:'合成课堂第 3 讲',category:'合成�
  segments:[{id:1,start:0,end:60,raw:'合成原文：菲涅耳公式与相位差。',corrected:'合成校对内容：菲涅耳公式与相位差。'}],ai_reviews:[],ai_summaries:[],
  ai_note_summary:{summary:'# 合成课堂笔记\n\n菲涅耳公式与相位差。',abstract:'合成摘要'},downloads:{audio:'/fake.aac',transcript:'/fake.txt',raw_transcript:'/fake.txt',corrected_transcript:'/fake.txt',bundle:'/fake.zip',ai_summary:'/fake.md'},inference:{provider:'remote',job_id:'fake-job'}};
 const baseTask = {id:'summary:smoke-class',recording_id:record.id,recording_title:record.title,title:record.title,category:record.category,type:'summary',family:'ai',label:'课后复习笔记',status:'interrupted',stage:'笔记生成中断',actions:['continue','retry'],result_url:'/library?recording=smoke-class',inference:{provider:'remote'}};
-let tasks,uploaded,reviewUploaded,activeSession,liveCourse,optimizedReady,syntheticRecords,unknownSync,linkedSync,courseFixtureFiles,requests=[];
+let tasks,uploaded,reviewUploaded,activeSession,liveCourse,optimizedReady,syntheticRecords,unknownSync,linkedSync,courseFixtureFiles,noteReviewEnabled=false,requests=[];
 const pages={'/':'index.html','/library':'index.html','/tasks':'tasks.html','/notes':'course-files.html','/workspace':'workspace.html','/course-files':'course-files.html','/course/':'smartclass.html'};
 const server=http.createServer((req,res)=>{
  const url=new URL(req.url,'http://localhost');
@@ -42,7 +42,10 @@ async function fixtures(route) {
  else if(p==='/api/tasks/action'){const intent=request.postDataJSON();assert.equal(intent.use_saved_ai_settings,true);tasks=tasks.map(task=>task.id===intent.id?{...task,status:'queued',stage:'已加入队列'}:task);data={ok:true};}
  else if(p==='/api/ai-tasks')data={tasks:[]};
  else if(p==='/api/inference/settings')data={settings:{asr_provider:'remote_only',mineru_provider:'local',base_url:'http://synthetic.invalid'}};
- else if(p==='/api/ai/settings')data={settings:{function_providers:{}},has_api_key:false};
+ else if(p==='/api/ai/settings'){
+   if(request.method()==='PUT')noteReviewEnabled=request.postDataJSON().settings.note_review_enabled===true;
+   data={settings:{function_providers:{},note_review_enabled:noteReviewEnabled},has_api_key:false};
+ }
  else if(p==='/api/ai/classroom-chat/settings')data={provider:{transport:'api',model:'fake-model',base_url:'http://synthetic.invalid',context_window:131072,max_output_tokens:1000},context:{},system_prompt:'合成',include_context:true,include_terminology:true,include_summary:true,include_history:true,include_partial:false};
  else if(p==='/api/ai/classroom-chat/models')data={models:[]};
  else if(p==='/api/ideashell/status')data={status:'connected',connected:true};
@@ -80,14 +83,31 @@ async function fixtures(route) {
   finally {await context.close();}
  }
  try {
+  await scenario('笔记审核默认关闭并保存明确开启选择',async(page,context,origin)=>{
+    noteReviewEnabled=false;
+    await page.goto(origin+'/?settings=ai');
+    await page.locator('[data-ai-tab="summary"]').click();
+    const toggle=page.locator('#noteReviewEnabled');
+    await toggle.waitFor({state:'visible'});assert.equal(await toggle.isChecked(),false);
+    await toggle.locator('..').click();
+    await page.waitForFunction(()=>document.querySelector('#apiSaveStatus')?.textContent?.includes('已保存') || document.querySelector('#noteReviewEnabled')?.checked);
+    await page.waitForResponse(response=>response.url().endsWith('/api/ai/settings') && response.request().method()==='PUT');
+    assert.equal(noteReviewEnabled,true);
+    await page.reload();await page.locator('[data-ai-tab="summary"]').click();
+    assert.equal(await page.locator('#noteReviewEnabled').isChecked(),true);
+    await page.locator('#noteReviewEnabled').locator('..').click();
+    await page.waitForResponse(response=>response.url().endsWith('/api/ai/settings') && response.request().method()==='PUT');
+    assert.equal(noteReviewEnabled,false);
+    await page.screenshot({path:path.join(output,'note-review-switch.png'),fullPage:true});
+  });
   await scenario('课程任务使用实时进度并自动刷新，断线明确提示',async(page,context,origin)=>{
-    tasks=[{id:'course_queue',type:'course_queue',family:'asr',label:'课程回放队列',title:'课程回放 · 1 堂课',status:'running',progress:10.7,total:1,completed:0,actions:['pause'],course_items:[{id:'course-a',title:'合成课堂 A',state:'running',progress:10.7,phases:[{key:'asr',label:'本地语音转写',percent:12.7,state:'running'}]}]}];
-    liveCourse={queue:{paused:false,items:[{id:'course-a',title:'合成课堂 A',state:'running'}]},imports:[{id:'course-a',progress:62,phases:{download:{label:'获取回放音频',percent:100,state:'completed'},asr:{label:'本地语音转写',percent:48.8,detail:'45.9/94.0 分钟',state:'running'}}}]};
+    tasks=[{id:'course_queue',type:'course_queue',family:'asr',label:'课程回放队列',title:'课程回放 · 1 堂课',status:'running',progress:10.7,total:1,completed:0,actions:['pause'],course_items:[{id:'course-a',title:'合成课堂 A',state:'running',progress:10.7,phases:[{key:'asr',label:'Mac 转写',execution:{provider:'local'},percent:12.7,state:'running'}]}]}];
+    liveCourse={queue:{paused:false,items:[{id:'course-a',title:'合成课堂 A',state:'running'}]},imports:[{id:'course-a',progress:62,phases:{download:{label:'获取回放音频',percent:100,state:'completed'},asr:{label:'Mac 转写',execution:{provider:'local'},percent:48.8,detail:'45.9/94.0 分钟',state:'running'}}}]};
     await page.goto(origin+'/tasks');
     const groupDetails=page.locator('.group-details');
     await groupDetails.first().waitFor({state:'attached'});
     if(!(await groupDetails.first().evaluate(e=>e.open))) await page.locator('.group-details > summary').first().click();
-    const phase=page.locator('.course-phase').filter({hasText:'本地语音转写'}).locator('progress');
+    const phase=page.locator('.course-phase').filter({hasText:'Mac 转写'}).locator('progress');
     await page.waitForFunction(()=>document.querySelector('.task-progress')?.value===62);
     assert.equal(await phase.getAttribute('value'),'48.8');
     assert.match(await page.locator('.task-stage').innerText(),/0\/1 堂课/);

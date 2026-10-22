@@ -90,6 +90,14 @@ def note_runtime_config(config):
     return result
 
 
+def disabled_review(pdf,export,folder):
+    """Save the explicit opt-out separately; keep any real review immutable."""
+    decision={'status':'skipped','policy':'disabled_by_settings','pdf_sha256':export['pdf_sha256'],
+        'viewed_pages':[],'issues':[],'batches':[],'updated_at':local_now()}
+    atomic_json(pdf.parent/'review-disabled.json',decision)
+    return decision
+
+
 def review_coverage(ledger, cited_sources, terms):
     """Send local detailed evidence and an explicit whole-note outline.
 
@@ -1051,6 +1059,9 @@ async def generate(record, config):
             (pdf,export),latex_manifest=await export_direct(markdown,folder,material_version,config,plan,package,images,feedback=feedback)
             latex_writers=latex_manifest.get('writer_session_ids') or ([latex_manifest['writer_session_id']] if latex_manifest.get('writer_session_id') else [])
             task['writer_session_ids']=list(dict.fromkeys([*task['writer_session_ids'],*latex_writers]))
+            if config.get('note_review_enabled') is not True:
+                report=disabled_review(pdf,export,folder)
+                break
             stage(record,task,folder,'独立审查',pdf_sha256=export['pdf_sha256'],
                   review_report=str((pdf.parent/'review.json').relative_to(folder)),
                   **review_start_progress(task,export))
@@ -1101,6 +1112,7 @@ async def generate(record, config):
               'review_package':relative,'material_version':material_version,'pdf_sha256':export['pdf_sha256'],
               'review_status':report['status'],'source_map':{str(i):{'start':b['start'],'end':b['end'],'segment_ids':b.get('segment_ids',[])} for i,b in enumerate(blocks,1)},
               'coverage_count':len(plan['knowledge']),'image_count':len(images),'student_notes_included':bool(accepted)}
+        if report['status']=='skipped':note.update(review_enabled=False,review_policy='disabled_by_settings')
         atomic_json(folder/'proposed-note.json',note)
         # Read the on-disk version; a detached in-memory record may be stale.
         current=json.loads(record.meta_path.read_text())
@@ -1133,7 +1145,8 @@ async def generate(record, config):
             record.metadata.update(current);record.metadata['ai_note_summary']={**current['ai_note_summary'],'abstract':note['abstract']}
             if note.get('abstract_error'):record.metadata['ai_note_summary']['abstract_error']=note['abstract_error']
             record.save_all()
-        stage(record,task,folder,'完成' if report['status']=='passed' else '待处理',status='completed' if report['status']=='passed' else 'pending')
+        finished=report['status'] in {'passed','skipped'}
+        stage(record,task,folder,'完成 · 未审核' if report['status']=='skipped' else '完成' if finished else '待处理',status='completed' if finished else 'pending')
         record.metadata.pop('ai_note_summary_draft',None);record.save_metadata()
         return record.metadata['ai_note_summary']
     except BaseException as exc:
@@ -1145,6 +1158,7 @@ async def generate(record, config):
 
 
 async def upgrade_pdf(record, config):
+    config=note_runtime_config(config)
     """Historical or edited Markdown: export/review on demand, preserving text."""
     config=note_runtime_config(config)
     note=copy.deepcopy(record.metadata.get('ai_note_summary') or {})
@@ -1170,6 +1184,9 @@ async def upgrade_pdf(record, config):
         if task:stage(record,task,folder,'LaTeX 排版',status='running')
         (pdf,export),latex_manifest=await export_direct(note['summary'],folder,note['material_version'],config,ledger,package,images)
         writers=latex_manifest.get('writer_session_ids') or ([latex_manifest['writer_session_id']] if latex_manifest.get('writer_session_id') else [])
+        if config.get('note_review_enabled') is not True:
+            report=disabled_review(pdf,export,folder)
+            break
         if task:stage(record,task,folder,'独立审查',pdf_sha256=export['pdf_sha256'],
             review_report=str((pdf.parent/'review.json').relative_to(folder)),**review_start_progress(task,export))
         report=await visual_review(pdf,export,folder,provider,ledger,package['relevant_pages'],generator_session_ids=writers,
@@ -1192,12 +1209,14 @@ async def upgrade_pdf(record, config):
             if report['status']=='passed' and repair['unresolved']:
                 raise ValueError('自动复核仍有证据不足的问题，已有正文与完整提案保留')
         break
-    if task:stage(record,task,folder,'已完成' if report['status']=='passed' else '待修订',status='completed' if report['status']=='passed' else 'pending')
+    finished=report['status'] in {'passed','skipped'}
+    if task:stage(record,task,folder,'完成 · 未审核' if report['status']=='skipped' else '已完成' if finished else '待修订',status='completed' if finished else 'pending')
     current=json.loads(record.meta_path.read_text())
     if body_hash(current.get('ai_note_summary'))!=initial:raise ValueError('审查期间笔记已修改，通过结果只绑定候选旧版本')
     record.metadata.update(current)
     record.metadata['ai_note_summary'].update(review_package=relative,pdf_sha256=export['pdf_sha256'],review_status=report['status'],material_version=note['material_version'])
-    if report['status']=='passed':record.metadata['ai_note_summary'].pop('review_warning',None)
+    record.metadata['ai_note_summary'].update(review_enabled=report['status']!='skipped',review_policy='disabled_by_settings' if report['status']=='skipped' else report.get('policy'))
+    if finished:record.metadata['ai_note_summary'].pop('review_warning',None)
     if task:record.metadata.pop('ai_note_summary_draft',None)
     record.save_metadata()
     return {'status':report['status'],'pdf_sha256':export['pdf_sha256'],'pages':export['pages']}

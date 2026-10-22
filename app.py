@@ -1657,6 +1657,13 @@ async def service_stop_guard(action: str, request: Request):
         service_draining = False
         library_watch.draining = False
         return {"ready": False}
+    if action == "request-stop":
+        service_draining = True
+        library_watch.draining = True
+        smartclass_service.service_draining = True
+        await smartclass_service.stop()
+        library_watch.publish()
+        return {"ready": True}
     if action != "prepare-stop":
         raise HTTPException(404, "操作不存在")
     active = recording_store.active

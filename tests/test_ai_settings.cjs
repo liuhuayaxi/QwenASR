@@ -43,9 +43,12 @@ async function main() {
     assert.equal(env.field('summaryBaseUrl').value,silicon.base_url);
     assert.equal(env.field('summaryModel').value,'saved-summary');
     assert.equal(env.requests.length,1); // Loading a page does not rewrite its settings.
+    assert.equal(env.field('noteReviewEnabled').checked,false);
+    env.field('noteReviewEnabled').checked=true;
     await env.ctx.saveApiSettings();
     assert.equal(env.requests.at(-1).url,'/api/ai/settings');
     assert.equal(env.requests.at(-1).body.settings.function_providers.summary.model,'saved-summary');
+    assert.equal(env.requests.at(-1).body.settings.note_review_enabled,true);
   }
   const migration=environment({},silicon);
   await migration.ctx.restoreApiSettings();
