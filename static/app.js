@@ -40,6 +40,7 @@ const els = {
   clearButton: $("#clearButton"), language: $("#language"), aiCorrection: $("#aiCorrection"),
   summaryEnabled: $("#summaryEnabled"),
   noteReviewEnabled: $("#noteReviewEnabled"),
+  noteAiLatexEnabled: $("#noteAiLatexEnabled"),
   translation: $("#translation"), aiBaseUrl: $("#aiBaseUrl"),
   aiModel: $("#aiModel"), reviewBaseUrl: $("#reviewBaseUrl"), reviewModel: $("#reviewModel"),
   reviewApiKey: $("#reviewApiKey"), reviewApiMode: $("#reviewApiMode"),
@@ -473,6 +474,7 @@ function saveApiSettings() {
     context_window: els.contextWindow.value, summary_interval: els.summaryInterval.value,
     summary_enabled: els.summaryEnabled.checked, api_key: els.aiApiKey.value,
     note_review_enabled: els.noteReviewEnabled.checked,
+    note_ai_latex_enabled: els.noteAiLatexEnabled.checked,
     extra_params: els.apiParams.value, ai_correction: els.aiCorrection.checked,
     api_mode: els.aiApiMode.value, history_chars: els.historyChars.value,
     translation: els.translation.value, title_prompt: els.titlePrompt.value,
@@ -535,6 +537,7 @@ async function restoreApiSettings() {
     els.summaryInterval.value = saved.summary_interval || "10";
     els.summaryEnabled.checked = Boolean(saved.summary_enabled);
     els.noteReviewEnabled.checked = saved.note_review_enabled === true;
+    els.noteAiLatexEnabled.checked = saved.note_ai_latex_enabled === true;
     els.aiApiMode.value = saved.api_mode || "auto";
     els.aiApiKey.value = saved.api_key || "";
     els.historyChars.value = saved.history_chars ?? "2000";
@@ -2690,6 +2693,7 @@ els.summaryEnabled.addEventListener("change", () => {
   if (els.summaryEnabled.checked && !els.reviewApiKey.value && !els.reviewKeyHint.textContent) openAdvancedSettings(els.reviewApiKey);
 });
 els.noteReviewEnabled.addEventListener('change',scheduleApiSave);
+els.noteAiLatexEnabled.addEventListener('change',scheduleApiSave);
 [els.aiBaseUrl, els.aiModel, els.contextWindow, els.aiApiKey, els.apiParams, $("#sentenceTransport"), $("#sentenceEffort"), $("#sentenceMaxOutput"),
   els.reviewBaseUrl, els.reviewModel, els.reviewContextWindow, els.reviewApiKey, els.reviewApiParams,
   els.summaryBaseUrl, els.summaryModel, els.summaryContextWindow, els.summaryApiKey, els.summaryApiParams, $("#reviewTransport"), $("#reviewEffort"), $("#reviewMaxOutput"), $("#summaryTransport"), $("#summaryEffort"), $("#summaryMaxOutput"),
@@ -2746,6 +2750,7 @@ els.clearApiConfig.addEventListener("click", async () => {
   els.aiCorrection.checked = false;
   els.summaryEnabled.checked = false;
   els.noteReviewEnabled.checked = false;
+  els.noteAiLatexEnabled.checked = false;
   els.translation.value = "off";
   els.saveApiConfig.checked = true;
   restoreFunctionProviders({});

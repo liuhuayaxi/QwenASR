@@ -920,9 +920,11 @@ def _build_compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any
         saved_preferences = ai_preferences.read()
         saved_providers = (saved_preferences.get("function_providers") or {})
         note_review_enabled = saved_preferences.get("note_review_enabled") is True
+        note_ai_latex_enabled = saved_preferences.get("note_ai_latex_enabled") is True
     except (OSError, ValueError):
         saved_providers = {}
         note_review_enabled = False
+        note_ai_latex_enabled = False
 
     def ai_provider_snapshot(kind: str) -> dict[str, Any]:
         mode = {"summary": "summary", "refinement": "correction", "live_summary": "review"}.get(kind, "sentence")
@@ -935,7 +937,7 @@ def _build_compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any
             "configured_ai_effort": str(provider.get("cli_effort") or ""),
             # The saved 逐页审核 switch (default off); the task view hides the
             # 逐页审查 step when it is off.
-            **({"note_review_enabled": note_review_enabled} if kind == "summary" else {}),
+            **({"note_review_enabled": note_review_enabled, "note_ai_latex_enabled": note_ai_latex_enabled} if kind == "summary" else {}),
         }
 
     for record in getattr(recording_store,'iter_records',recording_store.list_records)():
@@ -2154,7 +2156,9 @@ async def generate_library_summary(
         raise HTTPException(status_code=502, detail=f"AI 总结请求失败：{exc}") from exc
 
 
-SUMMARY_QUEUE_CONCURRENCY = max(1, int(os.getenv("QWEN_ASR_SUMMARY_CONCURRENCY") or 1))
+# Each note owns one AGY conversation, so several notes can run side by side.
+# Bounded (default 4) to stay within the AGY account rate and local memory.
+SUMMARY_QUEUE_CONCURRENCY = max(1, min(8, int(os.getenv("QWEN_ASR_SUMMARY_CONCURRENCY") or 4)))
 _summary_queue_semaphore: asyncio.Semaphore | None = None
 summary_queue_order: list[str] = []
 
@@ -2165,8 +2169,9 @@ _summary_queue_loop = None
 def summary_queue() -> asyncio.Semaphore:
     global _summary_queue_semaphore, _summary_queue_loop
     loop = asyncio.get_running_loop()
-    if _summary_queue_semaphore is None or _summary_queue_loop is not loop:
+    if _summary_queue_semaphore is None or _summary_queue_loop is not loop or getattr(_summary_queue_semaphore, "_qwen_limit", None) != SUMMARY_QUEUE_CONCURRENCY:
         _summary_queue_semaphore, _summary_queue_loop = asyncio.Semaphore(SUMMARY_QUEUE_CONCURRENCY), loop
+        _summary_queue_semaphore._qwen_limit = SUMMARY_QUEUE_CONCURRENCY
         summary_queue_order.clear()
     return _summary_queue_semaphore
 

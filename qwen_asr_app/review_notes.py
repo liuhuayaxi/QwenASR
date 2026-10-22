@@ -5,7 +5,9 @@ import copy
 import hashlib
 import json
 from pathlib import Path
+import logging
 import re
+import subprocess
 import time
 import weakref
 
@@ -24,6 +26,7 @@ from .runtime_memory import release_pdf_cache
 async def owned_thread(function, *args):
     return await await_owned_task(asyncio.create_task(asyncio.to_thread(function,*args)))
 from . import review_scope
+logger=logging.getLogger(__name__)
 
 VERSION='illustrated-lesson-latex-v2'
 SCOPE_VERSION='illustrated-lesson-objectives-latex-v5'
@@ -88,6 +91,31 @@ def note_runtime_config(config):
     if provider.get('transport')=='agy_cli':
         result.setdefault('ai',{})['summary_provider']={**provider,'cli_timeout_seconds':0}
     return result
+
+
+DIRECT_PDF_ENGINE='chromium-markdown-katex-v1'
+AI_LATEX_ENGINE='xelatex-course-v1'
+
+
+def ai_latex_enabled(config):
+    """The AI LaTeX re-authoring pass is opt-in (ai-settings note_ai_latex_enabled)."""
+    return (config or {}).get('note_ai_latex_enabled') is True
+
+
+async def export_note_pdf(markdown,folder,provenance,config,ledger,package,images,*,feedback=None):
+    """((pdf, export), latex_manifest). Default: deterministic Markdown → HTML
+    (vendored KaTeX, local figures, CJK fonts) → headless Chromium PDF, no AI.
+    The AI LaTeX pass runs only when the provenance was bound to it."""
+    if (provenance or {}).get('layout_engine')==AI_LATEX_ENGINE:
+        from .note_latex_author import export_direct
+        return await export_direct(markdown,folder,provenance,config,ledger,package,images,feedback=feedback)
+    from .note_pdf import export_pdf
+    return (await owned_thread(export_pdf,markdown,folder,provenance)),{}
+
+
+def pdf_failed_review(error):
+    return {'status':'skipped','policy':'pdf_failed','pdf_sha256':None,'viewed_pages':[],'issues':[],'batches':[],
+            'error':str(error)[:400],'updated_at':local_now()}
 
 
 def disabled_review(pdf,export,folder):
@@ -903,6 +931,9 @@ async def generate(record, config):
         if task.get('material_fingerprint') not in {None,material_fp}:
             raise ValueError('课件版本改变，旧任务已保留，请新建一次生成')
         task['material_fingerprint']=material_fp
+        # The fingerprint above stays bound to the historical layout key so
+        # resumed tasks keep their finished steps; the PDF engine is chosen here.
+        provenance={**material_version,'layout_engine':AI_LATEX_ENGINE if ai_latex_enabled(config) else DIRECT_PDF_ENGINE}
         stage(record,task,folder,'识别本节新内容')
         plan_path=folder/'coverage.json'
         if plan_path.exists():plan=json.loads(plan_path.read_text())
@@ -1006,8 +1037,12 @@ async def generate(record, config):
                 atomic_json(cached,value)
                 return value
             figure_batch=max(1,min(16,int(config.get('figure_batch_size') or 8)))
-            for start in range(0,len(images),figure_batch):
-                batch=images[start:start+figure_batch];value=await inspect(batch);readings.append(value)
+            batches=[images[start:start+figure_batch] for start in range(0,len(images),figure_batch)]
+            # Independent image batches are read concurrently; results are
+            # cached per batch and consumed below in the original order.
+            first_pass=await asyncio.gather(*(inspect(batch) for batch in batches))
+            for batch,value in zip(batches,first_pass):
+                readings.append(value)
                 verdict={x['image_id']:x for x in value['reading']['images']}
                 for image in batch:
                     decision=verdict[image['image_id']]
@@ -1094,9 +1129,18 @@ async def generate(record, config):
             if any(']('+image['path']+')' not in markdown for image in images):
                 raise ValueError('修订稿缺少已选的重要教学图；已保留草稿，未发布缺图版本')
             atomic_bytes(draft_path,markdown.encode())
-            stage(record,task,folder,'LaTeX 排版',revision=revision)
-            from .note_latex_author import export_direct
-            (pdf,export),latex_manifest=await export_direct(markdown,folder,material_version,config,plan,package,images,feedback=feedback)
+            stage(record,task,folder,'LaTeX 排版' if provenance['layout_engine']==AI_LATEX_ENGINE else '生成 PDF',revision=revision)
+            pdf_error=None
+            try:
+                (pdf,export),latex_manifest=await export_note_pdf(markdown,folder,provenance,config,plan,package,images,feedback=feedback)
+            except (ValueError,RuntimeError,OSError,subprocess.SubprocessError) as exc:
+                if provenance['layout_engine']==AI_LATEX_ENGINE:raise
+                # Fail soft: the Markdown note is saved and pushed; only the PDF is marked failed.
+                logger.warning('笔记 PDF 生成失败，Markdown 笔记照常保存：%s',exc)
+                pdf=export=None;latex_manifest={};pdf_error=str(exc)
+            if pdf is None:
+                report=pdf_failed_review(pdf_error)
+                break
             latex_writers=latex_manifest.get('writer_session_ids') or ([latex_manifest['writer_session_id']] if latex_manifest.get('writer_session_id') else [])
             task['writer_session_ids']=list(dict.fromkeys([*task['writer_session_ids'],*latex_writers]))
             if config.get('note_review_enabled') is not True:
@@ -1111,7 +1155,7 @@ async def generate(record, config):
             if report.get('issues'):
                 from .note_review_repair import repair_review
                 stage(record,task,folder,'修订 · 自动核对审查问题')
-                repair=await repair_review(markdown,folder,material_version,provider,plan,package,images,pdf,blocking_review(report),
+                repair=await repair_review(markdown,folder,provenance,provider,plan,package,images,pdf,blocking_review(report),
                     generator_session_ids=task['writer_session_ids'],retry_round=config.get('_note_validation_retry_round'),
                     allow_changes=revision<2,
                     progress=lambda page,total:stage(record,task,folder,f'修订 · 自动核对第 {page} 页'))
@@ -1139,7 +1183,7 @@ async def generate(record, config):
             corrections=folder/'source-corrections.json'
             if corrections.is_file():feedback['source_comparison']=json.loads(corrections.read_text())
             revision_payload={'draft':markdown,'review':feedback,'evidence':payload,
-                'latex_draft':(folder/'latex/body.tex').read_text()}
+                'latex_draft':(folder/'latex/body.tex').read_text() if provenance['layout_engine']==AI_LATEX_ENGINE else ''}
             revision_instructions=TEACHING+review_scope.instructions(scope)+'\n根据独立审查修订完整笔记，保留全部正确内容及图片引用。'
             atomic_json(folder/'revision-budget.json',request_budget(revision_instructions,revision_payload,config))
             require_budget(revision_instructions,revision_payload,config,label='审查修订材料',window=context_window_for(config,'summary'))
@@ -1149,10 +1193,11 @@ async def generate(record, config):
             _checkpoint_revision(folder,task,markdown,revised,revision,last_session_id.get())
             markdown=revised
         note={'summary':markdown,'abstract':'','source':'post_recording','created_at':local_now(),'updated_at':local_now(),
-              'review_package':relative,'material_version':material_version,'pdf_sha256':export['pdf_sha256'],
+              'review_package':relative,'material_version':provenance,'pdf_sha256':(export or {}).get('pdf_sha256'),
               'review_status':report['status'],'source_map':{str(i):{'start':b['start'],'end':b['end'],'segment_ids':b.get('segment_ids',[])} for i,b in enumerate(blocks,1)},
               'coverage_count':len(plan['knowledge']),'image_count':len(images),'student_notes_included':bool(accepted)}
         if report['status']=='skipped':note.update(review_enabled=False,review_policy='disabled_by_settings')
+        if report.get('policy')=='pdf_failed':note.update(pdf_status='failed',pdf_error=report.get('error',''))
         atomic_json(folder/'proposed-note.json',note)
         # Read the on-disk version; a detached in-memory record may be stale.
         current=json.loads(record.meta_path.read_text())
@@ -1166,12 +1211,12 @@ async def generate(record, config):
         if body_hash(current.get('ai_note_summary'))!=task['base_body_sha256']:
             atomic_json(folder/'conflict-draft.json',note)
             record.metadata.update(current)
-            record.metadata['ai_note_proposal']={'task_id':identity,'review_status':report['status'],'pdf_sha256':export['pdf_sha256']}
+            record.metadata['ai_note_proposal']={'task_id':identity,'review_status':report['status'],'pdf_sha256':(export or {}).get('pdf_sha256')}
             record.save_metadata()
             raise ValueError('生成期间正文被人工修改；已保留新版草稿，未覆盖人工编辑')
         if (current.get('ai_note_summary') or {}).get('source') in {'edited','ideashell_pull','restored'}:
             record.metadata.update(current)
-            record.metadata['ai_note_proposal']={'task_id':identity,'review_status':report['status'],'pdf_sha256':export['pdf_sha256']}
+            record.metadata['ai_note_proposal']={'task_id':identity,'review_status':report['status'],'pdf_sha256':(export or {}).get('pdf_sha256')}
             record.save_metadata()
             raise ValueError('图文候选版本已保留，原人工编辑未覆盖；请在笔记页预览并选择是否采用')
         record.metadata.update(current);record.metadata['ai_note_summary']=note;record.save_all()
@@ -1218,13 +1263,12 @@ async def upgrade_pdf(record, config):
     package['learning_scope']=scope
     if scope.get('enabled') and not note.get('material_version',{}).get('learning_scope',{}).get('enabled'):
         raise ValueError('此光电子学旧笔记尚未按原课件学习要求区分掌握与了解，请重新生成范围修订候选；原正文已保留')
-    note['material_version']={**(note.get('material_version') or {}),'layout_engine':'xelatex-course-v1'}
+    note['material_version']={**(note.get('material_version') or {}),'layout_engine':AI_LATEX_ENGINE if ai_latex_enabled(config) else DIRECT_PDF_ENGINE}
     images=json.loads((folder/'images.json').read_text()) if (folder/'images.json').exists() else []
-    from .note_latex_author import export_direct
     task_path=folder/'task.json';task=json.loads(task_path.read_text()) if task_path.exists() else None
     for repair_round in range(3):
-        if task:stage(record,task,folder,'LaTeX 排版',status='running')
-        (pdf,export),latex_manifest=await export_direct(note['summary'],folder,note['material_version'],config,ledger,package,images)
+        if task:stage(record,task,folder,'LaTeX 排版' if ai_latex_enabled(config) else '生成 PDF',status='running')
+        (pdf,export),latex_manifest=await export_note_pdf(note['summary'],folder,note['material_version'],config,ledger,package,images)
         writers=latex_manifest.get('writer_session_ids') or ([latex_manifest['writer_session_id']] if latex_manifest.get('writer_session_id') else [])
         if config.get('note_review_enabled') is not True:
             report=disabled_review(pdf,export,folder)

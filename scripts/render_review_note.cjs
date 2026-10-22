@@ -63,7 +63,9 @@ async function main(){
    standaloneBlockquotes:document.querySelectorAll('#note > blockquote').length,
    timeMetadataParagraphs:document.querySelectorAll('p.lesson-time-range').length,
    timeMetadataLists:document.querySelectorAll('ul.lesson-time-range,ol.lesson-time-range').length}));
-  if(problems.math||problems.broken)throw new Error('PDF 公式或图片未完成渲染 '+JSON.stringify(problems));
+  // A missing figure fails the export. A formula KaTeX cannot parse stays
+  // visible as its source (counted in the result) instead of losing the PDF.
+  if(problems.broken)throw new Error('PDF 图片未完成渲染 '+JSON.stringify(problems));
   await page.pdf({path:request.output,format:'A4',printBackground:true,displayHeaderFooter:true,
    headerTemplate:'<span></span>',footerTemplate:'<div style="font-size:8px;width:100%;text-align:center;color:#68778a">课后复习笔记 · <span class="pageNumber"></span> / <span class="totalPages"></span></div>',
    margin:{top:'17mm',right:'18mm',bottom:'18mm',left:'18mm'},preferCSSPageSize:true});

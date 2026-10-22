@@ -437,6 +437,44 @@ class RegionRetryTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SummaryQueueTests(unittest.IsolatedAsyncioTestCase):
+    async def test_summary_jobs_run_in_parallel_up_to_the_limit(self):
+        import app
+        from qwen_asr_app.storage import RecordingStore
+        raw = tempfile.TemporaryDirectory()
+        self.addCleanup(raw.cleanup)
+        store = RecordingStore.__new__(RecordingStore)
+        store.active = None
+        store.paths = {}
+        ids = ("par-p1", "par-p2", "par-p3")
+        for ident in ids:
+            folder = Path(raw.name) / ident
+            folder.mkdir()
+            RecordingRecord(folder, {
+                "id": ident, "title": ident, "category": "未分类", "kind": "upload", "status": "completed",
+                "sample_count": 0, "next_segment_id": 1, "sample_rate": 16000, "audio_filename": "recording.aac"}).save_all()
+            store.paths[ident] = folder
+        store.iter_records = lambda: [store.find(i) for i in ids]
+        running, peak = set(), []
+        release = asyncio.Event()
+
+        async def generate(session_id, payload):
+            running.add(session_id)
+            peak.append(len(running))
+            await release.wait()
+            running.discard(session_id)
+            return {"summary": {"summary": "## 笔记", "abstract": "摘要"}}
+
+        with patch.object(app, "recording_store", store), patch.object(app, "generate_library_summary", generate), \
+                patch.object(app, "SUMMARY_QUEUE_CONCURRENCY", 2):
+            for ident in ids:
+                app.start_summary_job(store.find(ident), {"config": {"ai": {}}})
+            for _ in range(5):
+                await asyncio.sleep(0)
+            self.assertEqual(max(peak), 2)
+            self.assertEqual(store.find("par-p3").metadata["summary_job"]["status"], "queued")
+            release.set()
+            await asyncio.gather(*[app.background_summary_tasks[i] for i in ids if i in app.background_summary_tasks])
+
     async def test_summary_jobs_run_one_at_a_time_and_report_queue_position(self):
         import app
         from qwen_asr_app.storage import RecordingStore
@@ -466,7 +504,8 @@ class SummaryQueueTests(unittest.IsolatedAsyncioTestCase):
             running.discard(session_id)
             return {"summary": {"summary": "## 笔记", "abstract": "摘要"}}
 
-        with patch.object(app, "recording_store", store), patch.object(app, "generate_library_summary", generate):
+        with patch.object(app, "recording_store", store), patch.object(app, "generate_library_summary", generate), \
+                patch.object(app, "SUMMARY_QUEUE_CONCURRENCY", 1):
             for ident in ("queue-q1", "queue-q2", "queue-q3"):
                 app.start_summary_job(store.find(ident), {"config": {"ai": {}}})
             for _ in range(5):
