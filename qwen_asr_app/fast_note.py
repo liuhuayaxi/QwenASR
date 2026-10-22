@@ -26,16 +26,9 @@ from .review_materials import collect, extract_image, bind_markdown_images
 from .storage import local_now
 from . import review_scope
 
-VERSION = 'fast-one-turn-v1'
+VERSION = 'fast-one-turn-v2'
 MAX_PAGE_CHARS = 1800
 LOCATOR = re.compile(r'!\[[^\]]*\]\(\.?/?figures/([a-f0-9]{32})_p(\d+)\.png\)')
-
-FIGURE_RULES = '''
-配图：source_pages 是本节课件页（source_id、page、页面文字）。按图文学习材料组织，为理解本节重要概念所需的器件结构、能带、光路、曲线、框图、推导示意等原课件页配图，
-优先本节首次引入、老师强调、推导与例题；图放在对应解释旁边。插图写成 Markdown 图片：![原件名 第N页：图意](figures/<source_id>_p<page>.png)，
-source_id 与 page 必须原样来自 source_pages；不要用纯文字页、目录页或装饰图凑数，每节一般 4–12 张。图下用一两句说明读图要点。
-引用课堂转写时用 [课堂 S编号](#source-编号) 形式（编号即 transcript 中 S 后的数字）。直接返回完整 Markdown 正文，不要代码围栏，不要输出读取过程。'''
-
 
 def abstract_from(markdown: str) -> str:
     """Library one-liner without another AI call: first real prose sentence."""
@@ -98,15 +91,20 @@ async def generate_fast(record, config):
         markdown = draft_path.read_text()
     else:
         stage(record, task, folder, '编写笔记')
-        instructions = (TEACHING + '\n' + str(config.get('_note_summary_system_prompt') or '') + '\n'
-                        + str(config.get('_note_summary_custom_prompt') or '') + review_scope.instructions(scope) + FIGURE_RULES)
+        from . import note_prompts
+        from .settings import DEFAULT_NOTE_SUMMARY_PROMPT
+        found = note_prompts.features(package, scope, questions)
+        task['features'] = found
+        saved = str(config.get('_note_summary_system_prompt') or '')
+        custom = '\n'.join(x for x in (saved if saved.strip() != DEFAULT_NOTE_SUMMARY_PROMPT.strip() else '',
+                                        str(config.get('_note_summary_custom_prompt') or '')) if x.strip())
+        instructions = note_prompts.compose(found, custom)
         payload = {'transcript': source_blocks, 'source_pages': _pages(package),
-                   'accepted_student_notes': (folder / 'accepted-notes.md').read_text() if (folder / 'accepted-notes.md').exists() else '',
-                   'learning_scope': scope, 'course': package.get('category'), 'lesson_date': package.get('lesson_date')}
+                   'course': package.get('category'), 'lesson_title': (package.get('material_selection') or {}).get('lesson_title', '')}
+        if found['learning_requirements']:
+            payload['learning_requirements'] = note_prompts.requirement_items(scope)
         if questions:
-            from .yuketang.retrieval import instructions as yuketang_instructions
             payload['yuketang_questions'] = questions
-            instructions += yuketang_instructions(write_section=True)
         try:
             markdown = await request_ai_text(instructions=instructions, payload=payload, config=config, mode='summary', max_output_tokens=32768)
         except AIRequestError as exc:
@@ -143,12 +141,16 @@ async def generate_fast(record, config):
         block = blocks[number - 1]
         return f'[课堂 S{number} · {clock(block["start"])}–{clock(block["end"])}](#source-{number})'
     markdown = re.sub(r'\[[^\]]*\]\(#source-(\d+)\)', source_reference, markdown)
+    from . import note_prompts
+    markdown, cleaning = note_prompts.clean(markdown)
+    task['cleaning'] = cleaning
     markdown = re.sub(r'^# [^\n]*\n?', '', markdown, count=1, flags=re.M) if markdown.lstrip().startswith('# ') else markdown
-    markdown = (f'# {record.metadata.get("title", "课堂复习笔记")}\n\n课程：{package["category"]}  \n课次：{package["lesson_date"]}\n\n'
+    markdown = (f'# {record.metadata.get("title", "课堂复习笔记")}\n\n课程：{package["category"]}　课次：{note_prompts.human_date(package["lesson_date"])}\n\n'
                 + markdown.lstrip())
     if questions:
         from .yuketang.retrieval import ensure_section
         markdown = ensure_section(markdown, questions)
+    markdown = note_prompts.bold_cjk_safe(markdown)
     markdown = timestamp_references(markdown, blocks)
     atomic_bytes(draft_path, markdown.encode())
 

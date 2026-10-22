@@ -366,13 +366,15 @@ class RetrievalTests(unittest.TestCase):
         item = retrieval.compact({**bank_question(id="q1", body="HDB3 码最长连零个数？", options=[{"key": "A", "value": "3"}, {"key": "B", "value": "4"}],
                                                   student_answer=["B"], correct=False, score=0.0, max_score=2.0, remark="不超过 3 个连零"),
                                   "_relevance": {"same_lesson": True}})
-        self.assertEqual(item["是否答对"], False)
-        self.assertEqual(item["得分"], "0/2")
+        for hidden in ("我的答案", "是否答对", "得分", "来源", "日期", "本节课堂习题", "本节课前测"):
+            self.assertNotIn(hidden, item)
         self.assertNotIn("images", item)
         text = retrieval.appendix([item])
-        self.assertIn("## 相关习题与答案", text)
-        self.assertIn("正确答案：A", text)
-        self.assertIn("我的答案：B（答错，得分 0/2）", text)
+        self.assertIn("## 课上习题", text)
+        self.assertIn("**答案**：A", text)
+        self.assertIn("**解析**：不超过 3 个连零", text)
+        self.assertNotIn("我的答案", text)
+        self.assertEqual(retrieval.ensure_section("# 笔记\n\n## 课上习题\n\n已写", [item]), "# 笔记\n\n## 课上习题\n\n已写")
         self.assertEqual(retrieval.ensure_section("# 笔记\n\n## 相关习题与答案\n\n已写", [item]), "# 笔记\n\n## 相关习题与答案\n\n已写")
         self.assertTrue(retrieval.ensure_section("# 笔记", [item]).endswith(text))
         self.assertEqual(retrieval.ensure_section("# 笔记", []), "# 笔记")
@@ -383,7 +385,7 @@ class RetrievalTests(unittest.TestCase):
         full = summary_instructions({"_yuketang_questions": [item]})
         self.assertIn("<yuketang_questions>", full)
         self.assertIn("HDB3 码最长连零个数？", full)
-        self.assertIn("## 相关习题与答案", full)
+        self.assertIn("## 课上习题", full)
         self.assertIn("考点", full)
         chunk = summary_instructions({"_yuketang_questions": [item], "_detailed_chunk": True})
         self.assertIn("不要输出", chunk)
@@ -428,8 +430,8 @@ class NoteInjectionTests(unittest.IsolatedAsyncioTestCase):
             config = summary.await_args.args[2]
             self.assertEqual(config["_yuketang_questions"][0]["题干"], "AMI 码中“1”如何编码？")
             note = saved.ai_summary_path.read_text(encoding="utf-8")
-            self.assertIn("## 相关习题与答案", note)
-            self.assertIn("我的答案：B（答错", note)
+            self.assertIn("## 课上习题", note)
+            self.assertNotIn("我的答案", note)
             self.assertEqual(saved.metadata["ai_note_summary"]["yuketang_question_ids"], ["lesson:1:2"])
 
 
@@ -521,7 +523,6 @@ class LessonMatchTests(unittest.TestCase):
         self.assertEqual({item["id"] for item in marked}, {q["id"] for q in forced})
         self.assertEqual(len(items), len(marked), "optional extras give way to the budget first")
         self.assertTrue(all(item.get("题号") for item in marked))
-        self.assertTrue(any(item.get("本节课前测") for item in marked))
         # With room to spare, unrelated optional questions join after the forced ones.
         roomy = retrieval.questions_for_record(record, store=self.store, transcript="HDB3 码", budget=10 ** 6)
         self.assertGreater(len(roomy), len(marked))
@@ -539,11 +540,11 @@ class LessonMatchTests(unittest.TestCase):
         fixed = retrieval.ensure_section(note, items)
         self.assertEqual(retrieval.missing_forced(fixed, items), [])
         self.assertEqual(fixed.count("## 相关习题与答案"), 1)
-        self.assertIn("### 补充：本节习题（程序核对后补全）", fixed)
-        self.assertLess(fixed.index("补充：本节习题"), fixed.index("## 课后总结"))
+        self.assertIn("<!-- yuketang:", fixed)
+        self.assertLess(fixed.rindex("<!-- yuketang:"), fixed.index("## 课后总结"))
         self.assertTrue(fixed.rstrip().endswith("结束"))
         self.assertNotIn(f"〔{by_text['题号']}〕", fixed, "a question found by text is not duplicated")
-        self.assertIn("- 我的答案：B（", fixed)
+        self.assertNotIn("我的答案", fixed)
         self.assertEqual(retrieval.ensure_section(fixed, items), fixed)
         # No section at all: the full appendix is added.
         self.assertEqual(retrieval.missing_forced(retrieval.ensure_section("# 笔记", items), items), [])

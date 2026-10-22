@@ -81,8 +81,16 @@ marked.use({ gfm: true, breaks: false, extensions: [
     }, renderer: (token) => mathHtml(token.text, token.display) },
 ] });
 
+// CommonMark does not close **…** whose content starts/ends with punctuation
+// when CJK text touches it (e.g. **俄歇复合（Auger）**的); render those as <strong>.
+export function cjkSafeStrong(markdown) {
+  return String(markdown || "").split(/(^```[\s\S]*?^```|\$\$[\s\S]*?\$\$)/m).map((part, index) => index % 2 ? part
+    : part.replace(/\*\*([^*\n$]{1,80}?)\*\*/g, (raw, inner) => !isObviousMath(inner) &&
+      (/^[\s（(“"《【\[]/.test(inner) || /[）)”"》】\]：:，。；、！？]$/.test(inner) ) ? `<strong>${inner}</strong>` : raw)).join("");
+}
+
 export function renderMarkdown(markdown, assetBase = '') {
-  const safe = DOMPurify.sanitize(marked.parse(String(markdown || "")), {
+  const safe = DOMPurify.sanitize(marked.parse(cjkSafeStrong(markdown)), {
     FORBID_TAGS: ["style", "iframe", "form", "input"], FORBID_ATTR: ["autofocus"],
   });
   return assetBase ? safe.replace(/src="assets\/(fig-[a-f0-9]{16}\.png)"/g, (_raw, name) => `src="${assetBase}${name}"`) : safe;
