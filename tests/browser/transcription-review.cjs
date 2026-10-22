@@ -2,10 +2,10 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const path=require('node:path');
 const http=require('node:http');
-const {chromium}=require('playwright');
+const {chromium}=require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 
 const root=path.resolve(__dirname,'../..');
-const output=path.join(root,'output/playwright/transcription-review');
+const output=path.resolve(process.env.QWEN_ASR_BROWSER_OUTPUT || path.join(root,'output/playwright/transcription-review'));
 fs.mkdirSync(output,{recursive:true});
 const server=http.createServer((req,res)=>{
   const name=decodeURIComponent(new URL(req.url,'http://localhost').pathname).replace(/^\//,'');
@@ -18,7 +18,7 @@ const server=http.createServer((req,res)=>{
 async function main(){
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
   const origin=`http://127.0.0.1:${server.address().port}`;
-  const browser=await chromium.launch({headless:true});
+  const browser=await chromium.launch({headless:true,executablePath:process.env.QWEN_ASR_BROWSER_EXECUTABLE || undefined});
   const context=await browser.newContext({viewport:{width:1100,height:900}});
   const page=await context.newPage(),errors=[];
   page.on('pageerror',error=>errors.push(error.message));

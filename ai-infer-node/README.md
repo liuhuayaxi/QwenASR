@@ -1,6 +1,6 @@
 # Windows WSL2 按需 AI 推理节点
 
-服务源码在此目录；实际部署在 WSL 的 `/home/liuhuayaxi/ai-infer-node`。独立 gateway、mineru、asr 虚拟环境保留 Mac 和 WSL 原有环境。PDF/图像固定 Advanced，ASR 固定官方 1.7B HF 权重和全 GPU BF16。默认模型空闲时间为 0，每项任务通过进程退出卸载模型。
+服务源码在此目录；实际部署在 WSL 的 `/home/liuhuayaxi/ai-infer-node`。独立 gateway、mineru、asr 虚拟环境保留 Mac 和 WSL 原有环境。PDF/图像固定 Advanced，ASR 固定官方 1.7B HF 权重和全 GPU BF16。文件任务的模型空闲时间为 0，每项任务通过进程退出卸载模型；课堂短片段使用有期限的会话租约复用 Worker，租约结束且空闲后释放。
 
 2026-10-10 的 Windows PDF 配置使用 `processing_window_size=4`、`vlm_concurrency=4`、`max_num_seqs=4` 和 `enforce_eager=false`，启用 vLLM 编译与 CUDA Graph。并发发生在同一份文档的解析过程中，GPU 任务队列仍为 1，避免 8 GB 显卡同时加载 ASR 和多个视觉模型。显存预算保持 `gpu_memory_utilization=0.55`，模型、Advanced 档位和 BF16 保持原配置。首次运行需要建立编译缓存；之后仍按任务加载与卸载模型。结果 metadata 的 `performance_config` 记录实际传入的参数，CUDA Graph 是否成功捕获需核对 worker 日志。
 
@@ -31,7 +31,7 @@ powershell.exe -NoProfile -File "$env:LOCALAPPDATA\AIInferNode\install_tailnet_s
 
 令牌位于 WSL `~/ai-infer-node/private/token` 和 Mac `~/.qwenasr/remote-infer/token`，权限 600；其他设备安全复制到自己的受保护文件即可。裸浏览器请求无 Bearer 返回 401，这是正常鉴权。正式地址与 SSH 管理地址是两个不同的 Tailscale 节点，Syncthing 也使用 Windows 原生节点。
 
-Mac 默认模式仍为 local。客户端对短暂连接/网关失败做有限重试，提交时复用同一个 key，轮询时复用 Job ID。连续断线超过 `network_recovery_seconds=60` 后失败，Preferred 可回退；冷启动和正常排队则继续等待正式 job_timeout，不混为网络故障。
+Mac 默认模式仍为 local。客户端对短暂连接/网关失败做有限重试，提交时复用同一个 key，轮询时复用 Job ID。连续断线超过 `network_recovery_seconds=60` 后保留操作收据。Preferred 仅在收据证明远端尚未接受时回退；已经提交、已接受或响应丢失的操作继续按原 ID 恢复。冷启动和正常排队继续等待正式 job_timeout。
 
 命令行切换（在 QwenASR 项目目录使用原 `.venv`）：
 
@@ -41,7 +41,7 @@ Mac 默认模式仍为 local。客户端对短暂连接/网关失败做有限重
 .venv/bin/python ai-infer-node/client/provider_config.py --mineru local --asr local
 ```
 
-设置保存在 `~/.qwenasr/inference-providers.json`。浏览器不接触远程令牌。`remote_only` 的任何错误都向上层返回；`remote_preferred` 失败后使用原始本机输入回退，结果记录实际 provider、fallback 和错误类型。
+设置保存在 `~/.qwenasr/inference-providers.json`。浏览器不接触远程令牌。`remote_only` 的错误保留资料等待远程恢复；`remote_preferred` 在明确未提交时使用原始本机输入回退，结果记录实际 provider、fallback 和错误类型。两种远程模式都会恢复已持久化的课堂待转片段。崩溃后尚未分段的尾音继承录音时保存的路由和省电策略；恢复后新增录音使用当前设置。
 
 ## 重复部署
 
@@ -52,7 +52,9 @@ rsync -az --exclude config.toml --exclude private --exclude data --exclude venvs
 ssh efinity 'cd ~/ai-infer-node && scripts/install_wsl.sh'
 ```
 
-安装器创建隔离 venv、下载并验证模型、冻结依赖版本。`requirements-*.lock` 为实际部署版本。MinerU 的 CUDA 编译器、CRT、NVVM 固定到 13.0.88，与其 Torch cu130 头文件一致；模型和 MinerU 版本未因此降低。`configure_cuda_toolkit.py` 提供 pip CUDA 的标准目录布局，链接现有 WSL Windows-driver `libcuda`，不安装 Linux NVIDIA 显示驱动。
+安装器创建隔离 venv、下载并验证模型、生成并固定 ASR/MinerU 文件清单的 SHA-256、冻结依赖版本。首次安装按实际目录配置路径；已有的端口、令牌位置和其他自定义配置保留。MinerU 清单只有在官方 `mineru-kit models verify` 成功后才生成，写入配置前再执行网关的逐文件校验。仅复制示例配置不能完成模型清单配置，需要运行安装器。
+
+重复安装前应先等待任务完成并停止 `ai-infer-gateway.service`；安装脚本会拒绝修改正在运行的服务。`requirements-*.lock` 为实际部署版本。MinerU 的 CUDA 编译器、CRT、NVVM 固定到 13.0.88，与其 Torch cu130 头文件一致；模型和 MinerU 版本未因此降低。`configure_cuda_toolkit.py` 提供 pip CUDA 的标准目录布局，链接现有 WSL Windows-driver `libcuda`，不安装 Linux NVIDIA 显示驱动。
 
 重装优先使用交付的 lock 文件；ASR 已保存 HF revision 时重用该提交。主动更新可显式设置 `AI_INFER_MODEL_REVISION`，更新后须重新做质量和资源验收。
 
@@ -69,7 +71,11 @@ systemctl status ai-infer-gateway
 journalctl -u ai-infer-gateway --since today
 ```
 
-服务以 `liuhuayaxi` 运行，异常自动重启，停止时先安全终止任务，systemd `KillMode=control-group` 兜底清理全部子进程。服务仅使用一个 uvicorn worker；SQLite 和文件锁阻止同数据目录重复启动。
+服务以 `liuhuayaxi` 运行，异常自动重启，停止时先安全终止任务，systemd `KillMode=control-group` 兜底清理全部子进程。`Delegate=yes` 为该服务委派 cgroup v2 子树；`worker_cgroup_root="auto"` 从当前进程读取服务自身的 cgroup，仍校验服务归属、UID 和 `cgroup.kill`。服务仅使用一个 uvicorn worker；SQLite 和文件锁阻止同数据目录重复启动。
+
+安装 systemd 的最后一步以服务用户读取令牌，轮询 `/v1/health`，只有模型清单、cgroup 和 GPU 启动观测全部通过才报告成功。进程 active 但健康状态 degraded 会让安装返回失败。以前保留的资源隔离记录不会被安装器删除；修复原因后需通过带鉴权的 `/v1/resources/recheck` 建立可靠的空闲基线，并再次检查 health。
+
+空队列使用事件唤醒，并每 5 秒检查一次持久状态；新增任务立即唤醒调度器。`/v1/status` 的 Windows 宿主观测最多每 15 秒采样、GPU 展示最多每 5 秒采样，响应包含 `sampled_at` 和 `sample_age_seconds`。模型启动、任务结束和隔离恢复始终使用新的资源观测。课堂 Worker 退出后，其回收协程也结束，下一次启动时重新建立。
 
 ## Windows 登录和开机
 

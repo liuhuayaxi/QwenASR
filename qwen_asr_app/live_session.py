@@ -161,6 +161,7 @@ class TranscriptionSession:
             self.pending_config.update(clean)
             return True
         self.config.update(clean)
+        self.persist_capture_config()
         self.refresh_remote_lease()
         return False
 
@@ -168,7 +169,17 @@ class TranscriptionSession:
         if self.pending_config:
             self.config.update(self.pending_config)
             self.pending_config.clear()
+            self.persist_capture_config()
             self.refresh_remote_lease()
+
+    def persist_capture_config(self):
+        """Save the route at an audio boundary so a crash tail keeps its owner."""
+        if not self.accepting_audio or self.recording is None:
+            return
+        snapshot = without_secrets(self.config)
+        if self.recording.metadata.get('capture_config_snapshot') != snapshot:
+            self.recording.metadata['capture_config_snapshot'] = snapshot
+            self.recording.save_metadata()
 
     def refresh_remote_lease(self):
         """Apply routing at audio boundaries without altering accepted clips."""
@@ -223,7 +234,8 @@ class TranscriptionSession:
             self.silence_samples = 0
             self.voiced_samples += len(audio)
 
-        if self.sample_count >= int(1.5 * SAMPLE_RATE) and (
+        if (self.config.get('inference_settings', {}).get('asr_provider', 'local') == 'local'
+                and self.sample_count >= int(1.5 * SAMPLE_RATE)) and (
             # BF16 1.7B is fast on Apple Silicon, but repeated full-prefix decoding
             # is the main energy cost. A configurable ~6 s cadence stays interactive without
             # keeping the GPU busy continuously.
@@ -313,19 +325,7 @@ class TranscriptionSession:
         }
         config_snapshot = json.loads(json.dumps(self.config))
         entry = recording.metadata['pending_segments'][str(current_id)]
-        if config_snapshot.get('inference_settings', {}).get('asr_provider', 'local') != 'local':
-            from .inference_providers import prepare_audio
-            # Live utterances are bounded clips, not whole lectures. Match the
-            # duration-based local ceiling and the installed Windows API limit.
-            params = asr_params_with_terminology(config_snapshot.get('asr_params'), config_snapshot.get('terminology'))
-            params['max_tokens'] = min(int(params.get('max_tokens', 4096)), 2048,
-                                      max(192, int(len(audio) / SAMPLE_RATE * 10) + 128))
-            config_snapshot['asr_params'] = params
-            folder = PRIVATE_ROOT/'remote-operations'/'live'/recording.id/str(current_id)
-            config_snapshot['_remote_operation_dir'] = str(folder)
-            prepare_audio(folder, audio, config_snapshot.get('language'),
-                asr_terminology_context(str(config_snapshot.get('context', '')), config_snapshot.get('terminology')),
-                4096, config_snapshot['inference_settings'], config_snapshot.get('asr_params'))
+        self.prepare_remote_segment(recording, current_id, audio, config_snapshot)
         entry['config_snapshot'] = without_secrets(config_snapshot)
         recording.save_metadata()
         self.segment_id = recording.next_segment_id
@@ -344,6 +344,24 @@ class TranscriptionSession:
                 segment_end,
             )
         )
+
+    @staticmethod
+    def prepare_remote_segment(recording, segment_id, audio, snapshot):
+        if snapshot.get('inference_settings', {}).get('asr_provider', 'local') == 'local':
+            return
+        from .inference_providers import prepare_audio
+        # Existing remote snapshots retain their request parameters and route.
+        folder = snapshot.get('_remote_operation_dir')
+        if not folder:
+            params = asr_params_with_terminology(snapshot.get('asr_params'), snapshot.get('terminology'))
+            params['max_tokens'] = min(int(params.get('max_tokens', 4096)), 2048,
+                                      max(192, int(len(audio) / SAMPLE_RATE * 10) + 128))
+            snapshot['asr_params'] = params
+            folder = PRIVATE_ROOT/'remote-operations'/'live'/recording.id/str(segment_id)
+            snapshot['_remote_operation_dir'] = str(folder)
+        prepare_audio(folder, audio, snapshot.get('language'),
+            asr_terminology_context(str(snapshot.get('context', '')), snapshot.get('terminology')),
+            4096, snapshot['inference_settings'], snapshot.get('asr_params'))
 
     def reset_audio(self, continue_speaking: bool = False) -> None:
         self.chunks = []
@@ -744,6 +762,10 @@ class TranscriptionSession:
                 "ai_system_prompt": str(ai_options.get("system_prompt") or DEFAULT_AI_SYSTEM_PROMPT),
             }
             recording.save_metadata()
+        self.recording = recording
+        # Recover already captured audio before replacing the recording's route
+        # with today's setting for new microphone samples.
+        await self.recover_pending()
         from .inference_providers import inference_settings
         # New audio follows today's saved choice, including resumed recordings.
         # Already submitted segments retain their own immutable snapshots.
@@ -753,9 +775,8 @@ class TranscriptionSession:
         self.config['inference_settings'] = inference_settings.for_task('asr')
         recording.metadata['inference_settings'] = self.config['inference_settings']
         recording.save_metadata()
-        self.recording = recording
-        await self.recover_pending()
         self.accepting_audio = True
+        self.persist_capture_config()
         self.refresh_remote_lease()
         self.segment_id = recording.next_segment_id
         await self.send(
@@ -785,6 +806,9 @@ class TranscriptionSession:
                 frames = audio.getnframes()
         record.metadata["sample_count"] = max(frames, int(record.metadata.get("sample_count", 0)))
         pending = record.metadata.setdefault("pending_segments", {})
+        capture = copy.deepcopy(record.metadata.get('capture_config_snapshot') or self.config)
+        if not record.metadata.get('capture_config_snapshot'):
+            capture['inference_settings'] = saved_config(record.metadata.get('inference_settings'))
         covered_end = max([float(s.get("end", 0)) for s in record.segments]
                           + [float(s.get("end", 0)) for s in pending.values()]
                           + [int(record.metadata.get("transcribed_until_sample", 0)) / SAMPLE_RATE])
@@ -792,11 +816,13 @@ class TranscriptionSession:
         while cursor < frames:
             end = min(frames, cursor + 45 * SAMPLE_RATE)
             segment_id = record.reserve_segment_id()
-            pending[str(segment_id)] = {"id": segment_id, "start": cursor / SAMPLE_RATE, "end": end / SAMPLE_RATE}
+            pending[str(segment_id)] = {"id": segment_id, "start": cursor / SAMPLE_RATE,
+                                       "end": end / SAMPLE_RATE,
+                                       "config_snapshot": without_secrets(capture)}
             cursor = end
         record.save_metadata()
         for item in list(pending.values()):
-            snapshot = item.get('config_snapshot') or {**self.config, 'inference_settings': saved_config()}
+            snapshot = copy.deepcopy(item.get('config_snapshot') or capture)
             folder = snapshot.get('_remote_operation_dir')
             def read_range(item=item, folder=folder):
                 if folder:
@@ -816,6 +842,10 @@ class TranscriptionSession:
             samples = await asyncio.to_thread(read_range)
             if samples is None:
                 continue
+            if not folder and snapshot.get('inference_settings', {}).get('asr_provider', 'local') != 'local':
+                await asyncio.to_thread(self.prepare_remote_segment, record, item['id'], samples, snapshot)
+                item['config_snapshot'] = without_secrets(snapshot)
+                record.save_metadata()
             self.track(self.run_final(samples, int(item['id']), json.loads(json.dumps(snapshot)),
                                       "recovery", record, float(item["start"]), float(item["end"])))
 

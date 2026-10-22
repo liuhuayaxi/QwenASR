@@ -130,6 +130,13 @@ class UploadJobs:
                     self.save()
                 self.tasks.pop(ident, None)
                 self.notifications[ident].set()
+                # Completed streams reconstruct their terminal result from the
+                # durable recording. Do not retain full transcript event copies
+                # for every upload for the lifetime of the web service.
+                self.events.pop(ident, None)
+                self.sequence.pop(ident, None)
+                self.notifications.pop(ident, None)
+                self.intent.pop(ident, None)
         task.add_done_callback(finished)
 
     def emit(self, job, event):

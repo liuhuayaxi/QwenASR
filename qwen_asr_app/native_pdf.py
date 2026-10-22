@@ -21,9 +21,73 @@ def pdf_operation(operation,**arguments):
     return json.loads(result.stdout)['result']
 
 
+def _text_pdf(source, destination, title=None):
+    import pymupdf as fitz
+    import html
+
+    raw = source.read_bytes()
+    encodings = ("utf-16",) if raw.startswith((b"\xff\xfe", b"\xfe\xff")) else ("utf-8-sig", "gb18030")
+    for encoding in encodings:
+        try:
+            text = raw.decode(encoding)
+            break
+        except UnicodeError:
+            continue
+    else:
+        raise ValueError("文本编码无法识别，请先保存为 UTF-8")
+    if "\x00" in text:
+        raise ValueError("文本含二进制内容，请先保存为 UTF-8")
+    # Preserve literal Markdown / LaTeX and readable text rather than fetching links.
+    # Bound long lines (including URLs / formulas) so they cannot overflow a page.
+    import textwrap
+    lines = [part for line in text.splitlines() for part in (textwrap.wrap(line.expandtabs(4), width=70, replace_whitespace=False, drop_whitespace=False) or [""])]
+    body = "<h1>" + html.escape(title or source.name) + "</h1>" + "".join(
+        "<p>" + html.escape(line) + "</p>" for line in lines
+    )
+    story = fitz.Story(html=body, user_css="body{font-size:11pt;line-height:1.5;}p{margin:0 0 5pt;overflow-wrap:break-word;}h1{font-size:18pt;}")
+    writer = fitz.DocumentWriter(str(destination))
+    try:
+        more = True
+        while more:
+            device = writer.begin_page(fitz.paper_rect("a4"))
+            more, _ = story.place(fitz.Rect(42, 42, 553, 800))
+            story.draw(device)
+            writer.end_page()
+    finally:
+        writer.close()
+
+
+def _image_pdf(source, destination):
+    import pymupdf as fitz
+
+    from PIL import Image, ImageOps, ImageSequence
+    doc = fitz.open()
+    try:
+        with Image.open(source) as image:
+            for frame in ImageSequence.Iterator(image):
+                frame = ImageOps.exif_transpose(frame).convert("RGB")
+                import io
+                stream = io.BytesIO()
+                frame.save(stream, format="PNG")
+                width, height = frame.size
+                scale = min(1, 842 / max(width, height))
+                page = doc.new_page(width=width * scale, height=height * scale)
+                page.insert_image(page.rect, stream=stream.getvalue())
+        doc.save(destination, deflate=True)
+    finally:
+        doc.close()
+
+
 def _execute(request):
     import pymupdf as fitz
     operation=request['operation']
+    if operation in {'text_pdf', 'image_pdf'}:
+        source, output = Path(request['path']), Path(request['output'])
+        if operation == 'text_pdf':
+            _text_pdf(source, output, request.get('title'))
+        else:
+            _image_pdf(source, output)
+        return None
     if operation=='image_locations':
         digests={};locations={row['image_id']:[] for row in request['figures']}
         for row in request['figures']:
@@ -35,6 +99,27 @@ def _execute(request):
                         if number not in locations[ident]:locations[ident].append(number)
         return locations
     with fitz.open(request['path']) as doc:
+        if operation == 'page_count':
+            return len(doc)
+        if operation == 'validate':
+            if doc.needs_pass:
+                raise ValueError('PDF 已加密，请先解密再转换')
+            if not len(doc):
+                raise ValueError('文件中没有可转换的页面')
+            return len(doc)
+        if operation == 'package':
+            for name, path in request['attachments'].items():
+                doc.embfile_add(name, Path(path).read_bytes())
+            doc.save(request['output'], deflate=True)
+            return len(doc)
+        if operation == 'text_stats':
+            total_chars, uncertain = 0, []
+            for index, page in enumerate(doc, 1):
+                text = page.get_text().strip()
+                total_chars += len(text)
+                if '\ufffd' in text:
+                    uncertain.append(index)
+            return {'pages': len(doc), 'text_chars': total_chars, 'uncertain_pages': uncertain}
         if operation=='inspect':
             return {'pages':len(doc),'blank_pages':[i+1 for i,page in enumerate(doc) if not page.get_text().strip() and not page.get_images()]}
         if operation=='text':

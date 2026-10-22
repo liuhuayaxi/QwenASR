@@ -71,12 +71,14 @@ class LocalIndependence(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record.metadata['inference_settings']['asr_provider'], 'local')
 
     async def test_force_local_load_does_not_read_provider_configuration(self):
-        manager = ModelManager.__new__(ModelManager)
-        manager.cancel_unload = Mock()
-        manager.load_lock = asyncio.Lock()
+        manager = ModelManager(Path('/unused/model'))
         manager.worker = Mock(is_alive=Mock(return_value=True))
-        with patch.object(providers.inference_settings, 'read', side_effect=AssertionError('settings read')):
-            await manager.load(force_local=True)
+        try:
+            with patch.object(providers.inference_settings, 'read', side_effect=AssertionError('settings read')):
+                await manager.load(force_local=True)
+            self.assertIsNotNone(manager.unload_task)
+        finally:
+            manager.cancel_unload()
 
     def test_legacy_local_missing_snapshot_does_not_use_current_remote_mode(self):
         with patch.object(providers.inference_settings, 'read', side_effect=AssertionError('settings read')):

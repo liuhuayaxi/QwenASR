@@ -137,8 +137,9 @@ class NoteBudgetTests(unittest.TestCase):
             self.assertNotEqual(budget_compatible_identity(raw,[*inputs,'source changed'],config()),identity)
 
     def test_cli_accepts_over_900000_characters_when_token_budget_fits(self):
+        from tests.agy_fixtures import available_material_sandbox
         provider=config()['ai']['summary_provider']
-        with patch('qwen_asr_app.agy_cli.executable',return_value='/test/agy'):
+        with patch('qwen_asr_app.agy_cli.executable',return_value='/test/agy'), available_material_sandbox('qwen_asr_app.agy_cli'):
             args=_request_arguments('只返回OK',{'source':'abc '*250000},provider)
             self.assertIsNotNone(args)
         provider['context_window']=256000

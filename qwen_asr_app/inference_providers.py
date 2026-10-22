@@ -230,7 +230,12 @@ def classroom_clip_operation(folder, request):
         # Older resident workers silently capped generation at 2048. Retain
         # the user's saved ceiling and use their file job until upgraded.
         from .remote_classroom import capabilities
-        caps = capabilities(request['config'])
+        try:
+            caps = capabilities(request['config'])
+        except Exception:
+            # No classroom receipt exists yet. The durable file protocol can
+            # perform its own preflight and safely classify nonacceptance.
+            return False
         ceiling = caps.get('classroom_asr_max_new_tokens', 2048)
         if type(ceiling) is not int or request['max_new_tokens'] > ceiling:
             return False

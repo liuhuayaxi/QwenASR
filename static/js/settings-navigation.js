@@ -31,6 +31,7 @@ export function createSettingsNavigation() {
     $("#settingsPageTitle").textContent = pages[page][0];
     if (changed) content.scrollTop = 0;
     syncActions();
+    document.dispatchEvent(new Event('qwenasr:viewchange'));
   }
 
   function reveal(target) {

@@ -10,7 +10,7 @@ from unittest.mock import patch
 import httpx
 import numpy as np
 
-from qwen_asr_app.course_download import stream_audio
+from qwen_asr_app.course_download import _stream_audio_inline as stream_audio
 from qwen_asr_app.parallel_media import BLOCK_BYTES, PROBE_BYTES, parallel_media
 from qwen_asr_app.smartclass import SmartClassError
 

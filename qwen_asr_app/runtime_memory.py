@@ -5,27 +5,55 @@ import asyncio
 import ctypes
 import gc
 import os
-import subprocess
 import sys
+from functools import lru_cache
 
 _pending=None
 last_reclaim={}
 
 
-def rss_bytes():
+class _ProcTaskInfo(ctypes.Structure):
+    # Apple's public proc_taskinfo ABI (xnu/bsd/sys/proc_info.h).
+    _fields_ = [(name, ctypes.c_uint64) for name in
+                ('virtual_size', 'resident_size', 'total_user', 'total_system', 'threads_user', 'threads_system')]
+    _fields_ += [(name, ctypes.c_int32) for name in
+                 ('policy', 'faults', 'pageins', 'cow_faults', 'messages_sent', 'messages_received',
+                  'syscalls_mach', 'syscalls_unix', 'context_switches', 'threads', 'running_threads', 'priority')]
+
+
+@lru_cache(maxsize=1)
+def _darwin_proc_info():
+    function = ctypes.CDLL('/usr/lib/libproc.dylib').proc_pidinfo
+    function.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
+    function.restype = ctypes.c_int
+    return function
+
+
+def _darwin_rss_bytes(pid=None):
+    info = _ProcTaskInfo()
+    count = _darwin_proc_info()(os.getpid() if pid is None else pid, 4, 0, ctypes.byref(info), ctypes.sizeof(info))
+    return int(info.resident_size) if count == ctypes.sizeof(info) else None
+
+
+def rss_bytes(pid=None):
     try:
         if sys.platform=='linux':
-            with open('/proc/self/statm') as source:return int(source.read().split()[1])*os.sysconf('SC_PAGE_SIZE')
-        return int(subprocess.check_output(['/bin/ps','-o','rss=','-p',str(os.getpid())],text=True).strip())*1024
-    except (OSError,ValueError,IndexError):return None
+            path = '/proc/self/statm' if pid is None else f'/proc/{int(pid)}/statm'
+            with open(path) as source:return int(source.read().split()[1])*os.sysconf('SC_PAGE_SIZE')
+        if sys.platform == 'darwin':
+            return _darwin_rss_bytes(pid)
+        return None
+    except (OSError,AttributeError,ValueError,IndexError):return None
 
 
 def release_pdf_cache():
     # MuPDF's global store otherwise keeps decoded images after documents and
     # pixmaps are closed. Never race a native PDF operation on another thread.
-    from .review_materials import PDF_LOCK
+    # Do not import PDF infrastructure just to clean up an idle server.
+    module=sys.modules.get('fitz') or sys.modules.get('pymupdf')
+    if module is None:return 0
+    from .native_pdf import PDF_LOCK
     with PDF_LOCK:
-        module=sys.modules.get('fitz') or sys.modules.get('pymupdf')
         tools=getattr(module,'TOOLS',None)
         if tools is None:return 0
         size=tools.store_size

@@ -3,13 +3,18 @@ import hashlib
 import json
 import os
 import time
+import tomllib
 import urllib.parse
 import urllib.request
 from pathlib import Path
 
 root = Path(__file__).resolve().parents[1]
-model = "Qwen/Qwen3-ASR-1.7B-hf"
-folder = root / "models" / "Qwen3-ASR-1.7B-hf"
+with (root / 'config.toml').open('rb') as source_config:
+    asr_config = tomllib.load(source_config)['asr']
+model = asr_config['model_id']
+if model not in {'Qwen/Qwen3-ASR-1.7B', 'Qwen/Qwen3-ASR-1.7B-hf'}:
+    raise ValueError('Only official Qwen3-ASR 1.7B is allowed')
+folder = Path(asr_config['model_path']).expanduser().resolve()
 folder.mkdir(parents=True, exist_ok=True)
 source = os.environ.get("AI_INFER_MODEL_SOURCE", "huggingface")
 if source not in ("huggingface", "modelscope"):

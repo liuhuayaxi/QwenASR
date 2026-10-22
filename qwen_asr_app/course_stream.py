@@ -238,16 +238,22 @@ class CourseStreamJob:
                 audio = np.frombuffer(raw_bytes, dtype="<i2").astype(np.float32) / 32768
                 offset = sum(c["samples"] for c in chunks[:index]) / SAMPLE_RATE
                 saved_parts = [s for s in self.record.segments if s.get("course_chunk") == index]
-                done_sample = max((int(s["chunk_end_sample"]) for s in saved_parts), default=0)
+                # Silent ranges have no transcript entry. Persist their progress
+                # separately, and never derive an identifier from entry count:
+                # old checkpoints can contain IDs 102, 104 with gaps.
+                done_sample = max(
+                    int(chunks[index].get("transcribed_samples", 0)),
+                    max((int(s["chunk_end_sample"]) for s in saved_parts), default=0),
+                )
                 ranges = deque([(done_sample, len(audio))]) if done_sample < len(audio) else deque()
-                part = len(saved_parts)
+                last_id = max((int(s["id"]) for s in self.record.segments), default=0)
+                next_id = max((index + 1) * 100 + 1, last_id + 1)
                 while ranges:
                     start, end = ranges.popleft()
                     if getattr(self.model, "realtime_pending", False) and end - start > 25 * SAMPLE_RATE:
                         ranges.appendleft((start + 25 * SAMPLE_RATE, end))
                         end = start + 25 * SAMPLE_RATE
-                    part += 1
-                    ident = (index + 1) * 100 + part
+                    ident = next_id
                     seconds = (end - start) / SAMPLE_RATE
                     self.state["stage"] = f"正在转写第 {index + 1} 段 · 下载与精修同时进行"
                     self.record.save_metadata()
@@ -274,7 +280,6 @@ class CourseStreamJob:
                         if seconds > 35 and ("重复" in str(exc) or "超时" in str(exc)):
                             first, second = bisect_audio_range(audio, start, end)
                             ranges.appendleft(second); ranges.appendleft(first)
-                            part -= 1
                             continue
                         raise
                     if text:
@@ -287,8 +292,14 @@ class CourseStreamJob:
                         if pipeline:
                             segment["ai_requested"] = {"correction": True, "translation": "off"}
                         self.record.upsert_segment(segment)
-                        if pipeline:
-                            await pipeline.submit(segment)
+                    # Advance only after the transcript is durable. A crash
+                    # between the two writes can repeat silence, but cannot
+                    # skip recognized words or overwrite a saved segment.
+                    chunks[index]["transcribed_samples"] = end
+                    self.record.save_metadata()
+                    next_id += 1
+                    if text and pipeline:
+                        await pipeline.submit(segment)
                 self.state["completed_chunks"] = index + 1
                 self.record.metadata["batch_progress"] = {
                     "stage": "asr", "completed_seconds": offset + len(audio) / SAMPLE_RATE,
@@ -370,18 +381,23 @@ class CourseStreamManager:
     async def create(self, data):
         config = data.get("config") or {}
         try:
-            required = ["sentence"]
-            if config.get("ai_correction"):
-                required.append("correction")
-            if config.get("summary_enabled") or config.get("generate_summary", True):
-                required.append("summary")
             # The SmartClass service owns these per-course operation switches.
             # Keep its explicit automatic-correction choice while still
             # rebuilding every provider and credential from saved settings.
             config = ai_preferences.task_config(
-                config, required_modes=tuple(required),
+                config,
                 preserve_flags=("ai_correction", "summary_enabled", "translation"),
             )
+            required = []
+            if config.get("ai_correction"):
+                required.append("correction")
+            if config.get("generate_summary", False):
+                required.append("summary")
+            if required:
+                config = ai_preferences.task_config(
+                    config, required_modes=tuple(required),
+                    preserve_flags=("ai_correction", "summary_enabled", "translation"),
+                )
         except (OSError, ValueError) as exc:
             raise HTTPException(409, str(exc)) from exc
         config["asr_params"] = normalize_asr_params(config.get("asr_params"), DEFAULT_ASR_PARAMS["max_tokens"])

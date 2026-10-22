@@ -518,6 +518,8 @@ class RecordingRecord:
         payload["segments"] = segments
         record = cls(directory, payload)
         apply_course_dates(record.metadata, directory)
+        if shared(app_settings) and directory.is_relative_to(app_settings.storage_root):
+            record.metadata['category'] = directory.relative_to(app_settings.storage_root).parts[0]
         return record
 
     @property
@@ -1131,11 +1133,12 @@ class RecordingStore:
                 # Bound the peak as well as the final cache. Keeping every
                 # decoded transcript until the sweep ends inflated idle RSS.
                 trim_cache()
-                if mark_interrupted and shared(app_settings) and record.directory.is_relative_to(app_settings.storage_root):
+                if shared(app_settings) and record.directory.is_relative_to(app_settings.storage_root):
                     category = record.directory.relative_to(app_settings.storage_root).parts[0]
                     if record.metadata.get('category') != category:
                         record.metadata['category'] = category
-                        record.save_metadata()
+                        if mark_interrupted:
+                            record.save_metadata()
                 if (
                     mark_interrupted
                     and record.metadata.get("status") in {"processing", "failed"}
@@ -1230,7 +1233,7 @@ class RecordingStore:
         if self.active is not None and self.active.id == session_id:
             return self.active
         directory = self.paths.get(session_id)
-        if directory is None:
+        if directory is None or not (directory / 'session.json').is_file():
             self.refresh()
             directory = self.paths.get(session_id)
         if directory is None:
@@ -1246,7 +1249,7 @@ class RecordingStore:
         """Scan pending headers without retaining complete recordings."""
         def eligible(metadata):
             if (metadata.get('remote_backlog') or {}).get('status') in {'paused','cancelled'}:return False
-            return any((item.get('config_snapshot') or {}).get('inference_settings',{}).get('asr_provider')=='remote_only'
+            return any((item.get('config_snapshot') or {}).get('inference_settings',{}).get('asr_provider') in {'remote_only', 'remote_preferred'}
                 and (item.get('config_snapshot') or {}).get('_remote_operation_dir')
                 for item in (metadata.get('pending_segments') or {}).values())
         cache=getattr(self,'_remote_backlog_cache',{});retained={};identities=[]
@@ -1263,6 +1266,24 @@ class RecordingStore:
         self._remote_backlog_cache=retained
         if self.active and eligible(self.active.metadata) and self.active.id not in identities:identities.append(self.active.id)
         return identities
+
+    def _catalog(self):
+        if not hasattr(self, '_list_catalog'):
+            from .recording_catalog import RecordingCatalog
+            self._list_catalog = RecordingCatalog(self)
+        return self._list_catalog
+
+    def iter_list_items(self):
+        """Read public list snapshots without retaining full notes/transcripts."""
+        return self._catalog().items()
+
+    def catalog_signature(self):
+        """Invalidate derived task summaries on any recording file replacement."""
+        return self._catalog().signature()
+
+    def recording_directories(self):
+        """Discover persisted records without reading their transcripts."""
+        return [path.parent for path in self._metadata_paths()]
 
     def list_records(self) -> list[RecordingRecord]:
         self.refresh()

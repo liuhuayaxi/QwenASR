@@ -102,6 +102,8 @@ class ClassroomIntelligenceService:
         self._cloud_semaphore = asyncio.Semaphore(1)  # Single serialized cloud call
         self._retry_monitor = None
         self._closing = False
+        from .background import NoteJobIndex
+        self._note_job_index = NoteJobIndex()
 
     async def start(self) -> None:
         """Lifespan start: recover durable note job states across saved records without poll resets."""
@@ -109,10 +111,12 @@ class ClassroomIntelligenceService:
         if self._retry_monitor is None or self._retry_monitor.done():
             self._retry_monitor = asyncio.create_task(self._retry_loop())
         running = set(self._running_tasks.keys())
-        list_fn = getattr(self.store, 'list_records', None) or getattr(self.store, 'list_recordings', None)
-        if list_fn and callable(list_fn):
-            try:
-                for rec in list_fn():
+        try:
+            for ident, rows in self._note_job_index.records(self.store):
+                if any(row.get('status') == 'pending' or (row.get('job') or {}).get('retryable') for row in rows):
+                    rec = self._find_record(ident)
+                    if rec is None:
+                        continue
                     store = ClassroomNoteStore(rec, self.live_sessions.get(str(getattr(rec, 'id', ''))))
                     await store.recover_interrupted_notes(running)
                     notes, _ = await store.list_notes()
@@ -125,8 +129,20 @@ class ClassroomIntelligenceService:
                             next_retry = float(job.get('next_retry_at') or 0)
                             delay = max(0.0, next_retry - now_ts)
                             await self.enqueue_enhancement(rec, note['id'], debounce_seconds=delay)
-            except Exception as exc:
-                logger.warning("Failed to recover notes on startup: %s", exc)
+        except Exception as exc:
+            logger.warning("Failed to recover notes on startup: %s", exc)
+
+    def _find_record(self, ident):
+        live = self.live_sessions.get(ident)
+        record = getattr(live, 'recording', None)
+        if record is not None:
+            return record
+        find = getattr(self.store, 'find', None)
+        if callable(find):
+            return find(ident)
+        visit = (getattr(self.store, 'iter_records', None) or getattr(self.store, 'list_records', None)
+                 or getattr(self.store, 'list_recordings', None))
+        return next((record for record in visit() if record.id == ident), None) if callable(visit) else None
 
     async def close(self) -> None:
         """Lifespan close: cancel and drain all in-flight and debounce tasks."""
@@ -151,16 +167,18 @@ class ClassroomIntelligenceService:
     async def _retry_loop(self):
         while True:
             await asyncio.sleep(15)
-            list_fn=getattr(self.store,'list_records',None) or getattr(self.store,'list_recordings',None)
-            if not list_fn:
-                continue
-            for record in list_fn():
-                doc=read_notes_doc(record)
-                for note in doc.get('notes',[]):
-                    job=note.get('job') or {}
-                    if note.get('locked') or note.get('status') != 'failed' or not job.get('retryable'):
-                        continue
-                    if time.time() >= float(job.get('next_retry_at') or 0):
+            await self._retry_once()
+
+    async def _retry_once(self):
+        for ident, rows in self._note_job_index.records(self.store):
+            record = None
+            for note in rows:
+                job = note.get('job') or {}
+                if note.get('locked') or note.get('status') != 'failed' or not job.get('retryable'):
+                    continue
+                if time.time() >= float(job.get('next_retry_at') or 0):
+                    record = record or self._find_record(ident)
+                    if record is not None:
                         await self.enqueue_enhancement(record,note['id'])
 
     async def on_transcript(self, record: Any) -> None:
