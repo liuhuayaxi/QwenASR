@@ -4,6 +4,7 @@ import argparse
 import importlib.metadata
 import json
 import os
+import sys
 from pathlib import Path
 
 
@@ -54,6 +55,11 @@ def main():
     (args.output / "document_content_list.json").write_text(
         json.dumps(content, ensure_ascii=False), encoding="utf-8")
     print('QWENASR_STAGE done', flush=True)
+    # llama.cpp/Metal worker threads can still hold a mutex while C++ static
+    # destructors run at interpreter exit ("libc++abi ... recursive_mutex lock
+    # failed"). Everything is written, so leave without running them.
+    sys.stdout.flush(); sys.stderr.flush()
+    os._exit(0)
 
 
 if __name__ == "__main__":

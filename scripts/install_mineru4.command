@@ -7,10 +7,12 @@ UV="$(command -v uv || true)"
 if [ -z "$UV" ] && [ -x /opt/homebrew/bin/uv ]; then UV=/opt/homebrew/bin/uv; fi
 if [ -z "$UV" ]; then echo '请先安装 uv：https://docs.astral.sh/uv/'; exit 1; fi
 "$UV" tool install --force --python 3.12 'mineru==4.0.10'
+# `mineru` front-end that starts the local server on demand and stops it after idle.
+install -m 755 "$(dirname "$0")/mineru_global_wrapper.sh" "$HOME/.local/bin/mineru"
 KIT="$HOME/.local/bin/mineru-kit"
 MINERU_MODEL_SMALL_BACKEND=auto MINERU_MODEL_VLM_ENGINE=llama-cpp \
   "$KIT" models download --tier standard --source modelscope
 MINERU_MODEL_SMALL_BACKEND=auto MINERU_MODEL_VLM_ENGINE=llama-cpp \
   "$KIT" models verify --tier standard
-"$HOME/.local/bin/mineru" config set parse_server.local.mode managed
+"$HOME/.local/share/uv/tools/mineru/bin/mineru" config set parse_server.local.mode managed
 echo 'MinerU 4.0.10 已就绪。打开工作台的设置 → MinerU 文件识别，选择质量档位与参数。'
