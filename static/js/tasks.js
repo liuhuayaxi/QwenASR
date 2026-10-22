@@ -80,6 +80,8 @@ function dateLabel(value) {
 }
 function friendlyError(task) {
   if (!task.error) return '';
+  // The server's own countdown text ("网络出口地区被拒，3 分钟后自动重试（第 n 次）").
+  if (task.status === 'waiting_retry' && task.error_kind === 'provider_region') return task.error;
   const messages = {
     network_dns: '模型服务域名暂时无法解析，网络恢复后可继续。',
     output_truncated: '模型输出达到长度上限，可继续处理或重试。',

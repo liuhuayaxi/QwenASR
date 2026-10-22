@@ -711,6 +711,8 @@ def _task_error_kind(error: str) -> str:
             return "network_connect_timeout"
         if "响应超时" in value:
             return "network_read_timeout"
+    if "网络出口地区" in value or "服务地区不可用" in value:
+        return "provider_region"
     if "agy cli" in value:
         from qwen_asr_app.agy_cli import _error_kind as agy_error_kind
         kind, _ = agy_error_kind(value)
@@ -793,6 +795,23 @@ AUTO_RETRY_KINDS = {
     "network_connect_timeout", "network_read_timeout", "network_transport",
 }
 MAX_AUTOMATIC_RETRIES = 6
+# Google rejects the network exit region intermittently (VPN/TUN node
+# switches). Retry the note job every 3 minutes for at most 30 minutes; the
+# review-note task resumes from its saved steps on each attempt.
+REGION_RETRY_DELAY_SECONDS = 180
+REGION_RETRY_WINDOW_SECONDS = 1800
+
+
+def _region_retry_delay(attempt: int) -> int | None:
+    """Seconds to wait before region retry ``attempt`` (1-based), or None."""
+    if attempt < 1 or attempt * REGION_RETRY_DELAY_SECONDS > REGION_RETRY_WINDOW_SECONDS:
+        return None
+    return REGION_RETRY_DELAY_SECONDS
+
+
+def _region_wait_message(attempt: int, delay: int) -> str:
+    minutes = max(1, round(delay / 60))
+    return f"网络出口地区被拒，{minutes} 分钟后自动重试（第 {attempt} 次）；已完成的步骤会保留"
 
 
 def _error_kind(exc: BaseException) -> str:
@@ -2166,6 +2185,7 @@ def start_summary_job(record: RecordingRecord, payload: dict[str, Any], *, autom
 
     async def execute() -> None:
         automatic_attempt = 0
+        region_attempt = 0
         continue_abstract = resume_abstract
 
         def save_state(status: str, error: str = "", **values: Any) -> None:
@@ -2206,6 +2226,21 @@ def start_summary_job(record: RecordingRecord, payload: dict[str, Any], *, autom
                 except Exception as exc:
                     error = str(exc.detail) if isinstance(exc, HTTPException) else str(exc)
                     error_kind = _error_kind(exc)
+                    if error_kind == "upstream" or not error_kind:
+                        error_kind = _task_error_kind(error)
+                    if error_kind == "provider_region":
+                        region_attempt += 1
+                        delay = _region_retry_delay(region_attempt)
+                        if delay is not None:
+                            save_state("waiting_retry", _region_wait_message(region_attempt, delay),
+                                       error_kind=error_kind, region_retry_count=region_attempt,
+                                       retry_in_seconds=delay, last_region_error=error[:500])
+                            await asyncio.sleep(delay)
+                            continue
+                        save_state("failed", f"{error}（已每 {REGION_RETRY_DELAY_SECONDS // 60} 分钟自动重试 {region_attempt - 1} 次，"
+                                             f"共 {REGION_RETRY_WINDOW_SECONDS // 60} 分钟仍被拒）",
+                                   error_kind=error_kind, region_retry_count=region_attempt - 1, retry_in_seconds=0)
+                        return
                     automatic_attempt += 1
                     if _may_auto_retry(exc) and automatic_attempt <= MAX_AUTOMATIC_RETRIES:
                         delay = _automatic_retry_delay(automatic_attempt)
