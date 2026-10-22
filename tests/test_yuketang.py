@@ -588,6 +588,51 @@ class CourseListTests(unittest.TestCase):
         self.assertEqual(store.search_ranked("光电子学", "完全不相关的查询词语"), [])
 
 
+class ReviewNoteIdentityTests(unittest.IsolatedAsyncioTestCase):
+    """A completed AGY note task must not be reused once 雨课堂 questions apply."""
+
+    async def test_completed_task_is_reused_only_for_the_same_question_set(self):
+        import hashlib
+        from types import SimpleNamespace
+        from qwen_asr_app import review_notes
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        directory = Path(temporary.name)
+        body = "## 知识点\n\n旧笔记"
+        record = SimpleNamespace(id="r1", directory=directory, metadata={"category": "光电子学", "ai_note_summary": {"summary": body}})
+        blocks = [{"start": 0, "end": 1, "text": "激光器", "segment_ids": [1]}]
+        config = {"ai": {"summary_provider": {"transport": "agy_cli", "model": "m"}}}
+
+        class Files:
+            def __init__(self, *args): pass
+            def list(self, category): return []
+
+        class Stop(Exception):
+            pass
+
+        async def run(questions):
+            with patch.object(review_notes, "transcript_blocks", return_value=blocks), \
+                 patch("qwen_asr_app.course_files.CourseFiles", Files), \
+                 patch.object(review_notes, "history_signature", return_value=[]), \
+                 patch("qwen_asr_app.classroom_intelligence.integrations.saved_notes_markdown", return_value=""), \
+                 patch("qwen_asr_app.batch_ai._yuketang_questions", AsyncMock(return_value=questions)), \
+                 patch.object(review_notes, "stage", side_effect=Stop):
+                return await review_notes.generate(record, config)
+
+        # Install a completed task for the question-free identity.
+        with self.assertRaises(Stop):
+            await run([])
+        folder = next((directory / ".review-notes").iterdir())
+        (folder / "note.md").write_text(body)
+        (folder / "task.json").write_text(json.dumps({"id": folder.name, "status": "completed"}))
+        record.metadata["ai_note_summary"]["review_package"] = f".review-notes/{folder.name}"
+        self.assertEqual(hashlib.sha256(body.encode()).hexdigest(), review_notes.body_hash(record.metadata["ai_note_summary"]))
+        self.assertEqual((await run([]))["summary"], body, "same inputs reuse the finished note")
+        with self.assertRaises(Stop):  # new questions start a fresh task instead of returning the old note
+            await run([{"id": "lesson:1:1", "必含": True, "题干": "阈值条件"}])
+        self.assertEqual(len(list((directory / ".review-notes").iterdir())), 2)
+
+
 class RouteTests(unittest.TestCase):
     def test_bind_status_questions_and_guard(self):
         from fastapi import FastAPI, HTTPException

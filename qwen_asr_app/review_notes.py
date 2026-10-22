@@ -840,8 +840,15 @@ async def generate(record, config):
     corpus=[(s['id'],s['sha256']) for s in CourseFiles(app_settings).list(record.metadata['category'])]
     historical_versions=history_signature(record,app_settings)
     pipeline_version=SCOPE_VERSION if review_scope.enabled_for(record.metadata) else VERSION
-    identity=budget_compatible_identity(record.directory/'.review-notes',
-        [pipeline_version,record.id,blocks,selection,corpus,historical_versions,saved_notes_markdown(record)],config,history_index=5)
+    source_blocks=[{'source':'S'+str(i),'start':b['start'],'end':b['end'],'text':b['text']} for i,b in enumerate(blocks,1)]
+    from .batch_ai import _yuketang_questions
+    yuketang_questions=await _yuketang_questions(record,source_blocks)
+    identity_inputs=[pipeline_version,record.id,blocks,selection,corpus,historical_versions,saved_notes_markdown(record)]
+    if yuketang_questions:
+        # A completed task is reused only for the same 雨课堂 question set;
+        # newly bound or newly published questions start a fresh note task.
+        identity_inputs.append({'yuketang_questions':hashlib.sha256(json.dumps(yuketang_questions,sort_keys=True,ensure_ascii=False).encode()).hexdigest()})
+    identity=budget_compatible_identity(record.directory/'.review-notes',identity_inputs,config,history_index=5)
     relative=f'.review-notes/{identity}';folder=record.directory/relative;folder.mkdir(parents=True,exist_ok=True,mode=0o700)
     config=note_runtime_config(config)
     from .note_review_repair import resume_install
@@ -866,7 +873,6 @@ async def generate(record, config):
         history=json.loads((folder/'history.json').read_text());accepted=(folder/'accepted-notes.md').read_text()
         # Every block is sent once in order. Evidence is per-block and neighbors,
         # avoiding an arbitrary last-6000-character global retrieval window.
-        source_blocks=[{'source':'S'+str(i),'start':b['start'],'end':b['end'],'text':b['text']} for i,b in enumerate(blocks,1)]
         package['_scope_transcript_blocks']=source_blocks
         source_versions={s['source_id']:s['sha256'] for s in package['sources']}
         material_version={'course_files':source_versions,'history':historical_versions,
@@ -1007,8 +1013,6 @@ async def generate(record, config):
             payload['verified_source_corrections']=json.loads((folder/'source-corrections.json').read_text())
         payload['coverage']={**plan,'figures':[{'source_id':i['source_id'],'page':i['page'],'path':i['path'],'concept':i['concept']} for i in images]}
         instructions=TEACHING+'\n'+str(config.get('_note_summary_system_prompt') or '')+'\n'+str(config.get('_note_summary_custom_prompt') or '')+review_scope.instructions(scope)
-        from .batch_ai import _yuketang_questions
-        yuketang_questions=await _yuketang_questions(record,source_blocks)
         if yuketang_questions:
             from .yuketang.retrieval import instructions as yuketang_instructions
             # 雨课堂题库: same-lesson in-class problems first, then nearby tests.
