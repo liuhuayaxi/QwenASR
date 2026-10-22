@@ -152,6 +152,27 @@ class DriveTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['preview']['count'], 4)
         self.assertEqual(self.fake.requests, [])
 
+    async def test_yuketang_bank_included_without_login_or_raw_identity_data(self):
+        bank = self.root / 'bank'
+        keep = ['bindings.json', 'courses.json', 'classrooms/123/classroom.json',
+                'classrooms/123/questions/9.json', 'classrooms/123/activities/9.json',
+                'classrooms/123/vision/ab.json', 'classrooms/123/images/9/1.png']
+        drop = ['job.json', 'browser-profile/Default/Cookies', 'browser-profile/Local State',
+                'classrooms/123/raw/9.json', 'classrooms/123/images/9/.tmp.png',
+                'classrooms/123/questions/notes.txt', 'classrooms/abc/questions/1.json', 'token.json']
+        for name in keep + drop:
+            path = bank / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b'{}')
+        (bank / 'classrooms/123/questions/linked.json').symlink_to(self.root / 'outside.json')
+        with patch.dict(os.environ, {'QWEN_ASR_YUKETANG_DIR': str(bank)}):
+            found = {x['relative'] for x in inventory(self.settings, self.records, self.notes, DEFAULTS)}
+            self.assertEqual(found, {'雨课堂题库/' + name for name in keep})
+            off = inventory(self.settings, self.records, self.notes, {**DEFAULTS, 'yuketang': False})
+            self.assertEqual(off, [])
+            self.manager.configure({'options': {'yuketang': False}})
+            self.assertFalse(self.manager.state['options']['yuketang'])
+
     async def test_snapshot_rejects_change_or_link_swap(self):
         source = self.file('lecture.pdf')
         item = inventory(self.settings, self.records, self.notes, DEFAULTS)[0]

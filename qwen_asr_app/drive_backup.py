@@ -38,7 +38,29 @@ CHUNK = 4 * 1024 * 1024
 TRANSCRIPTS = {"transcript.txt", "原始转写.txt", "AI修正后文本.txt", "transcript.json"}
 NOTES = {"课堂笔记.md", "AI总结.md"}
 EXCLUDED = {"private", "backups", "compat-backups", "repair-backups", "缓存", "历史备份", "node_modules", "models"}
-DEFAULTS = {"pdf": True, "transcripts": True, "notes": False, "automatic": False, "interval_minutes": 10}
+DEFAULTS = {"pdf": True, "transcripts": True, "notes": False, "yuketang": True, "automatic": False, "interval_minutes": 10}
+# 雨课堂题库: questions, answers, explanations, vision transcripts and slide
+# images plus the course bindings. Never the browser profile (cookies), the
+# job log, or raw API payloads (raw/ holds the student's name and number).
+YUKETANG_TOP = {"bindings.json", "courses.json"}
+YUKETANG_DIRS = {"questions", "activities", "vision", "images"}
+YUKETANG_SUFFIXES = {".json", ".jpg", ".jpeg", ".png", ".webp", ".gif"}
+
+
+def yuketang_root():
+    from .yuketang.store import BankStore
+    return Path(BankStore().root)
+
+
+def yuketang_selected(relative_parts):
+    """relative_parts: path parts below the bank root."""
+    if len(relative_parts) == 1:
+        return relative_parts[0] in YUKETANG_TOP
+    if len(relative_parts) < 3 or relative_parts[0] != "classrooms" or not relative_parts[1].isdigit():
+        return False
+    if len(relative_parts) == 3:
+        return relative_parts[2] == "classroom.json"
+    return relative_parts[2] in YUKETANG_DIRS and Path(relative_parts[-1]).suffix.lower() in YUKETANG_SUFFIXES
 ACTIVE = {"scanning", "uploading", "verifying", "stopping"}
 
 
@@ -69,8 +91,8 @@ def inventory(settings, recordings, notes, options):
     root = Path(settings.storage_root).resolve()
     result, seen = [], set()
 
-    def add(path, relative, anchor):
-        if not selected(path, options) or path in seen:
+    def add(path, relative, anchor, chosen=None):
+        if not (selected(path, options) if chosen is None else chosen) or path in seen:
             return
         # Reject linked ancestors as well as a linked file.
         if any(part.is_symlink() for part in (path, *path.parents) if part != anchor.parent):
@@ -107,6 +129,22 @@ def inventory(settings, recordings, notes, options):
             continue
         ident = hashlib.sha256(str(folder).encode()).hexdigest()[:12]
         walk(folder, f"外部录音/{folder.name}-{ident}")
+    if options.get("yuketang"):
+        bank = yuketang_root().absolute()
+        if bank.is_dir() and not bank.is_symlink() and not (bank := bank.resolve()).is_relative_to(root):
+            for directory, dirs, files in os.walk(bank, followlinks=False):
+                here = Path(directory)
+                dirs[:] = sorted(d for d in dirs if not d.startswith('.') and not (here / d).is_symlink()
+                                 and d not in {"browser-profile", "raw"})
+                for name in sorted(files):
+                    path = here / name
+                    parts = path.relative_to(bank).parts
+                    if name.startswith('.') or not yuketang_selected(parts):
+                        continue
+                    try:
+                        add(path, "雨课堂题库/" + "/".join(parts), bank, chosen=True)
+                    except FileNotFoundError:
+                        continue
     if options["notes"]:
         for note in notes.notes():
             path = Path(note["path"]).absolute()

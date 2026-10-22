@@ -18,7 +18,7 @@ import { createClassroomIntelligence } from "./js/classroom-intelligence.js?v=20
 import { createClassroomChat } from "./js/classroom-chat.js?v=20261019-idle-lifecycle-1";
 import { createSettingsNavigation } from "./js/settings-navigation.js?v=20261019-idle-lifecycle-1";
 import { createLibraryBackup } from "./js/library-backup.js?v=20261014-daily";
-import { createDriveBackup } from "./js/drive-backup.js?v=20261019-idle-lifecycle-1";
+import { createDriveBackup } from "./js/drive-backup.js?v=20261022-ykt-drive-1";
 
 import { createContinuation, recognitionText } from "./js/workbench/continuation.js?v=20261011-ui-final";
 

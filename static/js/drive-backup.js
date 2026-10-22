@@ -12,7 +12,7 @@ export function createDriveBackup() {
   const authLink = byId('driveBackupAuthLink');
   const credential = byId('driveBackupCredentials');
   const previewPanel = byId('driveBackupPreview');
-  const options = ['pdf', 'transcripts', 'notes', 'automatic'];
+  const options = ['pdf', 'transcripts', 'notes', 'yuketang', 'automatic'];
   let current = null, pending = false, dirty = false, rendered = '', refreshFailed = false;
   const size = bytes => bytes >= 1024 ** 3 ? `${(bytes / 1024 ** 3).toFixed(2)} GB` : `${(bytes / 1024 ** 2).toFixed(1)} MB`;
   const labels = {scanning:'正在扫描资料', uploading:'正在上传', verifying:'正在校验云端文件', stopping:'正在暂停',

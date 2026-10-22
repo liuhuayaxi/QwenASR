@@ -406,9 +406,10 @@
               <label class="settings-checkbox"><span>资料库中的 PDF</span><input id="driveOption-pdf" type="checkbox" checked /></label>
               <label class="settings-checkbox"><span>原始转写、修正文本和时间轴</span><input id="driveOption-transcripts" type="checkbox" checked /></label>
               <label class="settings-checkbox"><span>课堂笔记和 AI 总结</span><input id="driveOption-notes" type="checkbox" /></label>
+              <label class="settings-checkbox"><span>雨课堂题库（题目、答案、题图与课程绑定；不含登录信息）</span><input id="driveOption-yuketang" type="checkbox" checked /></label>
               <label class="settings-checkbox"><span>启用自动增量备份</span><input id="driveOption-automatic" type="checkbox" /></label>
               <label><span>自动检查间隔</span><select id="driveBackupInterval" class="field-select"><option value="5">每 5 分钟</option><option value="10" selected>每 10 分钟</option><option value="30">每 30 分钟</option><option value="60">每小时</option><option value="1440">每天</option></select></label>
-              <p class="setting-hint wide">按资料库目录保存到“QwenASR备份”。自动备份在 QwenASR 服务运行时检查新增和变化的文件；本地删除不删除云端副本。备份范围不含录音音频、应用配置、密钥和缓存。<a href="https://gist.github.com/liuhuayaxi/f979839837fd3de783d620b5005b1a57#file-privacy-md" target="_blank" rel="noopener noreferrer">隐私说明</a></p>
+              <p class="setting-hint wide">按资料库目录保存到“QwenASR备份”。自动备份在 QwenASR 服务运行时检查新增和变化的文件；本地删除不删除云端副本。备份范围不含录音音频、应用配置、密钥和缓存；雨课堂只备份题库与绑定，不含浏览器登录资料和含实名的原始接口数据。<a href="https://gist.github.com/liuhuayaxi/f979839837fd3de783d620b5005b1a57#file-privacy-md" target="_blank" rel="noopener noreferrer">隐私说明</a></p>
               <div class="inline-setting wide">
                 <button id="driveBackupStart" class="mini-button primary-mini-button" type="button" data-drive-action="start">立即备份</button>
                 <a id="driveBackupFolder" class="mini-button hidden" target="_blank" rel="noopener noreferrer">打开云盘目录</a>
@@ -925,6 +926,6 @@
     </dialog>
 
     <div id="toast" class="toast" role="status"></div>
-    <script src="/static/app.js?v=20261022-local-main-1" type="module"></script>
+    <script src="/static/app.js?v=20261022-ykt-drive-1" type="module"></script>
   </body>
 </html>
