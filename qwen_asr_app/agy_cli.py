@@ -40,7 +40,11 @@ INLINE_INPUT_BYTES = 150_000
 # 1.4.5: a 20.7k-character file was complete, a 30k-character view was cut).
 # Size chunks by characters, not bytes: CJK text is 3 bytes per character, so
 # the old 16 KB byte limit produced ~5k-character files and 14+ tool reads.
-FILE_INPUT_BYTES = 72_000
+# read_file (AGY 1.4.x) also stops each read at 46,080 bytes and then asks for a
+# ByteOffset continuation, which the receipt check rightly rejects, so every
+# file must stay below that byte limit as well.
+READ_FILE_BYTE_LIMIT = 46_080
+FILE_INPUT_BYTES = 43_000
 FILE_INPUT_CHARS = 22_000
 MODEL_START_DELAYS = (2, 5)
 PROTOCOL_RETRY_DELAYS = (2, 5)

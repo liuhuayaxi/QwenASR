@@ -134,8 +134,10 @@ class ChunkSizeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             _, request = _file_prompt(prompt, Path(raw))
             files = sorted(request.glob('input-*.json'))
-            self.assertLessEqual(len(files), 8)
+            self.assertLessEqual(len(files), 11)
             self.assertTrue(all(len(f.read_text()) <= FILE_INPUT_CHARS + 800 for f in files))
+            from qwen_asr_app.agy_cli import READ_FILE_BYTE_LIMIT
+            self.assertTrue(all(f.stat().st_size < READ_FILE_BYTE_LIMIT for f in files))
 
     def test_same_value_under_another_field_name_is_referenced(self):
         with tempfile.TemporaryDirectory() as raw:
