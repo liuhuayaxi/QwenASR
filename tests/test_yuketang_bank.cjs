@@ -31,3 +31,29 @@ test('current course comes from the selected course button', async () => {
   const doc = {querySelector: () => ({dataset: {category: '通信原理 C'}})};
   assert.equal(currentCategory(doc), '通信原理 C');
 });
+
+test('LaTeX renders through the vendored KaTeX while plain text stays escaped', async () => {
+  const {mathText} = await modulePromise;
+  const katex = require(path.join(__dirname, '../static/vendor/katex/katex.min.js'));
+  const html = mathText('波长 $\\lambda_0 = 1.31\\,\\mu\\mathrm{m}$，角度 \\(\\theta_{\\perp}\\) <script>x</script> $$\\frac{a}{b}$$ \\[E=mc^2\\]', katex);
+  assert.equal((html.match(/class="katex"/g) || []).length, 4);
+  assert.equal((html.match(/katex-display/g) || []).length, 2);
+  assert.match(html, /&lt;script&gt;x&lt;\/script&gt;/);
+  assert.doesNotMatch(html, /<script>/);
+  // Formulas cannot inject markup either: KaTeX runs with trust off.
+  assert.doesNotMatch(mathText('$\\href{javascript:alert(1)}{x}$', katex), /href="javascript/);
+  // Without KaTeX the source is shown escaped, never as raw HTML.
+  assert.equal(mathText('$a<b$', undefined), '$a&lt;b$');
+  assert.equal(mathText('价格 5 元', katex), '价格 5 元');
+});
+
+test('question card renders formulas in body, options, answers and my answer', async () => {
+  const {questionHtml} = await modulePromise;
+  const calls = [];
+  globalThis.katex = {renderToString: tex => { calls.push(tex); return `<span class="katex">${tex.length}</span>`; }};
+  try {
+    questionHtml({classroom_id: '1', source_label: '课上习题', type_text: '单选题', body: '求 $x^2$', options: [{key: 'A', value: '\\(y\\)'}],
+      answer: ['$z$'], remark: '$$w$$', student_answer: ['$v$'], images: []});
+  } finally { delete globalThis.katex; }
+  assert.deepEqual(calls.sort(), ['v', 'w', 'x^2', 'y', 'z']);
+});

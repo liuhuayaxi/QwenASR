@@ -5,6 +5,26 @@ import {createVisiblePoll} from './visible-poll.js';
 
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
+// Math delimiters used by Yuketang text and by vision transcripts. Text
+// outside formulas stays escaped; formulas go through the vendored KaTeX
+// (trust off), or stay escaped source when KaTeX is unavailable.
+const MATH = /\$\$([\s\S]+?)\$\$|\\\[([\s\S]+?)\\\]|\\\(([\s\S]+?)\\\)|\$((?:\\.|[^$\n\\]|\\)+?)\$/g;
+export function mathText(value, katex = globalThis.katex) {
+  const text = String(value ?? '');
+  let html = '', last = 0;
+  for (const match of text.matchAll(MATH)) {
+    const [raw, block, bracket, paren, inline] = match;
+    const tex = (block ?? bracket ?? paren ?? inline).trim();
+    html += esc(text.slice(last, match.index));
+    last = match.index + raw.length;
+    if (!tex || !katex?.renderToString) { html += esc(raw); continue; }
+    try {
+      html += katex.renderToString(tex, {displayMode: block !== undefined || bracket !== undefined, throwOnError: false, trust: false, strict: 'ignore', maxExpand: 500});
+    } catch { html += esc(raw); }
+  }
+  return html + esc(text.slice(last));
+}
+
 const SOURCES = {exam: '课前/课后测试与考试', lesson: '课上习题', courseware: '课件习题'};
 const STATUS = {running: '运行中', completed: '已完成', failed: '失败', login_required: '需要重新登录', stopped: '已停止', idle: '空闲'};
 const state = {category: '', status: null, questions: [], searchTimer: null};
@@ -68,14 +88,14 @@ function renderStatus() {
 export function questionHtml(q, imageUrl = image => `/api/yuketang/image/${encodeURIComponent(q.classroom_id)}/${image.path.split('/').map(encodeURIComponent).join('/')}`) {
   const mark = q.correct === true ? '<span class="ykt-ok">答对</span>' : q.correct === false ? '<span class="ykt-wrong">答错</span>' : q.graded === false && (q.student_answer || []).length ? '<span class="muted">未批改</span>' : '';
   const body = q.body || q.vision?.text || (q.images?.length ? '（图片题，见下方图片）' : '');
-  const options = (q.options || []).map(o => `<li><b>${esc(o.key)}</b> ${esc(o.value)}</li>`).join('');
+  const options = (q.options || []).map(o => `<li><b>${esc(o.key)}</b> ${mathText(o.value)}</li>`).join('');
   const answer = (q.answer || []).join('、') || q.vision?.answer_text || '';
   const images = (q.images || []).filter(image => image.path).map(image => `<img loading="lazy" alt="${esc(image.kind === 'remark' ? '参考答案图片' : '题目图片')}" src="${esc(imageUrl(image))}">`).join('');
   return `<article class="ykt-question">
     <header><span class="count-badge">${esc(q.source_label)}</span> <b>${esc(q.activity_title)}</b> <span class="muted">${esc(q.date || '')}${q.page ? ` · 第 ${esc(q.page)} 页` : ''} · ${esc(q.type_text)}</span> ${mark}</header>
-    <p class="ykt-body">${esc(body)}</p>${options ? `<ul class="ykt-options">${options}</ul>` : ''}
-    <p><b>正确答案：</b>${esc(answer || '未公布')}${q.remark ? `<br><b>解析：</b>${esc(q.remark)}` : ''}</p>
-    ${(q.student_answer || []).length ? `<p class="ykt-mine"><b>我的答案：</b>${esc(q.student_answer.join('、'))}${q.score != null ? `（${esc(q.score)}/${esc(q.max_score ?? '?')} 分）` : ''}</p>` : ''}
+    <p class="ykt-body">${mathText(body)}</p>${options ? `<ul class="ykt-options">${options}</ul>` : ''}
+    <p><b>正确答案：</b>${answer ? mathText(answer) : '未公布'}${q.remark ? `<br><b>解析：</b>${mathText(q.remark)}` : ''}</p>
+    ${(q.student_answer || []).length ? `<p class="ykt-mine"><b>我的答案：</b>${mathText(q.student_answer.join('、'))}${q.score != null ? `（${esc(q.score)}/${esc(q.max_score ?? '?')} 分）` : ''}</p>` : ''}
     ${images ? `<div class="ykt-images">${images}</div>` : ''}</article>`;
 }
 

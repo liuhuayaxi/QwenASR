@@ -135,7 +135,7 @@ class InstallerTests(unittest.TestCase):
             with patch('server.task_scope.Path', side_effect=mapped), \
                  patch.object(Path, 'mkdir', autospec=True, side_effect=scope_dir):
                 scope = TaskScope('auto', 'a'*32)
-                self.assertEqual(scope.path.parent, service)
+                self.assertEqual(scope.path.parent, service.resolve())
                 self.assertFalse(scope.observation()['populated'])
                 with self.assertRaisesRegex(RuntimeError, 'NOT_OWNED_BY_SERVICE'):
                     TaskScope(root, 'b'*32)

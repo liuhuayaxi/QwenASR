@@ -26,7 +26,7 @@ class SessionRecoveryTests(unittest.TestCase):
         receipt = {'type': 'GENERIC', 'status': 'DONE', 'content': output}
         self.save([self.user(), read, receipt, self.answer()])
         recovered = self.recover(allowed_files=files)
-        self.assertEqual(recovered['viewed_files'], [str(source)])
+        self.assertEqual(recovered['viewed_files'], [str(source.resolve())])
         self.assertEqual(recovered['tools'], ['read_file'])
         for bad in [output.replace('1-3 of 3', '1-2 of 3'), output.replace('完整来源', '替换内容'),
                     output.replace('3: }', ''), output.replace('1-3 of 3', '1-3 of 4')]:
@@ -46,7 +46,7 @@ class SessionRecoveryTests(unittest.TestCase):
         read = self.answer(content='', tool_calls=[{'name': 'read_file', 'args': {'Path': str(source)}}])
         receipt = {'type': 'GENERIC', 'status': 'DONE', 'content': 'image read', 'media': [{'uri': 'fixture-image'}]}
         self.save([self.user(), read, receipt, self.answer()])
-        self.assertEqual(self.recover(allowed_files=files)['viewed_files'], [str(source)])
+        self.assertEqual(self.recover(allowed_files=files)['viewed_files'], [str(source.resolve())])
         receipt.pop('media')
         self.save([self.user(), read, receipt, self.answer()])
         with self.assertRaisesRegex(SessionEvidenceError, '图片回执'):
