@@ -48,6 +48,20 @@ def _pages(package):
     return out
 
 
+WRITER_TIMEOUT = 600
+
+
+def _writer_config(config):
+    """Bound one writer turn: a stalled AGY stream fails fast as a retriable
+    read timeout instead of holding the lesson for the 30-minute default."""
+    config = json.loads(json.dumps(config, default=str))
+    provider = (config.get('ai') or {}).get('summary_provider')
+    if isinstance(provider, dict) and provider.get('transport') == 'agy_cli':
+        current = int(provider.get('cli_timeout_seconds') or 1800)
+        provider['cli_timeout_seconds'] = WRITER_TIMEOUT if current == 0 else min(current, WRITER_TIMEOUT)
+    return config
+
+
 class ProposalKept(ValueError):
     """The edited body was kept; the new note is saved as a proposal (not a failure)."""
 
@@ -116,7 +130,12 @@ async def generate_fast(record, config):
         if questions:
             payload['yuketang_questions'] = questions
         try:
-            markdown = await request_ai_text(instructions=instructions, payload=payload, config=config, mode='summary', max_output_tokens=32768)
+            try:
+                markdown = await request_ai_text(instructions=instructions, payload=payload, config=_writer_config(config), mode='summary', max_output_tokens=32768)
+            except AIRequestError as exc:
+                if exc.kind not in {'network_read_timeout', 'network_transport'}:
+                    raise
+                markdown = await request_ai_text(instructions=instructions, payload=payload, config=_writer_config(config), mode='summary', max_output_tokens=32768)
         except AIRequestError as exc:
             if exc.kind != 'output_truncated':
                 raise
