@@ -64,6 +64,15 @@ class FileTokenStorage:
             return LEGACY_CHINA_SERVER
         return url
 
+    def retire_stale_grant(self) -> Path | None:
+        """Move a grant bound to another OAuth resource aside (kept as a backup)
+        so the next connect starts a fresh authorization for the current URL."""
+        if not self.path.exists():
+            return None
+        backup = self.path.with_name(f"{self.path.stem}.stale-{time.strftime('%Y%m%d-%H%M%S')}.json")
+        os.replace(self.path, backup)
+        return backup
+
     def _read(self) -> dict[str, Any]:
         try:
             value = json.loads(self.path.read_text(encoding="utf-8"))
@@ -171,6 +180,28 @@ class FileTokenStorage:
         return remaining is None or remaining > minimum_seconds
 
 
+def leaf_errors(exc: BaseException) -> list[BaseException]:
+    """Flatten anyio/asyncio exception groups to the errors that caused them."""
+    inner = getattr(exc, "exceptions", None)
+    if inner:
+        return [leaf for item in inner for leaf in leaf_errors(item)]
+    return [exc]
+
+
+def resource_mismatch(exc: BaseException) -> bool:
+    return any(type(e).__name__ == "OAuthFlowError" and "does not match expected" in str(e) for e in leaf_errors(exc))
+
+
+def readable_error(exc: BaseException) -> str:
+    leaves = leaf_errors(exc)
+    if resource_mismatch(exc):
+        return "闪念贝壳已更换授权地址，原授权不再可用，请点击连接重新授权"
+    if any(type(e).__name__ in {"ConnectError", "ConnectTimeout", "ReadTimeout"} for e in leaves):
+        return "暂时无法连接闪念贝壳服务器，请检查网络后重试"
+    message = "；".join(dict.fromkeys(str(e) for e in leaves if str(e)))
+    return message or "暂时无法连接闪念贝壳，本机凭证已保留"
+
+
 class IdeaShellConnection:
     def __init__(self, server_url: str) -> None:
         self.server_url = normalize_server_url(server_url)
@@ -271,7 +302,7 @@ class IdeaShellConnection:
             finally:
                 self._interactive_auth = False
 
-    async def _probe_locked(self) -> None:
+    async def _probe_locked(self, retried: bool = False) -> None:
         resources: tuple[Any, AsyncExitStack] | None = None
         try:
             resources = await self._client_session()
@@ -287,7 +318,13 @@ class IdeaShellConnection:
         except Exception as exc:
             self.connected = False
             self.authorization_url = ""
-            self.error = str(exc) or "暂时无法连接闪念贝壳，本机凭证已保留"
+            if resource_mismatch(exc) and not retried and self.storage.retire_stale_grant():
+                # The saved grant belongs to a previous resource URL; start a
+                # fresh authorization against the current one.
+                resources = None
+                await self._probe_locked(retried=True)
+                return
+            self.error = readable_error(exc)
         finally:
             if resources is not None:
                 await self._close_session(resources)
