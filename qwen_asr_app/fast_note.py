@@ -59,6 +59,10 @@ async def generate_fast(record, config):
     config = note_runtime_config(config)
     source_blocks = [{'source': 'S' + str(i), 'start': b['start'], 'end': b['end'], 'text': b['text']} for i, b in enumerate(blocks, 1)]
     questions = await _yuketang_questions(record, source_blocks)
+    if not blocks:
+        # Without speech there is nothing to rank optional questions against;
+        # keep this lesson's own exercises so the note stays on topic.
+        questions = [q for q in questions if q.get('必含')]
     identity = hashlib.sha256(json.dumps([VERSION, record.id, blocks, questions, record.metadata.get('review_material_ids')],
                                          sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()[:24]
     relative = f'.review-notes/{identity}'
