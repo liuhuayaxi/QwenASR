@@ -1,4 +1,4 @@
-import {taskGroups, filterTaskGroups, groupCounts, actionableTasks, completedTasks, taskMatchesType, activeStatuses, errorStatuses, leadingTask, taskProgressView, progressGroups} from './task-center-view.js?v=20261022-review-off-1';
+import {taskGroups, filterTaskGroups, groupCounts, actionableTasks, completedTasks, taskMatchesType, activeStatuses, errorStatuses, leadingTask, taskProgressView, progressGroups} from './task-center-view.js?v=20261022-queue-1';
 import {createTaskPdfDialog} from './task-pdf-dialog.js?v=20261018-recovery-1';
 import {aiTaskPayload} from './task-config.js?v=20260913-tasks-1';
 import {mergeLiveCourseProgress} from './course-progress.js?v=20261018-recovery-1';

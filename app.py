@@ -978,8 +978,11 @@ def _build_compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any
                 "progress_unit": summary_progress.get('unit', '批'),
                 "review_round":summary_progress.get('review_round'),
                 "review_batches":summary_progress.get('review_batches',[]),
-                "phase": ("详细笔记已保存 · 短摘要待补齐" if abstract_pending and status == "completed_with_errors"
+                "phase": (f"排队中 · 第 {summary_queue_position(record.id)} 位，前面的笔记完成后自动开始"
+                          if status == "queued" and summary_queue_position(record.id)
+                          else "详细笔记已保存 · 短摘要待补齐" if abstract_pending and status == "completed_with_errors"
                           else "录音库短摘要" if abstract_pending else summary_progress['phase']),
+                "queue_position": summary_queue_position(record.id),
                 "ai_activity": task_ai_activity(f"summary:{record.id}"),
                 "resume_stage": "abstract" if abstract_pending else "",
                 "retry_in_seconds": int(summary.get("retry_in_seconds") or 0),
@@ -2151,6 +2154,28 @@ async def generate_library_summary(
         raise HTTPException(status_code=502, detail=f"AI 总结请求失败：{exc}") from exc
 
 
+SUMMARY_QUEUE_CONCURRENCY = max(1, int(os.getenv("QWEN_ASR_SUMMARY_CONCURRENCY") or 1))
+_summary_queue_semaphore: asyncio.Semaphore | None = None
+summary_queue_order: list[str] = []
+
+
+_summary_queue_loop = None
+
+
+def summary_queue() -> asyncio.Semaphore:
+    global _summary_queue_semaphore, _summary_queue_loop
+    loop = asyncio.get_running_loop()
+    if _summary_queue_semaphore is None or _summary_queue_loop is not loop:
+        _summary_queue_semaphore, _summary_queue_loop = asyncio.Semaphore(SUMMARY_QUEUE_CONCURRENCY), loop
+        summary_queue_order.clear()
+    return _summary_queue_semaphore
+
+
+def summary_queue_position(session_id: str) -> int:
+    """1-based place among notes still waiting for a slot, or 0."""
+    return summary_queue_order.index(session_id) + 1 if session_id in summary_queue_order else 0
+
+
 def start_summary_job(record: RecordingRecord, payload: dict[str, Any], *, automatic: bool = False) -> None:
     """Own generation on the server so losing the browser cannot cancel it."""
     session_id = record.id
@@ -2284,8 +2309,18 @@ def start_summary_job(record: RecordingRecord, payload: dict[str, Any], *, autom
             schedule_memory_cleanup()
 
     async def run() -> None:
-        with track_ai_activity(f"summary:{session_id}"):
-            await execute()
+        # Serial note queue: queued jobs wait here (status "queued", shown as
+        # 排队中 in the task center) and run one after another.
+        summary_queue_order.append(session_id)
+        try:
+            async with summary_queue():
+                if session_id in summary_queue_order:
+                    summary_queue_order.remove(session_id)
+                with track_ai_activity(f"summary:{session_id}"):
+                    await execute()
+        finally:
+            if session_id in summary_queue_order:
+                summary_queue_order.remove(session_id)
 
     task = asyncio.create_task(run())
     background_summary_tasks[session_id] = task

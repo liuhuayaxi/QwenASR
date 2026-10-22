@@ -84,6 +84,9 @@ export function taskProgressView(task) {
   if (task.status==='pending' && (task.attention_kind==='review' || Number(task.review_required_blocks)>0)) {
     return {label:`${task.review_required_blocks || task.total || 0} 段待核对`,detail:'校对结果已保存，核对数字与公式后即可使用',count:'',percent:null};
   }
+  if (task.type==='summary' && task.status==='queued' && Number(task.queue_position)>0) {
+    return {label:'排队中',count:`第 ${task.queue_position} 位`,detail:'前面的笔记完成后自动开始；可随时取消',percent:null};
+  }
   if (task.type==='summary' && !done) {
     // 逐页审查 only exists when the saved AI 逐页审核 switch is on. "排版" is
     // the LaTeX/PDF layout pass, not a review.
