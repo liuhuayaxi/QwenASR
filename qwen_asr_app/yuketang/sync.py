@@ -64,6 +64,7 @@ class ClassroomSync:
     # ------------------------------------------------------------ main
     def run(self) -> dict[str, Any]:
         self.store.ensure()
+        previous_counts = self.store.classroom(self.cid).get("counts")
         info = self.classroom_info()
         activities = self.list_activities()
         self.summary["activities"] = len(activities)
@@ -105,7 +106,12 @@ class ClassroomSync:
             self.progress(f"{label}：{count} 题" + ("" if status == "complete" else f"（{extra.get('reason') or '尚未全部公布'}，稍后再同步）"))
         questions = self.store.questions(self.cid)
         counts = self.store.counts(questions)
-        info.update(last_sync=now_iso(), counts=counts, last_summary=self.summary)
+        finished = now_iso()
+        # last_sync = end of the last successful run, whether or not anything changed.
+        info.update(last_sync=finished, last_attempt_at=finished, last_attempt_status="ok", last_error="",
+                    counts=counts, last_summary=self.summary)
+        if self.summary.get("imported") or counts != previous_counts:
+            info["last_change"] = finished  # internal: when the bank content last changed
         self.store.save_classroom(self.cid, info)
         return {"classroom_id": self.cid, "name": info.get("course_name", ""), "counts": counts, **self.summary}
 
@@ -306,6 +312,31 @@ def sync_classrooms(store: BankStore, classrooms: list[dict[str, Any]], *, headl
     from .client import YuketangSession
     progress = progress or (lambda message: None)
     results = []
+    try:
+        return _sync_classrooms(store, classrooms, headless=headless, delay=delay, refresh=refresh,
+                                profile_dir=profile_dir, progress=progress, should_stop=should_stop, results=results)
+    except BaseException as exc:
+        # Record the failed attempt honestly on every classroom not synced yet.
+        done = {str(item.get("classroom_id")) for item in results}
+        status = "login_required" if isinstance(exc, LoginRequired) else "stopped" if isinstance(exc, SyncAborted) else "failed"
+        for item in classrooms:
+            cid = str(item["classroom_id"])
+            if cid not in done:
+                record_attempt_failure(store, cid, status, str(exc))
+        raise
+
+
+def record_attempt_failure(store: BankStore, cid: str, status: str, error: str) -> None:
+    try:
+        info = store.classroom(cid)
+        info.update(last_attempt_at=now_iso(), last_attempt_status=status, last_error=str(error)[:300])
+        store.save_classroom(cid, info)
+    except Exception:  # pragma: no cover - never mask the original failure
+        pass
+
+
+def _sync_classrooms(store, classrooms, *, headless, delay, refresh, profile_dir, progress, should_stop, results):
+    from .client import YuketangSession
     with YuketangSession(profile_dir or store.profile_dir, headless=headless, delay=delay) as session:
         session.check_login()
         try:

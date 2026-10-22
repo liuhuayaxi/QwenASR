@@ -120,3 +120,14 @@ test('course page: 雨课堂 section sits right below 检索 and review tools ar
   assert.doesNotMatch(html, /review-tools|导入复习资料|保存位置/);
   assert.doesNotMatch(fs.readFileSync(path.join(__dirname, '../static/js/course-files.js'), 'utf8'), /review-materials\.js/);
 });
+
+test('sync time is truthful: last success, or an honest failure with the last success', async () => {
+  const {syncText} = await modulePromise;
+  assert.equal(syncText([]), '从未同步');
+  assert.match(syncText([{last_sync: '2026-10-22T15:28:56+08:00', last_attempt_at: '2026-10-22T15:28:56+08:00', last_attempt_status: 'ok'}]), /^上次同步 10\/22 \d\d:28$/);
+  const failed = syncText([{last_sync: '2026-10-22T15:01:00+08:00', last_attempt_at: '2026-10-22T16:05:00+08:00', last_attempt_status: 'login_required'}]);
+  assert.match(failed, /^上次同步失败（需要登录） 10\/22 \d\d:05（上次成功 10\/22 \d\d:01）$/);
+  assert.match(syncText([{last_sync: '', last_attempt_at: '2026-10-22T16:05:00+08:00', last_attempt_status: 'failed'}]), /^上次同步失败 .*（上次成功 无）$/);
+  // An old failure followed by a success is not shown.
+  assert.match(syncText([{last_sync: '2026-10-22T17:00:00+08:00', last_attempt_at: '2026-10-22T17:00:00+08:00', last_attempt_status: 'ok'}]), /^上次同步 /);
+});

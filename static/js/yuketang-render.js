@@ -62,8 +62,7 @@ export function headerLine(status = {}) {
   const name = first.course_name || first.name || `班级 ${first.classroom_id}`;
   const counts = status.counts || {};
   const parts = [rooms.length > 1 ? `${name} 等 ${rooms.length} 个班级` : name, counts.total ? `${counts.total} 题${counts.wrong ? `（答错 ${counts.wrong}）` : ''}` : '尚无题目'];
-  const last = rooms.map(room => room.last_sync).filter(Boolean).sort().pop();
-  parts.push(last ? `上次同步 ${formatTime(last)}` : '从未同步');
+  parts.push(syncText(rooms));
   return parts.join(' · ');
 }
 
@@ -86,4 +85,20 @@ export function bindView(status = {}, courses = {}, rebinding = false) {
   if (!list.length) return {mode: 'login'};
   const current = bound ? String(status.classrooms[0].classroom_id) : '';
   return {mode: 'select', selected: current || courses.suggested || '', options: list.map(course => ({value: String(course.classroom_id), label: courseLabel(course), university: String(course.university_id ?? '')}))};
+}
+
+// Truthful sync time: the end of the last successful sync (even when nothing
+// changed); when the latest attempt failed, say so and keep the last success.
+const FAILED = {failed: '上次同步失败', login_required: '上次同步失败（需要登录）', stopped: '上次同步已停止'};
+export function syncText(rooms = []) {
+  const success = rooms.map(room => room.last_sync).filter(Boolean).sort().pop() || '';
+  const attempts = rooms.filter(room => room.last_attempt_at).sort((a, b) => String(a.last_attempt_at).localeCompare(String(b.last_attempt_at)));
+  const latest = attempts[attempts.length - 1];
+  const failed = rooms.filter(room => FAILED[room.last_attempt_status] && String(room.last_attempt_at || '') > String(room.last_sync || ''));
+  if (failed.length) {
+    const room = failed.sort((a, b) => String(a.last_attempt_at).localeCompare(String(b.last_attempt_at))).pop();
+    return `${FAILED[room.last_attempt_status]} ${formatTime(room.last_attempt_at)}（上次成功 ${success ? formatTime(success) : '无'}）`;
+  }
+  if (!success) return latest ? '从未成功同步' : '从未同步';
+  return `上次同步 ${formatTime(success)}`;
 }

@@ -72,6 +72,9 @@ class YuketangService:
                 classrooms.append({**item, "course_name": info.get("course_name", ""),
                                    "classroom_name": info.get("classroom_name", ""),
                                    "last_sync": info.get("last_sync", ""),
+                                   "last_attempt_at": info.get("last_attempt_at", info.get("last_sync", "")),
+                                   "last_attempt_status": info.get("last_attempt_status", "ok" if info.get("last_sync") else ""),
+                                   "last_error": info.get("last_error", ""),
                                    "counts": self.store.counts(questions),
                                    "pending_activities": [{"title": (s.get("activity") or {}).get("title"), "status": s.get("status"),
                                                            "reason": s.get("reason") or s.get("error", "")}

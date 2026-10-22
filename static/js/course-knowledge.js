@@ -3,7 +3,7 @@
  * Follows the QwenASR knowledge development contract.
  */
 
-import { questionHtml } from "./yuketang-render.js?v=20261022-ykt-3";
+import { questionHtml } from "./yuketang-render.js?v=20261022-ykt-4";
 
 const $ = (selector) => document.querySelector(selector);
 

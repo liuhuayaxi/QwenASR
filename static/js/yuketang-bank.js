@@ -1,7 +1,7 @@
 // 雨课堂习题 panel on the course page: bind via dropdown, one-click sync,
 // optional question browser. Talks only to /api/yuketang.
 import {createVisiblePoll} from './visible-poll.js';
-import {esc, countsText, questionHtml, headerLine, bindView, currentCategory} from './yuketang-render.js?v=20261022-ykt-3';
+import {esc, countsText, questionHtml, headerLine, bindView, currentCategory} from './yuketang-render.js?v=20261022-ykt-4';
 
 const $ = id => document.getElementById(id);
 const STATUS = {running: '进行中', completed: '已完成', failed: '失败', login_required: '需要登录', interrupted: '已中断'};

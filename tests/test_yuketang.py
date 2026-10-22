@@ -249,6 +249,34 @@ class SyncTests(unittest.TestCase):
         self.assertFalse(any("student-answer" in url and OBJECTIVE_LESSON in url for url in session.calls))
         self.assertEqual(result["counts"]["lesson"], 4)
 
+    def test_last_sync_is_the_real_end_of_the_last_successful_run(self):
+        from qwen_asr_app.yuketang import sync as sync_module
+        from qwen_asr_app.yuketang.client import LoginRequired
+        with patch.object(sync_module, "now_iso", return_value="2026-10-22T15:00:00+08:00"):
+            self.run_sync(FakeSession())
+        info = self.store.classroom("26260946")
+        self.assertEqual((info["last_sync"], info["last_change"], info["last_attempt_status"]), ("2026-10-22T15:00:00+08:00",) * 2 + ("ok",))
+        # Nothing changed: the sync time still moves, the internal change time does not.
+        with patch.object(sync_module, "now_iso", return_value="2026-10-22T15:30:00+08:00"):
+            self.run_sync(FakeSession())
+        info = self.store.classroom("26260946")
+        self.assertEqual(info["last_sync"], "2026-10-22T15:30:00+08:00")
+        self.assertEqual(info["last_change"], "2026-10-22T15:00:00+08:00")
+        # A failed attempt is recorded honestly and keeps the last success.
+        class Expired:
+            def __init__(self, *args, **kwargs): pass
+            def __enter__(self): return self
+            def __exit__(self, *exc): return False
+            def check_login(self): raise LoginRequired("雨课堂登录已过期")
+        with patch("qwen_asr_app.yuketang.client.YuketangSession", Expired), \
+             patch.object(sync_module, "now_iso", return_value="2026-10-22T16:00:00+08:00"):
+            with self.assertRaises(LoginRequired):
+                sync_module.sync_classrooms(self.store, [{"classroom_id": "26260946"}])
+        info = self.store.classroom("26260946")
+        self.assertEqual(info["last_sync"], "2026-10-22T15:30:00+08:00")
+        self.assertEqual((info["last_attempt_at"], info["last_attempt_status"]), ("2026-10-22T16:00:00+08:00", "login_required"))
+        self.assertIn("过期", info["last_error"])
+
     def test_failed_image_download_is_retried_without_leaking_signed_url(self):
         class Flaky(FakeSession):
             def download(self, url):
