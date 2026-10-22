@@ -134,15 +134,19 @@ class ClassroomCompute:
         if self.gpu_lock:self.gpu_lock.close();self.gpu_lock=None
         if self.external_lock:self.external_lock.close();self.external_lock=None
         if self.log:self.log.close();self.log=None
+        wake = getattr(self.node, 'work_available', None)
+        if wake is not None:wake.set()
 
     async def reap(self):
         try:
-            while True:
+            while self.process is not None:
                 await asyncio.sleep(2)
                 if not self.reserved() and time.monotonic()-self.last_use>30 and not self.guard.locked():
                     async with self.guard:await self.close()
         except asyncio.CancelledError:
             await self.close()
+        finally:
+            if self.timer is asyncio.current_task():self.timer=None
 
     async def start(self, needs_gpu=True):
         if getattr(self.node,'isolation',None) or getattr(self.node,'scheduler_error',None):raise HTTPException(409,'NODE_RESOURCE_ISOLATION')
@@ -171,7 +175,7 @@ class ClassroomCompute:
             str(self.node.cfg['asr']['model_path']),str(self.node.cfg.get('knowledge',{}).get('model_root',Path.home()/'ai-infer-node/models/knowledge')),
             cwd=str(Path(__file__).resolve().parents[1]),stdin=asyncio.subprocess.PIPE,stdout=asyncio.subprocess.PIPE,
             stderr=self.log,env={**os.environ,'HF_HUB_OFFLINE':'1','TRANSFORMERS_OFFLINE':'1','TOKENIZERS_PARALLELISM':'false','OMP_NUM_THREADS':'4'},limit=4*1024*1024)
-        if not self.timer:self.timer=asyncio.create_task(self.reap())
+        if self.timer is None or self.timer.done():self.timer=asyncio.create_task(self.reap())
 
     async def run(self, payload):
         ident=payload.get('operation_id','')

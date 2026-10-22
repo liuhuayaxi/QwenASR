@@ -4,6 +4,7 @@ const selectedLessonIds = new Set();
 let busy = false, submitting = false, loadingCourse = '', loadSerial = 0, accountCollapsed = false;
 let replayLoginSubmitted = false;
 let sessionCheckInFlight = false, lastSessionCheck = 0;
+let refreshInFlight = null, refreshQueued = false, statusSignature = '', importsSignature = '', refreshFailed = false;
 function notice(message = '', kind = 'error') { $('notice').textContent = message; $('notice').dataset.kind = kind; }
 function courseTimingText(metrics) {
   const seconds = key => {
@@ -184,77 +185,97 @@ function renderCourseState(s) {
     $('correctionModel').value = correction.model || '';
     optionsLoaded = true;
   }
-  $('result').replaceChildren();
-  const activeImports = s.imports.filter(j => ['running', 'queued'].includes(j.state));
-  if (!activeImports.length) {
-    const empty = document.createElement('p'); empty.className = 'muted';
-    empty.textContent = '暂无运行任务'; $('result').append(empty);
-  }
-  for (const j of activeImports) {
-    const box = document.createElement('div'); box.className = 'job';
-    const head = document.createElement('div'); head.className = 'job-head';
-    const title = document.createElement('strong'), badge = document.createElement('span'), message = document.createElement('p');
-    title.textContent = j.title; badge.className = 'job-percent'; badge.textContent = j.state === 'queued' ? '排队中' : Math.round(Number(j.progress) || 0) + '%';
-    message.textContent = j.message; head.append(title, badge); box.append(head, message);
-    if (j.metrics?.first_text_seconds != null) {
-      const timing = document.createElement('p'); timing.textContent = courseTimingText(j.metrics);
-      timing.title = '累计时间仅包含已保存的转写片段，不代表整个任务耗时；当前片段和失败重试不计入。';
-      box.append(timing);
+  const importsVersion = JSON.stringify(s.imports);
+  if (importsVersion !== importsSignature) {
+    importsSignature = importsVersion;
+    $('result').replaceChildren();
+    const activeImports = s.imports.filter(j => ['running', 'queued'].includes(j.state));
+    if (!activeImports.length) {
+      const empty = document.createElement('p'); empty.className = 'muted';
+      empty.textContent = '暂无运行任务'; $('result').append(empty);
     }
-    if (j.ai_errors) { const warning = document.createElement('p'); warning.textContent = j.ai_errors + ' 段精修未完成，原文已保留，可在顶部任务中心重试'; box.append(warning); }
-    if (j.state === 'running') {
-      const meter = document.createElement('progress'); meter.className = 'overall-progress'; meter.max = 100; meter.value = j.progress || 0; meter.setAttribute('aria-label', '课次总体进度'); box.append(meter);
-    }
-    if (j.state === 'running' && j.phases && Object.keys(j.phases).length) {
-      const phases = document.createElement('div'); phases.className = 'phase-list';
-      for (const key of ['download','asr','correction','summary']) {
-        const phase = j.phases[key]; if (!phase) continue;
-        const row = document.createElement('div'); row.className = 'phase-row'; row.dataset.state = phase.state || 'pending';
-        const phaseHead = document.createElement('div'); phaseHead.className = 'phase-head';
-        const label = document.createElement('b'), value = document.createElement('span');
-        const percent = Math.max(0, Math.min(100, Number(phase.percent) || 0));
-        label.textContent = phase.label || key; value.textContent = Math.round(percent) + '%'; phaseHead.append(label, value);
-        const track = document.createElement('div'); track.className = 'phase-track'; track.setAttribute('role', 'progressbar'); track.setAttribute('aria-valuemin', '0'); track.setAttribute('aria-valuemax', '100'); track.setAttribute('aria-valuenow', String(Math.round(percent)));
-        const fill = document.createElement('i'); fill.style.width = percent + '%'; track.append(fill);
-        const detail = document.createElement('small'); detail.className = 'phase-detail'; detail.textContent = phase.detail || '等待开始';
-        row.append(phaseHead, track, detail); phases.append(row);
+    for (const j of activeImports) {
+      const box = document.createElement('div'); box.className = 'job';
+      const head = document.createElement('div'); head.className = 'job-head';
+      const title = document.createElement('strong'), badge = document.createElement('span'), message = document.createElement('p');
+      title.textContent = j.title; badge.className = 'job-percent'; badge.textContent = j.state === 'queued' ? '排队中' : Math.round(Number(j.progress) || 0) + '%';
+      message.textContent = j.message; head.append(title, badge); box.append(head, message);
+      if (j.metrics?.first_text_seconds != null) {
+        const timing = document.createElement('p'); timing.textContent = courseTimingText(j.metrics);
+        timing.title = '累计时间仅包含已保存的转写片段，不代表整个任务耗时；当前片段和失败重试不计入。';
+        box.append(timing);
       }
-      box.append(phases);
+      if (j.ai_errors) { const warning = document.createElement('p'); warning.textContent = j.ai_errors + ' 段精修未完成，原文已保留，可在顶部任务中心重试'; box.append(warning); }
+      if (j.state === 'running') {
+        const meter = document.createElement('progress'); meter.className = 'overall-progress'; meter.max = 100; meter.value = j.progress || 0; meter.setAttribute('aria-label', '课次总体进度'); box.append(meter);
+      }
+      if (j.state === 'running' && j.phases && Object.keys(j.phases).length) {
+        const phases = document.createElement('div'); phases.className = 'phase-list';
+        for (const key of ['download','asr','correction','summary']) {
+          const phase = j.phases[key]; if (!phase) continue;
+          const row = document.createElement('div'); row.className = 'phase-row'; row.dataset.state = phase.state || 'pending';
+          const phaseHead = document.createElement('div'); phaseHead.className = 'phase-head';
+          const label = document.createElement('b'), value = document.createElement('span');
+          const percent = Math.max(0, Math.min(100, Number(phase.percent) || 0));
+          label.textContent = phase.label || key; value.textContent = Math.round(percent) + '%'; phaseHead.append(label, value);
+          const track = document.createElement('div'); track.className = 'phase-track'; track.setAttribute('role', 'progressbar'); track.setAttribute('aria-valuemin', '0'); track.setAttribute('aria-valuemax', '100'); track.setAttribute('aria-valuenow', String(Math.round(percent)));
+          const fill = document.createElement('i'); fill.style.width = percent + '%'; track.append(fill);
+          const detail = document.createElement('small'); detail.className = 'phase-detail'; detail.textContent = phase.detail || '等待开始';
+          row.append(phaseHead, track, detail); phases.append(row);
+        }
+        box.append(phases);
+      }
+      $('result').append(box);
     }
-    $('result').append(box);
-  }
-  const completedImports = (s.imports || []).filter(item => item.state === 'completed' && item.record_id).slice(-5).reverse();
-  if (completedImports.length) {
-    const heading = document.createElement('h3'); heading.textContent = '最近入库 · 课堂记录'; $('result').append(heading);
-    for (const item of completedImports) {
-      const link = document.createElement('a'); link.className = 'ui-button';
-      link.href = '/library?' + new URLSearchParams({recording: item.record_id});
-      link.textContent = `${item.title || '课堂记录'} · 阅读原文 / 打开课堂笔记`;
-      $('result').append(link);
+    const completedImports = (s.imports || []).filter(item => item.state === 'completed' && item.record_id).slice(-5).reverse();
+    if (completedImports.length) {
+      const heading = document.createElement('h3'); heading.textContent = '最近入库 · 课堂记录'; $('result').append(heading);
+      for (const item of completedImports) {
+        const link = document.createElement('a'); link.className = 'ui-button';
+        link.href = '/library?' + new URLSearchParams({recording: item.record_id});
+        link.textContent = `${item.title || '课堂记录'} · 阅读原文 / 打开课堂笔记`;
+        $('result').append(link);
+      }
     }
   }
   if (s.lesson_course === $('courses').value) updateLessonStatuses(s.lesson_statuses || {});
   updateSelection();
 }
 async function refresh() {
-  try {
-    const course = $('courses').value;
-    const r = await fetch('/api/status' + (course ? '?course=' + encodeURIComponent(course) : '')), s = await r.json();
-    if (continuePendingReplay(s)) return;
-    $('state').textContent = s.message;
-    $('identity').textContent = s.identity?.name && s.authenticated ? '已连接：' + s.identity.name + ' · ' + s.term + ' 学期' : '';
-    $('reconnect').hidden = !s.credentials_saved;
-    $('connect').disabled = $('reconnect').disabled = ['connecting','syncing','running'].includes(s.state);
-    if (s.identity && !accountCollapsed) {
-      $('accountDetails').open = false;
-      accountCollapsed = true;
-    }
-    if (s.state === 'error') $('accountDetails').open = true;
-    if (new URLSearchParams(location.search).has('returnTo')) $('accountDetails').open = true;
-    $('accountLabel').textContent = s.identity?.name && s.authenticated ? '账号已连接 · ' + s.identity.name : '统一身份认证';
-    window.courseStatus = s;
-    renderCourseState(s);
-  } catch { $('state').textContent = '本机课程同步服务尚未连接'; }
+  if (refreshInFlight) { refreshQueued = true; return refreshInFlight; }
+  window.clearTimeout(refreshTimer);
+  refreshInFlight = (async () => {
+    try {
+      const course = $('courses').value;
+      const r = await fetch('/api/status' + (course ? '?course=' + encodeURIComponent(course) : ''),
+        {cache: 'no-store', signal: globalThis.AbortSignal?.timeout?.(15000)}), s = await r.json();
+      if (!r.ok) throw Error('无法读取课程状态');
+      if (course !== $('courses').value) { refreshQueued = true; return; }
+      refreshFailed = false;
+      if (continuePendingReplay(s)) return;
+      const signature = JSON.stringify([course, s]);
+      if (signature === statusSignature) return;
+      statusSignature = signature;
+      $('state').textContent = s.message;
+      $('identity').textContent = s.identity?.name && s.authenticated ? '已连接：' + s.identity.name + ' · ' + s.term + ' 学期' : '';
+      $('reconnect').hidden = !s.credentials_saved;
+      $('connect').disabled = $('reconnect').disabled = ['connecting','syncing','running'].includes(s.state);
+      if (s.identity && !accountCollapsed) {
+        $('accountDetails').open = false;
+        accountCollapsed = true;
+      }
+      if (s.state === 'error') $('accountDetails').open = true;
+      if (new URLSearchParams(location.search).has('returnTo')) $('accountDetails').open = true;
+      $('accountLabel').textContent = s.identity?.name && s.authenticated ? '账号已连接 · ' + s.identity.name : '统一身份认证';
+      window.courseStatus = s;
+      renderCourseState(s);
+    } catch { refreshFailed = true; statusSignature = ''; $('state').textContent = '本机课程同步服务尚未连接'; }
+  })().finally(() => {
+    refreshInFlight = null;
+    if (refreshQueued && !document.hidden) { refreshQueued = false; void refresh(); }
+    else { refreshQueued = false; scheduleRefresh(); }
+  });
+  return refreshInFlight;
 }
 async function checkSession() {
   if (sessionCheckInFlight || Date.now() - lastSessionCheck < 60000) return;
@@ -342,18 +363,27 @@ $('import').onclick = async () => {
   finally { submitting = false; updateSelection(); }
 };
 $('stop').onclick = async () => {
-  try { await post('/api/stop'); notice('正在暂停队列，已保存的转写进度会保留…', 'success'); } catch (e) { notice(e.message); }
+  try { await post('/api/stop'); notice('正在暂停队列，已保存的转写进度会保留…', 'success'); await refresh(); } catch (e) { notice(e.message); }
 };
 let refreshTimer = 0;
+function scheduleRefresh() {
+  window.clearTimeout(refreshTimer);
+  if (document.hidden) return;
+  const running = ['connecting', 'syncing', 'running'].includes(window.courseStatus?.state) ||
+    window.courseStatus?.imports?.some(job => ['running', 'queued'].includes(job.state));
+  refreshTimer = window.setTimeout(scheduledRefresh, refreshFailed ? 5000 : running ? 2000 : 60000);
+}
 async function scheduledRefresh() {
+  window.clearTimeout(refreshTimer);
+  if (document.hidden || refreshInFlight) return;
   await refresh();
-  refreshTimer = window.setTimeout(scheduledRefresh, document.hidden ? 15000 : 2000);
 }
 document.addEventListener('visibilitychange', () => {
   window.clearTimeout(refreshTimer);
   if (!document.hidden) checkSession();
   scheduledRefresh();
 });
+window.addEventListener('online', scheduledRefresh);
 window.addEventListener('pageshow', () => checkSession());
 checkSession();
 scheduledRefresh();

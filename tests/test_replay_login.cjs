@@ -13,7 +13,7 @@ function environment(returnTo) {
   };
   const context = {URL, URLSearchParams, Date,
     location:{origin:'http://127.0.0.1:8765',search:'?returnTo='+encodeURIComponent(returnTo),replace:url=>navigations.push(url)},
-    document:{getElementById:element,addEventListener(){}}, window:{addEventListener(){}},
+    document:{getElementById:element,addEventListener(){}}, window:{addEventListener(){},setTimeout(){return 1},clearTimeout(){}},
     async fetch(url, options) {
       requests.push([url,options?.body ? JSON.parse(options.body) : null]);
       return {ok:true,json:async()=>url==='/api/status' ?

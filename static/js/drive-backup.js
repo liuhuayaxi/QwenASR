@@ -1,3 +1,5 @@
+import {createVisiblePoll} from './visible-poll.js';
+
 export function createDriveBackup() {
   const root = document.getElementById('driveBackupSettings');
   if (!root) return;
@@ -11,7 +13,7 @@ export function createDriveBackup() {
   const credential = byId('driveBackupCredentials');
   const previewPanel = byId('driveBackupPreview');
   const options = ['pdf', 'transcripts', 'notes', 'automatic'];
-  let current = null, pending = false, dirty = false, timer;
+  let current = null, pending = false, dirty = false, rendered = '', refreshFailed = false;
   const size = bytes => bytes >= 1024 ** 3 ? `${(bytes / 1024 ** 3).toFixed(2)} GB` : `${(bytes / 1024 ** 2).toFixed(1)} MB`;
   const labels = {scanning:'正在扫描资料', uploading:'正在上传', verifying:'正在校验云端文件', stopping:'正在暂停',
     completed:'备份完成', partial:'部分文件未完成，可重试', failed:'备份失败，可重试', stopped:'已暂停', interrupted:'等待继续备份'};
@@ -41,6 +43,9 @@ export function createDriveBackup() {
     byId('driveBackupStop').classList.toggle('hidden', !current?.busy);
   }
   function render(data) {
+    const signature = JSON.stringify([data, dirty, previewPanel.open]);
+    if (signature === rendered) { current = data; return; }
+    rendered = signature;
     const wasConnected = current?.connected;
     const wasAuthorizing = current?.authorizing;
     current = data;
@@ -84,13 +89,9 @@ export function createDriveBackup() {
     for (const file of preview?.files || []) { const li = document.createElement('li'); li.textContent = file; list.append(li); }
     controls();
   }
-  function schedule() {
-    clearTimeout(timer);
-    timer = setTimeout(() => run('refresh'), current?.busy || current?.authorizing ? 1500 : 15000);
-  }
   async function run(action) {
     if (pending) return;
-    pending = true; clearTimeout(timer); controls();
+    pending = true; controls();
     // Open synchronously on the user's gesture, avoiding popup blockers after fetch.
     const popup = action === 'connect' ? window.open('about:blank', '_blank') : null;
     if (popup) popup.opener = null;
@@ -105,6 +106,7 @@ export function createDriveBackup() {
         }
       }
       const data = await api(action === 'refresh' ? '' : action, payload);
+      refreshFailed = false;
       if (action === 'configure') { dirty = false; credential.value = ''; }
       render(data);
       if (data.authorization_url) {
@@ -115,9 +117,10 @@ export function createDriveBackup() {
         account.textContent = '等待 Google 授权，请在打开的页面完成登录';
       }
     } catch (error) {
+      refreshFailed = true;
       if (popup) popup.close();
       status.textContent = `操作未完成：${error.message}。正在自动核对状态…`;
-    } finally { pending = false; controls(); schedule(); }
+    } finally { pending = false; controls(); polling.schedule(); }
   }
   root.querySelectorAll('[data-drive-action]').forEach(button => button.addEventListener('click', () => run(button.dataset.driveAction)));
   root.querySelectorAll('input,select').forEach(input => input.addEventListener('change', () => { dirty = true; controls(); }));
@@ -125,7 +128,10 @@ export function createDriveBackup() {
     if (previewPanel.open && !dirty && !pending) void run('preview');
     if (!previewPanel.open) byId('driveBackupPreviewSummary').textContent = '查看备份清单';
   });
-  document.querySelector('[data-settings-tab="library"]')?.addEventListener('click', () => run('refresh'));
-  run('refresh');
+  const polling = createVisiblePoll({run: () => run('refresh'),
+    enabled: () => Boolean(root.getClientRects().length),
+    delay: () => current?.busy || current?.authorizing ? 1500 : refreshFailed ? 5000 : 60000,
+    events: ['qwenasr:viewchange']});
+  polling.wake();
   return {refresh:() => run('refresh')};
 }

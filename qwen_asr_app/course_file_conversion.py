@@ -1,7 +1,6 @@
 """Prepare course files as PDFs, then use the workbench's MinerU pipeline."""
 from __future__ import annotations
 
-import html
 import errno
 import os
 import shutil
@@ -12,6 +11,7 @@ import time
 from pathlib import Path
 
 from .pdf_ai import convert_pdf_to_ai, find_mineru_binary, _run_checked
+from .native_pdf import pdf_operation
 from .conversion_control import check_stopped
 from .mineru_settings import mineru_settings, normalize_mineru_settings
 
@@ -53,64 +53,14 @@ def capabilities():
 
 
 def _text_pdf(source, destination, title=None):
-    import pymupdf as fitz
-
-    raw = source.read_bytes()
-    encodings = ("utf-16",) if raw.startswith((b"\xff\xfe", b"\xfe\xff")) else ("utf-8-sig", "gb18030")
-    for encoding in encodings:
-        try:
-            text = raw.decode(encoding)
-            break
-        except UnicodeError:
-            continue
-    else:
-        raise ValueError("文本编码无法识别，请先保存为 UTF-8")
-    if "\x00" in text:
-        raise ValueError("文本含二进制内容，请先保存为 UTF-8")
-    # Preserve literal Markdown / LaTeX and readable text rather than fetching links.
-    # Bound long lines (including URLs / formulas) so they cannot overflow a page.
-    import textwrap
-    lines = [part for line in text.splitlines() for part in (textwrap.wrap(line.expandtabs(4), width=70, replace_whitespace=False, drop_whitespace=False) or [""])]
-    body = "<h1>" + html.escape(title or source.name) + "</h1>" + "".join(
-        "<p>" + html.escape(line) + "</p>" for line in lines
-    )
-    story = fitz.Story(html=body, user_css="body{font-size:11pt;line-height:1.5;}p{margin:0 0 5pt;overflow-wrap:break-word;}h1{font-size:18pt;}")
-    writer = fitz.DocumentWriter(str(destination))
-    try:
-        more = True
-        while more:
-            device = writer.begin_page(fitz.paper_rect("a4"))
-            more, _ = story.place(fitz.Rect(42, 42, 553, 800))
-            story.draw(device)
-            writer.end_page()
-    finally:
-        writer.close()
+    pdf_operation('text_pdf', path=str(source), output=str(destination), title=title)
 
 
 def _image_pdf(source, destination):
-    import pymupdf as fitz
-
-    from PIL import Image, ImageOps, ImageSequence
-    doc = fitz.open()
-    try:
-        with Image.open(source) as image:
-            for frame in ImageSequence.Iterator(image):
-                frame = ImageOps.exif_transpose(frame).convert("RGB")
-                import io
-                stream = io.BytesIO()
-                frame.save(stream, format="PNG")
-                width, height = frame.size
-                scale = min(1, 842 / max(width, height))
-                page = doc.new_page(width=width * scale, height=height * scale)
-                page.insert_image(page.rect, stream=stream.getvalue())
-        doc.save(destination, deflate=True)
-    finally:
-        doc.close()
+    pdf_operation('image_pdf', path=str(source), output=str(destination))
 
 
 def convert(source, destination, progress=lambda stage, percent: None, stop=None, settings=None, inference_config=None, receipt_path=None, local_guard=None):
-    import pymupdf as fitz
-
     check_stopped(stop)
     source, destination = Path(source), Path(destination)
     suffix = source.suffix.lower()
@@ -132,12 +82,10 @@ def convert(source, destination, progress=lambda stage, percent: None, stop=None
                 markdown = next((work/'result').glob('*.md'))
                 rendered = work/'native-text.pdf'
                 _text_pdf(markdown, rendered, title=source.name)
-                with fitz.open(rendered) as document:
-                    pages = len(document)
-                    document.embfile_add('mineru-result.zip', (work/'result/result.zip').read_bytes())
-                    document.embfile_add('mineru-transcript.md', markdown.read_bytes())
-                    packaged = work/'native-packaged.pdf'
-                    document.save(packaged, deflate=True)
+                packaged = work/'native-packaged.pdf'
+                pages = pdf_operation('package', path=str(rendered), output=str(packaged),
+                    attachments={'mineru-result.zip': str(work/'result/result.zip'),
+                                 'mineru-transcript.md': str(markdown)})
                 check_stopped(stop)
                 packaged.replace(destination)
                 return {'engine': ENGINE, 'pages': pages, 'source_pages': None, 'text_chars': len(markdown.read_text()),
@@ -180,24 +128,13 @@ def convert(source, destination, progress=lambda stage, percent: None, stop=None
                 raise ValueError("Office 转换失败，请检查文件能否正常打开")
             if produced != base:
                 produced.replace(base)
-        doc = fitz.open(base)
-        try:
-            if doc.needs_pass:
-                raise ValueError("PDF 已加密，请先解密再转换")
-            if not len(doc):
-                raise ValueError("文件中没有可转换的页面")
-            source_pages = len(doc)
-        finally:
-            doc.close()
+        source_pages = pdf_operation('validate', path=str(base))
         inference = {}
         result = convert_pdf_to_ai(base, builder_script=ROOT / "scripts" / "build_ai_friendly_pdf.py",
             python_executable=Path(sys.executable), progress=progress, stop=stop, settings=settings,
             inference_metadata=inference, inference_config=provider, receipt_path=receipt_path, local_guard=local_guard)
-        with fitz.open(result) as generated:
-            pages = len(generated)
-            page_texts = [page.get_text().strip() for page in generated]
-            total_chars = sum(map(len, page_texts))
-            uncertain_pages = [index + 1 for index, text in enumerate(page_texts) if "\ufffd" in text]
+        stats = pdf_operation('text_stats', path=str(result))
+        pages, total_chars, uncertain_pages = stats['pages'], stats['text_chars'], stats['uncertain_pages']
         check_stopped(stop)
         result.replace(destination)
     warnings = ["MinerU 已生成转写；科学符号、表格单元格及图表估计值未逐项核验。原图为核对依据，图表估计值不能作为事实数据。"]

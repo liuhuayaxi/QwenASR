@@ -103,7 +103,7 @@ class DurableClipTests(unittest.TestCase):
             with self.assertRaisesRegex(ClassroomRemoteError, 'ASR_TOKEN_LIMIT'):
                 self.run_clip()
         self.assertEqual(send.call_count, 1)
-        self.assertEqual(json.loads((self.folder / 'classroom-receipt.json').read_text())['state'], 'pending')
+        self.assertEqual(json.loads((self.folder / 'classroom-receipt.json').read_text())['state'], 'submitting')
 
     def test_retry_exhaustion_retains_same_id_for_later_recovery(self):
         with patch('qwen_asr_app.remote_classroom.capabilities', return_value={'asr_session': True}), \

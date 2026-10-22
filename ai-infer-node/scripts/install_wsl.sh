@@ -3,15 +3,17 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 NODE_ROOT="$PWD"
 umask 077
+if systemctl is-active --quiet ai-infer-gateway.service; then
+  echo 'Stop ai-infer-gateway.service before changing its runtimes or model manifests, then rerun.' >&2
+  exit 1
+fi
 mkdir -p private venvs models mineru-home data
+python3 scripts/provision_models.py initialize
 if [[ ! -x bootstrap/bin/uv ]]; then
   python3 -m venv bootstrap
   bootstrap/bin/python -m pip install 'uv==0.12.23'
 fi
 NODE_UV="$NODE_ROOT/bootstrap/bin/uv"
-[[ -f config.toml ]] || cp config.example.toml config.toml
-[[ -f private/token ]] || python3 -c 'import secrets;from pathlib import Path;Path("private/token").write_text(secrets.token_urlsafe(48)+"\n")'
-chmod 600 private/token config.toml
 for environment in gateway mineru asr; do
   [[ -x "venvs/$environment/bin/python" ]] || "$NODE_UV" venv "venvs/$environment" --python python3
 done
@@ -32,9 +34,9 @@ else
   "$NODE_UV" pip install --python venvs/asr/bin/python 'transformers==5.19.0' 'torch==2.14.1' accelerate soundfile librosa huggingface_hub
 fi
 command -v ffmpeg >/dev/null || { echo 'Install ffmpeg with the WSL administrator, then rerun.' >&2; exit 1; }
-MINERU_HOME="$NODE_ROOT/mineru-home" venvs/mineru/bin/mineru-kit models download --tier standard --small-backend torch --vlm-engine vllm --source modelscope
-MINERU_HOME="$NODE_ROOT/mineru-home" venvs/mineru/bin/mineru-kit models verify --tier standard --small-backend torch --vlm-engine vllm
+MINERU_HOME="$(python3 -c 'import pathlib,tomllib;print(pathlib.Path(tomllib.load(open("config.toml","rb"))["mineru"]["home"]).expanduser())')" venvs/mineru/bin/mineru-kit models download --tier standard --small-backend torch --vlm-engine vllm --source modelscope
 venvs/asr/bin/python scripts/download_asr.py
+python3 scripts/provision_models.py provision
 for environment in gateway mineru asr; do
   "$NODE_UV" pip freeze --python "venvs/$environment/bin/python" > "requirements-$environment.lock"
 done

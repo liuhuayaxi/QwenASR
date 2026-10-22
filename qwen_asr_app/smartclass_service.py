@@ -712,6 +712,7 @@ async def import_group(group: dict, run_options: dict | None = None):
         profile = library.get("category_profiles", {}).get(category, {})
         config = {"title": group["title"], "category": category, "language": "", "translation": "off",
                   "course_time": {'start': group['start'], 'end': group['stop']},
+                  "generate_summary": options.get("generate_summary", True),
                   "ai_correction": options.get("ai_correction", True), "context": profile.get("asr_prompt", group["course_name"]),
                   "terminology": profile.get("terminology", []), "asr_params": profile.get("asr_params", {}),
                   "ai": {"summary_provider": options.get("summary_provider", {}),

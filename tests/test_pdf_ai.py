@@ -53,6 +53,10 @@ class PdfAiPackagingTests(unittest.TestCase):
             markdown = folder / "公式课件.md"
             content = folder / "公式课件_content_list.json"
             output = folder / "公式课件(AI).pdf"
+            # MuPDF ships this Unicode font on every supported test platform.
+            # Exercise the renderer without depending on an installed macOS font.
+            font = folder / 'fixture-unicode.ttf'
+            font.write_bytes(fitz.Font('cjk').buffer)
 
             document = fitz.open()
             page = document.new_page(width=600, height=400)
@@ -89,6 +93,8 @@ class PdfAiPackagingTests(unittest.TestCase):
                     str(output),
                     "--title",
                     source.stem,
+                    "--font",
+                    str(font),
                 ],
                 capture_output=True,
                 text=True,

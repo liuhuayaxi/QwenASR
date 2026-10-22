@@ -426,6 +426,7 @@ class CourseIngestor:
             mtime, size, stat_hash = 0.0, 0, ""
 
         # Check existing source
+        self.store.sync_source_metadata(src_spec)
         existing = self.store.get_source(source_id)
         if existing and existing["status"] == "active":
             # If stat_hash is unchanged

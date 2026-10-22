@@ -1,5 +1,6 @@
 import { renderMarkdown } from "./markdown-reader.js?v=20261015-reader-math-scope-8";
-import { createClassroomIntelligence } from "./classroom-intelligence.js?v=20261015-reader-math-scope-8";
+import { createClassroomIntelligence } from "./classroom-intelligence.js?v=20261019-idle-lifecycle-1";
+import {createVisiblePoll, classroomPanelVisible} from './visible-poll.js';
 
 const $ = (selector) => document.querySelector(selector);
 const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];
@@ -9,7 +10,7 @@ const stamp = (seconds) => {
   return [Math.floor(n / 3600), Math.floor(n / 60) % 60, n % 60].map(v => String(v).padStart(2, "0")).join(":");
 };
 async function api(url, options = {}) {
-  const response = await fetch(url, { cache: "no-store", ...options });
+  const response = await fetch(url, { cache: "no-store", ...(options.method ? {} : {signal: AbortSignal.timeout(15000)}), ...options });
   const payload = await response.json();
   if (!response.ok) throw new Error(messageFor(payload));
   return payload;
@@ -20,11 +21,11 @@ export function createClassroomChat({ openSettings, toast }) {
   const intelligence = window.__classroomIntelligence || createClassroomIntelligence({ openSettings, toast });
   const e = Object.fromEntries(["Messages", "Context", "Question", "Send", "Form", "Error", "Clear", "ModelSelect", "Settings", "SaveSettings", "SettingsStatus", "RefreshModels", "Scope"].map(key => [key, $("#chat" + key)]));
   let sessionId = null, settings = null, defaultPrompt = "", models = [], viewVersion = 0;
-  let settingsDirty = false, settingsSaving = false, refreshing = false;
+  let settingsDirty = false, settingsSaving = false, sessionActive = false;
   let settingsEditVersion = 0;
   let loadedId = null, displayed = "";
   let modelsLoading = null, modelsUpdatedAt = 0;
-  const documents = new Map(), drafts = new Map(), submitting = new Set();
+  const documents = new Map(), drafts = new Map(), submitting = new Set(), refreshRequests = new Map();
   const docFor = id => documents.get(id) || { conversation_id: "", turns: [] };
   const baseFor = id => `/api/recordings/${encodeURIComponent(id)}/chat`;
 
@@ -57,7 +58,8 @@ export function createClassroomChat({ openSettings, toast }) {
   }
   function render(force = false) {
     const doc = docFor(sessionId);
-    e.Context.textContent = contextText(doc.context);
+    const contextLabel = contextText(doc.context);
+    if (e.Context.textContent !== contextLabel) e.Context.textContent = contextLabel;
     const fingerprint = JSON.stringify([sessionId, doc.turns, submitting.has(sessionId), Boolean(doc.running)]);
     if (force || fingerprint !== displayed) {
       const nearBottom = e.Messages.scrollHeight - e.Messages.scrollTop - e.Messages.clientHeight < 80;
@@ -171,32 +173,41 @@ export function createClassroomChat({ openSettings, toast }) {
   }
   async function refreshConversation() {
     const id = sessionId, version = viewVersion;
-    if (!id || refreshing) return;
-    refreshing = true;
-    try {
-      const doc = await api(baseFor(id));
-      if (sessionId === id && viewVersion !== version) return;
-      const previous = docFor(id);
-      if (submitting.has(id) || previous.conversation_id === doc.conversation_id) {
-        for (const turn of previous.turns) {
-          if (!doc.turns.some(item => item.id === turn.id) && (turn.status === "failed" || submitting.has(id))) doc.turns.push(turn);
+    if (!id) return;
+    if (refreshRequests.has(id)) return refreshRequests.get(id);
+    const request = (async () => {
+      try {
+        const doc = await api(baseFor(id));
+        if (sessionId === id && viewVersion !== version) return;
+        const previous = docFor(id);
+        if (submitting.has(id) || previous.conversation_id === doc.conversation_id) {
+          for (const turn of previous.turns) {
+            if (!doc.turns.some(item => item.id === turn.id) && (turn.status === "failed" || submitting.has(id))) doc.turns.push(turn);
+          }
         }
-      }
-      documents.set(id, doc);
-      if (sessionId === id && viewVersion === version) { loadedId = id; render(); }
-    } catch (exc) { if (sessionId === id && loadedId !== id) error(exc.message); }
-    finally { refreshing = false; controls(); }
+        documents.set(id, doc);
+        if (sessionId === id && viewVersion === version) { loadedId = id; render(); }
+      } catch (exc) { if (sessionId === id && loadedId !== id) error(exc.message); }
+      finally { controls(); }
+    })().finally(() => { refreshRequests.delete(id); conversationPoll.schedule(); });
+    refreshRequests.set(id, request);
+    return request;
   }
   function showSession(session) {
     const next = session?.id || null;
     if (window.__classroomIntelligence?.showSession) {
       try { window.__classroomIntelligence.showSession(session); } catch {}
     }
-    if (next === sessionId) { void refreshConversation(); return; }
+    const wasActive = sessionActive;
+    sessionActive = session?.status === 'active';
+    if (next === sessionId) {
+      if (wasActive !== sessionActive) conversationPoll.wake();
+      return;
+    }
     if (sessionId) drafts.set(sessionId, e.Question.value);
     sessionId = next; viewVersion++; loadedId = null;
     e.Question.value = drafts.get(next) || "";
-    error(); render(true); void refreshConversation();
+    error(); render(true); conversationPoll.wake();
   }
   async function submit(retry = null) {
     const id = sessionId;
@@ -212,7 +223,7 @@ export function createClassroomChat({ openSettings, toast }) {
     turn.status = "pending"; turn.error = "";
     documents.set(id, doc); submitting.add(id);
     if (!retry) { e.Question.value = ""; drafts.delete(id); }
-    error(); render(true);
+    error(); render(true); conversationPoll.schedule();
     try {
       const result = await api(baseFor(id), jsonOptions("POST", {question, request_id: requestId, conversation_id: conversationId, scope}));
       const latest = docFor(id);
@@ -236,6 +247,7 @@ export function createClassroomChat({ openSettings, toast }) {
     } finally {
       submitting.delete(id);
       if (sessionId === id) { render(); e.Question.focus({ preventScroll: true }); }
+      conversationPoll.schedule();
     }
   }
   function fillSettings() {
@@ -349,9 +361,13 @@ export function createClassroomChat({ openSettings, toast }) {
     const model = e.ModelSelect.value;
     if (await persist({provider: {model, cli_model: model}}, !settingsDirty)) toast("课堂问答模型已切换");
   });
-  setInterval(() => { if (!document.hidden && sessionId) void refreshConversation(); }, 4000);
+  const conversationPoll = createVisiblePoll({run: refreshConversation,
+    enabled: () => sessionId && classroomPanelVisible($('#chatPanel')),
+    delay: () => loadedId !== sessionId || sessionActive || submitting.has(sessionId) || docFor(sessionId).running ? 4000 : 60000,
+    events: ['qwenasr:viewchange']});
   const refreshModelCatalog = () => {
-    if (!document.hidden && settings?.provider.transport === "agy_cli" && Date.now() - modelsUpdatedAt >= 300000) void loadModels();
+    if (!document.hidden && settings?.provider.transport === "agy_cli" && Date.now() - modelsUpdatedAt >= 300000 &&
+        (classroomPanelVisible($('#chatPanel')) || $('#settingsDialog')?.open)) void loadModels();
   };
   setInterval(refreshModelCatalog, 60000);
   document.addEventListener("visibilitychange", refreshModelCatalog);

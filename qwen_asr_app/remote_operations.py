@@ -84,7 +84,8 @@ def discard_completed_payloads(path):
     if root.is_symlink() or not any(root.resolve() != base.resolve() and root.resolve().is_relative_to(base.resolve()) for base in allowed):
         return
     for child in root.iterdir() if root.is_dir() else []:
-        if child.name in {'receipt.json', 'operation.json', 'receipt.cancel.json'}:
+        if child.name in {'receipt.json', 'classroom-receipt.json', 'operation.json', 'receipt.cancel.json',
+                          'receipt.lock', 'classroom-receipt.lock'}:
             continue
         try:
             if child.is_dir() and not child.is_symlink():
@@ -116,12 +117,32 @@ class LocalComputeGuard:
         self.loop.call_soon_threadsafe(self.lock.release)
 
 
+@contextlib.contextmanager
+def operation_receipt_lock(path):
+    import fcntl
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with path.with_suffix('.lock').open('a') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ResultNeedsRepair('同一远程操作仍在运行，请等待现有操作完成') from None
+        yield
+
+
 def mark_local_fallback(path):
-    value = receipt(path)
-    if value.get('state') not in {'proven_not_accepted', 'local_fallback'}:
-        raise ValueError('未证实远端没有接受，禁止自动本地重算')
-    value['state'] = 'local_fallback'
-    atomic_json(Path(path), value)
+    path = Path(path)
+    classroom = path.with_name('classroom-receipt.json')
+    if path.name == 'receipt.json' and classroom.exists():
+        if path.exists():
+            raise ResultNeedsRepair('远程操作存在两种协议收据，请先修复记录')
+        path = classroom
+    with operation_receipt_lock(path):
+        value = receipt(path)
+        if value.get('state') not in {'proven_not_accepted', 'local_fallback'}:
+            raise ValueError('未证实远端没有接受，禁止自动本地重算')
+        value['state'] = 'local_fallback'
+        atomic_json(path, value)
 
 
 class ResultNeedsRepair(RuntimeError):

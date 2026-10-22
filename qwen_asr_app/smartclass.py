@@ -133,6 +133,13 @@ def parse_index(text: str) -> dict:
 
 def extract_audio(sources: list[dict], destination: Path, progress=lambda *args: None, stop=None,
                   sample_seconds: float | None = None, sample_offset: float = 0) -> list[dict]:
+    from .course_codec import run_codec
+    return run_codec('extract', sources, destination=str(Path(destination).resolve()),
+        progress=progress, stop=stop, sample_seconds=sample_seconds, sample_offset=sample_offset)
+
+
+def _extract_audio_inline(sources: list[dict], destination: Path, progress=lambda *args: None, stop=None,
+                  sample_seconds: float | None = None, sample_offset: float = 0) -> list[dict]:
     """Decode only audio, joining source periods into one continuous lossless FLAC."""
     import av
     destination.parent.mkdir(parents=True, exist_ok=True)

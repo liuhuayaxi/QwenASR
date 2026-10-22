@@ -3,11 +3,16 @@ export function initReviewMaterials(onData, reload) {
 const $ = id => document.getElementById(id === 'toast' ? id : 'review-' + id);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const state = { category: new URLSearchParams(location.search).get('category') || '', categories: [], lessons: [], notes: [], selected: new Set(), template: '', epoch: 0 };
-let toastTimer;
+let toastTimer, lessonsSignature = '';
 function toast(text) { $('toast').textContent = text; $('toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => $('toast').hidden = true, 4200); }
 function notice(id, text, error = false) { const node = $(id); node.textContent = text; node.hidden = !text; node.classList.toggle('error', error); }
 async function api(path, options = {}) { const response = await fetch(path, {cache:'no-store', ...options}); let data; try { data = await response.json(); } catch { throw new Error('服务未返回有效结果，请刷新页面'); } if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : `操作未完成（${response.status}）`); return data; }
-function renderLessons() { $('lessonCount').textContent = state.lessons.length; $('lessons').innerHTML = state.lessons.map(item => `<label class="lesson-item"><input type="checkbox" data-lesson="${esc(item.id)}" ${state.selected.has(item.id) ? 'checked' : ''}><span><span class="lesson-title">${esc(item.title)}</span><span class="lesson-meta">${esc(item.date)}${item.ideashell_note_id ? ' · 已关联闪念贝壳' : ''}</span></span></label>`).join(''); $('lessonEmpty').hidden = state.lessons.length !== 0; updateSelection(); }
+function renderLessons() {
+  const signature = JSON.stringify([state.category, state.lessons, [...state.selected]]);
+  if (signature === lessonsSignature) { updateSelection(); return; }
+  lessonsSignature = signature;
+  $('lessonCount').textContent = state.lessons.length; $('lessons').innerHTML = state.lessons.map(item => `<label class="lesson-item"><input type="checkbox" data-lesson="${esc(item.id)}" ${state.selected.has(item.id) ? 'checked' : ''}><span><span class="lesson-title">${esc(item.title)}</span><span class="lesson-meta">${esc(item.date)}${item.ideashell_note_id ? ' · 已关联闪念贝壳' : ''}</span></span></label>`).join(''); $('lessonEmpty').hidden = state.lessons.length !== 0; updateSelection();
+}
 function updateSelection() { const count = state.selected.size; $('selectionText').textContent = count ? `已选择 ${count} 节课` : '尚未选择课次'; $('selectedForUpload').textContent = count ? `将关联 ${count} 节课` : '未指定来源课次'; $('generatePrompt').disabled = !count; $('copyPrompt').disabled = !$('promptOutput').value.trim(); }
 function renderNotes() { onData({notes: state.notes, categories: state.categories}); }
 async function load(category = state.category) {

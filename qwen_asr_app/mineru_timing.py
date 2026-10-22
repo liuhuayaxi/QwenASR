@@ -27,9 +27,8 @@ def pdf_pages(source):
     if Path(source).suffix.lower() != '.pdf':
         return 0
     try:
-        import pymupdf
-        with pymupdf.open(source) as document:
-            return len(document)
+        from .native_pdf import pdf_operation
+        return pdf_operation('page_count', path=str(source))
     except Exception:
         return 0
 

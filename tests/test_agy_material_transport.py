@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
+from tests.agy_fixtures import available_material_sandbox
 
 from qwen_asr_app.agy_cli import _error_kind
 from qwen_asr_app.agy_materials import MaterialSessionError, communicate, request_materials, retry_materials, sandbox_profile, parse_json

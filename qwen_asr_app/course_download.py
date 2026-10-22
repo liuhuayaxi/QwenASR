@@ -17,6 +17,11 @@ RATE = 16000
 
 
 def stream_audio(sources, on_chunk, progress=lambda *args: None, stop=None, resume=None):
+    from .course_codec import run_codec
+    return run_codec('stream', sources, on_chunk=on_chunk, progress=progress, stop=stop, resume=resume)
+
+
+def _stream_audio_inline(sources, on_chunk, progress=lambda *args: None, stop=None, resume=None):
     """Emit ~60 second PCM chunks; each callback acknowledges a durable checkpoint.
 
     Cursor positions count decoded 16 kHz samples inside the original source.

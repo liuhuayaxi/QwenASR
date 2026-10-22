@@ -21,7 +21,7 @@ async def retry_once(store, manager, live_sessions, unavailable, claim=None, on_
             if pending.get('state')=='processing' and live:continue
             if pending.get('retry_after',0)>time.time():continue
             config=copy.deepcopy(pending.get('config_snapshot') or {})
-            if config.get('inference_settings',{}).get('asr_provider')!='remote_only':continue
+            if config.get('inference_settings',{}).get('asr_provider') not in {'remote_only','remote_preferred'}:continue
             folder=config.get('_remote_operation_dir')
             if not folder:continue
             source=Path(folder)/'audio.wav'

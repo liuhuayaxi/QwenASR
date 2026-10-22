@@ -18,6 +18,11 @@ class ClassroomRemoteError(RuntimeError):
         super().__init__('Windows 暂不可用：' + self.code)
 
 
+class ClassroomNotAccepted(RuntimeError):
+    """A durable prepared receipt proves no compute request was submitted."""
+    proven_not_accepted = True
+
+
 def request(cfg, path, payload=None, timeout=180):
     client=remote_client(cfg)
     with client.session() as session:
@@ -37,7 +42,7 @@ def capabilities(cfg):
     return request(cfg,'/v1/capabilities')
 
 
-def compute(cfg, payload, *, stop=None):
+def compute(cfg, payload, *, stop=None, before_submit=None):
     # The server has one GPU and an eight-second queue admission budget. Two
     # course imports can legitimately exceed that budget while the other clip
     # is running. Retry only transient conditions, always using the durable
@@ -54,6 +59,8 @@ def compute(cfg, payload, *, stop=None):
         remaining=deadline-time.monotonic()
         if remaining<=0:
             raise ResultNeedsRepair('Windows 计算队列等待超时，原始资料已保留')
+        if before_submit is not None:
+            before_submit()
         try:
             value=request(cfg,'/v1/classroom/compute',payload,timeout=remaining)
             break
@@ -72,24 +79,62 @@ def compute(cfg, payload, *, stop=None):
 
 
 def transcribe_clip(folder, cfg, source, language, prompt, max_tokens, *, stop=None):
+    from .remote_operations import operation_receipt_lock
     folder=Path(folder)
     receipt=folder/'classroom-receipt.json'
+    with operation_receipt_lock(receipt):
+        return _transcribe_clip(receipt, cfg, Path(source), language, prompt, max_tokens, stop=stop)
+
+
+def _transcribe_clip(receipt, cfg, source, language, prompt, max_tokens, *, stop=None):
+    from .remote_operations import ResultNeedsRepair
+    if stop is not None and stop.is_set():
+        raise ResultNeedsRepair('Windows 操作已停止等待；原始资料已保留')
     fingerprint=hashlib.sha256(source.read_bytes()).hexdigest()
     if receipt.exists():
-        state=json.loads(receipt.read_text())
+        try:
+            state=json.loads(receipt.read_text())
+            if (not isinstance(state,dict) or not isinstance(state.get('operation_id'),str)
+                    or not state['operation_id'] or not isinstance(state.get('audio_sha256'),str)
+                    or state.get('state') not in {'pending','prepared','proven_not_accepted',
+                                                  'submitting','completed','local_fallback'}
+                    or (state['state']=='completed' and not isinstance(state.get('result'),dict))
+                    or (state['state'] in {'prepared','proven_not_accepted','local_fallback'}
+                        and state.get('schema')!=2)):
+                raise ValueError('INVALID_CLASSROOM_RECEIPT')
+        except (OSError,ValueError) as exc:
+            raise ResultNeedsRepair('课堂操作收据需要修复；不会重新提交或回退本机') from exc
         if state['audio_sha256']!=fingerprint:raise ValueError('课堂音频版本发生变化')
     else:
-        state={'operation_id':'live-'+uuid.uuid4().hex,'audio_sha256':fingerprint,'state':'pending'}
+        state={'schema':2,'operation_id':'live-'+uuid.uuid4().hex,
+               'audio_sha256':fingerprint,'state':'prepared'}
         atomic_json(receipt,state)
     if state.get('state')=='completed':return state['result']
-    caps=capabilities(cfg)
+    if state['state']=='local_fallback':
+        raise ClassroomNotAccepted('课堂操作此前已确认未提交，继续本机转写')
+    try:
+        caps=capabilities(cfg)
+    except Exception as exc:
+        # Old "pending" receipts may have lost a successful POST response.
+        # Only our explicit pre-submission states permit a local fallback.
+        if (state['state'] in {'prepared','proven_not_accepted'}
+                and not (stop is not None and stop.is_set())):
+            state.update(state='proven_not_accepted',last_error=type(exc).__name__)
+            atomic_json(receipt,state)
+            raise ClassroomNotAccepted('Windows 连接失败，已确认课堂片段尚未提交') from exc
+        raise
     if not caps.get('asr_session'):raise RuntimeError('Windows 不支持课堂会话，请更新节点')
     ceiling=caps.get('classroom_asr_max_new_tokens',2048)
     if type(ceiling) is not int or not 128<=max_tokens<=ceiling:
         raise ValueError('Windows 课堂生成上限不支持已保存的参数，请更新节点；音频已保留')
     payload={'kind':'asr','operation_id':state['operation_id'],'audio':base64.b64encode(source.read_bytes()).decode(),
              'language':language or '', 'prompt':prompt or '', 'max_new_tokens':max_tokens}
-    value=compute(cfg,payload,stop=stop)
+    def before_submit():
+        if state['state']!='submitting':
+            # Persist uncertainty before the first byte can leave this process.
+            state['state']='submitting'
+            atomic_json(receipt,state)
+    value=compute(cfg,payload,stop=stop,before_submit=before_submit)
     state.update(state='completed',result=value)
     atomic_json(receipt,state)
     return value

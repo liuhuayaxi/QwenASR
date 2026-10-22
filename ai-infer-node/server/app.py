@@ -98,6 +98,9 @@ class Gateway:
         self.process = None
         self.current = None
         self.stopping = False
+        self.work_available = asyncio.Event()
+        self.observation_lock = asyncio.Lock()
+        self.status_observations = {}
         self.loop = None
         self.isolation = None
         self.scheduler_error = None
@@ -186,6 +189,7 @@ class Gateway:
 
     async def stop(self):
         self.stopping = True
+        self.work_available.set()
         classroom=getattr(self,'classroom',None)
         if classroom:
             if classroom.timer:classroom.timer.cancel()
@@ -245,13 +249,33 @@ class Gateway:
             (self.coordination / 'resource-isolation.json').unlink(missing_ok=True)
             self.isolation, self.owned_pgid, self.scheduler_error = None, None, None
 
+    async def wait_for_work(self, timeout=5):
+        try:
+            await asyncio.wait_for(self.work_available.wait(), timeout)
+        except asyncio.TimeoutError:
+            pass
+
+    async def status_observation(self, key, observe, max_age):
+        # Cache dashboard probes only. Startup, job ownership and GPU-release
+        # verification always call their observers directly for fresh evidence.
+        async with self.observation_lock:
+            saved = self.status_observations.get(key)
+            if saved is None or time.monotonic() - saved[0] >= max_age:
+                value = await observe()
+                saved = (time.monotonic(), time.time(), value)
+                self.status_observations[key] = saved
+            return {**saved[2], 'sampled_at': saved[1],
+                    'sample_age_seconds': round(time.monotonic() - saved[0], 3),
+                    'sample_interval_seconds': max_age}
+
     async def schedule(self):
         cleaned = 0
         while not self.stopping:
             try:
+                self.work_available.clear()
                 classroom = getattr(self, 'classroom', None)
                 if classroom and (classroom.reserved() or classroom.guard.locked()):
-                    await asyncio.sleep(.25)
+                    await self.wait_for_work(1)
                     continue
                 shared_isolation = self.coordination/'resource-isolation.json'
                 if shared_isolation.exists():
@@ -274,7 +298,7 @@ class Gateway:
                 if ident:
                     await self.execute(ident)
                 else:
-                    await asyncio.sleep(.25)
+                    await self.wait_for_work()
             except Exception as exc:
                 self.scheduler_error = 'SCHEDULER_' + type(exc).__name__
                 with contextlib.suppress(Exception):
@@ -477,10 +501,12 @@ class Gateway:
                            gpu_release_seconds=time.monotonic()-release_started,
                            gpu_release_verified=release_state == 'verified', cleanup_errors=cleanup_errors,
                            gateway_job_seconds=time.monotonic()-started, memory_after=memory_observation())
+            scope_closed = False
             try:
                 if release_state == 'verified':
                     if scope is not None:
                         scope.close()
+                        scope_closed = True
                     metrics['model_file_cache_reclaim'] = await bounded_reclaim(self.cfg)
             except Exception as exc:
                 metrics['model_file_cache_reclaim'] = {'state': 'unknown', 'error': type(exc).__name__}
@@ -518,6 +544,9 @@ class Gateway:
                         (folder/name).unlink(missing_ok=True)
                 self.process = None
                 self.current = None
+                if scope_closed and release_state == 'verified' and not self.isolation and not self.scheduler_error:
+                    self.owned_pgid = None
+                    self.scope_path = None
                 lock.close()
                 if external:
                     external.close()
@@ -622,11 +651,11 @@ async def status():
     counts = node.store.counts()
     return {"ok": True, "data": {"state": node.store.get(node.current)["status"].upper() if node.current else "QUEUED" if counts.get("queued") else "IDLE",
         "resource_isolation": node.isolation, "scheduler_alive": node.loop is not None and not node.loop.done(),
-        "resources": {**memory_observation(), "windows_host": await host_observation(), "node_processes": group_processes(node.owned_pgid)},
+        "resources": {**memory_observation(), "windows_host": await node.status_observation('host', host_observation, 15), "node_processes": group_processes(node.owned_pgid)},
         "current_job": node.current, "worker_pid": node.process.pid if node.process else None,
         "data_dir": str(node.data), "results_dir": str(node.results) if node.results else str(node.data / "<job-id>" / "result"),
         "startup_checks": node.startup_checks, "models_preloaded": False,
-        "queue": counts, "gpu": await gpu_usage(), "gateway_rss_mib": psutil.Process().memory_info().rss / 2**20,
+        "queue": counts, "gpu": await node.status_observation('gpu', gpu_usage, 5), "gateway_rss_mib": psutil.Process().memory_info().rss / 2**20,
         "memory": psutil.virtual_memory()._asdict(), "model_idle_timeout_seconds": 0, "max_concurrent_gpu_jobs": 1}}
 
 
@@ -702,6 +731,7 @@ async def submit(request: Request, kind: str, filename: str, options: str = "{}"
                 os.close(fd)
         execution_snapshot['input_sha256'] = digest.hexdigest()
         node.store.add(ident, key, kind, fingerprint, normalized, suffix, execution_snapshot)
+        node.work_available.set()
         return {"ok": True, "data": public_job(node.store.get(ident))}
     except TimeoutError:
         raise HTTPException(408, "Upload timeout")
@@ -738,6 +768,7 @@ async def cancel(ident: str):
     value = job(ident)
     if value["status"] not in TERMINAL:
         app.state.gateway.store.update(ident, canceled=1, **({"status": "canceled"} if value["status"] == "queued" else {}))
+        app.state.gateway.work_available.set()
     return {"ok": True, "data": public_job(job(ident))}
 
 

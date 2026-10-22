@@ -1,11 +1,13 @@
-import { initReviewMaterials } from './review-materials.js?v=20261014-course-notes';
+import { initReviewMaterials } from './review-materials.js?v=20261019-idle-lifecycle-1';
 import { IDEASHELL_SERVERS as servers } from './ideashell-config.js?v=20261007';
 import {mineruEstimateLabel} from './mineru-progress-view.js?v=20261013-time-1';
+import {createVisiblePoll} from './visible-poll.js';
 
 const $ = (id) => document.getElementById(id);
 const storageKey = 'qwen-asr-ideashell-settings-v1';
 const state = {category: new URLSearchParams(location.search).get('category') || '未分类', files: [], reviewNotes: [], categories: [], selected: null, preview: null, sharedFolder: false, fileAction: null, replacing: null, uploading: false, syncing: false, managing: false, categoryAction: null, epoch: 0, modalEpoch: 0};
-let pollTimer, connectionTimer, toastTimer, previewTimer;
+let polling, connectionTimer, toastTimer, previewTimer;
+let loadRequest = null, reloadRequested = false, coursesSignature = '', filesSignature = '';
 let previewEpoch = 0, matchesEpoch = 0;
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c]));
 const size = bytes => bytes < 1024 ** 2 ? `${Math.round(bytes / 1024)} KB` : `${(bytes / 1024 ** 2).toFixed(1)} MB`;
@@ -14,7 +16,7 @@ const server = () => servers[$('region').value];
 function toast(text) { $('toast').textContent = text; $('toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => $('toast').hidden = true, 4200); }
 function notice(id, text, error = false) { const node = $(id); node.textContent = text; node.hidden = !text; node.classList.toggle('error', error); }
 async function api(path, body) {
-  const options = {cache: 'no-store'};
+  const options = {cache: 'no-store', ...(body === undefined ? {signal: AbortSignal.timeout(15000)} : {})};
   if (body !== undefined) {
     options.method = 'POST'; options.headers = {'X-QwenASR-Client': 'course-files'};
     if (body instanceof FormData) options.body = body;
@@ -32,6 +34,9 @@ async function busy(button, action) {
   finally { button.disabled = false; }
 }
 function renderCourses() {
+  const signature = JSON.stringify([state.category, state.categories]);
+  if (signature === coursesSignature) { updateCategoryControls(); return; }
+  coursesSignature = signature;
   $('courses').innerHTML = state.categories.map(category => `<button class="${category === state.category ? 'selected' : ''}" aria-current="${category === state.category ? 'page' : 'false'}" data-category="${esc(category)}">${esc(category)}</button>`).join('');
   updateCategoryControls();
 }
@@ -54,6 +59,9 @@ function reviewCard(item) {
   return `<article class="file-card" data-review-id="${esc(item.id)}"><div class="file-icon">PDF</div><div class="file-main"><h3 class="file-title">${title}</h3><div class="file-meta"><span class="badge">复习资料</span><span>${esc(String(item.created_at || '').slice(0,10))}</span><span>${esc(item.filename)}</span></div><p class="file-status${item.exists ? '' : ' error'}">${item.exists ? 'PDF 已保存' : '文件已不存在'}${sources ? ` · 来源课次：${esc(sources)}` : ''}</p><div class="actions">${item.exists ? `<a class="ui-button" href="${esc(item.download_url)}" download>下载 PDF</a>` : ''}<button class="ui-button danger" data-delete-review="${esc(item.id)}" type="button">移到废纸篓</button></div></div></article>`;
 }
 function renderFiles() {
+  const signature = JSON.stringify([state.category, state.files, state.reviewNotes, state.sharedFolder, $('search').value, $('kindFilter').value]);
+  if (signature === filesSignature) return;
+  filesSignature = signature;
   const legacyFiles = state.files.filter(file => file.needs_mineru_upgrade);
   const upgradeButton = $('upgradeLegacy');
   upgradeButton.hidden = legacyFiles.length === 0;
@@ -89,30 +97,38 @@ function renderFiles() {
   }).join('') + reviews.map(reviewCard).join('');
 }
 async function load() {
+  if (loadRequest) { reloadRequested = true; return loadRequest; }
   const epoch = ++state.epoch;
-  clearTimeout(pollTimer);
-  try {
-    const data = await api(`/api/course-files?${query({category: state.category})}`);
-    if (epoch !== state.epoch) return;
-    state.files = data.files; state.categories = data.categories; state.sharedFolder = Boolean(data.shared_folder);
-    if (state.category !== data.category) {
-      state.category = data.category;
-      history.replaceState(null, '', `/course-files?${query({category: state.category})}`);
-    }
-    $('courseTitle').textContent = state.category + ' · PDF 资料库';
-    $('courseMeta').textContent = state.sharedFolder ? '与本机课程文件夹实时同步，原件在外层，AI 友好型文件单独保存。' : '原件与 PDF 成对保存，和课堂笔记建立关联。';
-    $('directory').textContent = `保存位置：${data.directory}`;
-    $('capabilities').textContent = `Word / PPT / Excel 转 PDF：${data.capabilities.office ? '已具备转换工具' : '需安装 LibreOffice'} · MinerU 识别：${data.capabilities.mineru ? '可用' : '需配置 MinerU'}`;
-    notice('loadError', ''); renderCourses(); renderFiles();
-    await review.load(state.category);
-    if (epoch !== state.epoch) return;
-    const asset = new URLSearchParams(location.search).get('asset');
-    if (asset && !state.revealedAsset) {
-      const card = [...$('files').querySelectorAll('[data-id]')].find(node => node.dataset.id === asset);
-      if (card) { card.scrollIntoView({block: 'center'}); card.tabIndex = -1; card.focus({preventScroll: true}); state.revealedAsset = asset; }
-    }
-    if (state.files.some(f => ['queued', 'running', 'stopping'].includes(f.conversion?.status))) pollTimer = setTimeout(load, 2500);
-  } catch (error) { if (epoch === state.epoch) notice('loadError', error.message, true); }
+  const category = state.category;
+  loadRequest = (async () => {
+    try {
+      const data = await api(`/api/course-files?${query({category})}`);
+      if (epoch !== state.epoch) return;
+      if (category !== state.category) { reloadRequested = true; return; }
+      state.files = data.files; state.categories = data.categories; state.sharedFolder = Boolean(data.shared_folder);
+      if (state.category !== data.category) {
+        state.category = data.category;
+        history.replaceState(null, '', `/course-files?${query({category: state.category})}`);
+      }
+      $('courseTitle').textContent = state.category + ' · PDF 资料库';
+      $('courseMeta').textContent = state.sharedFolder ? '与本机课程文件夹实时同步，原件在外层，AI 友好型文件单独保存。' : '原件与 PDF 成对保存，和课堂笔记建立关联。';
+      $('directory').textContent = `保存位置：${data.directory}`;
+      $('capabilities').textContent = `Word / PPT / Excel 转 PDF：${data.capabilities.office ? '已具备转换工具' : '需安装 LibreOffice'} · MinerU 识别：${data.capabilities.mineru ? '可用' : '需配置 MinerU'}`;
+      notice('loadError', ''); renderCourses(); renderFiles();
+      await review.load(state.category);
+      if (epoch !== state.epoch) return;
+      const asset = new URLSearchParams(location.search).get('asset');
+      if (asset && !state.revealedAsset) {
+        const card = [...$('files').querySelectorAll('[data-id]')].find(node => node.dataset.id === asset);
+        if (card) { card.scrollIntoView({block: 'center'}); card.tabIndex = -1; card.focus({preventScroll: true}); state.revealedAsset = asset; }
+      }
+    } catch (error) { if (epoch === state.epoch) notice('loadError', error.message, true); }
+  })().finally(() => {
+    loadRequest = null;
+    if (reloadRequested && !document.hidden) { reloadRequested = false; void load(); }
+    else { reloadRequested = false; polling?.schedule(); }
+  });
+  return loadRequest;
 }
 $('courses').addEventListener('click', event => {
   const button = event.target.closest('[data-category]');
@@ -450,15 +466,14 @@ $('syncButton').addEventListener('click', async () => {
 let liveRefreshTimer;
 const libraryEvents = new EventSource('/api/library/events');
 libraryEvents.onmessage = () => {
+  if (document.hidden) return;
   clearTimeout(liveRefreshTimer);
   liveRefreshTimer = setTimeout(() => {
-    if (!state.managing && !state.uploading && !state.syncing) load();
+    if (!document.hidden && !state.managing && !state.uploading && !state.syncing) load();
   }, 150);
 };
-// EventSource reconnects on its own; a fallback also recovers missed changes.
-setInterval(() => {
-  if (document.visibilityState === 'visible' && libraryEvents.readyState !== EventSource.OPEN
-      && !state.managing && !state.uploading && !state.syncing) load();
-}, 3000);
-document.addEventListener('visibilitychange', () => { if (!document.hidden && !state.managing) load(); });
+// Events discover changes promptly; a slow idle check recovers missed events.
+polling = createVisiblePoll({run: () => {
+  if (!state.managing && !state.uploading && !state.syncing) return load();
+}, delay: () => state.files.some(f => ['queued', 'running', 'stopping'].includes(f.conversion?.status)) ? 2500 : 60000});
 load();

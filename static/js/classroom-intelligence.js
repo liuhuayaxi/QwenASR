@@ -3,6 +3,7 @@
  * Follows the QwenASR knowledge development contract.
  */
 import { renderMarkdown } from "./markdown-reader.js?v=20261015-reader-math-scope-8";
+import {createVisiblePoll, classroomPanelVisible} from './visible-poll.js';
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => document.querySelectorAll(selector);
@@ -44,17 +45,21 @@ function getSourceUrl(src, defaultSessionId) {
 function handleAudioJump(event, src, currentSessionId) {
   if (src.start !== null && src.start !== undefined) {
     const player = document.getElementById("noteAudio");
-    const sameSession = !src.lesson_id || src.lesson_id === currentSessionId;
-    if (player && sameSession) {
+    const targetId = src.lesson_id || src.session_id || currentSessionId;
+    const targetSource = `/api/recordings/${encodeURIComponent(targetId)}/playback`;
+    // The shared player belongs to the note reader, which can show a different
+    // lesson from the side rail. Otherwise follow the recording's normal link.
+    if (player && document.getElementById("noteDialog")?.open &&
+        player.getAttribute("src") === targetSource && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
       event.preventDefault();
       player.currentTime = Number(src.start);
-      try { player.play(); } catch {}
+      try { player.play()?.catch(() => {}); } catch {}
     }
   }
 }
 
 async function api(url, options = {}) {
-  const response = await fetch(url, { cache: "no-store", ...options });
+  const response = await fetch(url, { cache: "no-store", ...(options.method ? {} : {signal: AbortSignal.timeout(15000)}), ...options });
   let payload = null;
   try {
     payload = await response.json();
@@ -84,11 +89,15 @@ export function createClassroomIntelligence({ toast = () => {}, openSettings = (
   let notes = [];
   let renderedNotesSignature = "";
   let relatedResults = [];
-  let pollTimer = null;
+  let scribblesPoll = null, scribblesVersion = 0, relatedVersion = 0, sourcesLoadedFor = '', sourcesLoadedAt = 0;
+  let relatedSignature = '';
+  const scribblesRequests = new Map();
   let sourceHint = {};
   let isSaving = false;
   let selectedAnchor = "current"; // "current" | "previous" | "manual"
   const sessionDrafts = new Map(); // sessionId -> string
+  const draftVersions = new Map();
+  const composerRequestIds = new Map();
   const activeInlineEditors = new Set(); // noteId currently being edited
 
   // DOM elements cache
@@ -148,8 +157,9 @@ export function createClassroomIntelligence({ toast = () => {}, openSettings = (
     if (tabName === "scribbles" && scribblesEls.input) {
       scribblesEls.input.focus({ preventScroll: true });
     } else if (tabName === "related") {
-      void fetchRelatedMaterials();
+      void loadRelatedSources(currentSession).then(() => fetchRelatedMaterials());
     }
+    document.dispatchEvent(new Event('qwenasr:viewchange'));
   }
 
   // ==================== Anchor Selection ====================
@@ -193,41 +203,50 @@ export function createClassroomIntelligence({ toast = () => {}, openSettings = (
   async function loadScribbles(quiet = false) {
     const id = currentSessionId;
     if (!id) return;
-    try {
-      const data = await api(`/api/recordings/${encodeURIComponent(id)}/scribbles`);
-      if (currentSessionId !== id) return;
-      notes = data.notes || [];
-      sourceHint=data.context?.source_hint || {};
-      if (relatedEls.sourceSelect && document.activeElement!==relatedEls.sourceSelect) relatedEls.sourceSelect.value=sourceHint.source_id || '';
-      if (relatedEls.headingInput && document.activeElement!==relatedEls.headingInput) relatedEls.headingInput.value=sourceHint.heading || '';
-      if (relatedEls.pageInput && document.activeElement!==relatedEls.pageInput) relatedEls.pageInput.value=sourceHint.page || '';
-      renderScribbles();
-      if (!quiet && scribblesEls.status) {
-        scribblesEls.status.textContent = `共 ${notes.length} 条速记`;
+    if (scribblesRequests.has(id)) return scribblesRequests.get(id);
+    const version = scribblesVersion;
+    const request = (async () => {
+      try {
+        const data = await api(`/api/recordings/${encodeURIComponent(id)}/scribbles`);
+        if (currentSessionId !== id || version !== scribblesVersion) return;
+        notes = data.notes || [];
+        sourceHint=data.context?.source_hint || {};
+        if (relatedEls.sourceSelect && document.activeElement!==relatedEls.sourceSelect) relatedEls.sourceSelect.value=sourceHint.source_id || '';
+        if (relatedEls.headingInput && document.activeElement!==relatedEls.headingInput) relatedEls.headingInput.value=sourceHint.heading || '';
+        if (relatedEls.pageInput && document.activeElement!==relatedEls.pageInput) relatedEls.pageInput.value=sourceHint.page || '';
+        renderScribbles();
+        if (!quiet && scribblesEls.status) {
+          scribblesEls.status.textContent = `共 ${notes.length} 条速记`;
+        }
+      } catch (err) {
+        if (currentSessionId === id && !quiet && scribblesEls.status) {
+          scribblesEls.status.textContent = "读取速记失败";
+        }
       }
-    } catch (err) {
-      if (!quiet && scribblesEls.status) {
-        scribblesEls.status.textContent = "读取速记失败";
-      }
-    }
+    })().finally(() => {
+      scribblesRequests.delete(id);
+      if (currentSessionId === id && version !== scribblesVersion) void loadScribbles(quiet);
+      else checkPolling();
+    });
+    scribblesRequests.set(id, request);
+    return request;
   }
-
-  let currentComposerRequestId = null;
 
   async function saveScribble() {
     const id = currentSessionId;
     if (!id || isSaving) return;
-    const text = scribblesEls.input?.value.trim();
+    const submittedDraft = scribblesEls.input?.value || "";
+    const text = submittedDraft.trim();
     if (!text) return;
 
     isSaving = true;
     updateComposerControls();
     if (scribblesEls.status) scribblesEls.status.textContent = "正在保存速记…";
 
-    if (!currentComposerRequestId) {
-      currentComposerRequestId = crypto.randomUUID();
-    }
-    const requestId = currentComposerRequestId;
+    const draftVersion = draftVersions.get(id) || 0;
+    const autoEnhance = scribblesEls.autoEnhance?.checked ?? true;
+    if (!composerRequestIds.has(id)) composerRequestIds.set(id, crypto.randomUUID());
+    const requestId = composerRequestIds.get(id);
     const payload = {
       text,
       anchor: selectedAnchor,
@@ -246,45 +265,49 @@ export function createClassroomIntelligence({ toast = () => {}, openSettings = (
       const res = await api(`/api/recordings/${encodeURIComponent(id)}/scribbles`, jsonPost(payload));
       const newNote = res.note;
 
-      // Successful save: reset requestId and draft
-      currentComposerRequestId = null;
-      if (scribblesEls.input) scribblesEls.input.value = "";
-      sessionDrafts.delete(id);
+      // Only acknowledge the submitted version. Typing and changing lessons
+      // remain possible while the network request is pending.
+      if (composerRequestIds.get(id) === requestId) composerRequestIds.delete(id);
+      if ((draftVersions.get(id) || 0) === draftVersion) {
+        sessionDrafts.delete(id);
+        if (currentSessionId === id && scribblesEls.input?.value === submittedDraft) scribblesEls.input.value = "";
+      }
       updateComposerControls();
 
-      // Add to local state immediately
-      notes.unshift(newNote);
-      renderScribbles();
+      if (currentSessionId === id && newNote) {
+        scribblesVersion++;
+        notes = [newNote, ...notes.filter(note => note.id !== newNote.id)];
+        renderScribbles();
+      }
       toast("速记已保存");
 
       // 2. Trigger async enhance if checked
-      const autoEnhance = scribblesEls.autoEnhance?.checked ?? true;
       if (autoEnhance && newNote?.id) {
-        void triggerEnhance(newNote.id, true);
+        void triggerEnhance(newNote.id, true, id);
       }
     } catch (err) {
-      // Failed POST: keep currentComposerRequestId so retry reuses the exact same request_id
+      // Failed POST: an unchanged draft retries with the same request id.
       toast(`保存失败: ${err.message}`);
-      if (scribblesEls.status) scribblesEls.status.textContent = `保存失败: ${err.message}（可点击重试）`;
+      if (currentSessionId === id && scribblesEls.status) scribblesEls.status.textContent = `保存失败: ${err.message}（可点击重试）`;
     } finally {
       isSaving = false;
       updateComposerControls();
     }
   }
 
-  async function triggerEnhance(noteId, quiet = false) {
-    const id = currentSessionId;
+  async function triggerEnhance(noteId, quiet = false, id = currentSessionId) {
     if (!id) return;
     try {
       // Update note status locally to pending
-      const note = notes.find(n => n.id === noteId);
+      const note = currentSessionId === id && notes.find(n => n.id === noteId);
       if (note) {
         note.status = "pending";
         renderScribbles();
       }
       // Scoped or direct route
       const res = await api(`/api/recordings/${encodeURIComponent(id)}/scribbles/${encodeURIComponent(noteId)}/enhance`, jsonPost({}));
-      if (res.note) {
+      if (currentSessionId === id && res.note) {
+        scribblesVersion++;
         const idx = notes.findIndex(n => n.id === noteId);
         if (idx >= 0) notes[idx] = res.note;
         renderScribbles();
@@ -292,7 +315,7 @@ export function createClassroomIntelligence({ toast = () => {}, openSettings = (
       if (!quiet) toast("已提交 AI 增强");
     } catch (err) {
       if (!quiet) toast(`增强请求失败: ${err.message}`);
-      void loadScribbles(true);
+      if (currentSessionId === id) void loadScribbles(true);
     }
   }
 
@@ -303,7 +326,8 @@ export function createClassroomIntelligence({ toast = () => {}, openSettings = (
       const payload = { action, expected_revision: expectedRevision };
       if (suggestionId) payload.suggestion_id = suggestionId;
       const res = await api(`/api/recordings/${encodeURIComponent(id)}/scribbles/${encodeURIComponent(noteId)}/action`, jsonPost(payload));
-      if (res.note) {
+      if (currentSessionId === id && res.note) {
+        scribblesVersion++;
         const idx = notes.findIndex(n => n.id === noteId);
         if (idx >= 0) notes[idx] = res.note;
         renderScribbles();
@@ -320,22 +344,22 @@ export function createClassroomIntelligence({ toast = () => {}, openSettings = (
     }
   }
 
-  async function patchNote(noteId, patchData) {
-    const id = currentSessionId;
+  async function patchNote(noteId, patchData, id = currentSessionId) {
     if (!id) return;
     try {
       const res = await api(`/api/recordings/${encodeURIComponent(id)}/scribbles/${encodeURIComponent(noteId)}`, jsonPatch(patchData));
-      if (res.note) {
+      if (currentSessionId === id && res.note) {
+        scribblesVersion++;
         const idx = notes.findIndex(n => n.id === noteId);
         if (idx >= 0) notes[idx] = res.note;
         renderScribbles();
       }
       toast("笔记已更新");
-      return true;
+      return res.note || true;
     } catch (err) {
       if (err.status === 409) {
         toast("正文版本已变化，当前编辑草稿保留；取消后可查看最新正文");
-        void loadScribbles(false);
+        if (currentSessionId === id) void loadScribbles(false);
       } else {
         toast(`保存修改失败: ${err.message}`);
       }
@@ -460,6 +484,8 @@ export function createClassroomIntelligence({ toast = () => {}, openSettings = (
 
       // Inline editor vs normal view
       if (isEditing) {
+        const editingSessionId = currentSessionId;
+        let editingRevision = note.revision;
         const editorBox = document.createElement("div");
         editorBox.className = "scribble-inline-editor";
 
@@ -486,16 +512,17 @@ export function createClassroomIntelligence({ toast = () => {}, openSettings = (
         saveBtn.textContent = "保存修改";
         saveBtn.addEventListener("click", async () => {
           const val = textarea.value.trim();
-          if (!val) return;
-          saveBtn.disabled = true;
-          activeInlineEditors.delete(note.id);
-          const saved=await patchNote(note.id, { content: val, expected_revision: note.revision });
-          if (!saved) {
-            activeInlineEditors.add(note.id);
-            renderedNotesSignature="";
+          if (!val || saveBtn.disabled) return;
+          saveBtn.disabled = cancelBtn.disabled = true;
+          // Keep this exact editor protected from refreshes until the save is
+          // acknowledged; an error must leave its draft and focus intact.
+          const saved = await patchNote(note.id, { content: val, expected_revision: editingRevision }, editingSessionId);
+          if (saved && currentSessionId === editingSessionId) {
+            editingRevision = saved.revision ?? editingRevision;
+            if (textarea.value.trim() === val) activeInlineEditors.delete(note.id);
             renderScribbles();
           }
-          saveBtn.disabled = false;
+          saveBtn.disabled = cancelBtn.disabled = false;
         });
 
         actions.append(cancelBtn, saveBtn);
@@ -753,13 +780,15 @@ export function createClassroomIntelligence({ toast = () => {}, openSettings = (
 
   // ==================== Related Materials ====================
 
-  async function loadRelatedSources(session) {
+  async function loadRelatedSources(session, force = false) {
     const id=session?.id;
-    if(!id || !relatedEls.sourceSelect) return;
+    if(!id || !relatedEls.sourceSelect || (!force && sourcesLoadedFor === id && Date.now() - sourcesLoadedAt < 60000)) return;
     await loadScribbles(false);
     try {
       const data=await api('/api/knowledge/status?'+new URLSearchParams({category:session.category || '未分类'}));
       if(currentSessionId!==id) return;
+      sourcesLoadedFor = id;
+      sourcesLoadedAt = Date.now();
       const select=relatedEls.sourceSelect;
       select.replaceChildren(new Option('自动关联当前讲解',''));
       for(const item of data.sources || []) {
@@ -775,12 +804,14 @@ export function createClassroomIntelligence({ toast = () => {}, openSettings = (
   async function fetchRelatedMaterials(saveHint = false) {
     const id = currentSessionId;
     if (!id) return;
+    const version = ++relatedVersion;
     try {
       const sourceId = relatedEls.sourceSelect?.value || "";
       const heading = relatedEls.headingInput?.value?.trim() || "";
       const page = relatedEls.pageInput?.value ? Number(relatedEls.pageInput.value) : "";
       if (saveHint) {
         const saved=await api(`/api/recordings/${encodeURIComponent(id)}/intelligence/context`,jsonPost({source_id:sourceId,heading,page:page || null}));
+        if (currentSessionId !== id || version !== relatedVersion) return;
         sourceHint=saved.source_hint || {};
       }
 
@@ -790,9 +821,11 @@ export function createClassroomIntelligence({ toast = () => {}, openSettings = (
       if (page) params.set("page", String(page));
 
       const res = await api(`/api/intelligence/related?${params.toString()}`);
+      if (currentSessionId !== id || version !== relatedVersion) return;
       relatedResults = (res.results || []).slice(0, 4); // Few 4 results per contract
       renderRelatedMaterials();
     } catch (error) {
+      if (currentSessionId !== id || version !== relatedVersion) return;
       if(saveHint) toast(error.message);
       // Quiet fallback
       renderRelatedMaterials();
@@ -801,6 +834,9 @@ export function createClassroomIntelligence({ toast = () => {}, openSettings = (
 
   function renderRelatedMaterials() {
     if (!relatedEls.list) return;
+    const signature = JSON.stringify([currentSessionId, relatedResults]);
+    if (signature === relatedSignature) return;
+    relatedSignature = signature;
 
     if (relatedEls.badge) {
       relatedEls.badge.textContent = String(relatedResults.length);
@@ -895,19 +931,7 @@ export function createClassroomIntelligence({ toast = () => {}, openSettings = (
   // ==================== Auto Polling ====================
 
   function checkPolling() {
-    const pending = () => notes.some(note => note.status==='pending' ||
-      ['queued','pending','waiting_retry'].includes(note.job?.status));
-    const shouldPoll = !document.hidden && currentSession && (currentSession.status === "active" || pending());
-    if (shouldPoll && !pollTimer) {
-      pollTimer = setInterval(() => {
-        if (!document.hidden && currentSession && (currentSession.status === "active" || pending())) {
-          void loadScribbles(true);
-        }
-      }, 3500);
-    } else if (!shouldPoll && pollTimer) {
-      clearInterval(pollTimer);
-      pollTimer = null;
-    }
+    scribblesPoll?.schedule();
   }
 
   // ==================== Session Shown Callback ====================
@@ -915,32 +939,24 @@ export function createClassroomIntelligence({ toast = () => {}, openSettings = (
   function showSession(session) {
     const nextId = session?.id || null;
     if (nextId === currentSessionId) {
+      const changed = currentSession?.status !== session?.status;
       currentSession = session;
-      checkPolling();
-      void loadScribbles(true);
+      if (changed) scribblesPoll.wake();
       return;
     }
     saveCurrentDraft();
 
     currentSession = session;
     currentSessionId = nextId;
+    scribblesVersion++; relatedVersion++; sourcesLoadedFor = '';
+    notes = []; relatedResults = []; sourceHint = {};
 
     restoreDraft(nextId);
     activeInlineEditors.clear();
 
-    if (nextId) {
-      void loadRelatedSources(session);
-      if (activeTab === "related") {
-        void fetchRelatedMaterials();
-      }
-    } else {
-      notes = [];
-      relatedResults = [];
-      renderScribbles();
-      renderRelatedMaterials();
-    }
-
-    checkPolling();
+    renderScribbles(); renderRelatedMaterials();
+    if (nextId && activeTab === "related") void loadRelatedSources(session).then(() => fetchRelatedMaterials());
+    scribblesPoll.wake();
   }
 
   // ==================== Event Listeners ====================
@@ -958,7 +974,10 @@ export function createClassroomIntelligence({ toast = () => {}, openSettings = (
   // Composer
   if (scribblesEls.input) {
     scribblesEls.input.addEventListener("input", () => {
-      currentComposerRequestId = null;
+      if (currentSessionId) {
+        composerRequestIds.delete(currentSessionId);
+        draftVersions.set(currentSessionId, (draftVersions.get(currentSessionId) || 0) + 1);
+      }
       saveCurrentDraft();
       updateComposerControls();
     });
@@ -986,14 +1005,20 @@ export function createClassroomIntelligence({ toast = () => {}, openSettings = (
 
   // Related query
   if (relatedEls.refreshBtn) {
-    relatedEls.refreshBtn.addEventListener("click", () => void fetchRelatedMaterials(true));
+    relatedEls.refreshBtn.addEventListener("click", () => {
+      void loadRelatedSources(currentSession, true).then(() => fetchRelatedMaterials(true));
+    });
   }
   for (const input of [relatedEls.sourceSelect,relatedEls.headingInput,relatedEls.pageInput]) {
     input?.addEventListener('change',()=>void fetchRelatedMaterials(true));
   }
 
   // Visibility changes
-  document.addEventListener("visibilitychange", checkPolling);
+  scribblesPoll = createVisiblePoll({run: () => loadScribbles(true),
+    enabled: () => currentSessionId && (classroomPanelVisible(panels.scribbles) || classroomPanelVisible(panels.related)),
+    delay: () => currentSession?.status === 'active' || notes.some(note => note.status === 'pending' ||
+      ['queued', 'running', 'pending', 'waiting_retry', 'stopping'].includes(note.job?.status)) ? 3500 : 60000,
+    events: ['qwenasr:viewchange']});
 
   // ==================== Intelligence & Knowledge Settings ====================
 
