@@ -49,9 +49,11 @@ def rss_bytes(pid=None):
 def release_pdf_cache():
     # MuPDF's global store otherwise keeps decoded images after documents and
     # pixmaps are closed. Never race a native PDF operation on another thread.
-    from .review_materials import PDF_LOCK
+    # Do not import PDF infrastructure just to clean up an idle server.
+    module=sys.modules.get('fitz') or sys.modules.get('pymupdf')
+    if module is None:return 0
+    from .native_pdf import PDF_LOCK
     with PDF_LOCK:
-        module=sys.modules.get('fitz') or sys.modules.get('pymupdf')
         tools=getattr(module,'TOOLS',None)
         if tools is None:return 0
         size=tools.store_size
