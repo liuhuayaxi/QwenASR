@@ -367,3 +367,17 @@ class BoundedPlanRepairTests(unittest.IsolatedAsyncioTestCase):
 
 
 if __name__=='__main__':unittest.main()
+
+
+class LightlyEditedQuoteTests(unittest.TestCase):
+    def test_lightly_edited_quote_keeps_a_literal_span_and_paraphrase_still_fails(self):
+        from qwen_asr_app import review_scope as scope
+        blocks=[{'source':'S1','text':'那么我们今天主要讲半导体激光器的阈值电流密度，它和有源区厚度成正比。'}]
+        row={'objective_id':'o1','relevance':'relevant','sources':['S1'],
+             'evidence_quote':'我们今天主要讲半导体激光器的阈值电流密度，它和有源区厚度成正比'}
+        edited={'objective_coverage':[{**row,'evidence_quote':'我们今天主要讲半导体激光器的阈值电流密度,它和有源区厚度成正比'}]}
+        fixed=scope.canonical_evidence_quotes(edited,blocks)['objective_coverage'][0]['evidence_quote']
+        self.assertIn(fixed,blocks[0]['text']);self.assertGreaterEqual(len(fixed),16)
+        paraphrase={'objective_coverage':[{**row,'evidence_quote':'老师说明阈值电流密度与有源区厚度成正比关系'}]}
+        self.assertEqual(scope.canonical_evidence_quotes(paraphrase,blocks)['objective_coverage'][0]['evidence_quote'],
+                         '老师说明阈值电流密度与有源区厚度成正比关系')

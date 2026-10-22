@@ -184,10 +184,11 @@ def collect(record, folder, selected=None, settings=None, lesson_title=None):
             seen.add(digest)
             suffix=path.suffix.lower();relative=f'sources/{item["id"]}{suffix}'
             target=safe_path(folder,relative);target.parent.mkdir(exist_ok=True)
-            if not target.exists():shutil.copy2(path,target)
+            # Only files chosen for this lesson are copied into the package
+            # (below); text is read from the verified original in place.
             cache=folder/'sources'/(digest+'.pages.json')
             if cache.exists():pages=json.loads(cache.read_text())
-            else:pages=native_page_cache(target,digest);atomic_json(cache,pages)
+            else:pages=native_page_cache(path,digest);atomic_json(cache,pages)
             if suffix=='.pdf':
                 # Reclassify old caches as well; keep their original text and
                 # reuse the already converted, source-bound navigation layer.
@@ -241,6 +242,10 @@ def collect(record, folder, selected=None, settings=None, lesson_title=None):
     for row in decisions:
         if not row['chosen']:excluded.append({'id':row['source_id'],'reason':'not_in_lesson_scope','detail':'；'.join(row['reasons'])})
     originals=[s for s in originals if s['source_id'] in set(chosen_ids)]
+    for source in originals:
+        target=safe_path(folder,source['path'])
+        if not target.exists():
+            _,original=files.file(category,source['source_id'],'original');shutil.copy2(original,target)
     material_selection={'version':material_scope.VERSION,'lesson_title':lesson_title,'files':decisions,
         'summary':material_scope.summary(decisions,lesson_title)}
     # Score every real transcript block, including the middle and final blocks.

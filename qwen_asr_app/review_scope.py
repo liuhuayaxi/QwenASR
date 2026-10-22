@@ -201,7 +201,16 @@ def canonical_evidence_quotes(plan, blocks):
                         'method':'select-single-source-from-literal-adjacent-original-span'})
                     continue
         pieces=[part.strip() for part in re.split(r'\.{3,}|…{1,}',quote) if part.strip()]
-        if len(pieces)<2 or any(len(compact(part))<12 for part in pieces):continue
+        if len(pieces)<2 or any(len(compact(part))<12 for part in pieces):
+            # Lightly edited quote (ASR punctuation, one dropped filler word):
+            # keep the longest span that is literally present in one cited
+            # original. Below 16 characters the row still goes to AI repair.
+            span=_longest_literal_span(quote,cited)
+            if span:
+                row['evidence_quote']=span[0]
+                resolutions.append({'objective_id':row['objective_id'],'original_quote':quote,
+                    'literal_quote':span[0],'literal_source':span[1],'method':'longest-literal-span-in-cited-original'})
+            continue
         matches=[]
         for piece in pieces:
             match=next(((source,text) for source,text in cited if compact(piece) in compact(text)),None)
@@ -215,6 +224,28 @@ def canonical_evidence_quotes(plan, blocks):
                             'method':'select-one-of-fully-literal-ellipsis-excerpts'})
     if resolutions:result.setdefault('literal_quote_resolutions',[]).extend(resolutions)
     return result
+
+
+def _longest_literal_span(quote, cited, minimum=16):
+    """(text, source) of the longest run of the quote found verbatim in a cited original."""
+    compact=lambda text:re.sub(r'\s+','',str(text))
+    q=compact(quote);best=None
+    for source,text in cited:
+        positions=[i for i,c in enumerate(text) if not c.isspace()];t=compact(text)
+        if not q or not t:continue
+        # Dynamic programming over compact characters (quotes are short).
+        prev=[0]*(len(t)+1);length=end=0
+        for a in range(1,len(q)+1):
+            cur=[0]*(len(t)+1);qa=q[a-1]
+            for b in range(1,len(t)+1):
+                if qa==t[b-1]:
+                    cur[b]=prev[b-1]+1
+                    if cur[b]>length:length,end=cur[b],b
+            prev=cur
+        # Only a lightly edited quote qualifies: most of it must be literal.
+        if length>=max(minimum,int(len(q)*0.6)) and (best is None or length>best[0]):
+            best=(length,text[positions[end-length]:positions[end-1]+1],source)
+    return (best[1],best[2]) if best else None
 
 
 def mixed_depth_diagnostics(plan,scope):
