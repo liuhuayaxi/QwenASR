@@ -22,12 +22,11 @@ def main():
     for key in tuple(os.environ):
         if key.startswith("MINERU_"):
             os.environ.pop(key)
-    private = os.getenv("QWEN_ASR_PRIVATE_DIR") or str(Path(__file__).resolve().parents[1] / "local-data")
-    home = Path(private).expanduser() / "mineru4"
-    os.environ["MINERU_HOME"] = str(home)
+    # Models live in MinerU's own global home (~/.mineru/models), shared with
+    # every other program on this Mac; this run only pins backend choices.
     config_path = args.output.parent / "mineru-config.json"
     config_path.write_text(json.dumps({"model": {
-        "base_dir": str(home / "models"), "source": settings["model_source"],
+        "source": settings["model_source"],
         "small_backend": settings["small_backend"], "vlm": {
             "engine": settings["vlm_engine"], "server_url": "",
             "max_concurrency": settings["vlm_concurrency"],

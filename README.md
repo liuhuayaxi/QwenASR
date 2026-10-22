@@ -174,7 +174,7 @@ Qwen3-ASR 本身负责语音识别，不包含说话人分离（diarization）�
 
 ## MinerU 4 文件识别
 
-本地 PDF 工具和课程资料库使用 MinerU 4.0.10，以系统 uv tool 方式安装（`~/.local/bin/mineru-kit`，全机唯一一份）。首次安装或换机器时运行 `scripts/install_mineru4.command`，它会下载并校验 Apple Silicon 所需的小模型与 llama.cpp 视觉模型。模型保存在 `<项目>/local-data/mineru4/models/`，不纳入 Git。
+本地 PDF 工具和课程资料库使用 MinerU 4.0.10，以系统 uv tool 方式安装（`~/.local/bin/mineru-kit`，全机唯一一份）。首次安装或换机器时运行 `scripts/install_mineru4.command`，它会下载并校验 Apple Silicon 所需的小模型与 llama.cpp 视觉模型。模型保存在 MinerU 全局目录 `~/.mineru/models/`（配置 `~/.mineru/config.yaml`），其他程序直接调用 `mineru` 也共用这一份。
 
 打开“全部设置 → MinerU 文件识别”，或访问 <http://127.0.0.1:8765/?settings=mineru>。质量档位包括极速 Flash、基础 Basic、标准 Standard 和高级 Advanced；标准适合日常识别，高级使用更多推理计算，适合难识别的公式与排版。可调整自动／强制 OCR／原生文字层、图像分析、小模型后端、视觉引擎、模型下载来源、处理窗口页数、视觉并发和推理内存预算。内存预算影响小模型批量大小，不是进程内存硬限制；视觉并发也受本地引擎实际容量约束。Mac 推荐 Torch/MPS 自动后端和 llama.cpp。ONNX 需要对应模型；vLLM、LMDeploy 需要各自支持的操作系统、硬件与依赖。
 
