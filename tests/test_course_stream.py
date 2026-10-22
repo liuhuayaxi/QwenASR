@@ -12,7 +12,7 @@ import av
 import numpy as np
 from fastapi import FastAPI, HTTPException
 
-from qwen_asr_app.course_download import stream_audio
+from qwen_asr_app.course_download import _stream_audio_inline as stream_audio
 from qwen_asr_app.course_stream import CourseStreamJob, CourseStreamManager, course_stream_router
 from qwen_asr_app.smartclass import SmartClassClient, CAS, connection_error
 from qwen_asr_app.storage import RecordingRecord, RecordingStore

@@ -106,7 +106,8 @@ def main():
 
             token = uuid.uuid4().hex
             command = [sys.executable, '-m', 'uvicorn', 'app:app', '--host', '127.0.0.1', '--port', str(PORT), '--timeout-graceful-shutdown', '10']
-            env = {**os.environ, 'QWEN_ASR_INSTANCE': token}
+            from .launch_memory import service_environment
+            env = {**service_environment(), 'QWEN_ASR_INSTANCE': token}
             with (ROOT / 'server.log').open('ab') as output:
                 process = subprocess.Popen(command, cwd=ROOT, env=env, stdin=subprocess.DEVNULL,
                                            stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
