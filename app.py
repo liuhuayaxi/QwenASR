@@ -2157,8 +2157,8 @@ async def generate_library_summary(
 
 
 # Each note owns one AGY conversation, so several notes can run side by side.
-# Bounded (default 4) to stay within the AGY account rate and local memory.
-SUMMARY_QUEUE_CONCURRENCY = max(1, min(8, int(os.getenv("QWEN_ASR_SUMMARY_CONCURRENCY") or 4)))
+# Bounded (default 6, at most 12) to stay within the AGY account rate and local memory.
+SUMMARY_QUEUE_CONCURRENCY = max(1, min(12, int(os.getenv("QWEN_ASR_SUMMARY_CONCURRENCY") or 6)))
 _summary_queue_semaphore: asyncio.Semaphore | None = None
 summary_queue_order: list[str] = []
 

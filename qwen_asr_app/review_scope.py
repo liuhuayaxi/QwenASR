@@ -178,6 +178,15 @@ def canonical_evidence_quotes(plan, blocks):
         cited=[(source,originals[source]) for source in row.get('sources',[]) if source in originals]
         if row.get('relevance')!='relevant' or any(compact(quote) in compact(text) for _,text in cited):
             continue
+        # The quote is verbatim, but the model listed the wrong S numbers:
+        # cite the block that literally contains it (evidence stays literal).
+        if len(compact(quote))>=12:
+            holder=next((b['source'] for b in blocks if compact(quote) in compact(b.get('text',''))),None)
+            if holder is not None:
+                row['sources']=[*row.get('sources',[]),holder] if holder not in row.get('sources',[]) else row['sources']
+                resolutions.append({'objective_id':row['objective_id'],'original_quote':quote,'literal_quote':quote,
+                    'literal_source':holder,'method':'cite-the-original-block-that-contains-the-literal-quote'})
+                continue
         # ASR source boundaries can split one continuous spoken sentence.
         # Accept only a literal span across consecutive original blocks, then
         # retain the longest part inside one original source as the quote.
@@ -201,22 +210,29 @@ def canonical_evidence_quotes(plan, blocks):
                         'method':'select-single-source-from-literal-adjacent-original-span'})
                     continue
         pieces=[part.strip() for part in re.split(r'\.{3,}|…{1,}',quote) if part.strip()]
-        if len(pieces)<2 or any(len(compact(part))<12 for part in pieces):
+        matches=[]
+        if len(pieces)>=2 and all(len(compact(part))>=12 for part in pieces):
+            for piece in pieces:
+                match=next(((source,text) for source,text in cited if compact(piece) in compact(text)),None)
+                if match is None:break
+                matches.append((piece,match[0]))
+        if len(pieces)<2 or len(matches)!=len(pieces):
             # Lightly edited quote (ASR punctuation, one dropped filler word):
-            # keep the longest span that is literally present in one cited
-            # original. Below 16 characters the row still goes to AI repair.
-            span=_longest_literal_span(quote,cited)
+            # keep the longest span literally present in one original (>=16
+            # characters and 60% of the quote). An explicitly excerpted quote
+            # (with …) needs one verbatim excerpt of >=16 characters. Anything
+            # shorter still goes to AI repair.
+            excerpted=len(pieces)>=2
+            if excerpted and not all(any(compact(part) in compact(text) for text in originals.values()) for part in pieces):
+                continue  # an invented excerpt makes the whole quote suspect
+            span=(_longest_literal_span(quote,cited,share=0 if excerpted else 0.6)
+                  or _longest_literal_span(quote,list(originals.items()),share=0 if excerpted else 0.6))
             if span:
+                if span[1] not in row.get('sources',[]):row['sources']=[*row.get('sources',[]),span[1]]
                 row['evidence_quote']=span[0]
                 resolutions.append({'objective_id':row['objective_id'],'original_quote':quote,
-                    'literal_quote':span[0],'literal_source':span[1],'method':'longest-literal-span-in-cited-original'})
+                    'literal_quote':span[0],'literal_source':span[1],'method':'longest-literal-span-in-original'})
             continue
-        matches=[]
-        for piece in pieces:
-            match=next(((source,text) for source,text in cited if compact(piece) in compact(text)),None)
-            if match is None:break
-            matches.append((piece,match[0]))
-        if len(matches)!=len(pieces):continue
         selected,source=max(matches,key=lambda pair:len(compact(pair[0])))
         row['evidence_quote']=selected
         resolutions.append({'objective_id':row['objective_id'],'original_quote':quote,
@@ -226,7 +242,7 @@ def canonical_evidence_quotes(plan, blocks):
     return result
 
 
-def _longest_literal_span(quote, cited, minimum=16):
+def _longest_literal_span(quote, cited, minimum=16, share=0.6):
     """(text, source) of the longest run of the quote found verbatim in a cited original."""
     compact=lambda text:re.sub(r'\s+','',str(text))
     q=compact(quote);best=None
@@ -243,7 +259,7 @@ def _longest_literal_span(quote, cited, minimum=16):
                     if cur[b]>length:length,end=cur[b],b
             prev=cur
         # Only a lightly edited quote qualifies: most of it must be literal.
-        if length>=max(minimum,int(len(q)*0.6)) and (best is None or length>best[0]):
+        if length>=max(minimum,int(len(q)*share)) and (best is None or length>best[0]):
             best=(length,text[positions[end-length]:positions[end-1]+1],source)
     return (best[1],best[2]) if best else None
 

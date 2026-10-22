@@ -400,6 +400,11 @@ async def build_note_summary(
     from .ai import provider_for_mode
     provider = provider_for_mode(config.get('ai', {}), 'summary')
     if provider.get('transport') == 'agy_cli':
+        if config.get('note_pipeline', 'fast') == 'fast':
+            # One AGY turn per lesson (see fast_note); the multi-stage
+            # pipeline stays available with note_pipeline='full'.
+            from .fast_note import generate_fast
+            return await generate_fast(record, config)
         from .review_notes import generate
         return await generate(record, config)
     result = await _build_text_note_summary(record, config)
