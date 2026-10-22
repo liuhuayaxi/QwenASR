@@ -160,6 +160,10 @@ async def generate_fast(record, config):
             pass
     known = {(i['source_id'], i['page']) for i in images}
     markdown = LOCATOR.sub(lambda m: m[0] if (m[1], int(m[2])) in known else '', markdown)
+    # The writer sometimes echoes image paths it saw elsewhere; keep only rendered ones.
+    rendered = {i['path'] for i in images}
+    markdown = re.sub(r'!\[[^\]]*\]\((?:\./)?([^)\s]+)(?:\s+"[^"]*")?\)\n?',
+                      lambda m: m[0] if m[1] in rendered or m[1].startswith('figures/') else '', markdown)
     markdown = bind_markdown_images(markdown, folder, images)
     atomic_json(folder / 'images.json', images)
 
