@@ -50,13 +50,16 @@ MATERIAL_ONLY = '''
 
 def speech_blocks(blocks: list[dict]) -> list[dict]:
     """Drop ASR hotword echoes: when audio has no speech the recogniser can
-    return the hotword list verbatim for every chunk."""
+    return the hotword list (or the hotword prompt itself) for every chunk."""
     def key(text):
-        return re.sub(r'[\s。．.，,；;]+$', '', str(text or '').strip())
+        return re.sub(r'[\W_]+', '', str(text or ''))
     counts: dict[str, int] = {}
     for block in blocks:
         counts[key(block.get('text'))] = counts.get(key(block.get('text')), 0) + 1
-    return [b for b in blocks if key(b.get('text')) and not (counts[key(b.get('text'))] >= 3 and key(b.get('text')).count('；') >= 5)]
+    def echo(text):
+        text = str(text or '')
+        return '术语词库' in text or (counts[key(text)] >= 3 and len(re.findall(r'[；;、，,]', text)) >= 5)
+    return [b for b in blocks if key(b.get('text')) and not echo(b.get('text'))]
 
 
 PREVIEW_PATTERN = re.compile(r'翻转|预习|课前|自学|导学')

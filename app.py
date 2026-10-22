@@ -2105,7 +2105,9 @@ async def generate_library_summary(
     if not any(
         str(item.get("corrected") or item.get("raw") or "").strip()
         for item in record.segments
-    ):
+    ) and not record.metadata.get("review_material_ids"):
+        # A lesson with chosen 课件 but no usable speech still gets a
+        # material-only note from the fast pipeline.
         raise HTTPException(status_code=400, detail="录音还没有可用于生成详细 AI 总结的转写内容")
     try:
         config = ai_preferences.task_config(payload.get("config"), course=record.metadata.get("course_settings") or {}, required_modes=("summary",))

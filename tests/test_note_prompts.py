@@ -43,6 +43,8 @@ class NotePromptTests(unittest.TestCase):
         echo = '信源；信宿；信道；信息量；自信息；信源熵'
         blocks = [{'text': echo + '。'}, {'text': echo}, {'text': echo}, {'text': '今天讲信道。'}]
         self.assertEqual(np.speech_blocks(blocks), [{'text': '今天讲信道。'}])
+        variants = [{'text': '课程术语词库（优先识别）：' + echo}, {'text': echo.replace('；', '、')}] + blocks
+        self.assertEqual(np.speech_blocks(variants), [{'text': '今天讲信道。'}])
         self.assertIn('只依据课件', np.compose({'learning_requirements': False, 'yuketang': False, 'preview': False, 'transcript': False}))
 
     def test_material_only_and_readable_ranges(self):
