@@ -428,6 +428,27 @@ def ensure_section(markdown: str, items: list[dict[str, Any]]) -> str:
 _OPTION_LINE = re.compile(r"^\s*(?:[-*]\s+)?([A-H])\s*[.．、:：]\s*(.*)$")
 
 
+_MARKER_REF = re.compile(r"第\s*Y\d+(?:\s*[、,，和与及]\s*Y?\d+)*\s*题")
+
+
+def resolve_markers(markdown: str) -> str:
+    """Turn the writer's internal question markers (第Y3题) into the numbers
+    readers see in 课上习题 (第3题), using each entry's own marker comment."""
+    numbers: dict[str, str] = {}
+    current = None
+    for line in markdown.splitlines():
+        heading = re.match(r"^###\s*第(\d+)题", line)
+        if heading:
+            current = heading[1]
+            continue
+        marker = re.match(r"^<!--\s*yuketang:(Y\d+)\s*-->", line.strip())
+        if marker and current:
+            numbers.setdefault(marker[1], current)
+    if not numbers:
+        return markdown
+    return _MARKER_REF.sub(lambda m: re.sub(r"Y(\d+)", lambda y: numbers.get(y[0], y[1]), m[0]), markdown)
+
+
 def normalize_section(markdown: str) -> str:
     """Give every 课上习题 entry the same readable layout: stem paragraph,
     options as a list, then 答案 and 解析 each as their own paragraph."""

@@ -26,7 +26,7 @@ from .review_materials import collect, extract_image, bind_markdown_images
 from .storage import local_now
 from . import review_scope
 
-VERSION = 'fast-one-turn-v3'
+VERSION = 'fast-one-turn-v4'
 MAX_PAGE_CHARS = 1800
 LOCATOR = re.compile(r'!\[[^\]]*\]\(\.?/?figures/([a-f0-9]{32})_p(\d+)\.png\)')
 
@@ -42,7 +42,11 @@ def abstract_from(markdown: str) -> str:
 
 def _pages(package):
     out = []
-    for page in package.get('relevant_pages', []):
+    pages = package.get('relevant_pages') or [
+        # Without a transcript nothing is ranked: offer the lesson's own course
+        # pages so the writer can still pick figures.
+        {'source_id': s['source_id'], **p} for s in package.get('sources', []) for p in s.get('pages', [])]
+    for page in pages:
         text = re.sub(r'\[\[AI_TRANSCRIPT_PAGE:\d+\]\]|SOURCE_PDF_PAGE: \d+', '', str(page.get('text') or '')).strip()
         out.append({'source_id': page['source_id'], 'page': int(page['page']), 'text': text[:MAX_PAGE_CHARS]})
     return out
@@ -111,8 +115,11 @@ async def generate_fast(record, config):
     mark('materials')
 
     draft_path = folder / 'note.md'
-    if draft_path.exists():
-        markdown = draft_path.read_text()
+    # The writer's raw output is kept apart from the processed note.md: a rerun
+    # must restart from figure locators, not from already-bound asset links.
+    raw_path = folder / 'writer.md'
+    if raw_path.exists():
+        markdown = raw_path.read_text()
     else:
         stage(record, task, folder, '编写笔记')
         from . import note_prompts
@@ -142,7 +149,7 @@ async def generate_fast(record, config):
             from .note_markdown_batches import write_batches
             markdown, _ = await write_batches(instructions, payload, config, folder)
         markdown = re.sub(r'^```(?:markdown)?\s*|\s*```\s*$', '', markdown.strip())
-        atomic_bytes(draft_path, markdown.encode())
+        atomic_bytes(raw_path, markdown.encode())
     mark('writing')
 
     # Figures the writer chose: render those original pages, drop bad locators.
@@ -182,8 +189,8 @@ async def generate_fast(record, config):
     markdown = (f'# {record.metadata.get("title", "课堂复习笔记")}\n\n课程：{package["category"]}　课次：{note_prompts.human_date(package["lesson_date"])}\n\n'
                 + markdown.lstrip())
     if questions:
-        from .yuketang.retrieval import ensure_section, normalize_section
-        markdown = normalize_section(ensure_section(markdown, questions))
+        from .yuketang.retrieval import ensure_section, normalize_section, resolve_markers
+        markdown = resolve_markers(normalize_section(ensure_section(markdown, questions)))
     markdown = note_prompts.bold_cjk_safe(markdown)
     markdown = timestamp_references(markdown, blocks)
     atomic_bytes(draft_path, markdown.encode())
