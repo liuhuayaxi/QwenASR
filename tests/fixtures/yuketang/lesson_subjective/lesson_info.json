@@ -1,0 +1,28 @@
+{
+ "code": 0,
+ "msg": "OK",
+ "data": {
+  "lessonId": "1801064923783613184",
+  "teacherIdentityId": 20000002,
+  "teacherName": "教师乙",
+  "lessonName": "第四章 半导体激光器的性能 1",
+  "lessonType": 0,
+  "start": 1792540469999,
+  "end": 1792546500928,
+  "classroomId": 26549233,
+  "courseId": 3671680,
+  "classroomName": "2026秋-示例班级",
+  "courseName": "光电子学2026",
+  "activityId": 34996679,
+  "skuId": 13117668,
+  "hasLive": false,
+  "hasFakeLive": false,
+  "isScore": true,
+  "identityId": 10000002,
+  "uvid": 0,
+  "oldVersion": false,
+  "presentationIds": [
+   "1801065060551780480"
+  ]
+ }
+}

@@ -1,0 +1,28 @@
+{
+ "code": 0,
+ "msg": "OK",
+ "data": {
+  "lessonId": "1801117984421960576",
+  "teacherIdentityId": 20000001,
+  "teacherName": "教师甲",
+  "lessonName": "通信原理——绪论（2）",
+  "lessonType": 0,
+  "start": 1792546795320,
+  "end": 1792553490212,
+  "classroomId": 26260946,
+  "courseId": 3136863,
+  "classroomName": "2026秋-示例班级",
+  "courseName": "通信原理C（混合式）",
+  "activityId": 35003874,
+  "skuId": 12971558,
+  "hasLive": false,
+  "hasFakeLive": false,
+  "isScore": true,
+  "identityId": 10000001,
+  "uvid": 3278,
+  "oldVersion": false,
+  "presentationIds": [
+   "1801123460287155328"
+  ]
+ }
+}

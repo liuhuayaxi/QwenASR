@@ -1,0 +1,137 @@
+{
+ "code": 0,
+ "msg": "OK",
+ "data": {
+  "detail": {
+   "identityId": 10000001,
+   "name": "学生甲",
+   "number": "REDACTED",
+   "avatar": "https://example.invalid/avatar.png",
+   "score": 80.91,
+   "rank": 21,
+   "rankFloat": -10,
+   "tag": [],
+   "selfTag": [],
+   "checkinSource": 5,
+   "checkInName": "“正在上课”提示",
+   "checkInTime": 1792547325560,
+   "checkInChannel": "公众号",
+   "valid": 1,
+   "active": 3.0,
+   "exception": [],
+   "excellent": [],
+   "addScore": 0,
+   "checkinTagCode": 0
+  },
+  "quiz": [],
+  "presentation": [
+   {
+    "presentationId": "1801123460287155328",
+    "title": "第六章（视频4.1-4.3节）预习思考题讨论",
+    "cover": "https://yangtse-pri-ups.yuketang.cn/common_uploads/20000003/cover256_20261021095039.jpg",
+    "totalCount": 99,
+    "problemCount": 9,
+    "doubtTagCount": 0,
+    "collectTagCount": 0,
+    "showPresentation": "all"
+   }
+  ],
+  "shared": [],
+  "board": [],
+  "statistics": {
+   "durationTotal": 4974,
+   "durationTime": 10,
+   "tougaoCount": 0,
+   "danmuCount": 0,
+   "quickAnswerCount": 0,
+   "groupDiscussionCount": 0,
+   "studentReportCount": 0
+  },
+  "problem": {
+   "studentList": [
+    {
+     "idx": 7,
+     "problemId": "1801123460303932550",
+     "groupId": "0",
+     "teamId": "0",
+     "problem_type": 1,
+     "cover": "https://yangtse-pri-ups.yuketang.cn/common_uploads/20000003/cover397_20261021095041.jpg",
+     "anonymous": false,
+     "send_time": 1792548122891,
+     "problemTime": 23383,
+     "score": 1,
+     "problemscore": 1,
+     "result": [
+      "B"
+     ],
+     "correct": 1,
+     "isAnswered": true,
+     "redExist": false,
+     "redAmount": 0.0,
+     "doubt": false,
+     "collect": false
+    },
+    {
+     "idx": 15,
+     "problemId": "1801123460303932558",
+     "groupId": "0",
+     "teamId": "0",
+     "problem_type": 2,
+     "cover": "https://yangtse-pri-ups.yuketang.cn/common_uploads/20000003/cover398_20261021095043.jpg",
+     "anonymous": false,
+     "send_time": 1792548589458,
+     "problemTime": 28923,
+     "score": 2,
+     "problemscore": 0,
+     "result": [
+      "A",
+      "C",
+      "D"
+     ],
+     "correct": 0,
+     "isAnswered": true,
+     "redExist": false,
+     "redAmount": 0.0,
+     "doubt": false,
+     "collect": false
+    }
+   ],
+   "answer_range": {
+    "status": -2
+   },
+   "StudentLessonStatistics": {
+    "avgScore": 6.67,
+    "lessonSumTime": -103338224924,
+    "sumScore": 8,
+    "sumTime": 203734
+   }
+  },
+  "live": {
+   "lives_count": 0,
+   "finish_replay_count": 0,
+   "live_rate": 0,
+   "finish_replay": 0,
+   "replay_count": 0,
+   "finish_live_count": 0,
+   "replay_rate": 0,
+   "finish_live": 0
+  },
+  "memoContent": "",
+  "problemStatistics": {
+   "hasProblem": true,
+   "subProblemCorrectSum": 5,
+   "subProblemCorrectTotal": 7,
+   "problemTotalScore": 11,
+   "problemScore": 8,
+   "redSum": 0,
+   "redAmount": 0.0
+  },
+  "quizStatistics": {
+   "hasQuiz": false,
+   "subProblemCorrectSum": 0,
+   "subProblemCorrectTotal": 0,
+   "problemScore": 0.0,
+   "problemTotalScore": 0.0
+  }
+ }
+}

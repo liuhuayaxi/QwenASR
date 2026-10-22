@@ -1,0 +1,99 @@
+{
+ "code": 0,
+ "msg": "OK",
+ "data": {
+  "content": {
+   "problemId": 1801123460303932550,
+   "problemType": 1,
+   "body": "1. 下列哪种映射可以提高系统的有效性。( )",
+   "score": 100,
+   "halfScore": 0,
+   "remark": "",
+   "cover": "https://yangtse-pri-ups.yuketang.cn/common_uploads/20000003/cover397_20261021095041.jpg",
+   "coverProvider": "tencent",
+   "answer": [
+    "B"
+   ],
+   "from": 0,
+   "options": [
+    {
+     "key": "A",
+     "value": "1个比特映射为1个符号"
+    },
+    {
+     "key": "B",
+     "value": "多个比特映射为1个符号"
+    },
+    {
+     "key": "C",
+     "value": "1个比特映射为多个符号"
+    },
+    {
+     "key": "D",
+     "value": "以上答案均不对"
+    }
+   ],
+   "submit": {
+    "width": 121.5,
+    "height": 32.4,
+    "top": 489.375031,
+    "left": 486.0
+   },
+   "bullets": [
+    {
+     "width": 40.5,
+     "height": 40.5,
+     "top": 224.437485,
+     "label": "A",
+     "left": 87.75
+    },
+    {
+     "width": 40.5,
+     "height": 40.5,
+     "top": 291.937469,
+     "label": "B",
+     "left": 87.75
+    },
+    {
+     "width": 40.5,
+     "height": 40.5,
+     "top": 359.437469,
+     "label": "C",
+     "left": 87.75
+    },
+    {
+     "width": 40.5,
+     "height": 40.5,
+     "top": 426.937469,
+     "label": "D",
+     "left": 87.75
+    }
+   ],
+   "index": 7
+  },
+  "problem": {
+   "problemResultId": "1801129317045735936",
+   "problemId": "1801123460303932550",
+   "groupId": "0",
+   "teamId": "0",
+   "answerTime": 23383,
+   "result": [
+    "B"
+   ],
+   "extra_info": {
+    "blankStatus": "",
+    "deviceType": "0"
+   },
+   "score": 100,
+   "correct": true,
+   "half": true,
+   "remark_detail": {},
+   "comment": {},
+   "problem_type": 1
+  },
+  "doubt": false,
+  "collect": false,
+  "redExist": false,
+  "redAmount": 0
+ }
+}

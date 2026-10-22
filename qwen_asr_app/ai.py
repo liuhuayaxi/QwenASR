@@ -1310,6 +1310,12 @@ def summary_instructions(config: dict[str, Any], *, live: bool = False) -> str:
         from .transcription_assist.service import evidence_instructions
         instructions += evidence_instructions(config,note=True)
         instructions += '\n<course_evidence>\n' + json.dumps(config['_knowledge_evidence'],ensure_ascii=False) + '\n</course_evidence>'
+    if not live and config.get('_yuketang_questions'):
+        # Course question bank (雨课堂): in chunked notes the final 相关习题与答案
+        # section is appended once by the caller instead of per chunk.
+        from .yuketang.retrieval import instructions as yuketang_instructions, prompt_block
+        instructions += yuketang_instructions(write_section=not config.get('_detailed_chunk'))
+        instructions += prompt_block(config['_yuketang_questions'])
     return instructions
 
 

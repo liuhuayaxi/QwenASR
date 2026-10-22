@@ -63,11 +63,21 @@ class SummaryNamingTests(unittest.IsolatedAsyncioTestCase):
         saved = await self.run_job()
         self.assertEqual(saved.metadata["title"], "光纤归一化频率")
         self.assertEqual(saved.metadata["category"], "光电子学")
-        self.assertEqual(saved.metadata["summary_job"]["status"], "completed_with_errors")
-        self.assertEqual(saved.metadata['ai_note_summary']['review_status'],'unreviewed')
+        # Independent note review is off unless explicitly saved as enabled, so a
+        # text-provider note is complete rather than "unreviewed".
+        self.assertEqual(saved.metadata["summary_job"]["status"], "completed")
+        self.assertEqual(saved.metadata['ai_note_summary']['review_status'],'skipped')
+        self.assertEqual(saved.metadata['ai_note_summary']['review_policy'],'disabled_by_settings')
         self.assertTrue(saved.ai_summary_path.exists())
         self.assertFalse(self.record.directory.exists())
         self.title.assert_awaited_once()
+
+    async def test_explicitly_enabled_review_marks_text_note_unreviewed(self):
+        with patch.object(app.ai_preferences, "task_config",
+                          side_effect=lambda config, **_: {**(config or {}), "note_review_enabled": True}):
+            saved = await self.run_job()
+        self.assertEqual(saved.metadata["summary_job"]["status"], "completed_with_errors")
+        self.assertEqual(saved.metadata['ai_note_summary']['review_status'],'unreviewed')
 
     async def test_direct_generation_uses_saved_prompt_then_default(self):
         result = await app.generate_library_summary(self.record.id, self.payload)
@@ -80,7 +90,9 @@ class SummaryNamingTests(unittest.IsolatedAsyncioTestCase):
     async def test_title_failure_preserves_note_and_manual_retry_clears_error(self):
         self.title.side_effect = RuntimeError("取名服务暂时失败")
         saved = await self.run_job()
-        self.assertEqual(saved.metadata["summary_job"]["status"], "completed_with_errors")
+        # A naming failure keeps the note; it is recorded as title_error and the
+        # job itself is complete (review disabled by default settings).
+        self.assertEqual(saved.metadata["summary_job"]["status"], "completed")
         self.assertEqual(saved.metadata["title"], "原标题")
         self.assertEqual(saved.metadata["ai_note_summary"]["title_error"], "取名服务暂时失败")
         self.assertIn("归一化频率", saved.ai_summary_path.read_text())

@@ -1,0 +1,85 @@
+{
+ "errcode": 0,
+ "errmsg": "Success",
+ "data": {
+  "answer_time": null,
+  "objective_result_list": [
+   {
+    "problem_index": 1,
+    "class_average": 0.01,
+    "problem_id": 30857448,
+    "correct_blanks": [
+     1,
+     2,
+     3,
+     6,
+     7,
+     8,
+     9,
+     10,
+     11
+    ],
+    "score": 9,
+    "result": {
+     "1": "正向",
+     "2": "p",
+     "3": "注入",
+     "4": "全反射损耗",
+     "5": "双异质",
+     "6": "饱和",
+     "7": "宽",
+     "8": "1",
+     "9": "泄漏电流",
+     "10": "少子",
+     "11": "自发辐射"
+    },
+    "answer": "正向;P/p;注入;全反射;异质/异质结/双异质结;饱和;宽/大;1;漏电流/泄漏电流;非平衡少子/少子;辐射/自发辐射",
+    "problem_type": 4,
+    "correct": false
+   },
+   {
+    "problem_index": 2,
+    "class_average": 0.13,
+    "problem_id": 30857449,
+    "correct_blanks": [
+     1,
+     2,
+     3,
+     5,
+     6,
+     7,
+     8,
+     9
+    ],
+    "score": 8,
+    "result": {
+     "1": "错",
+     "2": "对",
+     "3": "对",
+     "4": "错",
+     "5": "错",
+     "6": "错",
+     "7": "错",
+     "8": "对",
+     "9": "对"
+    },
+    "answer": "错;对;对;对;错;错;错;对;对",
+    "problem_type": 4,
+    "correct": false
+   }
+  ],
+  "score": 17,
+  "title": "2026光电子学第二章测试",
+  "unfinished_count": 0,
+  "problem_count": 2,
+  "quiz_visible": true,
+  "publish_time": 1791769741000,
+  "deadline": 1791770400000,
+  "incorrect_count": 2,
+  "duration": 540,
+  "limit": 600,
+  "subjective_result_list": [],
+  "full_score": 20,
+  "objective_score": 17
+ }
+}

@@ -1,0 +1,102 @@
+{
+ "code": 0,
+ "msg": "OK",
+ "data": {
+  "content": {
+   "problemId": 1801123460303932558,
+   "problemType": 2,
+   "body": "数字基带信号S(t)的波形主要由什么因素决定？",
+   "score": 200,
+   "halfScore": 100,
+   "remark": "",
+   "cover": "https://yangtse-pri-ups.yuketang.cn/common_uploads/20000003/cover398_20261021095043.jpg",
+   "coverProvider": "tencent",
+   "answer": [
+    "A",
+    "C"
+   ],
+   "from": 0,
+   "options": [
+    {
+     "key": "A",
+     "value": "发送滤波器的冲激响应"
+    },
+    {
+     "key": "B",
+     "value": "接收滤波器的冲激响应"
+    },
+    {
+     "key": "C",
+     "value": "映射后的符号an"
+    },
+    {
+     "key": "D",
+     "value": "比特周期"
+    }
+   ],
+   "submit": {
+    "width": 121.5,
+    "height": 32.4,
+    "top": 489.375031,
+    "left": 486.0
+   },
+   "bullets": [
+    {
+     "width": 40.5,
+     "height": 40.5,
+     "top": 224.437485,
+     "label": "A",
+     "left": 87.75
+    },
+    {
+     "width": 40.5,
+     "height": 40.5,
+     "top": 291.937469,
+     "label": "B",
+     "left": 87.75
+    },
+    {
+     "width": 40.5,
+     "height": 40.5,
+     "top": 359.437469,
+     "label": "C",
+     "left": 87.75
+    },
+    {
+     "width": 40.5,
+     "height": 40.5,
+     "top": 426.937469,
+     "label": "D",
+     "left": 87.75
+    }
+   ],
+   "index": 15
+  },
+  "problem": {
+   "problemResultId": "1801133277366390144",
+   "problemId": "1801123460303932558",
+   "groupId": "0",
+   "teamId": "0",
+   "answerTime": 28923,
+   "result": [
+    "A",
+    "C",
+    "D"
+   ],
+   "extra_info": {
+    "blankStatus": "",
+    "deviceType": "0"
+   },
+   "score": 0,
+   "correct": false,
+   "half": false,
+   "remark_detail": {},
+   "comment": {},
+   "problem_type": 2
+  },
+  "doubt": false,
+  "collect": false,
+  "redExist": false,
+  "redAmount": 0
+ }
+}

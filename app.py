@@ -132,6 +132,7 @@ async def lifespan(_: FastAPI):
         # without opening another listener.
         async with smartclass_service.lifespan(smartclass_service.app):
             await library_watch.start()
+            yuketang_service.loop = asyncio.get_running_loop()
             await drive_backup_manager.start_loop()
             await knowledge_service.start()
             await knowledge_coordinator.start()
@@ -215,6 +216,10 @@ from qwen_asr_app.classroom_intelligence.service import configure_intelligence
 configure_intelligence(intelligence_router.intelligence_service)
 from qwen_asr_app.classroom_chat import classroom_chat_router
 app.include_router(classroom_chat_router(recording_store, ai_preferences, ai_secret_store, live_sessions, classroom_chat_running, knowledge_service))
+from qwen_asr_app.yuketang.service import YuketangService
+from qwen_asr_app.yuketang.routes import yuketang_router
+yuketang_service = YuketangService()
+app.include_router(yuketang_router(yuketang_service, course_file_api.guard, lambda: list(app_settings.categories)))
 
 
 class EphemeralFileResponse(FileResponse):
@@ -1945,6 +1950,12 @@ def change_library_category(category: str, name: str | None = None) -> dict[str,
             result = change_category(app_settings, recording_store, category, name)
     except (ValueError, OSError, RuntimeError) as exc:
         raise HTTPException(400, str(exc)) from exc
+    if name != category:
+        try:
+            # 雨课堂 bindings follow the course name; deleting a course unbinds it.
+            yuketang_service.store.rename_category(category, name)
+        except (OSError, ValueError) as exc:
+            print(f"雨课堂课程绑定未能随分类更新：{exc}", flush=True)
     for record in records:
         course_stream_manager.jobs.pop(record.id, None)
         session = live_sessions.pop(record.id, None)

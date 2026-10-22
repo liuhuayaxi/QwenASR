@@ -7,6 +7,7 @@
   <script src="/static/js/theme.js?v=20261011-ui-final"></script>
   <link rel="stylesheet" href="/static/course-files.css?v=20261020-chrome-preview">
   <link rel="stylesheet" href="/static/course-knowledge.css?v=20261014-knowledge-1">
+  <link rel="stylesheet" href="/static/yuketang-bank.css?v=20261022-ykt-1">
   <link rel="stylesheet" href="/static/review-materials.css?v=20261013">
   <link rel="stylesheet" href="/static/ui.css?v=20261011-ui-final">
   <link rel="stylesheet" href="/static/custom-controls.css?v=20261014-selection-hover">
@@ -56,6 +57,17 @@
       </details>
 
 </section>
+    <details id="yuketangSection" class="yuketang-section" aria-label="雨课堂题库" hidden>
+      <summary>雨课堂题库 <small id="ykt-summary"></small></summary>
+      <p class="muted">只读导入本课程在雨课堂的考试/测试、课上习题和课件习题，生成笔记时自动附上相关题目与答案。题库只保存在本机私有数据目录。</p>
+      <ul id="ykt-classrooms" class="ykt-classrooms"></ul>
+      <form id="ykt-bindForm" class="ykt-row"><label class="sr-only" for="ykt-classroom">雨课堂班级编号</label><input id="ykt-classroom" class="ui-field" inputmode="numeric" placeholder="班级编号，如 26260946"><label class="sr-only" for="ykt-university">学校编号</label><input id="ykt-university" class="ui-field" inputmode="numeric" placeholder="学校编号（可留空）"><button id="ykt-bind" class="ui-button" type="submit">绑定班级</button></form>
+      <div class="ykt-row"><button id="ykt-login" class="ui-button" type="button">登录雨课堂</button><button id="ykt-sync" class="ui-button primary" type="button">同步雨课堂题库</button><label class="muted"><input id="ykt-refresh" type="checkbox"> 全部重新读取</label><button id="ykt-transcribe" class="ui-button" type="button">转写题目图片</button><button id="ykt-stop" class="ui-button" type="button" hidden>停止</button><span id="ykt-job" class="muted" role="status"></span></div>
+      <p id="ykt-notice" class="notice" role="alert" hidden></p>
+      <pre id="ykt-log" class="ykt-log" hidden></pre>
+      <div class="ykt-row"><label class="sr-only" for="ykt-search">搜索题目</label><input id="ykt-search" class="ui-field" type="search" placeholder="搜索题干、答案…"><label class="sr-only" for="ykt-source">题目来源</label><select id="ykt-source" class="ui-field"><option value="">全部来源</option><option value="exam">课前/课后测试与考试</option><option value="lesson">课上习题</option><option value="courseware">课件习题</option></select></div>
+      <div id="ykt-questions" class="ykt-questions"></div>
+    </details>
     <section id="knowledgeSection" class="knowledge-search-section" aria-label="课程知识库检索与索引">
       <div class="knowledge-section-header">
         <div class="knowledge-title-group">
@@ -159,5 +171,6 @@
   <script type="module" src="/static/js/knowledge-settings.js"></script>
   <script type="module" src="/static/js/course-files.js?v=20261022-local-main-1"></script>
   <script type="module" src="/static/js/course-knowledge.js?v=20261022-merged-pr6"></script>
+  <script type="module" src="/static/js/yuketang-bank.js?v=20261022-ykt-1"></script>
 </body>
 </html>

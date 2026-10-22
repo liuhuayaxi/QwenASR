@@ -380,6 +380,17 @@ def note_summary_chunks(blocks: list[str], config: dict[str, Any]) -> list[str]:
         budget = max(128, budget // 2)
 
 
+async def _yuketang_questions(record: RecordingRecord, source_blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Questions from the bound 雨课堂 classrooms; never blocks note generation."""
+    try:
+        from .yuketang.retrieval import questions_for_record
+        transcript = "\n".join(str(block.get("text") or "") for block in source_blocks)
+        return await asyncio.to_thread(questions_for_record, record, transcript=transcript)
+    except Exception as exc:
+        logger.warning("Yuketang question retrieval skipped recording=%s: %s", getattr(record, "id", ""), exc)
+        return []
+
+
 async def build_note_summary(
     record: RecordingRecord,
     config: dict[str, Any],
@@ -431,6 +442,9 @@ async def _build_text_note_summary(
         from .transcription_assist.service import attach_accepted_evidence
         chunk_config=await attach_accepted_evidence(record,chunk_config)
         chunk_config['_accepted_classroom_notes'] = accepted_notes
+    yuketang_questions = await _yuketang_questions(record, source_blocks)
+    if yuketang_questions:
+        chunk_config['_yuketang_questions'] = yuketang_questions
     window = context_window_for(chunk_config, 'summary')
     chunks = note_summary_chunks(blocks, chunk_config)
     if not chunks:
@@ -528,6 +542,9 @@ async def _build_text_note_summary(
                        + "\n\n## 按课堂时间展开\n\n" + "\n\n".join(details))
     if len(chunks) == 1:
         rolling_summary = saved_parts["0"]
+    if yuketang_questions:
+        from .yuketang.retrieval import ensure_section
+        rolling_summary = ensure_section(rolling_summary, yuketang_questions)
     key_points: list[str] = []
     started_at = str(record.metadata.get("started_at") or "")
     try:
@@ -569,6 +586,7 @@ async def _build_text_note_summary(
         "knowledge_source_map": knowledge_map,
         "knowledge_source_validation": knowledge_validation,
         "student_notes_included": bool(accepted_notes),
+        "yuketang_question_ids": [item.get("id") for item in yuketang_questions],
     }
     draft["phase"] = "录音库短摘要"
     # Persist the detailed Markdown before the independent short-abstract call.

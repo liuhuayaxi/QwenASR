@@ -1,0 +1,130 @@
+{
+ "code": 0,
+ "msg": "OK",
+ "data": {
+  "content": {
+   "problemId": 1801065060585334927,
+   "problemType": 5,
+   "body": "",
+   "score": 1000,
+   "halfScore": 0,
+   "remark": "",
+   "cover": "https://changjiang-private-qn.yuketang.cn/slide/20000002/cover705_20261021084605.jpg",
+   "coverProvider": "",
+   "answer": [],
+   "from": 0,
+   "submit": {
+    "width": 121.5,
+    "height": 32.37496,
+    "top": 489.375031,
+    "left": 486.0
+   },
+   "remarkRich": {
+    "width": 302.4,
+    "height": 540.0,
+    "shapes": [
+     {
+      "fill": {
+       "backColor": "#FFFFFF",
+       "transparency": 0.0,
+       "visible": false
+      },
+      "line": {
+       "dashStyle": "msoLineSolid",
+       "backColor": "#000000",
+       "visible": false,
+       "weight": 0.75
+      },
+      "shapeType": 17,
+      "width": 262.375031,
+      "height": 31.5,
+      "left": 20.000061,
+      "top": 50.0,
+      "zOrderPosition": 6,
+      "rotation": 0.0,
+      "url": "https://changjiang-public-qn.yuketang.cn/problem/20000002/shape_16_32775_20261021084605.png",
+      "type": "msoTextBox",
+      "id": "32775"
+     },
+     {
+      "fill": {
+       "backColor": "#FFFFFF",
+       "transparency": 0.0,
+       "visible": false
+      },
+      "line": {
+       "dashStyle": "msoLineSolid",
+       "backColor": "#000000",
+       "visible": false,
+       "weight": 0.75
+      },
+      "shapeType": 13,
+      "width": 305.75,
+      "height": 116.0,
+      "left": -1.749939,
+      "top": 36.75,
+      "zOrderPosition": 7,
+      "rotation": 0.0,
+      "url": "https://changjiang-public-qn.yuketang.cn/problem/20000002/shape_16_32776_20261021084605.png",
+      "type": "msoPicture",
+      "id": "32776"
+     },
+     {
+      "fill": {
+       "backColor": "#FFFFFF",
+       "transparency": 0.0,
+       "visible": false
+      },
+      "line": {
+       "dashStyle": "msoLineSolid",
+       "backColor": "#000000",
+       "visible": false,
+       "weight": 0.75
+      },
+      "shapeType": 13,
+      "width": 308.625031,
+      "height": 107.25,
+      "left": -1.749939,
+      "top": 163.75,
+      "zOrderPosition": 8,
+      "rotation": 0.0,
+      "url": "https://changjiang-public-qn.yuketang.cn/problem/20000002/shape_16_32777_20261021084605.png",
+      "type": "msoPicture",
+      "id": "32777"
+     }
+    ]
+   },
+   "index": 16
+  },
+  "problem": {
+   "problemResultId": "1801087507753458048",
+   "problemId": "1801065060585334927",
+   "groupId": "0",
+   "teamId": "0",
+   "answerTime": 109757,
+   "result": {
+    "content": "俄歇复合和带隙宽度有关",
+    "pics": [
+     {
+      "pic": ""
+     }
+    ],
+    "videos": []
+   },
+   "extra_info": {
+    "blankStatus": "",
+    "deviceType": "0"
+   },
+   "score": -1,
+   "correct": false,
+   "half": false,
+   "remark_detail": {},
+   "comment": {},
+   "problem_type": 5
+  },
+  "doubt": false,
+  "collect": false,
+  "redExist": false,
+  "redAmount": 0
+ }
+}

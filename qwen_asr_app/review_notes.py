@@ -1007,6 +1007,13 @@ async def generate(record, config):
             payload['verified_source_corrections']=json.loads((folder/'source-corrections.json').read_text())
         payload['coverage']={**plan,'figures':[{'source_id':i['source_id'],'page':i['page'],'path':i['path'],'concept':i['concept']} for i in images]}
         instructions=TEACHING+'\n'+str(config.get('_note_summary_system_prompt') or '')+'\n'+str(config.get('_note_summary_custom_prompt') or '')+review_scope.instructions(scope)
+        from .batch_ai import _yuketang_questions
+        yuketang_questions=await _yuketang_questions(record,source_blocks)
+        if yuketang_questions:
+            from .yuketang.retrieval import instructions as yuketang_instructions
+            # 雨课堂题库: same-lesson in-class problems first, then nearby tests.
+            payload['yuketang_questions']=yuketang_questions
+            instructions+=yuketang_instructions(write_section=True)
         if draft_path.exists():markdown=draft_path.read_text()
         else:
             budget=require_budget(instructions,payload,config,label='完整图文写作',window=context_window_for(config,'summary'))
@@ -1030,6 +1037,9 @@ async def generate(record, config):
                 block=blocks[number-1]
                 return f'[课堂 S{number} · {clock(block["start"])}–{clock(block["end"])}](#source-{number})'
             markdown=re.sub(r'\[[^\]]*\]\(#source-(\d+)\)',source_reference,markdown)
+            if yuketang_questions:
+                from .yuketang.retrieval import ensure_section
+                markdown=ensure_section(markdown,yuketang_questions)
             atomic_bytes(draft_path,markdown.encode())
         rejected_path=folder/'image-rejections.json'
         rejected=json.loads(rejected_path.read_text()) if rejected_path.exists() else []
