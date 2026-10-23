@@ -262,12 +262,22 @@ def _checkpoint_revision(folder, task, previous, revised, revision, writer_sessi
 
 
 def timestamp_references(markdown, blocks):
+    """Resolve every transcript citation to `[课堂 S4 · 01:02–01:40](#source-4)`.
+    The writer sees blocks labelled "S4", so it may cite `#source-S4` or group
+    several blocks in one link (`[课堂 S2-S3, S7](#source-S2)`); each block or
+    range becomes its own timed link instead of keeping only the first id."""
+    def link(first, last):
+        if not (1 <= first <= len(blocks) and first <= last <= len(blocks)):
+            return '（转写来源待核对）'
+        label = f'S{first}' if first == last else f'S{first}–S{last}'
+        return f'[课堂 {label} · {clock(blocks[first-1]["start"])}–{clock(blocks[last-1]["end"])}](#source-{first})'
     def replace(match):
-        number=int(match[1])
-        if not 1<=number<=len(blocks):return '（转写来源待核对）'
-        block=blocks[number-1]
-        return f'[课堂 S{number} · {clock(block["start"])}–{clock(block["end"])}](#source-{number})'
-    return re.sub(r'\[[^\]]*\]\(#source-S?(\d+)\)',replace,markdown)
+        label = match[1].split('·')[0]
+        spans = re.findall(r'S(\d+)(?:\s*[-–~至]\s*S?(\d+))?', label)
+        if not spans:
+            return link(int(match[2]), int(match[2]))
+        return '、'.join(link(int(a), int(b or a)) for a, b in spans)
+    return re.sub(r'\[(?:课堂|原文)?\s*([^\]]*)\]\(#source-S?(\d+)\)', replace, markdown)
 
 
 def stage(record, manifest, folder, name, **values):

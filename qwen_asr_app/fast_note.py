@@ -174,13 +174,7 @@ async def generate_fast(record, config):
     markdown = bind_markdown_images(markdown, folder, images)
     atomic_json(folder / 'images.json', images)
 
-    def source_reference(match):
-        number = int(match[1])
-        if not 1 <= number <= len(blocks):
-            return '（转写来源待核对）'
-        block = blocks[number - 1]
-        return f'[课堂 S{number} · {clock(block["start"])}–{clock(block["end"])}](#source-{number})'
-    markdown = re.sub(r'\[[^\]]*\]\(#source-S?(\d+)\)', source_reference, markdown)
+    # Transcript citations are resolved once, by timestamp_references below.
     from . import note_prompts
     markdown, cleaning = note_prompts.clean(markdown)
     markdown = note_prompts.readable_ranges(markdown if blocks else note_prompts.material_only(markdown))

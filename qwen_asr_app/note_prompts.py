@@ -200,6 +200,6 @@ def readable_ranges(markdown: str) -> str:
 
 
 def material_only(markdown: str) -> str:
-    markdown = re.sub(r'\s*\[课堂 S[^\]]*\]\(#source-\d+\)', '', markdown)
+    markdown = re.sub(r'\s*\[课堂 S[^\]]*\]\(#source-S?\d+\)', '', markdown)
     markdown = re.sub(r'^(#{1,4} .*?)\s*\[\d[\d:.s\s\-–]*\]\s*$', r'\1', markdown, flags=re.M)
     return re.sub(r'老师强调[：:]\s*', '', markdown)
