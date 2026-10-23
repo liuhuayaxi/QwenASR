@@ -267,8 +267,11 @@ def timestamp_references(markdown, blocks):
     several blocks in one link (`[课堂 S2-S3, S7](#source-S2)`); each block or
     range becomes its own timed link instead of keeping only the first id."""
     def link(first, last):
-        if not (1 <= first <= len(blocks) and first <= last <= len(blocks)):
-            return '（转写来源待核对）'
+        # A block id past the transcript is a writer slip: drop it rather than
+        # leave reader-facing meta text; a range running past the end is clamped.
+        last = min(last, len(blocks))
+        if not (1 <= first <= last):
+            return ''
         label = f'S{first}' if first == last else f'S{first}–S{last}'
         return f'[课堂 {label} · {clock(blocks[first-1]["start"])}–{clock(blocks[last-1]["end"])}](#source-{first})'
     def replace(match):
@@ -276,8 +279,10 @@ def timestamp_references(markdown, blocks):
         spans = re.findall(r'S(\d+)(?:\s*[-–~至]\s*S?(\d+))?', label)
         if not spans:
             return link(int(match[2]), int(match[2]))
-        return '、'.join(link(int(a), int(b or a)) for a, b in spans)
-    return re.sub(r'\[(?:课堂|原文)?\s*([^\]]*)\]\(#source-S?(\d+)\)', replace, markdown)
+        return '、'.join(x for x in (link(int(a), int(b or a)) for a, b in spans) if x)
+    markdown = re.sub(r'[、 ]?（转写来源待核对）', '', markdown)
+    markdown = re.sub(r'\[(?:课堂|原文)?\s*([^\]]*)\]\(#source-S?(\d+)\)', replace, markdown)
+    return re.sub(r'、(?=[ \t]*(?:\||$))', '', markdown, flags=re.M)
 
 
 def stage(record, manifest, folder, name, **values):
@@ -1103,7 +1108,7 @@ async def generate(record, config):
             markdown=f'# {record.metadata.get("title","课堂复习笔记")}\n\n课程：{package["category"]}  \n课次：{package["lesson_date"]}\n\n> 新旧内容判断范围：本节完整转写，以及已收录的 {package["history_count"]} 个此前课次中的相关片段。历史未收录或未检出，不能证明老师此前没有讲过。\n\n'+markdown
             def source_reference(match):
                 number=int(match[1])
-                if not 1<=number<=len(blocks):return '（转写来源待核对）'
+                if not 1<=number<=len(blocks):return ''
                 block=blocks[number-1]
                 return f'[课堂 S{number} · {clock(block["start"])}–{clock(block["end"])}](#source-{number})'
             markdown=re.sub(r'\[[^\]]*\]\(#source-S?(\d+)\)',source_reference,markdown)

@@ -17,7 +17,11 @@ class SourceCitationTests(unittest.TestCase):
     def test_resolved_links_are_stable(self):
         once = timestamp_references('[课堂 S12, S16](#source-S12)', BLOCKS)
         self.assertEqual(timestamp_references(once, BLOCKS), once)
-        self.assertEqual(timestamp_references('[课堂 S99](#source-S99)', BLOCKS), '（转写来源待核对）')
+        self.assertEqual(timestamp_references('[课堂 S99](#source-S99)', BLOCKS), '')
+        # No reader-facing meta text, including in tables and stored notes.
+        out = timestamp_references('| a | [课堂 S1](#source-1)、[课堂 S99](#source-99) |', BLOCKS)
+        self.assertNotIn('待核对', out); self.assertNotIn('、 |', out); self.assertNotIn('、|', out)
+        self.assertEqual(timestamp_references('字节 （转写来源待核对）。', BLOCKS), '字节。')
 
 
 if __name__ == '__main__':
