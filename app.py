@@ -2721,6 +2721,9 @@ def ideashell_folders(payload: Any) -> list[dict[str, str]]:
     return folders
 
 
+IDEASHELL_TRASH_FOLDER = '待删除'
+
+
 async def ensure_ideashell_course_folder(connection: Any, category: str) -> str:
     """Read remote folders first, then reuse or create the matching course folder."""
     listing = await connection.call_tool("folder_list", {})
@@ -2869,6 +2872,11 @@ async def push_recording_summary_to_ideashell(
             record.metadata['ideashell_sync'] = sync
             record.save_metadata()
             raise HTTPException(409, '上次新建结果未知，普通重试不会再次新建。请在 IdeaShell 查找后填写笔记 ID 核对关联；确认需要另一篇时，单独选择“明确新建另一篇”。')
+        # 闪念贝壳 note_update appends a new memo instead of replacing the old
+        # one, so a re-push publishes a fresh note and retires the old one to
+        # the 「待删除」 folder for the user to delete.
+        replaced = list(previous_ids) if previous_ids and not create_new and payload.get("replace_existing") is True else []
+        create_new = create_new or bool(replaced)
         server_url = sync.get("server_url") if previous_ids else payload.get("server_url")
         connection = ideashell_manager.connection(
             str(server_url or payload.get("server_url") or "")
@@ -2959,6 +2967,16 @@ async def push_recording_summary_to_ideashell(
         # Persist the created/updated note before moving it. A failed move
         # must not lose the note id and cause a duplicate on the next push.
         await connection.call_tool("note_move", {"note_ids": [note_id], "folder_id": folder_id})
+        retired = []
+        for old_id in replaced:
+            if old_id == note_id:
+                continue
+            try:
+                trash = await ensure_ideashell_course_folder(connection, IDEASHELL_TRASH_FOLDER)
+                await connection.call_tool("note_move", {"note_ids": [old_id], "folder_id": trash})
+                retired.append(old_id)
+            except Exception as exc:  # the new note is already linked; report, don't fail
+                sync["retire_error"] = str(exc)
         sync.update(
             {
                 "note_id": note_ids[0],
@@ -3001,6 +3019,7 @@ async def push_recording_summary_to_ideashell(
             "audio_error": audio_error,
             "images_attached": len(images),
             "documents_attached": len(documents),
+            "retired_note_ids": retired,
             "session": record.public(include_segments=False),
         }
     except HTTPException:
