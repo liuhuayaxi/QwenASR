@@ -65,6 +65,8 @@ from qwen_asr_app.live_session import TranscriptionSession
 from qwen_asr_app.ideashell_sync import ideashell_manager
 from qwen_asr_app.ideashell_attachments import MAX_AUDIO_BYTES, audio_attachment_arguments_many, audio_file_metadata
 from qwen_asr_app.ideashell_attachments import image_attachment_batches, document_attachment_arguments
+# Image-only note_update calls over a few MB time out on the IdeaShell side.
+IDEASHELL_APPEND_BATCH_BYTES = 1_500_000
 from qwen_asr_app.ideashell_note_assets import prepare_push_assets, restore_image_markdown
 from qwen_asr_app.model_runtime import ModelManager
 from qwen_asr_app.ai_activity import track_ai_activity, task_ai_activity
@@ -2904,7 +2906,7 @@ async def push_recording_summary_to_ideashell(
         image_batches = image_attachment_batches(schema, images)
         # Validate all later batches before the first remote write.
         first_image_count = len(image_batches[0]['images']) if image_batches else 0
-        remaining_batches = image_attachment_batches(schemas.get('note_update', {}), images[first_image_count:])
+        remaining_batches = image_attachment_batches(schemas.get('note_update', {}), images[first_image_count:], IDEASHELL_APPEND_BATCH_BYTES)
         if remaining_batches and set(schemas.get('note_update', {}).get('required') or []) - {'note_id', 'images'}:
             raise ValueError('当前闪念贝壳接口不支持仅追加图片附件，请重新连接后重试')
         max_title = schema.get("properties", {}).get("title", {}).get("maxLength", 30)
@@ -2933,7 +2935,7 @@ async def push_recording_summary_to_ideashell(
                       and 0 < int(sync.get('images_uploaded') or 0) < len(images))
         if resume:
             first_image_count = int(sync['images_uploaded'])
-            remaining_batches = image_attachment_batches(schemas.get('note_update', {}), images[first_image_count:])
+            remaining_batches = image_attachment_batches(schemas.get('note_update', {}), images[first_image_count:], IDEASHELL_APPEND_BATCH_BYTES)
             replaced = [value for value in (sync.get('legacy_note_ids') or []) if value != note_id]
         elif note_id:
             arguments["note_id"] = note_id
