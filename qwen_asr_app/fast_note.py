@@ -180,7 +180,7 @@ async def generate_fast(record, config):
             return '（转写来源待核对）'
         block = blocks[number - 1]
         return f'[课堂 S{number} · {clock(block["start"])}–{clock(block["end"])}](#source-{number})'
-    markdown = re.sub(r'\[[^\]]*\]\(#source-(\d+)\)', source_reference, markdown)
+    markdown = re.sub(r'\[[^\]]*\]\(#source-S?(\d+)\)', source_reference, markdown)
     from . import note_prompts
     markdown, cleaning = note_prompts.clean(markdown)
     markdown = note_prompts.readable_ranges(markdown if blocks else note_prompts.material_only(markdown))

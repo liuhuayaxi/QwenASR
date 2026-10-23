@@ -446,7 +446,9 @@ def resolve_markers(markdown: str) -> str:
             numbers.setdefault(marker[1], current)
     if not numbers:
         return markdown
-    return _MARKER_REF.sub(lambda m: re.sub(r"Y(\d+)", lambda y: numbers.get(y[0], y[1]), m[0]), markdown)
+    markdown = _MARKER_REF.sub(lambda m: re.sub(r"Y(\d+)", lambda y: numbers.get(y[0], y[1]), m[0]), markdown)
+    # A multi-blank question cited by item: 第 5 题第 1 题 → 第 5 题第 1 小题.
+    return re.sub(r"(第\s*\d+\s*题\s*第\s*[\d、,，和与及 ]+?\s*)题", r"\1小题", markdown)
 
 
 def normalize_section(markdown: str) -> str:

@@ -39,7 +39,7 @@ def illustrated_record(root, count=20):
 
 
 class NoteAssetsTests(unittest.TestCase):
-    def test_images_and_pdf_are_real_bytes_and_pull_restores_local_illustrations(self):
+    def test_images_are_real_bytes_pdf_not_uploaded_and_pull_restores_local_illustrations(self):
         with tempfile.TemporaryDirectory() as raw:
             record, folder = illustrated_record(Path(raw), 2)
             note = record.metadata['ai_note_summary']
@@ -55,7 +55,7 @@ class NoteAssetsTests(unittest.TestCase):
             self.assertNotIn('](assets/', archive['content'])
             self.assertEqual(len(images), 2)
             self.assertTrue(all(i['data'].startswith(b'\x89PNG') for i in images))
-            self.assertEqual(documents[0]['data'], data)
+            self.assertEqual(documents, [])  # the review PDF is never uploaded
             self.assertNotIn('data', archive['images'][0])
             restored = restore_image_markdown(summary_from_archive(archive['content'], {'content_mode': 'summary'}), bindings)
             self.assertEqual(restored, content)
@@ -71,7 +71,7 @@ class NoteAssetsTests(unittest.TestCase):
             record.metadata['ai_note_summary'].update(review_status='passed', pdf_sha256='old')
             archive, _, documents, _ = prepare_push_assets(record, compose_push(record, 'summary'))
             self.assertEqual(documents, [])
-            self.assertTrue(archive['pdf_warning'])
+            self.assertEqual(archive['pdf_warning'], '')
             (folder / 'assets' / 'fig-0000000000000000.png').unlink()
             with self.assertRaisesRegex(ValueError, '图片不存在'):
                 prepare_push_assets(record, compose_push(record, 'summary'))

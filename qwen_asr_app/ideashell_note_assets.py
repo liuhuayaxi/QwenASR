@@ -68,36 +68,14 @@ def prepare_push_assets(record, archive):
     archive['content'] = IMAGE.sub(replace, archive['content'])
     archive['digest'] = hashlib.sha256(archive['content'].encode()).hexdigest()
     archive['characters'] = len(archive['content'])
+    # 闪念贝壳 gets the text and its figures only; the review PDF stays local.
     documents, pdf_warning = [], ''
-    # Reuse an already published PDF; preview must not generate or review one.
-    if images and package:
-        expected = note.get('pdf_sha256')
-        body_digest = hashlib.sha256(str(note.get('summary') or '').encode()).hexdigest()
-        if expected and note.get('review_status') in {'passed', 'skipped'}:
-            folder = safe_path(record.directory, package)
-            for meta_path in sorted((folder / 'pdf').glob('*/export.json')):
-                try:
-                    meta = json.loads(meta_path.read_text())
-                    if meta.get('pdf_sha256') != expected or meta.get('body_sha256') != body_digest:
-                        continue
-                    path = safe_path(folder, str(meta_path.parent.relative_to(folder) / 'candidate.pdf'))
-                    if not path.is_file():
-                        continue
-                    item = _attachment(path, '课后复习笔记.pdf', MAX_DOCUMENT_BYTES)
-                    if item['sha256'] == expected:
-                        documents.append(item)
-                        break
-                except (OSError, json.JSONDecodeError):
-                    continue
-        if not documents:
-            pdf_warning = '当前笔记尚无可直接上传的已导出 PDF；本次上传正文与全部图片附件'
     manifest = {'images': [attachment_preview(item) for item in images],
                 'documents': [attachment_preview(item) for item in documents]}
     archive.update(manifest)
     archive['image_previews'] = previews
     archive['assets_digest'] = hashlib.sha256(json.dumps(manifest, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
-    archive['image_note'] = ('图片保存在笔记附件中，正文配图标记与附件编号对应'
-                             + ('；附带 PDF 保留原图文排版' if documents else '')) if images else ''
+    archive['image_note'] = '图片保存在笔记附件中，正文配图标记与附件编号对应' if images else ''
     archive['pdf_warning'] = pdf_warning
     return archive, images, documents, bindings
 

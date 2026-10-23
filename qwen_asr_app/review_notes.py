@@ -267,7 +267,7 @@ def timestamp_references(markdown, blocks):
         if not 1<=number<=len(blocks):return '（转写来源待核对）'
         block=blocks[number-1]
         return f'[课堂 S{number} · {clock(block["start"])}–{clock(block["end"])}](#source-{number})'
-    return re.sub(r'\[[^\]]*\]\(#source-(\d+)\)',replace,markdown)
+    return re.sub(r'\[[^\]]*\]\(#source-S?(\d+)\)',replace,markdown)
 
 
 def stage(record, manifest, folder, name, **values):
@@ -1096,7 +1096,7 @@ async def generate(record, config):
                 if not 1<=number<=len(blocks):return '（转写来源待核对）'
                 block=blocks[number-1]
                 return f'[课堂 S{number} · {clock(block["start"])}–{clock(block["end"])}](#source-{number})'
-            markdown=re.sub(r'\[[^\]]*\]\(#source-(\d+)\)',source_reference,markdown)
+            markdown=re.sub(r'\[[^\]]*\]\(#source-S?(\d+)\)',source_reference,markdown)
             if yuketang_questions:
                 from .yuketang.retrieval import ensure_section
                 markdown=ensure_section(markdown,yuketang_questions)
