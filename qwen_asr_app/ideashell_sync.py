@@ -298,15 +298,19 @@ class IdeaShellConnection:
         # Session teardown (DELETE + draining the GET stream) can hang for the
         # full 300 s HTTP timeout on IdeaShell's side; the call result is
         # already in hand, so bound it instead of stalling every call.
+        # The exit stack owns anyio task groups / cancel scopes entered in this
+        # task, so it must be closed here (a separate task breaks the scopes and
+        # leaks a CancelledError into the caller); bound it with a cancel scope.
+        import anyio
         started = time.monotonic()
-        closer = asyncio.ensure_future(resources[1].aclose())
-        done, _ = await asyncio.wait({closer}, timeout=CLOSE_TIMEOUT_SECONDS)
-        if not done:
-            closer.cancel()
-            closer.add_done_callback(lambda task: task.cancelled() or task.exception())
-        elif closer.exception() is not None:
-            print(f"IdeaShell session close error: {readable_error(closer.exception())}", flush=True)
-        print(f"IdeaShell session close: {time.monotonic() - started:.1f}s{' (abandoned)' if not done else ''}", flush=True)
+        abandoned = False
+        try:
+            with anyio.move_on_after(CLOSE_TIMEOUT_SECONDS) as scope:
+                await resources[1].aclose()
+            abandoned = scope.cancelled_caught
+        except Exception as exc:  # teardown errors never fail a finished call
+            print(f"IdeaShell session close error: {readable_error(exc)}", flush=True)
+        print(f"IdeaShell session close: {time.monotonic() - started:.1f}s{' (abandoned)' if abandoned else ''}", flush=True)
 
     async def _probe(self) -> None:
         async with self._call_lock:
