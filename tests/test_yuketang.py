@@ -402,8 +402,10 @@ class NoteInjectionTests(unittest.IsolatedAsyncioTestCase):
         root = Path(temporary.name)
         bank = BankStore(root / "bank")
         bank.bind("通信原理 C", "26260946", university_id="3278")
+        bank.save_activity_state("26260946", "1", {"activity": {"id": "1", "type": 14, "title": "第六章",
+                                                                 "create_time": ms("2026-10-21T07:55:00")}})
         bank.save_questions("26260946", "1", [bank_question(
-            id="lesson:1:2", source="lesson", source_label="课上习题", activity_title="第六章", date="2026-10-21", page=7,
+            id="lesson:1:2", activity_id="1", source="lesson", source_label="课上习题", activity_title="第六章", date="2026-10-21", page=7,
             body="AMI 码中“1”如何编码？", options=[{"key": "A", "value": "交替极性"}, {"key": "B", "value": "固定正电平"}],
             student_answer=["B"], correct=False, score=0.0, max_score=2.0)])
         record = RecordingRecord(root / "original", {
@@ -523,10 +525,18 @@ class LessonMatchTests(unittest.TestCase):
         self.assertEqual({item["id"] for item in marked}, {q["id"] for q in forced})
         self.assertEqual(len(items), len(marked), "optional extras give way to the budget first")
         self.assertTrue(all(item.get("题号") for item in marked))
-        # With room to spare, unrelated optional questions join after the forced ones.
+        # Even with room to spare, questions of other lectures never join.
         roomy = retrieval.questions_for_record(record, store=self.store, transcript="HDB3 码", budget=10 ** 6)
-        self.assertGreater(len(roomy), len(marked))
-        self.assertLessEqual(len(roomy) - len(marked), retrieval.MAX_OPTIONAL)
+        self.assertEqual({item["id"] for item in roomy}, {q["id"] for q in forced})
+
+    def test_each_lecture_only_gets_its_own_questions(self):
+        first = retrieval.questions_for_record(Recording("2026-10-19T08:00:00", 90), store=self.store, transcript="HDB3 码")
+        self.assertEqual([item["id"] for item in first], ["lesson:L1:1"])
+        third = retrieval.questions_for_record(Recording("2026-10-21T14:00:00", 90), store=self.store, transcript="HDB3 码")
+        self.assertEqual(sorted(item["id"] for item in third), ["exam:T_late:1", "lesson:L3:1"])
+        # A recording on a day without any 雨课堂 lesson gets no questions at all.
+        self.assertEqual(retrieval.questions_for_record(Recording("2026-10-22T08:00:00", 90), store=self.store,
+                                                        transcript="HDB3 码 第六章"), [])
 
     def test_missing_forced_questions_are_appended_to_the_section(self):
         items = retrieval.questions_for_record(Recording("2026-10-21T08:02:00", 98), store=self.store, transcript="", budget=4000)

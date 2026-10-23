@@ -20,7 +20,7 @@ from .store import BankStore
 
 MAX_QUESTIONS = 14
 MAX_SAME_DAY = 12
-MAX_OPTIONAL = 8               # extras beside the forced lesson questions
+MAX_OPTIONAL = 0               # no extras: a note only lists its own lesson's questions
 MAX_CONTEXT_CHARS = 14_000     # budget for optional context; forced items always fit
 LESSON_MINUTES = 100           # assumed lesson length when problems give no later bound
 GRAY_HOURS = 3                 # tests this soon after the previous lesson may be its 课后测
@@ -318,18 +318,12 @@ def questions_for_record(record: Any, *, store: BankStore | None = None, transcr
     questions = store.course_questions(category)
     if not questions:
         return []
-    if transcript is None:
-        try:
-            from ..note_content import transcript_blocks
-            transcript = "\n".join(block.get("text", "") for block in transcript_blocks(record))
-        except Exception:
-            transcript = ""
+    # Only this lecture's own questions (the matched lesson's problems and the
+    # pre-class test sent just before it). Questions from other lectures are
+    # never borrowed: ranking the whole course bank made every note share the
+    # same handful of questions. No matched lesson means no 课上习题.
     _, forced = forced_for_record(record, store, category)
-    forced_ids = {question.get("id") for question in forced}
-    others = [question for question in questions if question.get("id") not in forced_ids]
-    optional_limit = MAX_OPTIONAL if forced else limit
-    ranked = rank(others, lecture_day=lecture_date(metadata), transcript=transcript or "", limit=optional_limit)
-    chosen = [*forced, *ranked]
+    chosen = list(forced)
     for number, question in enumerate(chosen, 1):
         question["_marker"] = f"Y{number}"
     return fit([compact(question, store) for question in chosen], budget)

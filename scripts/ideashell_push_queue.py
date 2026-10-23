@@ -161,7 +161,10 @@ def push_one(state, rid):
                                       {'content_mode': 'combined', 'include_audio': False}, timeout=600)
         if code == 200:
             body = {'content_mode': 'combined', 'preview_digest': preview['digest'],
-                    'assets_digest': preview['assets_digest'], 'audio_sha256s': [], 'include_audio': False}
+                    'assets_digest': preview['assets_digest'], 'audio_sha256s': [], 'include_audio': False,
+                    # Every re-push publishes a fresh single-memo note; the old
+                    # one is moved to 待删除 (never appended to as a new memo).
+                    'create_new': True}
             code, result, seconds = call('POST', f'/api/recordings/{rid}/ideashell/push', body)
         else:
             result = preview
