@@ -678,3 +678,78 @@ def listed_body(store):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class QuestionImageTests(unittest.TestCase):
+    """Image questions show the original 雨课堂 picture, not a description."""
+
+    def setUp(self):
+        from PIL import Image, ImageDraw
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.store = BankStore(self.root / "bank")
+        self.store.bind("光电子学", "123", name="光电子学")
+
+        def picture(name, size, draw=True):
+            image = Image.new("RGBA", size, (0, 0, 0, 0))
+            if draw:
+                ImageDraw.Draw(image).rectangle([5, 5, size[0] - 5, size[1] - 5], fill="black")
+            buffer = __import__("io").BytesIO()
+            image.save(buffer, "PNG")
+            return self.store.save_image("123", "9", name, buffer.getvalue())
+
+        quiz = {"id": "quiz:1:1", "classroom_id": "123", "activity_id": "9", "problem_type": "fill_blank",
+                "type_text": "填空题", "body": "", "options": [], "answer": ["受激辐射"], "answer_known": True,
+                "needs_vision": True, "images": [{"kind": "body", "source": "b", **picture("b.png", (300, 120))}],
+                "vision": {"status": "done", "text": "1. 半导体激光器的物理基础是[填空1]。"}}
+        slide = {"id": "lesson:1:2", "classroom_id": "123", "activity_id": "9", "problem_type": "single",
+                 "type_text": "单选题", "body": "。", "options": [{"key": "A", "value": "甲"}, {"key": "B", "value": "乙"}],
+                 "answer": ["B"], "answer_known": True, "needs_vision": True,
+                 "images": [{"kind": "slide", "source": "s", **picture("s.png", (400, 300))},
+                            {"kind": "remark", "source": "r1", **picture("r1.png", (350, 39), draw=False)},
+                            {"kind": "remark", "source": "r2", **picture("r2.png", (360, 150))}],
+                 "vision": {"status": "done", "text": "单选题 在线性近似下……"}}
+        plain = {"id": "lesson:1:3", "classroom_id": "123", "activity_id": "9", "problem_type": "single",
+                 "type_text": "单选题", "body": "量子阱宽度减小时跃迁能量如何变化？", "options": [{"key": "A", "value": "增大"}],
+                 "answer": ["A"], "answer_known": True, "needs_vision": False,
+                 "images": [{"kind": "slide", "source": "p", **picture("p.png", (400, 300))}]}
+        self.store.save_questions("123", "9", [quiz, slide, plain])
+        self.questions = {q["id"]: q for q in self.store.questions("123")}
+
+    def test_compact_hides_description_and_flags_images(self):
+        item = retrieval.compact(self.questions["quiz:1:1"], self.store)
+        self.assertEqual(item["原题图片"], 1)
+        self.assertNotIn("半导体激光器", item["题干"])
+        self.assertIn("半导体激光器", item["图片内容（仅供理解，不写入笔记）"])
+        slide = retrieval.compact(self.questions["lesson:1:2"], self.store)
+        self.assertNotIn("选项", slide)
+        self.assertEqual(slide["解析图片"], 1)  # the blank title strip is skipped
+        self.assertNotIn("原题图片", retrieval.compact(self.questions["lesson:1:3"], self.store))
+        self.assertIn("不要用文字描述", retrieval.instructions())
+
+    def test_attach_replaces_written_stem_with_original_image(self):
+        from qwen_asr_app.yuketang.note_images import attach, registered
+        from qwen_asr_app.review_materials import bind_markdown_images
+        items = [{**retrieval.compact(self.questions[qid], self.store), "题号": f"Y{n}"}
+                 for n, qid in enumerate(["quiz:1:1", "lesson:1:2", "lesson:1:3"], 1)]
+        markdown = ("# 笔记\n\n## 课上习题\n\n### 第1题\n\n<!-- yuketang:Y1 -->\n\n图中给出了四个填空，第一空问物理基础。\n\n"
+                    "**答案**：受激辐射\n\n**解析**：略。\n\n---\n\n### 第2题\n\n<!-- yuketang:Y2 -->\n\n图中是线性增益曲线。\n\n"
+                    "- A. 甲\n- B. 乙\n\n**答案**：B\n\n**解析**：透明条件。\n\n---\n\n### 第3题\n\n<!-- yuketang:Y3 -->\n\n"
+                    "量子阱宽度减小时跃迁能量如何变化？\n\n- A. 增大\n\n**答案**：A\n")
+        folder = self.root / "package"
+        result, report = attach(markdown, items, folder, "光电子学", self.store)
+        self.assertEqual([(r["number"], r["stem_images"], r["explain_images"]) for r in report], [(1, 1, 0), (2, 1, 1)])
+        self.assertNotIn("图中给出了", result)
+        self.assertNotIn("线性增益曲线", result)
+        self.assertNotIn("- A. 甲", result)
+        self.assertIn("量子阱宽度减小时", result)
+        links = re.findall(r"\]\((assets/fig-[a-f0-9]{16}\.png)\)", result)
+        self.assertEqual(len(links), 3)
+        self.assertTrue(all((folder / link).read_bytes().startswith(b"\x89PNG") for link in links))
+        self.assertLess(result.index("解析图片"), result.index("### 第3题"))
+        self.assertLess(result.index("解析图片"), result.index("---\n\n### 第3题"))
+        self.assertEqual(set(registered(folder)), set(links))
+        again, _ = attach(result, items, folder, "光电子学", self.store)
+        self.assertEqual(again, result)
+        self.assertEqual(bind_markdown_images(result, folder, []), result)

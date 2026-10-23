@@ -185,6 +185,8 @@ async def generate_fast(record, config):
     if questions:
         from .yuketang.retrieval import ensure_section, normalize_section, resolve_markers
         markdown = resolve_markers(normalize_section(ensure_section(markdown, questions)))
+        from .yuketang.note_images import attach
+        markdown, task['yuketang_images'] = attach(markdown, questions, folder, str(record.metadata.get('category') or ''))
     markdown = note_prompts.bold_cjk_safe(markdown)
     markdown = timestamp_references(markdown, blocks)
     atomic_bytes(draft_path, markdown.encode())

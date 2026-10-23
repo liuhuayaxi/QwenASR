@@ -94,23 +94,32 @@ def rank(questions: Iterable[dict[str, Any]], *, lecture_day: str, transcript: s
     return result
 
 
-def compact(question: dict[str, Any]) -> dict[str, Any]:
+def compact(question: dict[str, Any], store: BankStore | None = None) -> dict[str, Any]:
     """The data the note writer sees; no local paths, URLs or raw payloads."""
     vision = question.get("vision") or {}
+    from .note_images import has_images
+    pictures = has_images(question, store)
+    stem_image = bool(pictures["stem"])
     item = {
         "id": question.get("id"),
         "题号": question.get("_marker"),
         "必含": True if question.get("_forced") else None,
         "题型": question.get("type_text"),
-        "题干": question.get("body") or vision.get("text") or ("（题干仅有课件图片，尚未转写）" if question.get("needs_vision") else ""),
-        "选项": [f"{o.get('key')}. {o.get('value')}" for o in question.get("options") or []],
+        "题干": (question.get("body") if not stem_image or not pictures["slide"] and len(re.sub(r"[\s\W_]+", "", question.get("body") or "")) >= 4 else "")
+               or ("（题干见雨课堂原题图片）" if stem_image else vision.get("text") or ("（题干仅有课件图片，尚未转写）" if question.get("needs_vision") else "")),
+        "原题图片": pictures["stem"] or None,
+        "解析图片": pictures["explain"] or None,
+        "选项": [f"{o.get('key')}. {o.get('value')}" for o in question.get("options") or []] if not pictures["slide"] else [],
         "正确答案": question.get("answer") or ([] if not vision.get("answer_text") else [vision["answer_text"]]),
         "答案已知": bool(question.get("answer_known") or vision.get("answer_text")),
         "解析": question.get("remark") or "",
     }
     # Where/when it was asked and the student's own answer are deliberately
     # not passed on: the note lists one flat set of 课上习题 (stem, answer, 解析).
-    if vision.get("text") and question.get("body"):
+    if vision.get("text") and stem_image:
+        # Read-only context for answering; the note shows the original image.
+        item["图片内容（仅供理解，不写入笔记）"] = vision["text"]
+    elif vision.get("text") and question.get("body"):
         item["图片转写"] = vision["text"]
     return {key: value for key, value in item.items() if value not in (None, "", [])}
 
@@ -323,7 +332,7 @@ def questions_for_record(record: Any, *, store: BankStore | None = None, transcr
     chosen = [*forced, *ranked]
     for number, question in enumerate(chosen, 1):
         question["_marker"] = f"Y{number}"
-    return fit([compact(question) for question in chosen], budget)
+    return fit([compact(question, store) for question in chosen], budget)
 
 
 INSTRUCTIONS = (
@@ -331,16 +340,18 @@ INSTRUCTIONS = (
     "1. 在正文对应知识点处用“> 📝 考点：……（见课上习题第N题）”标出该知识点被哪道题考查；\n"
     "2. 解析要讲清正确答案为什么正确、错误选项错在哪里；“答案已知”为 false 时根据课堂内容给出参考解答；\n"
     "3. 不要编造题库中不存在的题目或答案；不写作答者本人的答案、对错、得分，不写题目来源、日期、页码，不区分课前/课中/课后。\n"
+    "4. 带“原题图片”的题，程序会在题干处直接插入雨课堂原题图片：题干只写数据中真实的文字题干（“题干见雨课堂原题图片”时题干留空），"
+    "不要用文字描述、转写或复述图片内容；“图片内容（仅供理解，不写入笔记）”只用于理解题意和写解析。带“解析图片”的题，程序会在解析后附上教师原图，解析文字不要逐句复述该图。\n"
 )
 
 
 def instructions(*, write_section: bool = True) -> str:
     if write_section:
         return INSTRUCTIONS + (
-            f"4. 笔记最后新增二级标题“## {SECTION_TITLE}”，所有题放在一个列表里依次编号，每题格式：\n"
+            f"5. 笔记最后新增二级标题“## {SECTION_TITLE}”，所有题放在一个列表里依次编号，每题格式：\n"
             "### 第N题\n<!-- yuketang:题号 -->\n题干（含选项）\n**答案**：……\n**解析**：……\n"
             "其中题号原样取自数据（如 Y1），“必含”为 true 的题必须全部写入，一题都不能省略。")
-    return INSTRUCTIONS + f"4. 本片段不要输出“{SECTION_TITLE}”小节，程序会在全文末尾统一附上。"
+    return INSTRUCTIONS + f"5. 本片段不要输出“{SECTION_TITLE}”小节，程序会在全文末尾统一附上。"
 
 
 def prompt_block(items: list[dict[str, Any]]) -> str:
@@ -352,7 +363,8 @@ def _entry(item: dict[str, Any], number: int) -> list[str]:
     lines = [f"### 第{number}题", ""]
     if item.get("题号"):
         lines += [f"<!-- yuketang:{item['题号']} -->", ""]
-    lines.append(str(item.get("题干", "")))
+    if not item.get("原题图片"):
+        lines.append(str(item.get("题干", "")))
     for option in item.get("选项", []):
         lines.append(f"- {option}")
     answer = "、".join(item.get("正确答案", [])) or "参考课堂内容作答"
@@ -385,7 +397,7 @@ def present(item: dict[str, Any], section: str) -> bool:
     if item.get("id") and str(item["id"]) in section:
         return True
     body = _normal(item.get("题干"))
-    if "尚未转写" in str(item.get("题干") or ""):
+    if "尚未转写" in str(item.get("题干") or "") or "原题图片" in str(item.get("题干") or ""):
         body = ""
     if len(body) >= 8:
         return body[:24] in _normal(section)

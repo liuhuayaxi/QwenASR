@@ -338,6 +338,13 @@ def bind_markdown_images(markdown, folder, images, rejected=()):
             if key in excluded:
                 bindings.append({'requested':uri,'status':'excluded','reason':excluded[key]['reason']})
                 return ''
+        if not image:
+            from .yuketang.note_images import registered
+            sha=registered(folder).get(uri)
+            actual=safe_path(folder,uri)
+            if sha and actual.is_file() and digest_file(actual)==sha:
+                bindings.append({'requested':uri,'path':uri,'status':'yuketang'})
+                return f'![{alt}]({uri})'
         if not image:raise ValueError('正文引用了未抽取或未看图确认的图片：'+uri)
         actual=safe_path(folder,image['path'])
         if not actual.is_file() or digest_file(actual)!=image['sha256']:raise ValueError('笔记图片缺失或版本改变')

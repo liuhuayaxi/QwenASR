@@ -1143,6 +1143,9 @@ async def generate(record, config):
                 from .yuketang.retrieval import ensure_section
                 markdown=ensure_section(markdown,yuketang_questions)
             markdown=timestamp_references(bind_markdown_images(markdown,folder,images,rejected),blocks)
+            if yuketang_questions:
+                from .yuketang.note_images import attach
+                markdown,task['yuketang_images']=attach(markdown,yuketang_questions,folder,str(record.metadata.get('category') or ''))
             if not accepted:markdown=markdown.replace('学生手记整理','课堂转写整理')
             if any(']('+image['path']+')' not in markdown for image in images):
                 raise ValueError('修订稿缺少已选的重要教学图；已保留草稿，未发布缺图版本')
