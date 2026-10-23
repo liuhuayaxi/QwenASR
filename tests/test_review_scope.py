@@ -201,10 +201,21 @@ class ScopeLatexBodyTests(unittest.TestCase):
 
 
 class ScopeCacheTests(unittest.IsolatedAsyncioTestCase):
-    async def test_other_course_never_calls_extra_model_or_reads_original(self):
+    async def test_every_course_reads_ppt_requirements_but_no_sources_means_no_call(self):
+        # Regression: 学习要求 used to be read only for 光电子学.
+        for category in ('通信原理 C', '微型计算机原理与接口技术', '光电子器件（全英文）'):
+            self.assertTrue(scope.enabled_for({'category': category}))
+        self.assertFalse(scope.enabled_for({'category': ''}))
         with patch.object(scope,'request_materials',AsyncMock()) as request:
-            self.assertFalse((await scope.prepare({'category':'通信原理 C'},Path('/unused'),{}))['enabled'])
+            await scope.prepare({'category':'通信原理 C','sources':[]},Path('/unused'),{})
             request.assert_not_awaited()
+
+    def test_requirement_pages_in_other_wordings_are_candidates(self):
+        from qwen_asr_app.review_materials import learning_scope_candidates
+        pages=[{'page':1,'text':'课程简介'},{'page':2,'text':'第2章学习重点 1.了解X86'},{'page':3,'text':'Learning Goals'},
+               {'page':4,'text':'AM原理要掌握的问题'},{'page':5,'text':'正文'}]
+        found=learning_scope_candidates([{'source_id':'s','sha256':'a'*64,'pages':pages}])
+        self.assertEqual([c['page'] for c in found],[2,3,4])
 
     async def test_hash_bound_visual_cache_is_reused_and_stale_sha_rejected(self):
         with tempfile.TemporaryDirectory() as raw:

@@ -32,7 +32,8 @@ def learning_scope_candidates(sources):
         matches=[]
         for page in source['pages']:
             text=page.get('text','')
-            if (re.search(r'(?:\d+(?:\.\d+)*\s*[章节]|本[章节]|学习|教学|考核)\s*(?:基本)?要求|学习目标',text)
+            if (re.search(r'(?:\d+(?:\.\d+)*\s*[章节]|本[章节]|学习|教学|考核)\s*(?:基本)?要求|学习目标|学习重点|要掌握|'
+                          r'(?i:learning\s+(?:goals?|objectives?|outcomes?)|course\s+objectives?)',text)
                     or re.search(r'(?:^|\n)\s*(?:\d+[.、．)]\s*)?(?:掌握|了解|理解|能够计算)',text)):
                 matches.append(page)
         # A chapter may put its requirements in an image at the very front.

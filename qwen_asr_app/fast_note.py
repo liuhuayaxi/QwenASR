@@ -26,7 +26,7 @@ from .review_materials import collect, extract_image, bind_markdown_images
 from .storage import local_now
 from . import review_scope
 
-VERSION = 'fast-one-turn-v4'
+VERSION = 'fast-one-turn-v5'
 MAX_PAGE_CHARS = 1800
 LOCATOR = re.compile(r'!\[[^\]]*\]\(\.?/?figures/([a-f0-9]{32})_p(\d+)\.png\)')
 
