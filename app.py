@@ -2903,7 +2903,9 @@ async def push_recording_summary_to_ideashell(
         excerpt = str(summary.get("abstract") or "").strip() if isinstance(summary, dict) else ""
         excerpt = excerpt[:100] or record._compact_summary(archive["content"], 180)
         schema = schemas.get("note_update" if note_id else "note_create", {})
-        image_batches = image_attachment_batches(schema, images)
+        # The create/update carrying the text is size-bounded as well: a ~5 MB
+        # first call (9 slide images) is rejected by 闪念贝壳 as "tool call failed".
+        image_batches = image_attachment_batches(schema, images, IDEASHELL_APPEND_BATCH_BYTES)
         # Validate all later batches before the first remote write.
         first_image_count = len(image_batches[0]['images']) if image_batches else 0
         remaining_batches = image_attachment_batches(schemas.get('note_update', {}), images[first_image_count:], IDEASHELL_APPEND_BATCH_BYTES)
@@ -3099,8 +3101,20 @@ async def verify_ideashell_note(session_id: str, payload: dict[str, Any] = Body(
             sync.pop('retire_error', None)
             record.metadata['ideashell_sync'] = sync
             record.save_metadata()
+    text = json.dumps(detail, ensure_ascii=False)
+    full = str(detail.get('text') or '') if isinstance(detail, dict) else text
+    files = re.findall(r'[\w\-.（）()]+\.(png|jpe?g|webp|gif|pdf|aac|m4a|mp3|wav)\b', full, re.I)
+    kinds = {}
+    for ext in files:
+        kind = 'image' if ext.lower() in {'png', 'jpg', 'jpeg', 'webp', 'gif'} else 'pdf' if ext.lower() == 'pdf' else 'audio'
+        kinds[kind] = kinds.get(kind, 0) + 1
+    trash = await ensure_ideashell_course_folder(connection, IDEASHELL_TRASH_FOLDER)
+    trash_listing = json.dumps(await connection.call_tool('folder_notes', {'folder_id': trash}), ensure_ascii=False)
     return {'note_id': note_id, 'in_course_folder': note_id in visible, 'old_still_in_course_folder': lingering,
-            'retired_now': retired, 'detail': _ideashell_trim(detail)}
+            'retired_now': retired, 'old_in_trash': [value for value in old_ids if value in trash_listing],
+            'memo_count': len(re.findall(r'^\*\*Memo \d+', full, re.M)), 'attachment_mentions': kinds,
+            'attachment_lines': [line[:160] for line in full.splitlines() if re.search(r'\.(png|jpe?g|webp|pdf|aac|m4a)\b', line, re.I)][:40],
+            'detail': _ideashell_trim(detail)}
 
 
 @app.post('/api/recordings/{session_id}/ideashell/reconcile')

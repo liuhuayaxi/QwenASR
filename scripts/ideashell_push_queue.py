@@ -70,6 +70,14 @@ def call(method, path, body=None, timeout=1800, headers=None):
         return 0, {'detail': f'{type(exc).__name__}: {exc}'[:500]}, time.monotonic() - started
 
 
+def nap(seconds):
+    """Sleep by wall clock: time.sleep() stops while the Mac sleeps, which made
+    a 900 s back-off last hours. Short slices also recover right after wake."""
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        time.sleep(min(30, max(0.1, deadline - time.time())))
+
+
 def wait_connected(state):
     """Block until the server reports a live 闪念贝壳 session."""
     for attempt in range(10_000):
@@ -85,7 +93,7 @@ def wait_connected(state):
         delay = min(60 * (attempt + 1), 600)
         state['waiting'] = f'等待闪念贝壳连接（{body.get("status") or body.get("detail")}），{delay}s 后重试'
         save(state)
-        time.sleep(delay)
+        nap(delay)
     raise SystemExit('闪念贝壳一直无法连接')
 
 
@@ -129,9 +137,10 @@ def verify(item, rid, retire=True):
                 readback_keys=sorted(detail)[:30] if isinstance(detail, dict) else [])
     item.pop('verify_error', None)
     # memos: 1 when the API exposes memo lists; absent means a single body.
+    kinds = body.get('attachment_mentions') or {}
+    item.update(memo_count=body.get('memo_count'), attachments=kinds, old_in_trash=body.get('old_in_trash'))
     ok = (body['in_course_folder'] and not body['old_still_in_course_folder']
-          and counts.get('memos', 1) == 1 and counts.get('documents', 0) == 0
-          and counts.get('audio', 0) == 0)
+          and body.get('memo_count', 1) == 1 and not kinds.get('pdf') and not kinds.get('audio'))
     return ok
 
 
@@ -190,7 +199,7 @@ def push_one(state, rid):
         delay = BACKOFF[min(item['attempts'] - 1, len(BACKOFF) - 1)]
         item['state'] = f'retry in {delay}s'
         save(state)
-        time.sleep(delay)
+        nap(delay)
     else:
         if attempts:
             item['state'] = 'failed'
@@ -204,7 +213,7 @@ def push_one(state, rid):
             break
         log(f'{rid} verify not clean: {item.get("verify_error") or item.get("readback")} '
             f'old_in_folder={item.get("old_still_in_course_folder")}')
-        time.sleep(BACKOFF[attempt])
+        nap(BACKOFF[attempt])
     else:
         item['state'] = 'pushed_unverified'
     item['finished_at'] = now()
@@ -230,13 +239,13 @@ def finish(state):
         code, body, _ = call('POST', '/api/library/drive/start', {}, timeout=60, headers=headers)
         if code == 200:
             break
-        time.sleep(30)  # another drive job is running
+        nap(30)  # another drive job is running
     while True:
         code, body, _ = call('GET', '/api/library/drive', timeout=60)
         job = (body or {}).get('job') or {}
         if code == 200 and not body.get('busy') and job.get('status') not in {'scanning', 'running', 'uploading'}:
             break
-        time.sleep(30)
+        nap(30)
     state['drive'] = {key: job.get(key) for key in ('status', 'total', 'uploaded', 'skipped', 'failed', 'errors')}
     log(f'drive: {state["drive"]}')
     save(state)
