@@ -52,7 +52,7 @@ def _pages(package):
     return out
 
 
-WRITER_TIMEOUT = 600
+WRITER_TIMEOUT = 1800  # long lessons (e.g. 光电子学) need >10min AGY turns
 
 
 def _writer_config(config):
