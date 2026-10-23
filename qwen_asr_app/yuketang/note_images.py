@@ -104,11 +104,16 @@ def _materialize(source: Path, folder: Path, key: str) -> tuple[str, str]:
     return relative, hashlib.sha256(target.read_bytes()).hexdigest()
 
 
-def registered(folder: Path) -> dict[str, str]:
+def _registry(folder: Path) -> list[dict[str, str]]:
     try:
-        return {item["path"]: item["sha256"] for item in json.loads((Path(folder) / REGISTRY).read_text())}
-    except (OSError, ValueError, KeyError, TypeError):
-        return {}
+        value = json.loads((Path(folder) / REGISTRY).read_text())
+        return [item for item in value if isinstance(item, dict) and item.get("path") and item.get("sha256")]
+    except (OSError, ValueError, TypeError):
+        return []
+
+
+def registered(folder: Path) -> dict[str, str]:
+    return {item["path"]: item["sha256"] for item in _registry(folder)}
 
 
 def _lookup(items: list[dict[str, Any]], store: BankStore, category: str) -> dict[str, dict[str, Any]]:
@@ -118,6 +123,45 @@ def _lookup(items: list[dict[str, Any]], store: BankStore, category: str) -> dic
         if str(question.get("id")) in wanted:
             found[str(question["id"])] = question
     return found
+
+
+def _stem_text(entry: str) -> str:
+    lines = entry.split("\n")[1:]
+    stem = []
+    for line in lines:
+        if line.strip().startswith("**答案**"):
+            break
+        if not line.strip().startswith("<!--") and not _IMAGE_LINE.match(line.strip()):
+            stem.append(line)
+    return "\n".join(stem)
+
+
+def _overlap(text: str, question: dict[str, Any]) -> float:
+    from .parsing import question_text
+    from .retrieval import _tokens
+    wanted = _tokens(text)
+    return len(wanted & _tokens(question_text(question))) / len(wanted) if wanted else 0.0
+
+
+def _identify(entry: str, candidate: dict[str, Any] | None, pool: list[dict[str, Any]],
+              owner: str = "") -> dict[str, Any] | None:
+    """The bank question an entry really shows. Markers come from the writer's
+    input order, which can drift from the bank (a resumed or older note), so a
+    written stem is checked against the question text before trusting it."""
+    if owner:
+        known = next((q for q in pool if str(q.get("id")) == owner), None)
+        if known:
+            return known
+    stem = _stem_text(entry)
+    if len(re.sub(r"[\s\W_]+", "", stem)) < 8:
+        return candidate
+    own = _overlap(stem, candidate) if candidate else 0.0
+    if candidate and own >= 0.6:
+        return candidate
+    scored = sorted(((_overlap(stem, q), q) for q in pool), key=lambda pair: -pair[0])
+    if scored and scored[0][0] >= 0.6 and scored[0][0] > own:
+        return scored[0][1]
+    return candidate
 
 
 def _entries(section: str) -> list[tuple[int, int]]:
@@ -170,18 +214,20 @@ def attach(markdown: str, items: list[dict[str, Any]], folder: Path, category: s
         return markdown, []
     by_marker = {str(item.get("题号")): item for item in items if item.get("题号")}
     bank = _lookup(items, store, category)
+    pool = store.course_questions(category)
     head_end = match.end()
     following = re.search(r"^##\s", markdown[head_end:], re.M)
     end = head_end + following.start() if following else len(markdown)
     section = markdown[head_end:end]
-    registry = {item_path: sha for item_path, sha in registered(folder).items()}
+    registry = {item["path"]: item for item in _registry(folder)}
     report, pieces, last = [], [], 0
     for start, stop in _entries(section):
         entry = section[start:stop]
         marker = re.search(r"<!--\s*yuketang:(Y\d+)\s*-->", entry)
         number = re.match(r"###\s*第(\d+)题", entry)[1]
         item = by_marker.get(marker[1]) if marker else None
-        question = bank.get(str(item.get("id"))) if item else None
+        owners = [registry[m].get("question_id", "") for m in re.findall(r"\]\((assets/fig-[a-f0-9]{16}\.png)\)", entry) if m in registry]
+        question = _identify(entry, bank.get(str(item.get("id"))) if item else None, pool, owners[0] if owners else "")
         if not question:
             continue
         found = question_images(question, store)
@@ -191,16 +237,16 @@ def attach(markdown: str, items: list[dict[str, Any]], folder: Path, category: s
         for role, paths, bucket in (("stem", found["stem"], stem), ("explain", found["explain"], explain)):
             for index, source in enumerate(paths):
                 relative, sha = _materialize(source, folder, f"{question['id']}:{role}:{index}")
-                registry[relative] = sha
+                registry[relative] = {"path": relative, "sha256": sha, "question_id": str(question["id"])}
                 bucket.append(relative)
         pieces += [section[last:start], _rewrite_entry(entry, question, stem, explain, number, found["slide"])]
         last = stop
-        report.append({"number": int(number), "marker": marker[1], "id": question["id"],
+        report.append({"number": int(number), "marker": marker[1] if marker else "", "id": question["id"],
                        "stem_images": len(stem), "explain_images": len(explain)})
     if not report:
         return markdown, []
     pieces.append(section[last:])
-    atomic_json(Path(folder) / REGISTRY, [{"path": p, "sha256": s} for p, s in sorted(registry.items())])
+    atomic_json(Path(folder) / REGISTRY, [registry[key] for key in sorted(registry)])
     new_section = "".join(pieces)
     tail = markdown[end:]
     return markdown[:head_end] + new_section.rstrip() + "\n" + ("\n" + tail.lstrip("\n") if tail.strip() else ""), report

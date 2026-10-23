@@ -2795,7 +2795,8 @@ async def preview_ideashell_push(session_id: str, payload: dict[str, Any] = Body
     try:
         mode = str(payload.get("content_mode") or "combined")
         try:
-            audio_parts = await ideashell_recording_audio_parts(record)
+            # include_audio=false: 闪念贝壳 gets the note text and figures only.
+            audio_parts = await ideashell_recording_audio_parts(record) if payload.get("include_audio") is not False else []
             audio_error = ""
         except (ValueError, OSError) as exc:
             audio_parts = []
@@ -2826,7 +2827,8 @@ async def push_recording_summary_to_ideashell(
     try:
         mode = str(payload.get("content_mode") or "combined")
         try:
-            audio_parts = await ideashell_recording_audio_parts(record)
+            # include_audio=false: 闪念贝壳 gets the note text and figures only.
+            audio_parts = await ideashell_recording_audio_parts(record) if payload.get("include_audio") is not False else []
             audio_error = ""
         except (ValueError, OSError) as exc:
             audio_parts = []
@@ -2922,7 +2924,18 @@ async def push_recording_summary_to_ideashell(
             arguments.update(image_batches[0])
         if documents:
             arguments.update(document_attachment_arguments(schema, documents))
-        if note_id:
+        # Resume a create whose later image batches failed: only append the
+        # missing images (note_update with images alone adds no memo).
+        resume = bool(note_id and sync.get('status') == 'partial'
+                      and operation.get('status') == 'confirmed' and operation.get('note_id') == note_id
+                      and operation.get('content_digest') == archive['digest']
+                      and sync.get('assets_digest') == archive['assets_digest']
+                      and 0 < int(sync.get('images_uploaded') or 0) < len(images))
+        if resume:
+            first_image_count = int(sync['images_uploaded'])
+            remaining_batches = image_attachment_batches(schemas.get('note_update', {}), images[first_image_count:])
+            replaced = [value for value in (sync.get('legacy_note_ids') or []) if value != note_id]
+        elif note_id:
             arguments["note_id"] = note_id
             result = await connection.call_tool("note_update", arguments)
         else:
@@ -2962,7 +2975,14 @@ async def push_recording_summary_to_ideashell(
         record.metadata["ideashell_sync"] = sync
         record.save_metadata()
         for batch in remaining_batches:
-            await connection.call_tool('note_update', {'note_id': note_id, **batch})
+            for attempt in range(3):
+                try:
+                    await connection.call_tool('note_update', {'note_id': note_id, **batch})
+                    break
+                except Exception:
+                    if attempt == 2:
+                        raise
+                    await asyncio.sleep(3 * (attempt + 1))
             sync['images_uploaded'] += len(batch['images'])
             record.save_metadata()
         # Persist the created/updated note before moving it. A failed move

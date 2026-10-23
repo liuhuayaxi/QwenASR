@@ -753,3 +753,18 @@ class QuestionImageTests(unittest.TestCase):
         again, _ = attach(result, items, folder, "光电子学", self.store)
         self.assertEqual(again, result)
         self.assertEqual(bind_markdown_images(result, folder, []), result)
+
+    def test_attach_follows_written_stem_when_marker_drifted(self):
+        from qwen_asr_app.yuketang.note_images import attach
+        items = [{**retrieval.compact(self.questions["lesson:1:3"], self.store), "题号": "Y1"},
+                 {**retrieval.compact(self.questions["quiz:1:1"], self.store), "题号": "Y2"}]
+        # Y1 now points at the plain question, but the entry shows the quiz item.
+        markdown = ("## 课上习题\n\n### 第1题\n\n<!-- yuketang:Y1 -->\n\n1. 半导体激光器的物理基础是[填空1]。\n\n"
+                    "**答案**：受激辐射\n\n### 第2题\n\n<!-- yuketang:Y2 -->\n\n量子阱宽度减小时跃迁能量如何变化？\n\n- A. 增大\n\n**答案**：A\n")
+        folder = self.root / "drift"
+        result, report = attach(markdown, items, folder, "光电子学", self.store)
+        self.assertEqual([(r["number"], r["id"]) for r in report], [(1, "quiz:1:1")])
+        self.assertIn("量子阱宽度减小时", result)
+        again, report_again = attach(result, items, folder, "光电子学", self.store)
+        self.assertEqual(again, result)
+        self.assertEqual([r["id"] for r in report_again], ["quiz:1:1"])

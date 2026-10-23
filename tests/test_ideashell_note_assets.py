@@ -84,14 +84,14 @@ class PushAssetsTests(unittest.IsolatedAsyncioTestCase):
     async def test_twenty_images_share_one_note_with_partial_progress_and_safe_retry(self):
         with tempfile.TemporaryDirectory() as raw:
             record, _ = illustrated_record(Path(raw))
-            failure = True
+            failure = 3  # survives the in-request retries
             async def remote(name, arguments):
                 nonlocal failure
                 if name == 'note_create':
                     self.assertEqual(len(arguments['images']), 9)
                     return {'note_id': 'b' * 32}
                 if name == 'note_update' and failure:
-                    failure = False
+                    failure -= 1
                     raise RuntimeError('上传中断')
                 return {}
             connection = SimpleNamespace(server_url='https://mcp.ideashell.cn/mcp',
@@ -120,7 +120,10 @@ class PushAssetsTests(unittest.IsolatedAsyncioTestCase):
             calls = connection.call_tool.call_args_list
             self.assertEqual(sum(call.args[0] == 'note_create' for call in calls), 1)
             batches = [call.args[1]['images'] for call in calls if call.args[0] == 'note_update']
-            self.assertEqual([len(items) for items in batches], [9, 9, 9, 2])
+            # Three failed attempts at batch 2, then the retry resumes with only
+            # the missing images and never re-sends the text (no extra memo).
+            self.assertEqual([len(items) for items in batches], [9, 9, 9, 9, 2])
+            self.assertFalse(any('content' in call.args[1] for call in calls if call.args[0] == 'note_update'))
 
     async def test_changed_figure_bytes_require_a_fresh_preview(self):
         with tempfile.TemporaryDirectory() as raw:
