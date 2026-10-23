@@ -202,6 +202,9 @@ def readable_error(exc: BaseException) -> str:
     return message or "暂时无法连接闪念贝壳，本机凭证已保留"
 
 
+CLOSE_TIMEOUT_SECONDS = 10
+
+
 class IdeaShellConnection:
     def __init__(self, server_url: str) -> None:
         self.server_url = normalize_server_url(server_url)
@@ -292,7 +295,18 @@ class IdeaShellConnection:
             raise
 
     async def _close_session(self, resources: tuple[Any, AsyncExitStack]) -> None:
-        await resources[1].aclose()
+        # Session teardown (DELETE + draining the GET stream) can hang for the
+        # full 300 s HTTP timeout on IdeaShell's side; the call result is
+        # already in hand, so bound it instead of stalling every call.
+        started = time.monotonic()
+        closer = asyncio.ensure_future(resources[1].aclose())
+        done, _ = await asyncio.wait({closer}, timeout=CLOSE_TIMEOUT_SECONDS)
+        if not done:
+            closer.cancel()
+            closer.add_done_callback(lambda task: task.cancelled() or task.exception())
+        elif closer.exception() is not None:
+            print(f"IdeaShell session close error: {readable_error(closer.exception())}", flush=True)
+        print(f"IdeaShell session close: {time.monotonic() - started:.1f}s{' (abandoned)' if not done else ''}", flush=True)
 
     async def _probe(self) -> None:
         async with self._call_lock:
@@ -430,8 +444,15 @@ class IdeaShellConnection:
         async with self._call_lock:
             resources: tuple[Any, AsyncExitStack] | None = None
             try:
+                started = time.monotonic()
                 resources = await self._client_session()
-                result = await resources[0].call_tool(name, arguments)
+                opened = time.monotonic()
+                try:
+                    result = await resources[0].call_tool(name, arguments)
+                finally:
+                    # Latency diagnostics: session setup vs. the tool call itself.
+                    print(f"IdeaShell call {name}: session {opened - started:.1f}s, call {time.monotonic() - opened:.1f}s, "
+                          f"payload {len(json.dumps(arguments, ensure_ascii=False)) // 1024}KB", flush=True)
                 if getattr(result, "isError", False) or getattr(result, "is_error", False):
                     raise RuntimeError(_tool_text(result) or f"IdeaShell {name} 调用失败")
                 return _tool_payload(result)

@@ -3061,6 +3061,48 @@ async def push_recording_summary_to_ideashell(
         raise HTTPException(status_code=502, detail=f"IdeaShell 推送失败：{detail}") from exc
 
 
+def _ideashell_trim(value, depth=0):
+    if isinstance(value, dict):
+        return {k: _ideashell_trim(v, depth + 1) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_ideashell_trim(v, depth + 1) for v in value[:40]]
+    if isinstance(value, str) and len(value) > 300:
+        return value[:300] + f'…(+{len(value) - 300})'
+    return value
+
+
+@app.post('/api/recordings/{session_id}/ideashell/verify')
+@recording_operation
+async def verify_ideashell_note(session_id: str, payload: dict[str, Any] = Body(default={})):
+    """Read back the linked note; optionally retire old notes still in the course folder."""
+    record = recording_store.find(session_id)
+    if record is None:
+        raise HTTPException(404, '没有找到这条录音')
+    sync = dict(record.metadata.get('ideashell_sync') or {})
+    note_id = str(sync.get('note_id') or '')
+    if not note_id:
+        raise HTTPException(400, '尚未推送')
+    connection = ideashell_manager.connection(str(sync.get('server_url') or ''))
+    detail = await connection.call_tool('note_detail', {'note_id': note_id, 'scope': 'full'})
+    folder_id = await ensure_ideashell_course_folder(connection, str(record.metadata.get('category') or '未分类'))
+    visible = json.dumps(await connection.call_tool('folder_notes', {'folder_id': folder_id}), ensure_ascii=False)
+    old_ids = [value for value in (sync.get('legacy_note_ids') or []) if value != note_id]
+    lingering = [value for value in old_ids if value in visible]
+    retired = []
+    if payload.get('retire') is True and lingering:
+        trash = await ensure_ideashell_course_folder(connection, IDEASHELL_TRASH_FOLDER)
+        await connection.call_tool('note_move', {'note_ids': lingering, 'folder_id': trash})
+        retired = lingering
+        trash_listing = json.dumps(await connection.call_tool('folder_notes', {'folder_id': trash}), ensure_ascii=False)
+        retired = [value for value in lingering if value in trash_listing]
+        if len(retired) == len(lingering):
+            sync.pop('retire_error', None)
+            record.metadata['ideashell_sync'] = sync
+            record.save_metadata()
+    return {'note_id': note_id, 'in_course_folder': note_id in visible, 'old_still_in_course_folder': lingering,
+            'retired_now': retired, 'detail': _ideashell_trim(detail)}
+
+
 @app.post('/api/recordings/{session_id}/ideashell/reconcile')
 @recording_operation
 async def reconcile_ideashell_create(session_id: str, payload: dict[str, Any] = Body(...)):
