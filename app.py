@@ -2875,7 +2875,8 @@ async def push_recording_summary_to_ideashell(
         # 闪念贝壳 note_update appends a new memo instead of replacing the old
         # one, so a re-push publishes a fresh note and retires the old one to
         # the 「待删除」 folder for the user to delete.
-        replaced = list(previous_ids) if previous_ids and not create_new and payload.get("replace_existing") is True else []
+        replaced = list(previous_ids) if (previous_ids and not create_new and sync.get("status") == "synced"
+                                         and payload.get("replace_existing") is not False) else []
         create_new = create_new or bool(replaced)
         server_url = sync.get("server_url") if previous_ids else payload.get("server_url")
         connection = ideashell_manager.connection(
@@ -2968,8 +2969,13 @@ async def push_recording_summary_to_ideashell(
         # must not lose the note id and cause a duplicate on the next push.
         await connection.call_tool("note_move", {"note_ids": [note_id], "folder_id": folder_id})
         retired = []
+        visible_old = ""
+        if replaced and "folder_notes" in schemas:
+            # Only retire notes still in the course folder: moving a note the
+            # user already trashed would pull it back out of the recycle bin.
+            visible_old = json.dumps(await connection.call_tool("folder_notes", {"folder_id": folder_id}), ensure_ascii=False)
         for old_id in replaced:
-            if old_id == note_id:
+            if old_id == note_id or old_id not in visible_old:
                 continue
             try:
                 trash = await ensure_ideashell_course_folder(connection, IDEASHELL_TRASH_FOLDER)
