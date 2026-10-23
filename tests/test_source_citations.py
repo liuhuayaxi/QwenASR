@@ -22,6 +22,10 @@ class SourceCitationTests(unittest.TestCase):
         out = timestamp_references('| a | [课堂 S1](#source-1)、[课堂 S99](#source-99) |', BLOCKS)
         self.assertNotIn('待核对', out); self.assertNotIn('、 |', out); self.assertNotIn('、|', out)
         self.assertEqual(timestamp_references('字节 （转写来源待核对）。', BLOCKS), '字节。')
+        # Writer sometimes copies a range into the anchor itself.
+        out = timestamp_references('[课堂 S2-S3](#source-S2-S3)', BLOCKS)
+        self.assertIn('#source-2', out); self.assertIn('#source-3' if False else 'S2–S3', out)
+        self.assertNotIn('source-S', out)
 
 
 if __name__ == '__main__':

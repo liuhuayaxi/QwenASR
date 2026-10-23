@@ -278,10 +278,13 @@ def timestamp_references(markdown, blocks):
         label = match[1].split('·')[0]
         spans = re.findall(r'S(\d+)(?:\s*[-–~至]\s*S?(\d+))?', label)
         if not spans:
-            return link(int(match[2]), int(match[2]))
+            spans = re.findall(r'S?(\d+)(?:\s*[-–~至]\s*S?(\d+))?', match[2])
         return '、'.join(x for x in (link(int(a), int(b or a)) for a, b in spans) if x)
     markdown = re.sub(r'[、 ]?（转写来源待核对）', '', markdown)
-    markdown = re.sub(r'\[(?:课堂|原文)?\s*([^\]]*)\]\(#source-S?(\d+)\)', replace, markdown)
+    # Anchors may be #source-4, #source-S4, or a writer-copied range #source-S23-S24.
+    markdown = re.sub(
+        r'\[(?:课堂|原文)?\s*([^\]]*)\]\(#source-((?:S?\d+)(?:\s*[-–~至]\s*S?\d+)?)\)',
+        replace, markdown)
     return re.sub(r'、(?=[ \t]*(?:\||$))', '', markdown, flags=re.M)
 
 
