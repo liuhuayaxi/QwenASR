@@ -69,6 +69,11 @@ class CourseStreamJob:
 
     def start(self):
         self.recover_chunks()
+        # A remote failure stays local across chunks and process recovery.
+        # Only an explicit pause followed by continue opens a new remote try.
+        if self.state.get("paused"):
+            self.state["asr_local_fallback"] = False
+            self.state.pop("asr_fallback_reason", None)
         self.record.metadata.update(status="processing", batch_options=public_config(self.config))
         self.record.metadata['inference_settings']=self.config['inference_settings']
         self.state.pop("error", None)
@@ -259,10 +264,18 @@ class CourseStreamJob:
                     self.record.save_metadata()
                     metrics = {}
                     routing=self.config['inference_settings']
+                    local_fallback = bool(self.state.get('asr_local_fallback'))
+                    if local_fallback:
+                        routing = {**routing, 'asr_provider': 'local', 'classroom_power_saving': False}
                     operation_dir=None
                     if routing.get('asr_provider','local')!='local':
                         operation_dir=self.record.directory/'.course-operations'/f'{index:05d}-{start}-{end}'
                     def on_provider(value):
+                        if value.get('provider') == 'local':
+                            if value.get('fallback'):
+                                self.state['asr_local_fallback'] = True
+                            if self.state.get('asr_local_fallback'):
+                                value = {**value, 'fallback': True}
                         self.state['asr_execution'] = {**value, 'updated_at': time.time()}
                         self.record.save_metadata()
                     inference = asyncio.create_task(self.model.transcribe(
@@ -275,6 +288,14 @@ class CourseStreamJob:
                     ))
                     try:
                         text, language, latency = await asyncio.shield(inference)
+                        if metrics.get('provider') == 'local' and (metrics.get('fallback') or local_fallback):
+                            self.state['asr_local_fallback'] = True
+                            reason = metrics.get('fallback_reason') or self.state.get('asr_fallback_reason')
+                            if reason:
+                                self.state['asr_fallback_reason'] = reason
+                            metrics.update(fallback=True, config_snapshot=self.config['inference_settings'])
+                            if reason:
+                                metrics['fallback_reason'] = reason
                         if metrics.get('provider') in {'local', 'remote'}:
                             self.state['asr_execution'] = {'provider': metrics['provider'], 'state': 'observed',
                                                          'fallback': bool(metrics.get('fallback')), 'updated_at': time.time()}

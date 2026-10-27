@@ -1214,7 +1214,7 @@ class RecordingStore:
             except Exception as exc:
                 print(f"忽略无法读取的录音会话 {meta_path}: {exc}", flush=True)
         live_paths = set(self.paths.values())
-        self._read_cache = {path: cached for path, cached in self._read_cache.items() if path.parent in live_paths}
+        self._read_cache = {path: cached for path, cached in tuple(self._read_cache.items()) if path.parent in live_paths}
         # Retain only a small recent read window. Complete transcripts include
         # retrieval evidence and must not grow into an unbounded service cache.
         trim_cache()
@@ -1310,9 +1310,12 @@ class RecordingStore:
     def list_records(self) -> list[RecordingRecord]:
         self.refresh()
         records: list[RecordingRecord] = []
-        for session_id in self.paths:
-            cached = self._read_cache.get(self.paths[session_id] / "session.json")
-            record = self.active if self.active is not None and self.active.id == session_id else cached[1] if cached else self.find(session_id)
+        # Catalog refreshes and note renames can replace paths from another
+        # thread. Keep identities paired with their directory for this read.
+        active = self.active
+        for session_id, directory in tuple(self.paths.items()):
+            cached = self._read_cache.get(directory / "session.json")
+            record = active if active is not None and active.id == session_id else cached[1] if cached else self.find(session_id)
             if record is not None:
                 records.append(record)
         records.sort(key=lambda item: str(item.metadata.get("started_at") or ""), reverse=True)

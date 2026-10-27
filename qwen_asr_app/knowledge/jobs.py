@@ -12,9 +12,11 @@ from .store import KnowledgeStore
 
 
 class JobManager:
-    def __init__(self, store: KnowledgeStore, sync_fn: Callable[..., dict[str, Any]]) -> None:
+    def __init__(self, store: KnowledgeStore, sync_fn: Callable[..., dict[str, Any]],
+                 defer: Callable[[str], bool] | None = None) -> None:
         self.store = store
         self.sync_fn = sync_fn
+        self.defer = defer
         self._queue: asyncio.Queue[str] = asyncio.Queue()
         self._worker_task: asyncio.Task[None] | None = None
         self._cancel_tokens: dict[str, threading.Event] = {}
@@ -105,6 +107,20 @@ class JobManager:
 
                 self._active_job_id = job_id
                 cancel_event = self._cancel_tokens.setdefault(job_id, threading.Event())
+                waiting_reported = False
+                while self.defer and self._running and not cancel_event.is_set():
+                    if not await asyncio.to_thread(self.defer, job['category']):
+                        break
+                    if not waiting_reported:
+                        self.store.update_job(job_id, status='queued', stage='waiting_asr',
+                                              message='等待本机转写完成后建立知识索引')
+                        waiting_reported = True
+                    await asyncio.sleep(.5)
+                if not self._running or cancel_event.is_set():
+                    self.store.update_job(job_id, status='cancelled' if self._running else 'interrupted',
+                                          message='任务已取消' if self._running else '服务停止，重启后继续')
+                    continue
+
                 self.store.update_job(job_id, status="running", stage="indexing", message="正在建立课程索引")
 
                 def progress_cb(stage: str, percent: float) -> None:
@@ -147,6 +163,15 @@ class JobManager:
                             message=msg,
                         )
                 except Exception as exc:
+                    # ASR may start after an indexing job passed its initial
+                    # idle check. Keep the same job queued instead of turning
+                    # deliberate GPU priority into a failed index every time.
+                    if ('本机模型资源繁忙' in str(exc) and not is_stopped()
+                            and self.defer and await asyncio.to_thread(self.defer, category)):
+                        self.store.update_job(job_id, status='queued', stage='waiting_asr', error='',
+                                              message='等待本机转写完成后继续知识索引')
+                        self._queue.put_nowait(job_id)
+                        continue
                     self.store.update_job(
                         job_id,
                         status="failed",

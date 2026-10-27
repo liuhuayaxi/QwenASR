@@ -17,6 +17,10 @@ from ..paths import ROOT, PRIVATE_ROOT
 from .settings import knowledge_settings, embedding_contract, prepared
 
 
+class EmbeddingWorkerExited(RuntimeError):
+    pass
+
+
 class LocalEmbedder:
     def __init__(self, config=None):
         self.config = dict(config or knowledge_settings.read())
@@ -38,7 +42,7 @@ class LocalEmbedder:
             raise TimeoutError('本地向量化超时，已释放模型，可以重试') from None
         if value is None:
             self.close()
-            raise RuntimeError('本地向量模型进程退出，请检查诊断记录后重试')
+            raise EmbeddingWorkerExited('本地向量模型进程退出，请检查诊断记录后重试')
         return value
 
     def _start(self):
@@ -84,18 +88,23 @@ class LocalEmbedder:
                 batch = texts[offset:offset+self.config['batch_size']]
                 lease = metal_lease(timeout=self.config['timeout_seconds'])
                 with lease:
-                    self._start()
                     ident = uuid.uuid4().hex
                     request = {'id': ident, 'texts': batch, 'query': query, 'contract': self.contract}
-                    try:
-                        self.process.stdin.write(json.dumps(request, ensure_ascii=False)+'\n')
-                        self.process.stdin.flush()
-                    except (BrokenPipeError, OSError):
-                        self.close()
-                        self._start()
-                        self.process.stdin.write(json.dumps(request, ensure_ascii=False)+'\n')
-                        self.process.stdin.flush()
-                    message = self._read(self.config['timeout_seconds'])
+                    for attempt in range(2):
+                        try:
+                            self._start()
+                            self.process.stdin.write(json.dumps(request, ensure_ascii=False)+'\n')
+                            self.process.stdin.flush()
+                            message = self._read(self.config['timeout_seconds'])
+                            break
+                        except TimeoutError:
+                            raise
+                        except (BrokenPipeError, OSError, EmbeddingWorkerExited):
+                            # An idle worker can exit after poll() but before
+                            # replying. Encoding is read-only and safe to retry.
+                            self.close()
+                            if attempt:
+                                raise
                 if message.get('id') != ident:
                     self.close()
                     raise RuntimeError('向量任务回执身份不一致')

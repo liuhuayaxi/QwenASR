@@ -34,6 +34,94 @@ async def until(predicate):
 
 
 class StreamTests(unittest.IsolatedAsyncioTestCase):
+    async def test_remote_failure_keeps_later_chunks_local(self):
+        with tempfile.TemporaryDirectory() as temp:
+            record = make_record(Path(temp))
+            providers = []
+            async def transcribe(audio, language, context, **kwargs):
+                provider = kwargs['inference_config']['asr_provider']
+                providers.append(provider)
+                fallback = provider != 'local'
+                if fallback:
+                    kwargs['on_provider']({'provider': 'remote', 'fallback': False})
+                kwargs['on_provider']({'provider': 'local', 'fallback': fallback})
+                kwargs['metrics'].update(provider='local', fallback=fallback)
+                if fallback:
+                    kwargs['metrics']['fallback_reason'] = 'ProvenNotAccepted'
+                return '课堂内容', 'Chinese', .1
+            model = SimpleNamespace(active_jobs=0, cancel_unload=lambda: None, schedule_unload=lambda: None,
+                                    transcribe=AsyncMock(side_effect=transcribe))
+            config = {'inference_settings': {'asr_provider': 'remote_preferred'}}
+            job = CourseStreamJob(record, config, model, set())
+            job.start()
+            for index in range(3):
+                await job.accept(index, bytes(16000*2), {})
+            await job.finish_input(3)
+            with patch.object(job, 'assemble'):
+                await asyncio.wait_for(job.task, 5)
+            self.assertEqual(providers, ['remote_preferred', 'local', 'local'])
+            self.assertEqual(record.metadata['status'], 'completed')
+            self.assertTrue(job.state['asr_local_fallback'])
+            self.assertTrue(job.state['asr_execution']['fallback'])
+            self.assertTrue(all(s['metrics']['fallback'] for s in record.segments))
+            self.assertTrue(all(s['metrics']['fallback_reason'] == 'ProvenNotAccepted' for s in record.segments))
+            self.assertEqual(job.config['inference_settings']['asr_provider'], 'remote_preferred')
+
+    async def test_fallback_survives_recovery_and_only_pause_continue_retries_remote(self):
+        with tempfile.TemporaryDirectory() as temp:
+            record = make_record(Path(temp))
+            providers = []
+            async def transcribe(audio, language, context, **kwargs):
+                provider = kwargs['inference_config']['asr_provider']
+                providers.append(provider)
+                fallback = len(providers) == 1
+                actual = 'local' if fallback or provider == 'local' else 'remote'
+                kwargs['on_provider']({'provider': actual, 'fallback': fallback})
+                kwargs['metrics'].update(provider=actual, fallback=fallback)
+                return '已保存的课堂内容', 'Chinese', .1
+            model = SimpleNamespace(active_jobs=0, cancel_unload=lambda: None, schedule_unload=lambda: None,
+                                    transcribe=AsyncMock(side_effect=transcribe))
+            config = {'inference_settings': {'asr_provider': 'remote_preferred'}}
+            job = CourseStreamJob(record, config, model, set())
+            job.start()
+            await job.accept(0, bytes(16000*2), {})
+            await until(lambda: job.state.get('completed_chunks') == 1)
+            await job.stop()  # Process recovery is not a user pause.
+            loaded = RecordingRecord.load(record.directory)
+            recovered = CourseStreamJob(loaded, config, model, set())
+            recovered.start()
+            await recovered.accept(1, bytes(16000*2), {})
+            await until(lambda: recovered.state.get('completed_chunks') == 2)
+            self.assertEqual(providers, ['remote_preferred', 'local'])
+            await recovered.stop(paused=True)
+            loaded = RecordingRecord.load(record.directory)
+            resumed = CourseStreamJob(loaded, config, model, set())
+            resumed.start()
+            self.assertFalse(resumed.state['asr_local_fallback'])
+            await resumed.accept(2, bytes(16000*2), {})
+            await resumed.finish_input(3)
+            with patch.object(resumed, 'assemble'):
+                await asyncio.wait_for(resumed.task, 5)
+            self.assertEqual(providers, ['remote_preferred', 'local', 'remote_preferred'])
+            self.assertEqual(len(loaded.segments), 3)
+            self.assertEqual(resumed.state['asr_execution']['provider'], 'remote')
+            self.assertFalse(resumed.state['asr_execution']['fallback'])
+
+    async def test_unresolved_remote_error_does_not_recompute_accepted_audio(self):
+        with tempfile.TemporaryDirectory() as temp:
+            record = make_record(Path(temp))
+            model = SimpleNamespace(active_jobs=0, cancel_unload=lambda: None, schedule_unload=lambda: None,
+                                    transcribe=AsyncMock(side_effect=RuntimeError('远端操作等待恢复')))
+            job = CourseStreamJob(record, {'inference_settings': {'asr_provider': 'remote_preferred'}}, model, set())
+            job.start()
+            await job.accept(0, bytes(16000*2), {})
+            await asyncio.wait_for(job.task, 5)
+            self.assertEqual(record.metadata['status'], 'interrupted')
+            self.assertFalse(job.state.get('asr_local_fallback'))
+            self.assertEqual(job.state['completed_chunks'], 0)
+            self.assertEqual(model.transcribe.await_count, 1)
+            self.assertTrue((record.directory / '.course-chunks' / '00000.pcm').exists())
+
     def test_library_item_keeps_resume_protocol_without_large_private_checkpoints(self):
         with tempfile.TemporaryDirectory() as temp:
             record = make_record(Path(temp))
