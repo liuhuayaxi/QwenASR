@@ -200,19 +200,20 @@ class BankStore:
 
     def save_questions(self, cid: Any, activity_id: Any, questions: list[dict[str, Any]]) -> None:
         path = self.classroom_dir(cid) / "questions" / f"{safe_name(activity_id)}.json"
-        previous = {item.get("id"): item for item in _read(path, []) if isinstance(item, dict)}
-        for question in questions:
-            # Keep finished vision transcriptions and downloaded files when an
-            # unchanged question is re-imported.
-            old = previous.get(question.get("id")) or {}
-            if old.get("vision") and not question.get("vision"):
-                question["vision"] = old["vision"]
-            old_images = {image.get("source"): image for image in old.get("images") or [] if isinstance(image, dict)}
-            for image in question.get("images") or []:
-                kept = old_images.get(image.get("source"))
-                if kept and kept.get("path") and not image.get("path"):
-                    image.update({k: kept[k] for k in ("path", "sha256") if k in kept})
-        atomic_json(path, questions)
+        with _LOCK:
+            previous = {item.get("id"): item for item in _read(path, []) if isinstance(item, dict)}
+            for question in questions:
+                # Keep finished vision transcriptions and downloaded files when an
+                # unchanged question is re-imported.
+                old = previous.get(question.get("id")) or {}
+                if old.get("vision") and not question.get("vision"):
+                    question["vision"] = old["vision"]
+                old_images = {image.get("source"): image for image in old.get("images") or [] if isinstance(image, dict)}
+                for image in question.get("images") or []:
+                    kept = old_images.get(image.get("source"))
+                    if kept and kept.get("path") and not image.get("path"):
+                        image.update({k: kept[k] for k in ("path", "sha256") if k in kept})
+            atomic_json(path, questions)
 
     def questions(self, cid: Any) -> list[dict[str, Any]]:
         folder = self.classroom_dir(cid) / "questions"
