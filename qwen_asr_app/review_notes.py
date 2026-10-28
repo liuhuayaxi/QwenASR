@@ -904,7 +904,8 @@ async def generate(record, config):
     if yuketang_questions:
         # A completed task is reused only for the same 雨课堂 question set;
         # newly bound or newly published questions start a fresh note task.
-        identity_inputs.append({'yuketang_questions':hashlib.sha256(json.dumps(yuketang_questions,sort_keys=True,ensure_ascii=False).encode()).hexdigest()})
+        from .yuketang.retrieval import QUESTION_PIPELINE_VERSION
+        identity_inputs.append({'yuketang_questions':hashlib.sha256(json.dumps(yuketang_questions,sort_keys=True,ensure_ascii=False).encode()).hexdigest(), 'question_pipeline':QUESTION_PIPELINE_VERSION})
     identity=budget_compatible_identity(record.directory/'.review-notes',identity_inputs,config,history_index=5)
     relative=f'.review-notes/{identity}';folder=record.directory/relative;folder.mkdir(parents=True,exist_ok=True,mode=0o700)
     config=note_runtime_config(config)

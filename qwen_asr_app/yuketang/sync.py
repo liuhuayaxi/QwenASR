@@ -50,6 +50,7 @@ class ClassroomSync:
         self.university_id = None if university_id in (None, "") else str(university_id)
         self.progress = progress or (lambda message: None)
         self.refresh = refresh
+        self.revalidate_images = refresh
         self.should_stop = should_stop or (lambda: False)
         self.activity_image_errors = 0
         self.summary = {"activities": 0, "imported": 0, "skipped": 0, "pending": 0, "errors": 0,
@@ -87,6 +88,7 @@ class ClassroomSync:
                 continue
             self.progress(f"{label}：读取中")
             self.activity_image_errors = 0
+            self.revalidate_images = self.refresh or self._stale(state, COMPLETE_RECHECK_HOURS)
             try:
                 status, count, extra = self.import_activity(activity)
                 if self.activity_image_errors:
@@ -102,7 +104,7 @@ class ClassroomSync:
                 self.store.save_activity_state(self.cid, activity.get("id"), {
                     **state, "activity": activity, "fingerprint": fingerprint, "status": "error",
                     "error": safe_error(exc), "checked_at": now_iso()})
-                self.progress(f"{label}：失败（{exc}）")
+                self.progress(f"{label}：失败（{safe_error(exc)}）")
                 continue
             self.summary["imported" if status == "complete" else "pending"] += 1
             self.store.save_activity_state(self.cid, activity.get("id"), {
@@ -153,8 +155,10 @@ class ClassroomSync:
         question_file = self.store.classroom_dir(self.cid) / "questions" / f"{safe_name(activity_id)}.json"
         if not question_file.is_file():
             return True
-        questions = [question for question in self.store.questions(self.cid)
-                     if str(question.get("activity_id")) == str(activity_id)]
+        try:
+            questions = self.store.activity_questions(self.cid, activity_id)
+        except RuntimeError:
+            return True
         if state.get("question_count") is not None and len(questions) != int(state.get("question_count") or 0):
             return True
         for question in questions:
@@ -200,9 +204,11 @@ class ClassroomSync:
                 if key not in seen:
                     seen.add(key)
                     activities.append(item)
-            if not has_more or not items:
-                break
-        return activities
+            if not has_more:
+                return activities
+            if not items:
+                raise RuntimeError("雨课堂活动分页为空但仍声明有下一页，未将不完整列表标为成功")
+        raise RuntimeError("雨课堂活动列表超过分页上限，未将不完整同步标为成功")
 
     # ------------------------------------------------------------ per type
     def import_activity(self, activity: dict[str, Any]) -> tuple[str, int, dict[str, Any]]:
@@ -221,10 +227,11 @@ class ClassroomSync:
         return len(questions)
 
     def download_images(self, activity: dict[str, Any], questions: list[dict[str, Any]]) -> None:
-        existing = {q.get("id"): q for q in self.store.questions(self.cid)}
+        existing = {q.get("id"): q for q in self.store.activity_questions(self.cid, activity.get("id"))}
         for question in questions:
             old_images = {i.get("source"): i for i in (existing.get(question["id"]) or {}).get("images") or []}
             for index, image in enumerate(question.get("images") or []):
+                self.check_stop()
                 if image.get("kind") == "student":
                     # Student-uploaded answer pictures are sensitive and are
                     # never needed for note rendering or vision transcription.
@@ -234,7 +241,7 @@ class ClassroomSync:
                     continue
                 url = image.pop("url", "")
                 kept = old_images.get(image.get("source"))
-                if kept and kept.get("path"):
+                if kept and kept.get("path") and not self.revalidate_images:
                     try:
                         self.store.image_path(self.cid, kept["path"])
                         image.update(path=kept["path"], sha256=kept.get("sha256", ""))
@@ -307,12 +314,13 @@ class ClassroomSync:
         shapes = {}
         for entry in [*(data.get("objective_result_list") or []), *(data.get("subjective_result_list") or [])]:
             pid = entry.get("problem_id") if isinstance(entry, dict) else None
-            if pid is None:
+            if pid is None or str(pid) in shapes:
                 continue
+            self.check_stop()
             payload = self.get(f"/v2/api/web/quiz/problem_shape?classroom_id={self.cid}&quiz_id={quiz_id}&problem_id={pid}")
             self.store.save_raw(self.cid, aid, f"problem_shape_{pid}", payload)
-            if payload.get("errcode") in (0, None):
-                shapes[str(pid)] = payload
+            parsing.body_data(payload)  # failed shapes must not erase good cached prompts
+            shapes[str(pid)] = payload
         questions = parsing.parse_quiz(activity, self.cid, result, shapes)
         count = self.save(activity, questions)
         visible = data.get("quiz_visible", True) and all(q["answer_known"] for q in questions)
@@ -325,6 +333,8 @@ class ClassroomSync:
         self.store.save_raw(self.cid, aid, "lesson_info", info)
         self.store.save_raw(self.cid, aid, "student_detail", detail)
         identity = parsing.lesson_identity(info)
+        if not identity and parsing.lesson_problems(detail):
+            raise RuntimeError("课堂题目缺少读取身份，保留上次成功同步的题目")
         answers = {}
         for item in parsing.lesson_problems(detail):
             pid = str(item.get("problemId") or "")
@@ -334,8 +344,8 @@ class ClassroomSync:
             payload = self.get(f"/api/v3/classroom-report/problem/student-answer?identityId={identity}"
                                f"&problemId={pid}&lesson_id={lesson_id}")
             self.store.save_raw(self.cid, aid, f"student_answer_{pid}", payload)
-            if payload.get("code") in (0, None):
-                answers[pid] = payload
+            parsing.body_data(payload)
+            answers[pid] = payload
         questions = parsing.parse_lesson(activity, self.cid, detail, answers, info)
         count = self.save(activity, questions)
         ungraded = any(not q.get("graded") for q in questions)
@@ -395,7 +405,7 @@ def _sync_classrooms(store, classrooms, *, headless, delay, refresh, profile_dir
         except LoginRequired:
             raise
         except Exception as exc:  # the binding dropdown is a convenience
-            progress(f"课程列表未更新：{exc}")
+            progress(f"课程列表未更新：{safe_error(exc)}")
         for item in classrooms:
             cid = str(item["classroom_id"])
             progress(f"同步雨课堂班级 {cid}")

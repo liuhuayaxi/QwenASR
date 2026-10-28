@@ -452,9 +452,9 @@ async def _build_text_note_summary(
     yuketang_questions = await _yuketang_questions(record, source_blocks)
     if yuketang_questions:
         chunk_config['_yuketang_questions'] = yuketang_questions
-    # Keep the question bank out of chunk planning; it is appended after
-    # all chunks are merged and must not be repeated in every request.
-    chunk_config['_yuketang_appendix_only'] = True
+    # Full-note planning includes the bounded bank, exactly like the request;
+    # detailed chunks omit it automatically and use the local appendix.
+    chunk_config['_yuketang_appendix_only'] = False
     window = context_window_for(chunk_config, 'summary')
     chunks = note_summary_chunks(blocks, chunk_config)
     if not chunks:
@@ -553,9 +553,19 @@ async def _build_text_note_summary(
                        + "\n\n## 按课堂时间展开\n\n" + "\n\n".join(details))
     if len(chunks) == 1:
         rolling_summary = saved_parts["0"]
+    question_package, question_images = "", []
     if yuketang_questions:
-        from .yuketang.retrieval import ensure_section
-        rolling_summary = ensure_section(rolling_summary, yuketang_questions)
+        from .yuketang.retrieval import ensure_section, normalize_section, resolve_markers
+        rolling_summary = resolve_markers(normalize_section(ensure_section(rolling_summary, yuketang_questions)))
+        if any(item.get("原题图片") or item.get("解析图片") for item in yuketang_questions):
+            from .yuketang.note_images import attach
+            ident = hashlib.sha256(json.dumps(["text-yuketang-v3", record.id, yuketang_questions],
+                                              ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:24]
+            question_package = f".review-notes/{ident}"
+            folder = record.directory / question_package
+            folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+            rolling_summary, question_images = await asyncio.to_thread(
+                attach, rolling_summary, yuketang_questions, folder, str(record.metadata.get("category") or ""))
     key_points: list[str] = []
     started_at = str(record.metadata.get("started_at") or "")
     try:
@@ -600,6 +610,11 @@ async def _build_text_note_summary(
         "yuketang_question_ids": [item.get("id") for item in yuketang_questions],
         "yuketang_forced_ids": [item.get("id") for item in yuketang_questions if item.get("必含")],
     }
+    if question_package:
+        from .durable import atomic_bytes
+        item.update(review_package=question_package, yuketang_images=question_images,
+                    image_count=sum(row["stem_images"] + row["explain_images"] for row in question_images))
+        atomic_bytes(record.directory / question_package / "note.md", rolling_summary.encode())
     draft["phase"] = "录音库短摘要"
     # Persist the detailed Markdown before the independent short-abstract call.
     # A failed abstract must never discard a usable full summary.

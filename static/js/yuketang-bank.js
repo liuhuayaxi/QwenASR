@@ -1,12 +1,12 @@
 // 雨课堂习题 panel on the course page: bind via dropdown, one-click sync,
 // optional question browser. Talks only to /api/yuketang.
 import {createVisiblePoll} from './visible-poll.js';
-import {esc, countsText, questionHtml, headerLine, bindView, currentCategory, hydrateImages} from './yuketang-render.js?v=20261022-ykt-4';
+import {esc, countsText, questionHtml, headerLine, bindView, currentCategory, hydrateImages, releaseImages} from './yuketang-render.js?v=20261028-ykt-5';
 
 const $ = id => document.getElementById(id);
-const STATUS = {running: '进行中', completed: '已完成', failed: '失败', login_required: '需要登录', interrupted: '已中断'};
+const STATUS = {running: '进行中', completed: '已完成', failed: '失败', login_required: '需要登录', interrupted: '已中断', partial: '部分完成'};
 const KIND = {sync: '同步', login: '登录', transcribe: '图片转写', courses: '读取课程列表'};
-const state = {category: '', status: null, courses: {courses: []}, rebinding: false, searchTimer: null, loaded: ''};
+const state = {category: '', status: null, courses: {courses: []}, rebinding: false, searchTimer: null, loaded: '', questionRequest: 0};
 
 async function api(path, body) {
   const options = body === undefined ? {cache: 'no-store', headers: {'X-QwenASR-Client': 'course-files'}} : {method: 'POST', headers: {'Content-Type': 'application/json', 'X-QwenASR-Client': 'course-files'}, body: JSON.stringify(body)};
@@ -58,28 +58,40 @@ function render() {
   const needsLogin = job.status === 'login_required';
   if (!status.playwright) setNotice('需要先安装 Playwright：.venv/bin/pip install playwright', {error: true});
   else if (needsLogin) setNotice('雨课堂登录已过期或尚未登录。', {error: true, login: true});
+  else if (!running && job.status === 'partial') setNotice('同步部分完成，有题目或图片读取失败，请查看同步详情后重试。', {error: true});
   else if (!running && job.status === 'failed' && job.error) setNotice(`${KIND[job.kind] || '任务'}失败：${job.error}`, {error: true});
   else setNotice('');
 }
 
 async function loadQuestions(force = false) {
   if (!state.category || $('ykt-browse').hidden || !$('ykt-browse').open) return;
-  const params = new URLSearchParams({category: state.category, q: $('ykt-search').value.trim(), source: $('ykt-source').value, limit: '300'});
-  if (!force && state.loaded === params.toString()) return;
-  state.loaded = params.toString();
+  const category = state.category;
+  const params = new URLSearchParams({category, q: $('ykt-search').value.trim(), source: $('ykt-source').value, limit: '300'});
+  const key = params.toString();
+  if (!force && state.loaded === key) return;
+  const request = ++state.questionRequest;
+  const current = () => request === state.questionRequest && category === state.category && category === currentCategory();
   try {
     const data = await api(`/api/yuketang/questions?${params}`);
+    if (!current()) return;
+    releaseImages($('ykt-questions'));
     $('ykt-questions').innerHTML = (data.questions || []).map(q => questionHtml(q)).join('') || '<p class="muted">没有符合条件的题目。</p>';
+    state.loaded = key;
     await hydrateImages($('ykt-questions'));
-  } catch (error) { $('ykt-questions').innerHTML = `<p class="notice error">${esc(error.message)}</p>`; }
+  } catch (error) {
+    if (!current()) return;
+    state.loaded = '';
+    releaseImages($('ykt-questions'));
+    $('ykt-questions').innerHTML = `<p class="notice error">${esc(error.message)}</p>`;
+  }
 }
 
 async function refresh() {
   const category = currentCategory();
   const section = $('yuketangSection');
-  if (!category || category === '未分类') { section.hidden = true; return; }
+  if (!category || category === '未分类') { state.questionRequest++; releaseImages($('ykt-questions')); state.loaded = ''; section.hidden = true; return; }
   section.hidden = false;
-  if (category !== state.category) { state.category = category; state.rebinding = false; state.loaded = ''; }
+  if (category !== state.category) { state.questionRequest++; releaseImages($('ykt-questions')); $('ykt-questions').replaceChildren(); state.category = category; state.rebinding = false; state.loaded = ''; }
   const wasRunning = state.status?.running;
   const [status, courses] = await Promise.all([
     api(`/api/yuketang/status?category=${encodeURIComponent(category)}`),

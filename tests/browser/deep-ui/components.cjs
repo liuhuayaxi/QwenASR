@@ -31,5 +31,5 @@ exports.mount=async function(p,{root,options,source,moduleURL,runtime}){
    const pending=window.__controller.refresh();if(!skip)await pending;
   }
  },{url:moduleURL('static/js/'+file+'.js'),kind:options.component,skip:options.skipInitialWait});
- if(options.component==='backup'&&!options.skipInitialWait)await p.waitForTimeout(25);
+ if(options.component==='backup'&&!options.skipInitialWait)await p.waitForFunction(()=>!document.querySelector('#exportLibraryBackup').disabled);
 };

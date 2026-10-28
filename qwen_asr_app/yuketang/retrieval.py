@@ -23,8 +23,10 @@ MAX_SAME_DAY = 12
 MAX_OPTIONAL = 8
 MAX_CONTEXT_CHARS = 14_000     # model context budget; full items stay in the appendix
 LESSON_MINUTES = 100           # assumed lesson length when problems give no later bound
+MAX_LESSON_GAP_MINUTES = 30
 GRAY_HOURS = 3                 # tests this soon after the previous lesson may be its 课后测
 CHINA = timezone(timedelta(hours=8))
+QUESTION_PIPELINE_VERSION = "yuketang-notes-v3"
 SECTION_TITLE = "课上习题"
 LEGACY_TITLES = ("相关习题与答案",)
 
@@ -117,14 +119,6 @@ def compact(question: dict[str, Any], store: BankStore | None = None) -> dict[st
         "答案已知": bool(question.get("answer_known") or vision.get("answer_text")),
         "解析": question.get("remark") or "",
     }
-    # These are local, course-scoped learning fields.  The model may use them
-    # to explain an error; the deterministic appendix still omits them.
-    if question.get("student_answer"):
-        item["我的答案"] = question["student_answer"]
-    if question.get("correct") is not None:
-        item["是否答对"] = bool(question["correct"])
-    if question.get("score") is not None:
-        item["得分"] = question["score"]
     if vision.get("text") and stem_image:
         # Read-only context for answering; the note shows the original image.
         item["图片内容（仅供理解，不写入笔记）"] = vision["text"]
@@ -133,102 +127,63 @@ def compact(question: dict[str, Any], store: BankStore | None = None) -> dict[st
     return {key: value for key, value in item.items() if value not in (None, "", [])}
 
 
-def _shrink(item: dict[str, Any], body: int, remark: int, answer: int) -> dict[str, Any]:
-    result = {**item, "题干": str(item.get("题干", ""))[:body], "解析": str(item.get("解析", ""))[:remark],
-              "选项": [str(value)[:200] for value in item.get("选项", [])],
-            "我的答案": [str(value)[:answer] for value in item.get("我的答案", [])],
-            "正确答案": [str(value)[:answer] for value in item.get("正确答案", [])]}
-    for key in ("图片内容（仅供理解，不写入笔记）", "图片转写"):
-        if key in result:
-            result[key] = str(result[key])[:body]
-    return result
-
-
-def _minimal(item: dict[str, Any], cap: int) -> dict[str, Any]:
-    """Smallest useful forced-question record for a model request."""
-    cap = max(1, int(cap))
-    # The marker is sufficient for post-processing; the full id remains in
-    # the unshortened record used by the deterministic appendix.
-    result = {key: item[key] for key in ("题号", "题型", "答案已知", "是否答对") if key in item}
-    result["题干"] = str(item.get("题干") or "")[:max(8, cap // 3)]
-    result["正确答案"] = [str(value)[:max(8, cap // 8)] for value in item.get("正确答案", [])]
-    if item.get("选项"):
-        result["选项"] = [str(value)[:max(8, cap // 8)] for value in item["选项"][:4]]
-    if item.get("解析"):
-        result["解析"] = str(item["解析"])[:max(8, cap // 4)]
-    return result
-
-
-def _size(item: dict[str, Any]) -> int:
+def _size(value: Any) -> int:
     import json
-    return len(json.dumps(item, ensure_ascii=False))
+    return len(json.dumps(value, ensure_ascii=False))
+
+
+def _summary_item(item: dict[str, Any], body: int, detail: int) -> dict[str, Any]:
+    """A model-only excerpt; never replace the full local source record."""
+    result = {key: item[key] for key in ("id", "题号", "必含", "题型", "答案已知", "原题图片", "解析图片") if key in item}
+    shortened = False
+    for key in ("题干", "图片内容（仅供理解，不写入笔记）", "图片转写", "解析"):
+        value = str(item.get(key) or "")
+        cap = body if key != "解析" else detail
+        if value:
+            result[key] = value[:cap]
+            shortened |= len(value) > cap
+    # Do not turn a truncated answer/option into an apparently complete one.
+    for key in ("选项", "正确答案"):
+        values = item.get(key) or []
+        if values and _size(values) <= detail:
+            result[key] = values
+        elif values:
+            shortened = True
+    if shortened or item.get("内容已压缩"):
+        result["内容已压缩"] = True
+    return result
 
 
 def fit(items: list[dict[str, Any]], budget: int = MAX_CONTEXT_CHARS) -> list[dict[str, Any]]:
-    """Fit the model-facing copy into a hard character budget.
+    """Bound the *serialized list*, in linear passes, without changing items.
 
-    Full records stay in the list passed to ``ensure_section``; this function
-    only controls the representation sent to the model.
+    All forced questions remain in the canonical appendix. Model-only excerpts
+    may omit records when even their markers do not fit; no retry/extra model
+    call is needed to restore those records. An empty JSON list takes 2 chars.
     """
-    budget = max(0, int(budget))
-    def clean(item):
-        return {key: value for key, value in item.items() if value not in (None, "", [])}
-    forced = [clean(item) for item in items if item.get("必含")]
-    optional = [clean(item) for item in items if not item.get("必含")]
-    for limits in ((4000, 2000, 1500), (1500, 600, 400), (600, 240, 160), (240, 100, 80)):
-        if sum(_size(item) for item in forced) <= budget:
+    budget = max(2, int(budget))
+    forced = [item for item in items if item.get("必含")]
+    optional = [item for item in items if not item.get("必含")]
+    candidates = forced
+    for body, detail in ((1500, 1000), (600, 400), (240, 160), (80, 48)):
+        if _size(candidates) <= budget:
             break
-        forced = [_shrink(item, *limits) for item in forced]
-    if sum(_size(item) for item in forced) > budget and forced:
-        per_item = max(16, budget // len(forced) - 16) if budget else 16
-        forced = [_minimal(item, per_item) for item in forced]
-        while sum(_size(item) for item in forced) > budget and forced:
-            index = max(range(len(forced)), key=lambda n: _size(forced[n]))
-            item = forced[index]
-            changed = False
-            for key in ("解析", "选项", "正确答案", "题干"):
-                if key not in item:
-                    continue
-                if isinstance(item[key], list):
-                    values = [str(value) for value in item[key]]
-                    shorter = [value[:max(1, len(value) // 2)] for value in values]
-                    if shorter == values:
-                        continue
-                    item[key] = shorter
-                else:
-                    value = str(item[key])
-                    shorter = value[:max(1, len(value) // 2)]
-                    if shorter == value:
-                        continue
-                    item[key] = shorter
-                changed = True
-                break
-            if not changed:
-                for key in ("题干", "解析", "选项", "正确答案"):
-                    if key in item:
-                        item.pop(key)
-                        changed = True
-                        break
-            if not changed:
-                for key in ("是否答对", "答案已知", "题型"):
-                    if key in item:
-                        item.pop(key)
-                        changed = True
-                        break
-            if not changed:
-                break
-    # If even the minimal marker list does not fit, omit the model-facing
-    # block. The full deterministic appendix remains unchanged and complete.
-    if sum(_size(item) for item in forced) > budget:
-        return []
-    result, used = list(forced), sum(_size(item) for item in forced)
+        candidates = [_summary_item(item, body, detail) for item in forced]
+    if _size(candidates) > budget:
+        candidates = [{key: item[key] for key in ("题号", "必含", "答案已知") if key in item}
+                      | {"内容已压缩": True} for item in forced]
+    result, used = [], 2  # opening and closing brackets
+    for item in candidates:
+        cost = _size(item) + (2 if result else 0)  # json.dumps uses ', '
+        if used + cost <= budget:
+            result.append(dict(item))
+            used += cost
     for item in optional:
-        if _size(item) > 2500:
-            item = _shrink(item, 1500, 600, 400)
-        if used + _size(item) > budget:
-            continue
-        result.append(item)
-        used += _size(item)
+        candidate = item if _size(item) <= 2500 else _summary_item(item, 1200, 500)
+        cost = _size(candidate) + (2 if result else 0)
+        if used + cost <= budget:
+            result.append(dict(candidate))
+            used += cost
     return result
 
 
@@ -311,7 +266,12 @@ def lesson_for_recording(lessons: list[dict[str, Any]], start: datetime, end: da
         return (min(end, lesson["end"]) - max(start, lesson["start"])).total_seconds()
     matched = [lesson for lesson in same_day if overlap(lesson) > 0]
     if not matched:
-        matched = [min(same_day, key=lambda lesson: abs((lesson["start"] - start).total_seconds()))]
+        nearest = min(same_day, key=lambda lesson: min(abs((lesson["end"] - start).total_seconds()),
+                                                      abs((lesson["start"] - end).total_seconds())))
+        gap = max((nearest["start"] - end).total_seconds(), (start - nearest["end"]).total_seconds(), 0)
+        if gap > MAX_LESSON_GAP_MINUTES * 60:
+            return None
+        matched = [nearest]
     matched.sort(key=lambda lesson: lesson["start"])
     return {"classroom_id": matched[0]["classroom_id"], "activity_id": matched[0]["activity_id"],
             "activity_ids": [lesson["activity_id"] for lesson in matched],
@@ -365,8 +325,10 @@ def forced_for_record(record: Any, store: BankStore, category: str) -> tuple[dic
         lessons = lesson_catalog(store, item["classroom_id"])
         match = lesson_for_recording(lessons, *window)
         if match is not None:
-            closeness = abs((match["start"] - window[0]).total_seconds())
-            if best is None or closeness < abs((best["start"] - window[0]).total_seconds()):
+            def quality(candidate):
+                overlap = max(0, (min(candidate["end"], window[1]) - max(candidate["start"], window[0])).total_seconds())
+                return (overlap, -abs((candidate["start"] - window[0]).total_seconds()))
+            if best is None or quality(match) > quality(best):
                 best, best_lessons = match, lessons
     if best is None:
         return None, []
@@ -413,14 +375,17 @@ def questions_for_record(record: Any, *, store: BankStore | None = None, transcr
             continue
         if str(question.get("classroom_id") or lesson["classroom_id"]) != lesson["classroom_id"]:
             continue
-        if question.get("source") not in {"exam", "courseware"}:
+        if question.get("source") not in {"exam", "quiz", "cards"}:
+            continue
+        when = _question_time(question)
+        if when is not None and when > lesson["end"]:
             continue
         terms = _tokens(question_text(question))
         overlap = len(terms & transcript_terms)
         if not transcript_terms or (overlap < 3 and overlap / max(8, len(terms)) < 0.25):
             continue
         remaining.append(question)
-    optional_limit = min(MAX_OPTIONAL, max(0, int(limit) - len(forced)))
+    optional_limit = min(MAX_OPTIONAL, max(0, int(limit)))
     if optional_limit:
         chosen.extend(rank(remaining, lecture_day=lecture_day, transcript=str(transcript or ""),
                            limit=optional_limit))
@@ -452,23 +417,12 @@ def instructions(*, write_section: bool = True) -> str:
 
 def prompt_block(items: list[dict[str, Any]]) -> str:
     import json
-    return "\n<yuketang_questions>\n" + json.dumps(fit(items), ensure_ascii=False) + "\n</yuketang_questions>"
+    prefix, suffix = "\n<yuketang_questions>\n", "\n</yuketang_questions>"
+    return prefix + json.dumps(fit(items, MAX_CONTEXT_CHARS - len(prefix) - len(suffix)), ensure_ascii=False) + suffix
 
 
 def _entry(item: dict[str, Any], number: int) -> list[str]:
-    lines = [f"### 第{number}题", ""]
-    if item.get("题号"):
-        lines += [f"<!-- yuketang:{item['题号']} -->", ""]
-    if not item.get("原题图片"):
-        lines.append(str(item.get("题干", "")))
-    for option in item.get("选项", []):
-        lines.append(f"- {option}")
-    answer = "、".join(item.get("正确答案", [])) or "参考课堂内容作答"
-    lines += ["", f"**答案**：{answer}"]
-    if item.get("解析"):
-        lines.append(f"\n**解析**：{item['解析']}")
-    lines.append("")
-    return lines
+    return ("### " + _restore_entry(f"第{number}题\n", item)).splitlines()
 
 
 def appendix(items: list[dict[str, Any]]) -> str:
@@ -491,65 +445,125 @@ def _section_entries(section: str) -> list[str]:
     return [part for part in parts[1:] if part.strip()]
 
 
+def _entry_marker(entry: str) -> str:
+    match = re.search(r"(?m)^<!--\s*yuketang:(Y\d+)\s*-->[ \t]*$", entry)
+    if match:
+        return match[1]
+    match = re.search(r"〔(Y\d+)〕", entry.split("\n", 1)[0])
+    return match[1] if match else ""
+
+
 def _entry_matches(item: dict[str, Any], entry: str) -> bool:
-    """Match one item against one rendered entry, never against the whole section."""
-    marker = str(item.get("题号") or "")
-    if marker and (f"〔{marker}〕" in entry or f"<!-- yuketang:{marker} -->" in entry):
-        return True
-    if item.get("id") and str(item["id"]) in entry:
+    marker = _entry_marker(entry)
+    if marker:
+        return marker == str(item.get("题号") or "")
+    ident = str(item.get("id") or "")
+    if ident and re.search(r"(?<![\w:.-])" + re.escape(ident) + r"(?![\w:.-])", entry):
         return True
     body = _normal(item.get("题干"))
     if "尚未转写" in str(item.get("题干") or "") or "原题图片" in str(item.get("题干") or ""):
-        body = ""
+        return False
     return len(body) >= 8 and body[:24] in _normal(entry)
 
 
+def _assign_entries(items: list[dict[str, Any]], entries: list[str]) -> dict[int, int]:
+    # Assign explicit markers before fuzzy text; a generic prefix must not
+    # consume an entry with another question's identity.
+    assigned, used = {}, set()
+    for i, item in enumerate(items):
+        for j, entry in enumerate(entries):
+            if j not in used and _entry_marker(entry) and _entry_matches(item, entry):
+                assigned[i] = j
+                used.add(j)
+                break
+    for i, item in enumerate(items):
+        if i in assigned:
+            continue
+        matches = [j for j, entry in enumerate(entries) if j not in used and _entry_matches(item, entry)]
+        exact = [j for j in matches if _normal(item.get("题干")) in _normal(entries[j])]
+        if exact:
+            matches = exact
+        if matches:
+            assigned[i] = matches[0]
+            used.add(matches[0])
+    return assigned
+
+
 def present(item: dict[str, Any], section: str) -> bool:
-    """Whether a question visibly appears in one of the section entries."""
     return any(_entry_matches(item, entry) for entry in _section_entries(section))
 
 
+def _section_end(markdown: str, match) -> int:
+    following = re.search(r"^##[ \t]+", markdown[match.end():], re.M)
+    return match.end() + following.start() if following else len(markdown)
+
+
 def missing_forced(markdown: str, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    forced = [item for item in items if item.get("必含")]
     match = _SECTION.search(markdown or "")
     if not match:
-        return [item for item in items if item.get("必含")]
-    rest = markdown[match.end():]
-    following = re.search(r"^##\s", rest, re.M)
-    section = rest[:following.start()] if following else rest
-    entries = _section_entries(section)
-    matched: set[int] = set()
-    missing = []
-    for item in (item for item in items if item.get("必含")):
-        found = next((index for index, entry in enumerate(entries)
-                      if index not in matched and _entry_matches(item, entry)), None)
-        if found is None:
-            missing.append(item)
-        else:
-            matched.add(found)
-    return missing
+        return forced
+    entries = _section_entries(markdown[match.end():_section_end(markdown, match)])
+    assigned = _assign_entries(forced, entries)
+    return [item for i, item in enumerate(forced) if i not in assigned]
+
+
+def _restore_entry(entry: str, item: dict[str, Any]) -> str:
+    """Restore canonical question data, retaining the model's explanation."""
+    heading, _, body = entry.partition("\n")
+    answer = re.search(r"(?m)^\*\*答案\*\*[ \t]*[：:]?[ \t]*", body)
+    explanation = re.search(r"(?m)^\*\*解析\*\*[ \t]*[：:]?[ \t]*", body)
+    stem_end = answer.start() if answer else explanation.start() if explanation else len(body)
+    images = re.findall(r"(?m)^!\[[^\]]*\]\(assets/fig-[a-f0-9]{16}\.png\)[ \t]*$", body[:stem_end])
+    lines = [heading.rstrip(), ""]
+    if item.get("题号"):
+        lines.extend([f"<!-- yuketang:{item['题号']} -->", ""])
+    stem = str(item.get("题干") or "")
+    if not (images and "原题图片" in stem):
+        lines.extend([stem, ""])
+    lines.extend(images)
+    lines.extend(f"- {value}" for value in item.get("选项", []))
+    official = "、".join(str(v) for v in item.get("正确答案", []))
+    old_answer = body[answer.end():explanation.start() if explanation else len(body)].strip() if answer else ""
+    if not official and old_answer:
+        official = old_answer if "待核对" in old_answer else "参考解答（待核对）：" + old_answer
+    lines.extend(["", "**答案**：" + (official or "参考答案待核对（题库未公布）")])
+    detail = body[explanation.end():].strip() if explanation else str(item.get("解析") or "")
+    if detail:
+        lines.extend(["", "**解析**：" + detail])
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).rstrip() + "\n\n"
 
 
 def ensure_section(markdown: str, items: list[dict[str, Any]]) -> str:
-    """Guarantee the section exists and lists every forced question."""
+    """Restore full forced questions and append missing entries without AI."""
     if not items:
         return markdown
     markdown = markdown or ""
     match = _SECTION.search(markdown)
     if not match:
         return markdown.rstrip() + "\n\n" + appendix(items)
-    missing = missing_forced(markdown, items)
-    if not missing:
+    cut = _section_end(markdown, match)
+    section = markdown[match.end():cut]
+    starts = [m.start() for m in re.finditer(r"(?m)^###[ \t]+", section)]
+    spans = [(start, starts[n + 1] if n + 1 < len(starts) else len(section)) for n, start in enumerate(starts)]
+    entries = [re.sub(r"^###[ \t]+", "", section[a:b]) for a, b in spans]
+    forced = [item for item in items if item.get("必含")]
+    assigned = _assign_entries(forced, entries)
+    replacements = {j: _restore_entry(entries[j], forced[i]) for i, j in assigned.items()}
+    parts, previous = [], 0
+    for j, (a, b) in enumerate(spans):
+        parts.append(section[previous:a])
+        parts.append("### " + replacements[j] if j in replacements else section[a:b])
+        previous = b
+    parts.append(section[previous:])
+    missing = [item for i, item in enumerate(forced) if i not in assigned]
+    for number, item in enumerate(missing, len(entries) + 1):
+        parts.append("\n" + "\n".join(_entry(item, number)))
+    if not forced:
         return markdown
-    rest = markdown[match.end():]
-    following = re.search(r"^##\s", rest, re.M)
-    cut = match.end() + (following.start() if following else len(rest))
-    lines = [""]
-    start = len(re.findall(r"^###\s", markdown[match.end():cut], re.M)) + 1
-    for number, item in enumerate(missing, start):
-        lines += _entry(item, number)
-    addition = "\n".join(lines).rstrip() + "\n"
-    head, tail = markdown[:cut].rstrip(), markdown[cut:]
-    return head + "\n" + addition + ("\n" + tail.lstrip("\n") if tail.strip() else "")
+    updated = re.sub(r"\n{3,}", "\n\n", "".join(parts)).rstrip() + "\n"
+    tail = markdown[cut:]
+    return markdown[:match.end()] + updated + ("\n" + tail.lstrip("\n") if tail.strip() else "")
 
 
 _OPTION_LINE = re.compile(r"^\s*(?:[-*]\s+)?([A-H])\s*[.．、:：]\s*(.*)$")

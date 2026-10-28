@@ -89,7 +89,7 @@ export function bindView(status = {}, courses = {}, rebinding = false) {
 
 // Truthful sync time: the end of the last successful sync (even when nothing
 // changed); when the latest attempt failed, say so and keep the last success.
-const FAILED = {failed: '上次同步失败', login_required: '上次同步失败（需要登录）', stopped: '上次同步已停止'};
+const FAILED = {partial: '上次同步部分完成', failed: '上次同步失败', login_required: '上次同步失败（需要登录）', stopped: '上次同步已停止'};
 export function syncText(rooms = []) {
   const success = rooms.map(room => room.last_sync).filter(Boolean).sort().pop() || '';
   const attempts = rooms.filter(room => room.last_attempt_at).sort((a, b) => String(a.last_attempt_at).localeCompare(String(b.last_attempt_at)));
@@ -104,17 +104,51 @@ export function syncText(rooms = []) {
 }
 
 
-export async function hydrateImages(root) {
-  const images = [...(root || document).querySelectorAll('img[data-yuketang-src]')];
-  await Promise.all(images.map(async image => {
-    const source = image.getAttribute('data-yuketang-src');
-    try {
-      const response = await fetch(source, {headers: {'X-QwenASR-Client': 'course-files'}, cache: 'no-store'});
-      if (!response.ok) throw new Error(String(response.status));
-      image.src = URL.createObjectURL(await response.blob());
-      image.removeAttribute('data-yuketang-src');
-    } catch {
-      image.remove();
+const imageJobs = new WeakMap();
+
+export function releaseImages(root) {
+  imageJobs.get(root)?.controller.abort();
+  imageJobs.delete(root);
+  for (const image of root.querySelectorAll('img[data-yuketang-object-url]')) {
+    URL.revokeObjectURL(image.getAttribute('data-yuketang-object-url'));
+    image.removeAttribute('data-yuketang-object-url');
+  }
+}
+
+export async function hydrateImages(root = document) {
+  if (imageJobs.has(root)) return imageJobs.get(root).promise;
+  const images = [...root.querySelectorAll('img[data-yuketang-src]')];
+  const controller = new AbortController();
+  const job = {controller, promise: null};
+  imageJobs.set(root, job);
+  let next = 0;
+  async function worker() {
+    while (!controller.signal.aborted && next < images.length) {
+      const image = images[next++];
+      const source = image.getAttribute('data-yuketang-src') || '';
+      try {
+        if (!source.startsWith('/api/yuketang/image/') || source.includes('\\')) throw new Error('invalid image route');
+        const response = await fetch(source, {headers: {'X-QwenASR-Client': 'course-files'},
+          cache: 'no-store', credentials: 'same-origin', signal: controller.signal});
+        if (!response.ok || !response.headers.get('content-type')?.startsWith('image/')) throw new Error('invalid image response');
+        const blob = await response.blob();
+        if (blob.size > 25 * 1024 * 1024) throw new Error('image too large');
+        if (controller.signal.aborted || image.isConnected === false || root.isConnected === false) continue;
+        const url = URL.createObjectURL(blob);
+        image.setAttribute('data-yuketang-object-url', url);
+        image.src = url;
+        image.removeAttribute('data-yuketang-src');
+      } catch (error) {
+        if (!controller.signal.aborted && image.isConnected !== false) {
+          image.setAttribute('data-yuketang-error', 'true');
+          image.alt = '题目图片加载失败，请刷新后重试';
+        }
+      }
     }
-  }));
+  }
+  // A large bank must not create hundreds of simultaneous image requests.
+  job.promise = Promise.all(Array.from({length: Math.min(4, images.length)}, worker)).finally(() => {
+    if (imageJobs.get(root) === job) imageJobs.delete(root);
+  });
+  return job.promise;
 }

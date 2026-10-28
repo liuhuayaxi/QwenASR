@@ -63,7 +63,7 @@ async def write_batches(instructions, payload, config, folder):
         # The final fast-note postprocessor appends the complete Yuketang bank;
         # never repeat that large payload for every fallback batch.
         local.pop('yuketang_questions', None)
-        extra=('\n本次只编写 required_knowledge_ids 列出的连续知识批次。完整来源资料保留用于上下文；'
+        extra=('\n本批次不生成课上习题小节；完整题目由程序在最终稿统一补全。\n本次只编写 required_knowledge_ids 列出的连续知识批次。完整来源资料保留用于上下文；'
             '只输出本批知识，不重复其他批次。每个ID恰好出现一次，使用 '
             '<!-- knowledge:真实ID -->正文<!-- /knowledge:真实ID -->，不得合并或漏掉ID。'
             '只嵌入本批 images 清单中的图，每图一次，放到 assigned_knowledge_id 指定知识块。'

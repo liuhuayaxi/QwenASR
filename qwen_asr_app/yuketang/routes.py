@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from fastapi import APIRouter, Body, HTTPException, Query, Request
+from fastapi import APIRouter, Body, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
 
 from .service import YuketangService
@@ -94,13 +94,22 @@ def yuketang_router(service: YuketangService, guard: Callable[[Request], None], 
         category = known(category)
         # mode=rank serves the course 检索 box (natural-language query).
         items = service.store.search_ranked(category, q, limit) if mode == "rank" else service.store.search(category, q, source, limit)
+        items = [{**item, "images": [{k: v for k, v in image.items() if k not in {"url", "source"}}
+                                    for image in item.get("images") or [] if image.get("kind") != "student"]} for item in items]
         return {"category": category, "questions": items, "counts": service.store.counts(service.store.course_questions(category))}
 
     @router.get("/image/{classroom_id}/{path:path}")
     def image(request: Request, classroom_id: str, path: str) -> FileResponse:
         guard(request)
         try:
-            return FileResponse(service.store.image_path(classroom_id, path), headers={"Cache-Control": "private, max-age=86400"})
+            if not any(category in categories() for category in service.store.categories_for(classroom_id)):
+                raise FileNotFoundError(path)
+            allowed = {image.get("path") for question in service.store.questions(classroom_id)
+                       for image in question.get("images") or [] if image.get("kind") != "student" and image.get("path")}
+            if path not in allowed:
+                raise FileNotFoundError(path)
+            return FileResponse(service.store.image_path(classroom_id, path), headers={
+                "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Cross-Origin-Resource-Policy": "same-origin"})
         except (FileNotFoundError, ValueError) as exc:
             raise HTTPException(404, "图片不存在") from exc
 
