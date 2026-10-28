@@ -108,9 +108,16 @@ class ClassroomSync:
         questions = self.store.questions(self.cid)
         counts = self.store.counts(questions)
         finished = now_iso()
-        # last_sync = end of the last successful run, whether or not anything changed.
-        info.update(last_sync=finished, last_attempt_at=finished, last_attempt_status="ok", last_error="",
+        # Keep the previous successful timestamp when any activity or image
+        # failed; otherwise the UI would report a partial run as successful.
+        partial = bool(self.summary.get("errors") or self.summary.get("image_errors"))
+        info.update(last_attempt_at=finished,
+                    last_attempt_status="partial" if partial else "ok",
+                    last_error=(f"{self.summary.get('errors', 0)} 个活动失败，{self.summary.get('image_errors', 0)} 张图片待重试"
+                                if partial else ""),
                     counts=counts, last_summary=self.summary)
+        if not partial:
+            info["last_sync"] = finished
         if self.summary.get("imported") or counts != previous_counts:
             info["last_change"] = finished  # internal: when the bank content last changed
         self.store.save_classroom(self.cid, info)
@@ -212,6 +219,13 @@ class ClassroomSync:
         for question in questions:
             old_images = {i.get("source"): i for i in (existing.get(question["id"]) or {}).get("images") or []}
             for index, image in enumerate(question.get("images") or []):
+                if image.get("kind") == "student":
+                    # Student-uploaded answer pictures are sensitive and are
+                    # never needed for note rendering or vision transcription.
+                    image.pop("url", None)
+                    image.pop("path", None)
+                    image.pop("sha256", None)
+                    continue
                 url = image.pop("url", "")
                 kept = old_images.get(image.get("source"))
                 if kept and kept.get("path"):
