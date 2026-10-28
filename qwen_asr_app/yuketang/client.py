@@ -154,7 +154,9 @@ class YuketangSession:
         self.requests += 1
         response = self.context.request.get(url, headers=headers or {}, timeout=30_000, max_redirects=0)
         status = response.status
-        if status in (401, 403) and url.startswith(HOST) and "/userinfo" in url:
+        if status == 401 and (url.startswith(HOST) or url.startswith(EXAM_HOST)):
+            raise LoginRequired("雨课堂登录已过期，请重新扫码登录")
+        if status == 403 and url.startswith(HOST) and "/userinfo" in url:
             raise LoginRequired("雨课堂登录已过期，请重新扫码登录")
         if status >= 300 and status < 400:
             raise LoginRequired("雨课堂要求重新登录")
@@ -169,12 +171,13 @@ class YuketangSession:
 
     def download(self, url: str) -> bytes:
         from urllib.parse import urlsplit
-        host = urlsplit(url).hostname or ""
-        if not any(host.endswith(suffix) for suffix in ALLOWED_IMAGE_HOSTS):
+        parts = urlsplit(url)
+        host = parts.hostname or ""
+        if parts.scheme != "https" or not any(host == suffix.lstrip(".") or host.endswith(suffix) for suffix in ALLOWED_IMAGE_HOSTS):
             raise ValueError(f"拒绝下载非雨课堂域名的图片：{host}")
         self._pace()
         self.requests += 1
-        response = self.context.request.get(url, timeout=60_000)
+        response = self.context.request.get(url, timeout=60_000, max_redirects=0)
         if response.status >= 400:
             raise RuntimeError(f"图片下载失败 HTTP {response.status}")
         body = response.body()
