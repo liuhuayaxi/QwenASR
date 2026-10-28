@@ -41,7 +41,7 @@ export function questionHtml(q, url = image => imageUrl(q, image), {label = ''} 
   const body = q.body || q.vision?.text || (q.images?.length ? '（图片题，见下方图片）' : '');
   const options = (q.options || []).map(o => `<li><b>${esc(o.key)}</b> ${mathText(o.value)}</li>`).join('');
   const answer = (q.answer || []).join('、') || q.vision?.answer_text || '';
-  const images = (q.images || []).filter(image => image.path).map(image => `<img loading="lazy" alt="${esc(image.kind === 'remark' ? '参考答案图片' : '题目图片')}" src="${esc(url(image))}">`).join('');
+  const images = (q.images || []).filter(image => image.path && image.kind !== 'student').map(image => `<img loading="lazy" alt="${esc(image.kind === 'remark' ? '参考答案图片' : '题目图片')}" data-yuketang-src="${esc(url(image))}">`).join('');
   return `<article class="ykt-question">
     <header>${label ? `<span class="ykt-hit-label">${esc(label)}</span> ` : ''}<span class="count-badge">${esc(q.source_label)}</span> <b>${esc(q.activity_title)}</b> <span class="muted">${esc(q.date || '')}${q.page ? ` · 第 ${esc(q.page)} 页` : ''} · ${esc(q.type_text)}</span> ${mark}</header>
     <p class="ykt-body">${mathText(body)}</p>${options ? `<ul class="ykt-options">${options}</ul>` : ''}
@@ -101,4 +101,20 @@ export function syncText(rooms = []) {
   }
   if (!success) return latest ? '从未成功同步' : '从未同步';
   return `上次同步 ${formatTime(success)}`;
+}
+
+
+export async function hydrateImages(root) {
+  const images = [...(root || document).querySelectorAll('img[data-yuketang-src]')];
+  await Promise.all(images.map(async image => {
+    const source = image.getAttribute('data-yuketang-src');
+    try {
+      const response = await fetch(source, {headers: {'X-QwenASR-Client': 'course-files'}, cache: 'no-store'});
+      if (!response.ok) throw new Error(String(response.status));
+      image.src = URL.createObjectURL(await response.blob());
+      image.removeAttribute('data-yuketang-src');
+    } catch {
+      image.remove();
+    }
+  }));
 }
