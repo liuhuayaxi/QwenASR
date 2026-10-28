@@ -83,6 +83,11 @@ def html_text(value: Any) -> str:
     return text.strip()
 
 
+def has_meaningful_text(value: Any) -> bool:
+    """Whether HTML-to-text output contains text beyond the image marker."""
+    return bool(re.sub(r"\[图片\]", "", str(value or "")).strip())
+
+
 def ms_to_local(value: Any) -> tuple[str, str]:
     try:
         stamp = float(value)
@@ -319,7 +324,7 @@ def parse_exam(activity: dict[str, Any], classroom_id: Any, paper_payload: Any,
             ref = image_ref("body", url)
             if ref:
                 question["images"].append(ref)
-        question["needs_vision"] = not question["body"] and bool(question["images"])
+        question["needs_vision"] = not has_meaningful_text(question["body"]) and bool(question["images"])
         questions.append(question)
     return questions
 
@@ -367,7 +372,7 @@ def parse_quiz(activity: dict[str, Any], classroom_id: Any, result_payload: Any,
                 ref = image_ref("body", item.get("URL") or item.get("url"))
                 if ref:
                     question["images"].append(ref)
-        question["needs_vision"] = not question["body"] and bool(question["images"])
+        question["needs_vision"] = not has_meaningful_text(question["body"]) and bool(question["images"])
         questions.append(question)
     return questions
 
@@ -461,7 +466,7 @@ def parse_lesson(activity: dict[str, Any], classroom_id: Any, detail_payload: An
             question["has_remark_images"] = True
         # The slide image is the only record of a subjective prompt and of any
         # figure not present in the structured body.
-        question["needs_vision"] = bool(slide) and (not body or kind == "subjective" or bool(rich.get("shapes")))
+        question["needs_vision"] = bool(slide) and (not has_meaningful_text(body) or kind == "subjective" or bool(rich.get("shapes")))
         questions.append(question)
     return questions
 
@@ -510,7 +515,7 @@ def parse_cards(activity: dict[str, Any], classroom_id: Any, detlist_payload: An
         slide_ref = image_ref("slide", slide.get("Cover"))
         if slide_ref:
             question["images"].append(slide_ref)
-        question["needs_vision"] = not question["body"] and bool(slide_ref)
+        question["needs_vision"] = not has_meaningful_text(question["body"]) and bool(slide_ref)
         questions.append(question)
     return questions
 
