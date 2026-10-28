@@ -28,7 +28,7 @@ from typing import Any, Iterable
 
 from ..durable import atomic_bytes, atomic_json
 from ..paths import PRIVATE_ROOT
-from .parsing import search_text
+from .parsing import search_text, strip_url
 
 _LOCK = threading.RLock()
 CLASSROOM_ID = re.compile(r"^\d{1,15}$")
@@ -51,6 +51,19 @@ def _read(path: Path, default: Any) -> Any:
         return default
     except (OSError, ValueError):
         return default
+
+
+def _redact_raw(value: Any) -> Any:
+    """Keep local diagnostics useful without retaining signed image URLs."""
+    if isinstance(value, dict):
+        return {key: _redact_raw(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_raw(item) for item in value]
+    if isinstance(value, str):
+        if value.startswith(("http://", "https://")):
+            return strip_url(value)
+        return re.sub(r"([?&](?:token|auth_key|signature|e)=[^&\s]+)", "", value)
+    return value
 
 
 def safe_name(value: Any) -> str:
@@ -193,7 +206,7 @@ class BankStore:
         return [_read(path, {}) for path in sorted(folder.glob("*.json"))] if folder.is_dir() else []
 
     def save_raw(self, cid: Any, activity_id: Any, name: str, payload: Any) -> None:
-        atomic_json(self.classroom_dir(cid) / "raw" / safe_name(activity_id) / f"{safe_name(name)}.json", payload)
+        atomic_json(self.classroom_dir(cid) / "raw" / safe_name(activity_id) / f"{safe_name(name)}.json", _redact_raw(payload))
 
     def raw(self, cid: Any, activity_id: Any, name: str) -> Any:
         return _read(self.classroom_dir(cid) / "raw" / safe_name(activity_id) / f"{safe_name(name)}.json", None)
