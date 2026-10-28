@@ -1,7 +1,7 @@
 // 雨课堂习题 panel on the course page: bind via dropdown, one-click sync,
 // optional question browser. Talks only to /api/yuketang.
 import {createVisiblePoll} from './visible-poll.js';
-import {esc, countsText, questionHtml, headerLine, bindView, currentCategory} from './yuketang-render.js?v=20261022-ykt-4';
+import {esc, countsText, questionHtml, headerLine, bindView, currentCategory, hydrateImages} from './yuketang-render.js?v=20261022-ykt-4';
 
 const $ = id => document.getElementById(id);
 const STATUS = {running: '进行中', completed: '已完成', failed: '失败', login_required: '需要登录', interrupted: '已中断'};
@@ -9,7 +9,7 @@ const KIND = {sync: '同步', login: '登录', transcribe: '图片转写', cours
 const state = {category: '', status: null, courses: {courses: []}, rebinding: false, searchTimer: null, loaded: ''};
 
 async function api(path, body) {
-  const options = body === undefined ? {cache: 'no-store'} : {method: 'POST', headers: {'Content-Type': 'application/json', 'X-QwenASR-Client': 'course-files'}, body: JSON.stringify(body)};
+  const options = body === undefined ? {cache: 'no-store', headers: {'X-QwenASR-Client': 'course-files'}} : {method: 'POST', headers: {'Content-Type': 'application/json', 'X-QwenASR-Client': 'course-files'}, body: JSON.stringify(body)};
   const response = await fetch(path, options);
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : `请求失败（${response.status}）`);
@@ -70,6 +70,7 @@ async function loadQuestions(force = false) {
   try {
     const data = await api(`/api/yuketang/questions?${params}`);
     $('ykt-questions').innerHTML = (data.questions || []).map(q => questionHtml(q)).join('') || '<p class="muted">没有符合条件的题目。</p>';
+    await hydrateImages($('ykt-questions'));
   } catch (error) { $('ykt-questions').innerHTML = `<p class="notice error">${esc(error.message)}</p>`; }
 }
 
