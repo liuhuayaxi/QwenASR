@@ -6,9 +6,11 @@ const fields = {
 export function createMineruSettings({root = document, fetcher = fetch} = {}) {
   const get = id => root.querySelector(`#${id}`);
   const status = get('mineruSettingsStatus'), save = get('saveMineruSettings'), reset = get('resetMineruSettings');
-  let ready = false, loading = null, saving = false, defaults, revision = 0;
+  let ready = false, loading = null, saving = false, defaults, autoTierSupported = false, revision = 0;
   function controls() {
     const tier = get('mineruTier').value;
+    const autoOption = get('mineruTier').querySelector('option[value="auto"]');
+    if (autoOption) autoOption.disabled = !autoTierSupported;
     const vlm = ['standard','advanced','auto'].includes(tier);
     for (const id of Object.values(fields)) get(id).disabled = !ready || !!loading || (!vlm && ['mineruVlmEngine','mineruConcurrency'].includes(id));
     save.disabled = reset.disabled = !ready || !!loading || saving;
@@ -37,6 +39,11 @@ export function createMineruSettings({root = document, fetcher = fetch} = {}) {
   });
   save.addEventListener('click', async () => {
     if (!ready || loading || saving) return;
+    if (get('mineruTier').value === 'auto' && !autoTierSupported) {
+      status.textContent = '当前后端尚未支持自动档，请先重启并更新工作台后再使用';
+      get('mineruTier').focus();
+      return;
+    }
     const settings = {};
     for (const [key, id] of Object.entries(fields)) {
       const field = get(id);
@@ -67,7 +74,15 @@ export function createMineruSettings({root = document, fetcher = fetch} = {}) {
         const response = await fetcher('/api/mineru/settings', {cache:'no-store', signal:AbortSignal.timeout(30000)});
         const data = await response.json();
         if (!response.ok) throw new Error(data.detail || '读取失败');
-        defaults = data.defaults; populate(data.settings); runtime(data.runtime); ready = true; status.textContent = '配置已读取';
+        defaults = data.defaults;
+        autoTierSupported = Array.isArray(data.tier_choices) && data.tier_choices.includes('auto');
+        const settings = {...data.settings};
+        if (!autoTierSupported && settings.tier === 'auto') {
+          settings.tier = defaults?.tier === 'advanced' ? 'advanced' : 'standard';
+          status.textContent = '当前后端尚未支持自动档，已暂时使用兼容档位；更新后端并重启后可启用自动档';
+        }
+        populate(settings); runtime(data.runtime); ready = true;
+        if (!status.textContent) status.textContent = '配置已读取';
       } catch (error) { ready = false; status.textContent = `读取失败：${error.message}。重新打开设置可重试。`; }
       finally { loading = null; controls(); }
     })();

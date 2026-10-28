@@ -72,7 +72,7 @@ from qwen_asr_app.model_runtime import ModelManager
 from qwen_asr_app.ai_activity import track_ai_activity, task_ai_activity
 from qwen_asr_app.request_security import websocket_origin_allowed, http_request_allowed
 from qwen_asr_app.pdf_ai import find_mineru_binary
-from qwen_asr_app.mineru_settings import mineru_settings, runtime_info, DEFAULT_MINERU_SETTINGS
+from qwen_asr_app.mineru_settings import mineru_settings, runtime_info, DEFAULT_MINERU_SETTINGS, CHOICES
 from qwen_asr_app.pdf_jobs import PDFJobs
 from qwen_asr_app.task_center import task_center_router
 from qwen_asr_app.course_file_routes import CourseFileAPI
@@ -380,6 +380,7 @@ async def get_ai_settings():
 async def get_mineru_settings():
     try:
         return {"settings": mineru_settings.read(), "defaults": DEFAULT_MINERU_SETTINGS,
+                "tier_choices": CHOICES["tier"],
                 "runtime": runtime_info(find_mineru_binary())}
     except (OSError, ValueError) as exc:
         raise HTTPException(500, "本机 MinerU 配置读取失败，未用默认值覆盖") from exc
