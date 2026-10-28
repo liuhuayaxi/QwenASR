@@ -161,6 +161,8 @@ class ClassroomSync:
             if str(question.get("activity_id")) != str(activity_id):
                 continue
             for image in question.get("images") or []:
+                if image.get("kind") == "student":
+                    continue
                 if image.get("source") and not image.get("path"):
                     return True
                 if image.get("path"):
