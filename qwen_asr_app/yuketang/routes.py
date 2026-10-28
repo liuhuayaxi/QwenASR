@@ -19,7 +19,8 @@ def yuketang_router(service: YuketangService, guard: Callable[[Request], None], 
         return category
 
     @router.get("/status")
-    def status(category: str | None = Query(None)) -> dict[str, Any]:
+    def status(request: Request, category: str | None = Query(None)) -> dict[str, Any]:
+        guard(request)
         return service.status(known(category) if category else None)
 
     @router.post("/bind")
@@ -53,7 +54,8 @@ def yuketang_router(service: YuketangService, guard: Callable[[Request], None], 
             raise HTTPException(409, str(exc)) from exc
 
     @router.get("/courses")
-    def courses(category: str | None = Query(None)) -> dict[str, Any]:
+    def courses(request: Request, category: str | None = Query(None)) -> dict[str, Any]:
+        guard(request)
         return service.courses(known(category) if category else None)
 
     @router.post("/courses/refresh")
@@ -86,15 +88,17 @@ def yuketang_router(service: YuketangService, guard: Callable[[Request], None], 
         return {"stopping": service.running}
 
     @router.get("/questions")
-    def questions(category: str = Query(...), q: str = Query(""), source: str = Query(""),
+    def questions(request: Request, category: str = Query(...), q: str = Query(""), source: str = Query(""),
                   limit: int = Query(200), mode: str = Query("filter")) -> dict[str, Any]:
+        guard(request)
         category = known(category)
         # mode=rank serves the course 检索 box (natural-language query).
         items = service.store.search_ranked(category, q, limit) if mode == "rank" else service.store.search(category, q, source, limit)
         return {"category": category, "questions": items, "counts": service.store.counts(service.store.course_questions(category))}
 
     @router.get("/image/{classroom_id}/{path:path}")
-    def image(classroom_id: str, path: str) -> FileResponse:
+    def image(request: Request, classroom_id: str, path: str) -> FileResponse:
+        guard(request)
         try:
             return FileResponse(service.store.image_path(classroom_id, path), headers={"Cache-Control": "private, max-age=86400"})
         except (FileNotFoundError, ValueError) as exc:
