@@ -387,8 +387,10 @@ async def _yuketang_questions(record: RecordingRecord, source_blocks: list[dict[
         transcript = "\n".join(str(block.get("text") or "") for block in source_blocks)
         return await asyncio.to_thread(questions_for_record, record, transcript=transcript)
     except Exception as exc:
-        logger.warning("Yuketang question retrieval skipped recording=%s: %s", getattr(record, "id", ""), exc)
-        return []
+        logger.exception("Yuketang question retrieval failed recording=%s", getattr(record, "id", ""))
+        # A bound classroom with a retrieval error must not silently produce a
+        # note that violates the one-question-not-missed guarantee.
+        raise RuntimeError("雨课堂题库读取失败，未生成笔记以免漏题") from exc
 
 
 async def build_note_summary(
