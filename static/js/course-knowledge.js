@@ -3,7 +3,7 @@
  * Follows the QwenASR knowledge development contract.
  */
 
-import { questionHtml } from "./yuketang-render.js?v=20261022-ykt-4";
+import { questionHtml, hydrateImages } from "./yuketang-render.js?v=20261022-ykt-4";
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -36,7 +36,7 @@ function stamp(seconds) {
 }
 
 async function api(url, options = {}) {
-  const response = await fetch(url, { cache: "no-store", ...options });
+  const response = await fetch(url, { cache: "no-store", headers: {"X-QwenASR-Client": "course-files", ...(options.headers || {})}, ...options });
   let payload = null;
   try {
     payload = await response.json();
@@ -196,6 +196,7 @@ export function initCourseKnowledge() {
       box.className = "ykt-hits knowledge-results-list";
       box.setAttribute("aria-label", "雨课堂习题检索结果");
       box.innerHTML = yuketangHitsHtml(yuketangHits.hits, yuketangHits.cross);
+      void hydrateImages(box);
       els.resultsList.before(box);
     }
 
