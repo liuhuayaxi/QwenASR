@@ -447,8 +447,9 @@ def parse_lesson(activity: dict[str, Any], classroom_id: Any, detail_payload: An
         correct = None
         if kind in {"single", "multiple", "judge", "fill_blank"} and graded and correct_flag in (0, 1, True, False):
             correct = bool(correct_flag)
-        if isinstance(mine.get("correct"), bool) and kind != "subjective":
-            correct = mine["correct"]
+        parsed_correct = bool_value(mine.get("correct"))
+        if parsed_correct is not None and kind != "subjective":
+            correct = parsed_correct
         answer = answer_list(content.get("answer"))
         if not answer and correct is True and student:
             answer = list(student)
