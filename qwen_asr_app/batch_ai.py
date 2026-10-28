@@ -450,12 +450,16 @@ async def _build_text_note_summary(
     yuketang_questions = await _yuketang_questions(record, source_blocks)
     if yuketang_questions:
         chunk_config['_yuketang_questions'] = yuketang_questions
+    # Keep the question bank out of chunk planning; it is appended after
+    # all chunks are merged and must not be repeated in every request.
+    chunk_config['_yuketang_appendix_only'] = True
     window = context_window_for(chunk_config, 'summary')
     chunks = note_summary_chunks(blocks, chunk_config)
     if not chunks:
         raise ValueError('录音还没有可用于生成总结的转写内容')
     chunk_config['_detailed_chunk'] = len(chunks)>1
     chunk_config['_full_note'] = len(chunks)==1
+    chunk_config['_yuketang_appendix_only'] = len(chunks)>1
     # Low verbosity is appropriate for the library abstract, not lecture notes.
     provider = chunk_config.setdefault("ai", {}).setdefault("summary_provider", {})
     extra = provider.get("extra_params")
