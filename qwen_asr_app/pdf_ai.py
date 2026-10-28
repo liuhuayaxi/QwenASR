@@ -198,14 +198,28 @@ def convert_pdf_to_ai(
             runtime_python = first_line.removeprefix("#!").strip()
             if not Path(runtime_python).is_file():
                 raise RuntimeError("MinerU 启动脚本没有有效的 Python 解释器")
-            _run_mineru(
+            mineru_output_log = _run_mineru(
                 [runtime_python, str(builder_script.parent / "run_mineru4.py"),
                  str(source), "-o", str(mineru_output), "--settings", str(settings_path)],
                 work / "mineru.log", report, stop,
             )
-            return {"metrics": {"mineru_version": info.get("version", ""), "tier": settings["tier"],
-                                "configured_vlm_engine": settings["vlm_engine"],
-                                "parse_seconds_including_load": time.monotonic() - started}}
+            effective_tier = settings["tier"]
+            strategy = None
+            for line in mineru_output_log.splitlines():
+                if line.startswith("{") and '"effective_tier"' in line:
+                    try:
+                        detail = json.loads(line)
+                        effective_tier = detail.get("effective_tier") or effective_tier
+                        strategy = detail.get("strategy")
+                    except (TypeError, ValueError):
+                        pass
+            metrics = {"mineru_version": info.get("version", ""), "tier": effective_tier,
+                       "requested_tier": settings["tier"],
+                       "configured_vlm_engine": settings["vlm_engine"],
+                       "parse_seconds_including_load": time.monotonic() - started}
+            if strategy is not None:
+                metrics["tier_strategy"] = strategy
+            return {"metrics": metrics}
         def local_parse():
             with local_guard or contextlib.nullcontext():
                 return compute_local()

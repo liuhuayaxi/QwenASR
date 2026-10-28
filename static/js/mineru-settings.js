@@ -8,10 +8,13 @@ export function createMineruSettings({root = document, fetcher = fetch} = {}) {
   const status = get('mineruSettingsStatus'), save = get('saveMineruSettings'), reset = get('resetMineruSettings');
   let ready = false, loading = null, saving = false, defaults, revision = 0;
   function controls() {
-    const vlm = ['standard','advanced'].includes(get('mineruTier').value);
+    const tier = get('mineruTier').value;
+    const vlm = ['standard','advanced','auto'].includes(tier);
     for (const id of Object.values(fields)) get(id).disabled = !ready || !!loading || (!vlm && ['mineruVlmEngine','mineruConcurrency'].includes(id));
     save.disabled = reset.disabled = !ready || !!loading || saving;
-    get('mineruTierHint').textContent = '';
+    get('mineruTierHint').textContent = tier === 'auto'
+      ? '原生文字层完整的 PPT 走 Standard；扫描件或视觉元素密集的页面走 Advanced。'
+      : '';
   }
   const populate = settings => {
     for (const [key, id] of Object.entries(fields)) {
