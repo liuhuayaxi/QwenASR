@@ -9,6 +9,7 @@ When the configured summary provider has no vision channel the questions stay
 from __future__ import annotations
 
 import asyncio
+import asyncio
 import hashlib
 import json
 from pathlib import Path
@@ -90,8 +91,9 @@ async def transcribe_classroom(store: BankStore, cid: Any, *, limit: int | None 
         try:
             for start in range(0, len(images), BATCH):
                 batch = images[start:start + BATCH]
-                missing, entries = [], []
-                for image in batch:
+                missing = []
+                ordered = [None] * len(batch)
+                for position, image in enumerate(batch):
                     path = store.image_path(cid, image["path"])
                     image_hash = str(image.get("sha256") or hashlib.sha256(path.read_bytes()).hexdigest())
                     image["sha256"] = image_hash
@@ -102,23 +104,24 @@ async def transcribe_classroom(store: BankStore, cid: Any, *, limit: int | None 
                         value = None
                     if (isinstance(value, dict) and value.get("cache_version") == VISION_CACHE_VERSION
                             and value.get("image_hash") == image_hash):
-                        readings.append({**value, "kind": image.get("kind")})
+                        ordered[position] = {**value, "kind": image.get("kind")}
                     else:
-                        missing.append((image, cached))
+                        missing.append((position, image, cached))
                 if not missing:
+                    readings.extend(ordered)
                     continue
-                paths = [str(store.image_path(cid, image["path"])) for image, _ in missing]
+                paths = [str(store.image_path(cid, image["path"])) for _, image, _ in missing]
                 # The image paths are passed to the local AGY bridge separately;
                 # never put absolute user/project paths into the model prompt.
                 manifest = [{"image_id": f"img{index}", "kind": image.get("kind")}
-                            for index, (image, _) in enumerate(missing)]
+                            for index, (_, image, _) in enumerate(missing)]
                 context = {"question": {k: question.get(k) for k in ("activity_title", "type_text", "body", "options", "page")},
                            "images": manifest}
                 result = await request(INSTRUCTIONS + "\n" + json.dumps(context, ensure_ascii=False), folder, paths)
                 by_id = {str(item.get("image_id")): item for item in (result or {}).get("images", []) if isinstance(item, dict)}
                 if set(by_id) != {entry["image_id"] for entry in manifest}:
                     raise ValueError("图片转写回执与图片清单不一致")
-                for entry, (image, cached) in zip(manifest, missing):
+                for entry, (position, image, cached) in zip(manifest, missing):
                     text = by_id[entry["image_id"]].get("text")
                     answer_text = by_id[entry["image_id"]].get("answer_text")
                     if not isinstance(text, str) or not isinstance(answer_text, str):
@@ -128,7 +131,8 @@ async def transcribe_classroom(store: BankStore, cid: Any, *, limit: int | None 
                              "cache_version": VISION_CACHE_VERSION, "image_hash": image.get("sha256"),
                              "at": now_iso()}
                     atomic_json(cached, value)
-                    readings.append({**value, "kind": image.get("kind")})
+                    ordered[position] = {**value, "kind": image.get("kind")}
+                readings.extend(ordered)
             text = "\n".join(r["text"] for r in readings if r.get("kind") != "remark" and r.get("text"))
             answer_text = "\n".join(filter(None, [*(r.get("answer_text") for r in readings),
                                                   *(r.get("text") for r in readings if r.get("kind") == "remark")]))

@@ -217,6 +217,10 @@ def fit(items: list[dict[str, Any]], budget: int = MAX_CONTEXT_CHARS) -> list[di
                         break
             if not changed:
                 break
+    # If even the minimal marker list does not fit, omit the model-facing
+    # block. The full deterministic appendix remains unchanged and complete.
+    if sum(_size(item) for item in forced) > budget:
+        return []
     result, used = list(forced), sum(_size(item) for item in forced)
     for item in optional:
         if _size(item) > 2500:
@@ -391,11 +395,31 @@ def questions_for_record(record: Any, *, store: BankStore | None = None, transcr
     questions = store.course_questions(category)
     if not questions:
         return []
-    _, forced = forced_for_record(record, store, category)
+    lesson, forced = forced_for_record(record, store, category)
+    # Never fall back to a recent question from a different classroom when
+    # there is no actual lesson matched to this recording.
+    if lesson is None:
+        return []
     chosen = list(forced)
     forced_ids = {str(question.get("id")) for question in forced}
     lecture_day = lecture_date(metadata)
-    remaining = [question for question in questions if str(question.get("id")) not in forced_ids]
+    # Other lessons held on the same date are not optional exercises for this
+    # recording. Only nearby tests and courseware with lexical evidence may
+    # join the mandatory questions of the matched lesson.
+    transcript_terms = _tokens(str(transcript or ""))
+    remaining = []
+    for question in questions:
+        if str(question.get("id")) in forced_ids:
+            continue
+        if str(question.get("classroom_id") or lesson["classroom_id"]) != lesson["classroom_id"]:
+            continue
+        if question.get("source") not in {"exam", "courseware"}:
+            continue
+        terms = _tokens(question_text(question))
+        overlap = len(terms & transcript_terms)
+        if not transcript_terms or (overlap < 3 and overlap / max(8, len(terms)) < 0.25):
+            continue
+        remaining.append(question)
     optional_limit = min(MAX_OPTIONAL, max(0, int(limit) - len(forced)))
     if optional_limit:
         chosen.extend(rank(remaining, lecture_day=lecture_day, transcript=str(transcript or ""),

@@ -135,7 +135,10 @@ async def generate_fast(record, config):
         if found['learning_requirements']:
             payload['learning_requirements'] = note_prompts.requirement_items(scope)
         if questions:
-            payload['yuketang_questions'] = questions
+            # Full questions remain available to the deterministic appendix;
+            # only the bounded copy is sent to the model.
+            from .yuketang.retrieval import fit as fit_yuketang
+            payload['yuketang_questions'] = fit_yuketang(questions)
         try:
             try:
                 markdown = await request_ai_text(instructions=instructions, payload=payload, config=_writer_config(config), mode='summary', max_output_tokens=32768)

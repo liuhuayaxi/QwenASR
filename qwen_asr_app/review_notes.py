@@ -1088,9 +1088,10 @@ async def generate(record, config):
         payload['coverage']={**plan,'figures':[{'source_id':i['source_id'],'page':i['page'],'path':i['path'],'concept':i['concept']} for i in images]}
         instructions=TEACHING+'\n'+str(config.get('_note_summary_system_prompt') or '')+'\n'+str(config.get('_note_summary_custom_prompt') or '')+review_scope.instructions(scope)
         if yuketang_questions:
-            from .yuketang.retrieval import instructions as yuketang_instructions
-            # 雨课堂题库: same-lesson in-class problems first, then nearby tests.
-            payload['yuketang_questions']=yuketang_questions
+            from .yuketang.retrieval import instructions as yuketang_instructions, fit as fit_yuketang
+            # The deterministic appendix uses the full bank, but model input
+            # must stay bounded regardless of the number of forced exercises.
+            payload['yuketang_questions']=fit_yuketang(yuketang_questions)
             instructions+=yuketang_instructions(write_section=True)
         if draft_path.exists():markdown=draft_path.read_text()
         else:
