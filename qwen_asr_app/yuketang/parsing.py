@@ -171,6 +171,19 @@ def _num(value: Any) -> float | None:
         return None
 
 
+def bool_value(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    text = str(value or "").strip().lower()
+    if text in {"true", "yes", "correct", "对"}:
+        return True
+    if text in {"false", "no", "wrong", "错"}:
+        return False
+    return None
+
+
 def sort_choice(values: list[str]) -> list[str]:
     return sorted(values) if all(len(value) == 1 and value.isalpha() for value in values) else values
 
@@ -318,7 +331,7 @@ def parse_exam(activity: dict[str, Any], classroom_id: Any, paper_payload: Any,
         question["answer_known"] = bool(answer)
         if result:
             question["student_answer"] = sort_choice(answer_list(result.get("result")))
-            question["correct"] = result.get("correct") if isinstance(result.get("correct"), bool) else None
+            question["correct"] = bool_value(result.get("correct"))
             question["score"] = _num(result.get("grade"))
         for url in html_images(problem.get("Body")):
             ref = image_ref("body", url)
@@ -361,7 +374,7 @@ def parse_quiz(activity: dict[str, Any], classroom_id: Any, result_payload: Any,
             answer=sort_choice(answer), answer_known=bool(answer),
             remark=html_text(shape.get("Remark")),
             student_answer=answer_list(entry.get("result")),
-            correct=entry.get("correct") if isinstance(entry.get("correct"), bool) else None,
+            correct=bool_value(entry.get("correct")),
             score=_num(entry.get("score")),
             max_score=_num(shape.get("Score")),
         )
@@ -507,7 +520,7 @@ def parse_cards(activity: dict[str, Any], classroom_id: Any, detlist_payload: An
             remark=html_text(problem.get("Remark")),
             max_score=_num(problem.get("Score")),
             student_answer=answer_list(result.get("result") or result.get("answer")),
-            correct=result.get("correct") if isinstance(result.get("correct"), bool) else None,
+            correct=bool_value(result.get("correct")),
             score=_num(result.get("score") if result.get("score") is not None else result.get("grade")),
         )
         if kind in {"single", "multiple", "judge"}:
