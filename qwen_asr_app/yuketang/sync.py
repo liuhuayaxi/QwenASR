@@ -14,13 +14,14 @@ from urllib.parse import urlsplit
 
 from . import parsing
 from .client import EXAM_HEADERS, EXAM_HOST, HOST, LoginRequired, classroom_headers
-from .store import BankStore, now_iso
+from .store import BankStore, now_iso, safe_name
 
 PAGE_SIZE = 20
 MAX_PAGES = 100
 # Re-check recent lessons whose subjective answers were not graded yet, and
 # exams whose answers were not yet released, at most this often.
 RECHECK_HOURS = 12
+COMPLETE_RECHECK_HOURS = 24 * 7
 RETRY_DELAY = 3.0
 RECENT_LESSON_DAYS = 30
 
@@ -120,14 +121,43 @@ class ClassroomSync:
             if state.get("status") in {"pending", "ungraded"} and state.get("fingerprint") == fingerprint:
                 return self._stale(state)
             return True
+        if state.get("status") == "complete":
+            # Activity metadata does not include the full paper.  Re-read a
+            # completed activity weekly so teacher edits eventually become
+            # visible without turning every note/sync into a full crawl.
+            return self._stale(state, COMPLETE_RECHECK_HOURS) or self._images_missing(state)
         return False
 
-    def _stale(self, state: dict[str, Any]) -> bool:
+    def _stale(self, state: dict[str, Any], hours: float = RECHECK_HOURS) -> bool:
         try:
             checked = datetime.fromisoformat(str(state.get("checked_at")))
         except ValueError:
             return True
-        return datetime.now(checked.tzinfo) - checked >= timedelta(hours=RECHECK_HOURS)
+        return datetime.now(checked.tzinfo) - checked >= timedelta(hours=hours)
+
+    def _images_missing(self, state: dict[str, Any]) -> bool:
+        activity_id = (state.get("activity") or {}).get("id")
+        if activity_id is None:
+            return False
+        question_file = self.store.classroom_dir(self.cid) / "questions" / f"{safe_name(activity_id)}.json"
+        if not question_file.is_file():
+            return True
+        questions = [question for question in self.store.questions(self.cid)
+                     if str(question.get("activity_id")) == str(activity_id)]
+        if state.get("question_count") is not None and len(questions) != int(state.get("question_count") or 0):
+            return True
+        for question in questions:
+            if str(question.get("activity_id")) != str(activity_id):
+                continue
+            for image in question.get("images") or []:
+                if image.get("source") and not image.get("path"):
+                    return True
+                if image.get("path"):
+                    try:
+                        self.store.image_path(self.cid, image["path"])
+                    except FileNotFoundError:
+                        return True
+        return False
 
     def classroom_info(self) -> dict[str, Any]:
         info = self.store.classroom(self.cid)
@@ -245,7 +275,8 @@ class ClassroomSync:
                     "exam_cover": cover if cover.get("errcode") in (0, None) else None}
         # The exam host keeps one open paper per browser session; a token from
         # an earlier exam answers 10006, so open this one first, like the UI.
-        self.session.open_exam(self.cid, exam_id)
+        if not self.session.open_exam(self.cid, exam_id):
+            return None
         return fetch()
 
     def import_quiz(self, activity: dict[str, Any]) -> tuple[str, int, dict[str, Any]]:
