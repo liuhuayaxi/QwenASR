@@ -9,6 +9,7 @@ When the configured summary provider has no vision channel the questions stay
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, Callable
@@ -17,6 +18,8 @@ from ..durable import atomic_json
 from .store import BankStore, now_iso
 
 BATCH = 4
+VISION_CACHE_VERSION = "yuketang-vision-v2"
+MAX_TRANSCRIPTION_CHARS = 12_000
 INSTRUCTIONS = (
     "你在整理学生本人的雨课堂习题图片，用于本地复习题库。逐张查看图片，完整转写题目文字："
     "题干、全部选项、已知数据、图中的公式（使用 LaTeX，行内 $...$）以及图表要点。"
@@ -29,11 +32,16 @@ INSTRUCTIONS = (
 def pending(store: BankStore, cid: Any) -> list[tuple[dict[str, Any], list[dict[str, Any]]]]:
     result = []
     for question in store.questions(cid):
-        if not question.get("needs_vision") or (question.get("vision") or {}).get("status") == "done":
+        if not question.get("needs_vision"):
             continue
         images = [image for image in question.get("images") or []
                   if image.get("path") and image.get("kind") in {"slide", "body", "remark"}]
         if images:
+            current = sorted(str(image.get("sha256") or image.get("path")) for image in images)
+            vision = question.get("vision") or {}
+            if (vision.get("status") == "done" and vision.get("cache_version") == VISION_CACHE_VERSION
+                    and sorted(vision.get("image_hashes") or []) == current):
+                continue
             result.append((question, images))
     return result
 
@@ -84,16 +92,26 @@ async def transcribe_classroom(store: BankStore, cid: Any, *, limit: int | None 
                 batch = images[start:start + BATCH]
                 missing, entries = [], []
                 for image in batch:
-                    cached = cache / f"{image.get('sha256') or Path(image['path']).name}.json"
-                    if cached.is_file():
-                        readings.append({**json.loads(cached.read_text()), "kind": image.get("kind")})
+                    path = store.image_path(cid, image["path"])
+                    image_hash = str(image.get("sha256") or hashlib.sha256(path.read_bytes()).hexdigest())
+                    image["sha256"] = image_hash
+                    cached = cache / f"{image_hash}.json"
+                    try:
+                        value = json.loads(cached.read_text(encoding="utf-8")) if cached.is_file() else None
+                    except (OSError, ValueError, TypeError):
+                        value = None
+                    if (isinstance(value, dict) and value.get("cache_version") == VISION_CACHE_VERSION
+                            and value.get("image_hash") == image_hash):
+                        readings.append({**value, "kind": image.get("kind")})
                     else:
                         missing.append((image, cached))
                 if not missing:
                     continue
                 paths = [str(store.image_path(cid, image["path"])) for image, _ in missing]
-                manifest = [{"image_id": f"img{index}", "kind": image.get("kind"), "path": path}
-                            for index, ((image, _), path) in enumerate(zip(missing, paths))]
+                # The image paths are passed to the local AGY bridge separately;
+                # never put absolute user/project paths into the model prompt.
+                manifest = [{"image_id": f"img{index}", "kind": image.get("kind")}
+                            for index, (image, _) in enumerate(missing)]
                 context = {"question": {k: question.get(k) for k in ("activity_title", "type_text", "body", "options", "page")},
                            "images": manifest}
                 result = await request(INSTRUCTIONS + "\n" + json.dumps(context, ensure_ascii=False), folder, paths)
@@ -101,16 +119,23 @@ async def transcribe_classroom(store: BankStore, cid: Any, *, limit: int | None 
                 if set(by_id) != {entry["image_id"] for entry in manifest}:
                     raise ValueError("图片转写回执与图片清单不一致")
                 for entry, (image, cached) in zip(manifest, missing):
-                    value = {"text": str(by_id[entry["image_id"]].get("text") or "").strip(),
-                             "answer_text": str(by_id[entry["image_id"]].get("answer_text") or "").strip(),
+                    text = by_id[entry["image_id"]].get("text")
+                    answer_text = by_id[entry["image_id"]].get("answer_text")
+                    if not isinstance(text, str) or not isinstance(answer_text, str):
+                        raise ValueError("图片转写回执字段类型不正确")
+                    value = {"text": text.strip()[:MAX_TRANSCRIPTION_CHARS],
+                             "answer_text": answer_text.strip()[:MAX_TRANSCRIPTION_CHARS],
+                             "cache_version": VISION_CACHE_VERSION, "image_hash": image.get("sha256"),
                              "at": now_iso()}
                     atomic_json(cached, value)
                     readings.append({**value, "kind": image.get("kind")})
             text = "\n".join(r["text"] for r in readings if r.get("kind") != "remark" and r.get("text"))
             answer_text = "\n".join(filter(None, [*(r.get("answer_text") for r in readings),
                                                   *(r.get("text") for r in readings if r.get("kind") == "remark")]))
-            store.update_question(cid, question["id"], {"vision": {
-                "status": "done", "text": text, "answer_text": answer_text, "at": now_iso(),
+            store.update_question(cid, question["id"], {"images": images, "vision": {
+                "status": "done", "text": text[:MAX_TRANSCRIPTION_CHARS],
+                "answer_text": answer_text[:MAX_TRANSCRIPTION_CHARS], "cache_version": VISION_CACHE_VERSION,
+                "image_hashes": sorted(str(image.get("sha256") or image.get("path")) for image in images), "at": now_iso(),
                 "model": provider.get("cli_model") or provider.get("model") if provider else "test"}})
             summary["done"] += 1
             progress(f"图片转写 {number}/{len(work)}：{question.get('activity_title')} P{question.get('page') or ''}")
