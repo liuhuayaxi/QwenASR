@@ -74,6 +74,12 @@ class YuketangSession:
     def __enter__(self) -> "YuketangSession":
         sync_playwright = _playwright()
         self.profile_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if self.profile_dir.is_symlink() or not self.profile_dir.is_dir():
+            raise RuntimeError("雨课堂浏览器资料目录必须是普通目录")
+        try:
+            self.profile_dir.chmod(0o700)
+        except OSError as exc:
+            raise RuntimeError("无法将雨课堂浏览器资料目录设为仅当前用户可读") from exc
         self._manager = sync_playwright()
         self._playwright = self._manager.__enter__()
         options = dict(headless=self.headless, viewport={"width": 1280, "height": 860}, locale="zh-CN")
