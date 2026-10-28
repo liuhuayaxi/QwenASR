@@ -20,8 +20,8 @@ from .store import BankStore
 
 MAX_QUESTIONS = 14
 MAX_SAME_DAY = 12
-MAX_OPTIONAL = 0               # no extras: a note only lists its own lesson's questions
-MAX_CONTEXT_CHARS = 14_000     # budget for optional context; forced items always fit
+MAX_OPTIONAL = 8
+MAX_CONTEXT_CHARS = 14_000     # model context budget; full items stay in the appendix
 LESSON_MINUTES = 100           # assumed lesson length when problems give no later bound
 GRAY_HOURS = 3                 # tests this soon after the previous lesson may be its 课后测
 CHINA = timezone(timedelta(hours=8))
@@ -62,6 +62,9 @@ def _days(a: str, b: str) -> int | None:
 
 def rank(questions: Iterable[dict[str, Any]], *, lecture_day: str, transcript: str,
          limit: int = MAX_QUESTIONS) -> list[dict[str, Any]]:
+    limit = max(0, int(limit))
+    if not limit:
+        return []
     transcript_terms = _tokens(transcript)
     scored = []
     for question in questions:
@@ -84,7 +87,7 @@ def rank(questions: Iterable[dict[str, Any]], *, lecture_day: str, transcript: s
         if relevant:
             scored.append((score, same_lesson, similarity, question))
     scored.sort(key=lambda item: (-item[0], str(item[3].get("date") or ""), item[3].get("page") or 0))
-    same_day = [item for item in scored if item[1]][:MAX_SAME_DAY]
+    same_day = [item for item in scored if item[1]][:min(MAX_SAME_DAY, limit)]
     others = [item for item in scored if not item[1]][:max(0, limit - len(same_day))]
     chosen = same_day + others
     result = []
@@ -114,8 +117,14 @@ def compact(question: dict[str, Any], store: BankStore | None = None) -> dict[st
         "答案已知": bool(question.get("answer_known") or vision.get("answer_text")),
         "解析": question.get("remark") or "",
     }
-    # Where/when it was asked and the student's own answer are deliberately
-    # not passed on: the note lists one flat set of 课上习题 (stem, answer, 解析).
+    # These are local, course-scoped learning fields.  The model may use them
+    # to explain an error; the deterministic appendix still omits them.
+    if question.get("student_answer"):
+        item["我的答案"] = question["student_answer"]
+    if question.get("correct") is not None:
+        item["是否答对"] = bool(question["correct"])
+    if question.get("score") is not None:
+        item["得分"] = question["score"]
     if vision.get("text") and stem_image:
         # Read-only context for answering; the note shows the original image.
         item["图片内容（仅供理解，不写入笔记）"] = vision["text"]
@@ -125,9 +134,13 @@ def compact(question: dict[str, Any], store: BankStore | None = None) -> dict[st
 
 
 def _shrink(item: dict[str, Any], body: int, remark: int, answer: int) -> dict[str, Any]:
-    return {**item, "题干": str(item.get("题干", ""))[:body], "解析": str(item.get("解析", ""))[:remark],
-            "选项": [str(value)[:200] for value in item.get("选项", [])],
-            "我的答案": [str(value)[:answer] for value in item.get("我的答案", [])]}
+    result = {**item, "题干": str(item.get("题干", ""))[:body], "解析": str(item.get("解析", ""))[:remark],
+              "选项": [str(value)[:200] for value in item.get("选项", [])],
+              "我的答案": [str(value)[:answer] for value in item.get("我的答案", [])]}
+    for key in ("图片内容（仅供理解，不写入笔记）", "图片转写"):
+        if key in result:
+            result[key] = str(result[key])[:body]
+    return result
 
 
 def _size(item: dict[str, Any]) -> int:
@@ -136,22 +149,33 @@ def _size(item: dict[str, Any]) -> int:
 
 
 def fit(items: list[dict[str, Any]], budget: int = MAX_CONTEXT_CHARS) -> list[dict[str, Any]]:
-    """Forced items are always kept (shortened if they alone exceed the
-    budget); optional items fill whatever budget remains, in order."""
+    """Fit the model-facing copy into a hard character budget.
+
+    Full records stay in the list passed to ``ensure_section``; this function
+    only controls the representation sent to the model.
+    """
+    budget = max(0, int(budget))
     def clean(item):
         return {key: value for key, value in item.items() if value not in (None, "", [])}
     forced = [clean(item) for item in items if item.get("必含")]
     optional = [clean(item) for item in items if not item.get("必含")]
-    for limits in ((4000, 2000, 1500), (1500, 600, 400), (600, 240, 160)):
+    for limits in ((4000, 2000, 1500), (1500, 600, 400), (600, 240, 160), (240, 100, 80)):
         if sum(_size(item) for item in forced) <= budget:
             break
-        forced = [_shrink(item, *limits) if _size(item) > 600 else item for item in forced]
+        forced = [_shrink(item, *limits) for item in forced]
+    if sum(_size(item) for item in forced) > budget and forced:
+        per_item = max(48, budget // len(forced)) if budget else 48
+        forced = [_shrink(item, max(16, per_item // 2), max(8, per_item // 6), max(8, per_item // 10))
+                  for item in forced]
+        for item in forced:
+            item.pop("图片内容（仅供理解，不写入笔记）", None)
+            item.pop("图片转写", None)
     result, used = list(forced), sum(_size(item) for item in forced)
     for item in optional:
         if _size(item) > 2500:
             item = _shrink(item, 1500, 600, 400)
         if used + _size(item) > budget:
-            break
+            continue
         result.append(item)
         used += _size(item)
     return result
@@ -166,7 +190,9 @@ def _local(ms: Any) -> datetime | None:
         return None
     if value <= 0:
         return None
-    return datetime.fromtimestamp(value / 1000, CHINA).replace(tzinfo=None)
+    if value > 1e11:
+        value /= 1000
+    return datetime.fromtimestamp(value, CHINA).replace(tzinfo=None)
 
 
 def _question_time(question: dict[str, Any]) -> datetime | None:
@@ -318,15 +344,20 @@ def questions_for_record(record: Any, *, store: BankStore | None = None, transcr
     questions = store.course_questions(category)
     if not questions:
         return []
-    # Only this lecture's own questions (the matched lesson's problems and the
-    # pre-class test sent just before it). Questions from other lectures are
-    # never borrowed: ranking the whole course bank made every note share the
-    # same handful of questions. No matched lesson means no 课上习题.
     _, forced = forced_for_record(record, store, category)
     chosen = list(forced)
+    forced_ids = {str(question.get("id")) for question in forced}
+    lecture_day = lecture_date(metadata)
+    remaining = [question for question in questions if str(question.get("id")) not in forced_ids]
+    optional_limit = min(MAX_OPTIONAL, max(0, int(limit) - len(forced)))
+    if optional_limit:
+        chosen.extend(rank(remaining, lecture_day=lecture_day, transcript=str(transcript or ""),
+                           limit=optional_limit))
     for number, question in enumerate(chosen, 1):
         question["_marker"] = f"Y{number}"
-    return fit([compact(question, store) for question in chosen], budget)
+    # Keep complete records for the deterministic appendix.  ``prompt_block``
+    # applies ``fit`` to the model-facing copy before each request.
+    return [compact(question, store) for question in chosen]
 
 
 INSTRUCTIONS = (
@@ -350,7 +381,7 @@ def instructions(*, write_section: bool = True) -> str:
 
 def prompt_block(items: list[dict[str, Any]]) -> str:
     import json
-    return "\n<yuketang_questions>\n" + json.dumps(items, ensure_ascii=False) + "\n</yuketang_questions>"
+    return "\n<yuketang_questions>\n" + json.dumps(fit(items), ensure_ascii=False) + "\n</yuketang_questions>"
 
 
 def _entry(item: dict[str, Any], number: int) -> list[str]:
@@ -384,18 +415,27 @@ def _normal(text: str) -> str:
     return re.sub(r"[\s\W_$\\{}]+", "", str(text or "")).lower()
 
 
-def present(item: dict[str, Any], section: str) -> bool:
-    """Whether a question visibly appears in the section text."""
-    if item.get("题号") and (f"〔{item['题号']}〕" in section or f"<!-- yuketang:{item['题号']} -->" in section):
+def _section_entries(section: str) -> list[str]:
+    parts = re.split(r"(?m)^###\s+", section)
+    return [part for part in parts[1:] if part.strip()]
+
+
+def _entry_matches(item: dict[str, Any], entry: str) -> bool:
+    """Match one item against one rendered entry, never against the whole section."""
+    marker = str(item.get("题号") or "")
+    if marker and (f"〔{marker}〕" in entry or f"<!-- yuketang:{marker} -->" in entry):
         return True
-    if item.get("id") and str(item["id"]) in section:
+    if item.get("id") and str(item["id"]) in entry:
         return True
     body = _normal(item.get("题干"))
     if "尚未转写" in str(item.get("题干") or "") or "原题图片" in str(item.get("题干") or ""):
         body = ""
-    if len(body) >= 8:
-        return body[:24] in _normal(section)
-    return False  # image-only question without its marker
+    return len(body) >= 8 and body[:24] in _normal(entry)
+
+
+def present(item: dict[str, Any], section: str) -> bool:
+    """Whether a question visibly appears in one of the section entries."""
+    return any(_entry_matches(item, entry) for entry in _section_entries(section))
 
 
 def missing_forced(markdown: str, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -405,7 +445,17 @@ def missing_forced(markdown: str, items: list[dict[str, Any]]) -> list[dict[str,
     rest = markdown[match.end():]
     following = re.search(r"^##\s", rest, re.M)
     section = rest[:following.start()] if following else rest
-    return [item for item in items if item.get("必含") and not present(item, section)]
+    entries = _section_entries(section)
+    matched: set[int] = set()
+    missing = []
+    for item in (item for item in items if item.get("必含")):
+        found = next((index for index, entry in enumerate(entries)
+                      if index not in matched and _entry_matches(item, entry)), None)
+        if found is None:
+            missing.append(item)
+        else:
+            matched.add(found)
+    return missing
 
 
 def ensure_section(markdown: str, items: list[dict[str, Any]]) -> str:
