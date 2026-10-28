@@ -136,10 +136,26 @@ def compact(question: dict[str, Any], store: BankStore | None = None) -> dict[st
 def _shrink(item: dict[str, Any], body: int, remark: int, answer: int) -> dict[str, Any]:
     result = {**item, "题干": str(item.get("题干", ""))[:body], "解析": str(item.get("解析", ""))[:remark],
               "选项": [str(value)[:200] for value in item.get("选项", [])],
-              "我的答案": [str(value)[:answer] for value in item.get("我的答案", [])]}
+            "我的答案": [str(value)[:answer] for value in item.get("我的答案", [])],
+            "正确答案": [str(value)[:answer] for value in item.get("正确答案", [])]}
     for key in ("图片内容（仅供理解，不写入笔记）", "图片转写"):
         if key in result:
             result[key] = str(result[key])[:body]
+    return result
+
+
+def _minimal(item: dict[str, Any], cap: int) -> dict[str, Any]:
+    """Smallest useful forced-question record for a model request."""
+    cap = max(1, int(cap))
+    # The marker is sufficient for post-processing; the full id remains in
+    # the unshortened record used by the deterministic appendix.
+    result = {key: item[key] for key in ("题号", "题型", "答案已知", "是否答对") if key in item}
+    result["题干"] = str(item.get("题干") or "")[:max(8, cap // 3)]
+    result["正确答案"] = [str(value)[:max(8, cap // 8)] for value in item.get("正确答案", [])]
+    if item.get("选项"):
+        result["选项"] = [str(value)[:max(8, cap // 8)] for value in item["选项"][:4]]
+    if item.get("解析"):
+        result["解析"] = str(item["解析"])[:max(8, cap // 4)]
     return result
 
 
@@ -164,12 +180,43 @@ def fit(items: list[dict[str, Any]], budget: int = MAX_CONTEXT_CHARS) -> list[di
             break
         forced = [_shrink(item, *limits) for item in forced]
     if sum(_size(item) for item in forced) > budget and forced:
-        per_item = max(48, budget // len(forced)) if budget else 48
-        forced = [_shrink(item, max(16, per_item // 2), max(8, per_item // 6), max(8, per_item // 10))
-                  for item in forced]
-        for item in forced:
-            item.pop("图片内容（仅供理解，不写入笔记）", None)
-            item.pop("图片转写", None)
+        per_item = max(16, budget // len(forced) - 16) if budget else 16
+        forced = [_minimal(item, per_item) for item in forced]
+        while sum(_size(item) for item in forced) > budget and forced:
+            index = max(range(len(forced)), key=lambda n: _size(forced[n]))
+            item = forced[index]
+            changed = False
+            for key in ("解析", "选项", "正确答案", "题干"):
+                if key not in item:
+                    continue
+                if isinstance(item[key], list):
+                    values = [str(value) for value in item[key]]
+                    shorter = [value[:max(1, len(value) // 2)] for value in values]
+                    if shorter == values:
+                        continue
+                    item[key] = shorter
+                else:
+                    value = str(item[key])
+                    shorter = value[:max(1, len(value) // 2)]
+                    if shorter == value:
+                        continue
+                    item[key] = shorter
+                changed = True
+                break
+            if not changed:
+                for key in ("题干", "解析", "选项", "正确答案"):
+                    if key in item:
+                        item.pop(key)
+                        changed = True
+                        break
+            if not changed:
+                for key in ("是否答对", "答案已知", "题型"):
+                    if key in item:
+                        item.pop(key)
+                        changed = True
+                        break
+            if not changed:
+                break
     result, used = list(forced), sum(_size(item) for item in forced)
     for item in optional:
         if _size(item) > 2500:
