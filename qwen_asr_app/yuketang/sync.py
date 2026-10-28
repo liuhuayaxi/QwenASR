@@ -26,6 +26,10 @@ RETRY_DELAY = 3.0
 RECENT_LESSON_DAYS = 30
 
 
+def safe_error(value: Any, limit: int = 500) -> str:
+    return re.sub(r"(https?://[^\s?]+)\?[^\s]*", r"\1", str(value or ""))[:limit]
+
+
 class SyncAborted(RuntimeError):
     pass
 
@@ -97,7 +101,7 @@ class ClassroomSync:
                 self.summary["errors"] += 1
                 self.store.save_activity_state(self.cid, activity.get("id"), {
                     **state, "activity": activity, "fingerprint": fingerprint, "status": "error",
-                    "error": str(exc)[:500], "checked_at": now_iso()})
+                    "error": safe_error(exc), "checked_at": now_iso()})
                 self.progress(f"{label}：失败（{exc}）")
                 continue
             self.summary["imported" if status == "complete" else "pending"] += 1
@@ -253,7 +257,7 @@ class ClassroomSync:
                         # Playwright's call log echoes the signed URL; keep only
                         # the first line without query strings.
                         first = (str(exc).splitlines() or [""])[0]
-                        image["error"] = re.sub(r"\?[^\s]*", "", first)[:200]
+                        image["error"] = safe_error(first, 200)
                         self.summary["image_errors"] += 1
                         self.activity_image_errors += 1
 
@@ -374,7 +378,7 @@ def sync_classrooms(store: BankStore, classrooms: list[dict[str, Any]], *, headl
 def record_attempt_failure(store: BankStore, cid: str, status: str, error: str) -> None:
     try:
         info = store.classroom(cid)
-        info.update(last_attempt_at=now_iso(), last_attempt_status=status, last_error=str(error)[:300])
+        info.update(last_attempt_at=now_iso(), last_attempt_status=status, last_error=safe_error(error, 300))
         store.save_classroom(cid, info)
     except Exception:  # pragma: no cover - never mask the original failure
         pass
