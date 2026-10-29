@@ -14,6 +14,7 @@ Pipeline (target < 5 min, hard cap 10 min per lesson):
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
@@ -47,9 +48,28 @@ def _pages(package):
         # pages so the writer can still pick figures.
         {'source_id': s['source_id'], **p} for s in package.get('sources', []) for p in s.get('pages', [])]
     for page in pages:
+        if (page.get('yuketang') or {}).get('missing_slide'):
+            continue
         text = re.sub(r'\[\[AI_TRANSCRIPT_PAGE:\d+\]\]|SOURCE_PDF_PAGE: \d+', '', str(page.get('text') or '')).strip()
-        out.append({'source_id': page['source_id'], 'page': int(page['page']), 'text': text[:MAX_PAGE_CHARS]})
+        out.append({'source_id': page['source_id'], 'page': int(page['page']), 'text': text[:MAX_PAGE_CHARS],
+                    **({'page_kind':'exercise', 'answer_authority':'personal_selection_is_not_an_answer'}
+                       if (page.get('yuketang') or {}).get('student_selection') else {})})
     return out
+
+
+def generation_identity(record, blocks, questions, selection, corpus, config):
+    """A replaced course file or changed writer instructions cannot reuse a draft."""
+    from . import note_prompts
+    from .material_scope import VERSION as scope_version
+    from .yuketang.pdf_layers import VERSION as image_policy
+    materials = sorted([{'id':s['id'],'name':s.get('name'),'sha256':s['sha256'],
+                         'conversion':{k:(s.get('conversion') or {}).get(k) for k in ('status','source_sha256','sha256')}}
+                        for s in corpus if s.get('status') not in {'deleted','superseded','excluded'} and not s.get('superseded_by')],
+                       key=lambda s:s['id'])
+    values = [VERSION, note_prompts.fingerprint(), scope_version, image_policy,
+              record.id, blocks, questions, selection, materials,
+              config.get('_note_summary_system_prompt'), config.get('_note_summary_custom_prompt')]
+    return hashlib.sha256(json.dumps(values,sort_keys=True,ensure_ascii=False,default=str).encode()).hexdigest()[:24]
 
 
 WRITER_TIMEOUT = 1800  # long lessons (e.g. 光电子学) need >10min AGY turns
@@ -96,8 +116,11 @@ async def generate_fast(record, config):
         # Without speech there is nothing to rank optional questions against;
         # keep this lesson's own exercises so the note stays on topic.
         questions = [q for q in questions if q.get('必含')]
-    identity = hashlib.sha256(json.dumps([VERSION, note_prompts.fingerprint(), record.id, blocks, questions, record.metadata.get('review_material_ids')],
-                                         sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()[:24]
+    selection = config.get('_review_material_ids', record.metadata.get('review_material_ids'))
+    from .course_files import CourseFiles
+    from .storage import app_settings
+    corpus = await asyncio.to_thread(CourseFiles(app_settings).list, record.metadata.get('category'))
+    identity = generation_identity(record, blocks, questions, selection, corpus, config)
     relative = f'.review-notes/{identity}'
     folder = record.directory / relative
     folder.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -105,7 +128,8 @@ async def generate_fast(record, config):
     task = json.loads(task_path.read_text()) if task_path.exists() else {'id': identity, 'version': VERSION, 'created_at': local_now(), 'base_body_sha256': initial}
     timings = task.setdefault('timings', {})
     existing = record.metadata.get('ai_note_summary') or {}
-    if task.get('status') == 'completed' and existing.get('review_package') == relative:
+    if (task.get('status') == 'completed' and existing.get('review_package') == relative
+            and (folder/'note.md').is_file() and body_hash(existing) == hashlib.sha256((folder/'note.md').read_bytes()).hexdigest()):
         return existing
 
     def mark(name):
@@ -113,9 +137,7 @@ async def generate_fast(record, config):
         atomic_json(task_path, task)
 
     stage(record, task, folder, '匹配课件', status='running')
-    selection = config.get('_review_material_ids', record.metadata.get('review_material_ids'))
     from .async_tasks import await_owned_task
-    import asyncio
     package = await await_owned_task(asyncio.create_task(asyncio.to_thread(collect, record, folder, selection)))
     if package.get('material_selection'):
         task['material_selection'] = package['material_selection']

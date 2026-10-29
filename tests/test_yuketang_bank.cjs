@@ -35,6 +35,14 @@ test('current course comes from the selected course button', async () => {
   assert.equal(currentCategory(doc), '通信原理 C');
 });
 
+test('legacy vision inference is not displayed as a published correct answer', async () => {
+  const {questionHtml} = await modulePromise;
+  const q = {body: '题目', answer: [], images: [], vision: {status: 'done', answer_text: 'B'}};
+  assert.match(questionHtml(q), /正确答案：<\/b>未公布/);
+  q.vision.version = 'teacher-evidence-v2';
+  assert.match(questionHtml(q), /正确答案：<\/b>B/);
+});
+
 test('LaTeX renders through the vendored KaTeX while plain text stays escaped', async () => {
   const {mathText} = await modulePromise;
   const katex = require(path.join(__dirname, '../static/vendor/katex/katex.min.js'));

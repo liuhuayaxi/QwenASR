@@ -109,6 +109,7 @@ class ClassroomSync:
             self.summary["imported" if status == "complete" else "pending"] += 1
             self.store.save_activity_state(self.cid, activity.get("id"), {
                 "activity": activity, "fingerprint": fingerprint, "status": status,
+                "parser_version": parsing.PARSER_VERSION,
                 "question_count": count, "checked_at": now_iso(), **extra})
             self.progress(f"{label}：{count} 题" + ("" if status == "complete" else f"（{extra.get('reason') or '尚未全部公布'}，稍后再同步）"))
         questions = self.store.questions(self.cid)
@@ -130,6 +131,8 @@ class ClassroomSync:
         return {"classroom_id": self.cid, "name": info.get("course_name", ""), "counts": counts, **self.summary}
 
     def needs_import(self, state: dict[str, Any], fingerprint: str) -> bool:
+        if state.get('parser_version') != parsing.PARSER_VERSION:
+            return True
         if not state or state.get("fingerprint") != fingerprint or state.get("status") != "complete":
             if state.get("status") in {"pending", "ungraded"} and state.get("fingerprint") == fingerprint:
                 return self._stale(state)

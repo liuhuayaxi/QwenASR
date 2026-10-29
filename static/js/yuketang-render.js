@@ -40,7 +40,7 @@ export function questionHtml(q, url = image => imageUrl(q, image), {label = ''} 
   const mark = q.correct === true ? '<span class="ykt-ok">答对</span>' : q.correct === false ? '<span class="ykt-wrong">答错</span>' : q.graded === false && (q.student_answer || []).length ? '<span class="muted">未批改</span>' : '';
   const body = q.body || q.vision?.text || (q.images?.length ? '（图片题，见下方图片）' : '');
   const options = (q.options || []).map(o => `<li><b>${esc(o.key)}</b> ${mathText(o.value)}</li>`).join('');
-  const answer = (q.answer || []).join('、') || q.vision?.answer_text || '';
+  const answer = (q.answer || []).join('、') || (q.vision?.version === 'teacher-evidence-v2' ? q.vision.answer_text : '') || '';
   const images = (q.images || []).filter(image => image.path && image.kind !== 'student').map(image => `<img loading="lazy" alt="${esc(image.kind === 'remark' ? '参考答案图片' : '题目图片')}" data-yuketang-src="${esc(url(image))}">`).join('');
   return `<article class="ykt-question">
     <header>${label ? `<span class="ykt-hit-label">${esc(label)}</span> ` : ''}<span class="count-badge">${esc(q.source_label)}</span> <b>${esc(q.activity_title)}</b> <span class="muted">${esc(q.date || '')}${q.page ? ` · 第 ${esc(q.page)} 页` : ''} · ${esc(q.type_text)}</span> ${mark}</header>

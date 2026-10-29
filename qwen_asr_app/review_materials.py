@@ -49,7 +49,7 @@ def learning_scope_candidates(sources):
 
 
 def native_page_cache(path, digest):
-    cache=PRIVATE_ROOT/'review-materials-cache'/'native-v1'/f'{digest}.json'
+    cache=PRIVATE_ROOT/'review-materials-cache'/'native-v2'/f'{digest}.json'
     with PDF_LOCK:
         if cache.is_file():return json.loads(cache.read_text())
         pages=native_pages(path)
@@ -129,9 +129,10 @@ def tokens(text):
 def native_pages(path):
     if path.suffix.lower()=='.pdf':
         from .native_pdf import pdf_operation
-        with PDF_LOCK:pages=pdf_operation('text',path=str(path),sort=True)
+        with PDF_LOCK:pages=pdf_operation('text',path=str(path),sort=True,inspect_yuketang=True)
         return [{'page':p['page'],'text':p['text'],'visual_source':True,
-            'image_primary':len(substantive_page_text(p['plain_text']))<40} for p in pages]
+            'image_primary':len(substantive_page_text(p['plain_text']))<40,
+            **({'yuketang':p['yuketang']} if p.get('yuketang') else {})} for p in pages]
     if path.suffix.lower()=='.pptx':
         with zipfile.ZipFile(path) as z:
             names=sorted((n for n in z.namelist() if re.fullmatch(r'ppt/slides/slide\d+.xml',n)),key=lambda n:int(re.search(r'(\d+)\.xml',n)[1]))
@@ -187,7 +188,7 @@ def collect(record, folder, selected=None, settings=None, lesson_title=None):
             target=safe_path(folder,relative);target.parent.mkdir(exist_ok=True)
             # Only files chosen for this lesson are copied into the package
             # (below); text is read from the verified original in place.
-            cache=folder/'sources'/(digest+'.pages.json')
+            cache=folder/'sources'/(digest+'.native-v2.pages.json')
             if cache.exists():pages=json.loads(cache.read_text())
             else:pages=native_page_cache(path,digest);atomic_json(cache,pages)
             if suffix=='.pdf':
@@ -278,7 +279,7 @@ def collect(record, folder, selected=None, settings=None, lesson_title=None):
     for (sid,number),score in sorted(page_scores.items(),key=lambda x:-x[1]):
         source=next(s for s in originals if s['source_id']==sid)
         page=source['pages'][number-1]
-        relevant.append({'source_id':sid,'page':number,'score':score,'text':page['text'],'visual_source':page['visual_source']})
+        relevant.append({'source_id':sid,**page,'score':score})
     package={'format':FORMAT,'recording_id':record.id,'course_id':cid,'category':category,'lesson_date':cutoff,
         'sources':originals,'excluded':excluded,'associations':associations,'relevant_pages':relevant,
         'material_selection':material_selection,
@@ -303,18 +304,19 @@ def extract_image(folder, package, request):
     if original.suffix.lower()=='.pptx':
         rendered_original=original_slide_pdf(original,Path(folder)/'slide-render'/source['sha256'])
     elif original.suffix.lower()!='.pdf':raise ValueError('该原件需要原始幻灯片渲染，不能使用转写排版 PDF 充当原图')
-    ident='fig-'+sha(json.dumps([sid,source['sha256'],page,bbox]).encode())[:16]
+    from .yuketang.pdf_layers import VERSION as image_policy
+    ident='fig-'+sha(json.dumps([sid,source['sha256'],page,bbox,image_policy]).encode())[:16]
     relative=f'assets/{ident}.png';target=safe_path(folder,relative);target.parent.mkdir(exist_ok=True)
-    cached_image=PRIVATE_ROOT/'review-materials-cache'/'images-v1'/f'{ident}.png'
+    cached_image=PRIVATE_ROOT/'review-materials-cache'/'images-v2'/f'{ident}.png'
     with PDF_LOCK:
         if not target.exists() and cached_image.is_file():shutil.copy2(cached_image,target)
-        pdf_operation('render',path=str(rendered_original),expected_pages=len(source['pages']),
+        pdf_operation('render',path=str(rendered_original),expected_pages=len(source['pages']),neutralize_yuketang=True,
             pages=[{'page':page,'output':str(target),'bbox':bbox,'scale':1.6}])
         if not cached_image.is_file():
             cached_image.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
             temporary=cached_image.with_suffix('.part.png');shutil.copy2(target,temporary);temporary.replace(cached_image)
     return {'image_id':ident,'path':relative,'source_id':sid,'source_name':source['name'],'source_sha256':source['sha256'],
-        'page':page,'bbox':bbox,'concept':request.get('concept',''),'reason':request.get('reason',''), 'sha256':digest_file(target)}
+        'page':page,'bbox':bbox,'image_policy':image_policy,'concept':request.get('concept',''),'reason':request.get('reason',''), 'sha256':digest_file(target)}
 
 
 def bind_markdown_images(markdown, folder, images, rejected=()):

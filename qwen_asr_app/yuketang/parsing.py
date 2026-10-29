@@ -18,6 +18,7 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 CHINA = timezone(timedelta(hours=8))
+PARSER_VERSION = 'teacher-answers-v2'
 
 # Activity types seen in /v2/api/web/logs/learn.
 ACTIVITY_COURSEWARE = 2   # 课件 / cards
@@ -472,14 +473,13 @@ def parse_lesson(activity: dict[str, Any], classroom_id: Any, detail_payload: An
         if parsed_correct is not None and kind != "subjective":
             correct = parsed_correct
         answer = answer_list(content.get("answer"))
-        if not answer and correct is True and student:
-            answer = list(student)
         body = html_text(content.get("body"))
         question.update(
             body=body,
             options=options_list(content.get("options")),
             answer=sort_choice(answer),
             answer_known=bool(answer),
+            answer_source="teacher" if answer else "unpublished",
             remark=html_text(content.get("remark")),
             student_answer=sort_choice(student) if kind != "subjective" else student,
             correct=correct,

@@ -68,7 +68,8 @@ def question_images(question: dict[str, Any], store: BankStore) -> dict[str, lis
             return None
 
     body = [p for p in (path(i) for i in images if i.get("kind") == "body") if p]
-    vision = str((question.get("vision") or {}).get("text") or "")
+    from .vision import current_vision
+    vision = str(current_vision(question).get("text") or "")
     slide_needed = (not _genuine(question.get("body")) or question.get("problem_type") == "subjective"
                     or question.get("type_text") == "主观题" or "附图" in vision)
     slides = [p for p in (path(i) for i in images if i.get("kind") == "slide") if p] if slide_needed else []
@@ -77,7 +78,7 @@ def question_images(question: dict[str, Any], store: BankStore) -> dict[str, lis
     result["slide"] = bool(slides) and not body
     # When the note's 答案 is already the faithful transcription of these
     # pictures (no structured answer in the bank), showing both would repeat it.
-    if not (question.get("vision") or {}).get("answer_text") or question.get("answer"):
+    if not current_vision(question).get("answer_text") or question.get("answer"):
         result["explain"] = [p for p in (path(i) for i in images if i.get("kind") == "remark") if p and _visible(p)]
     return result
 

@@ -411,6 +411,7 @@ class NoteInjectionTests(unittest.IsolatedAsyncioTestCase):
         record = RecordingRecord(root / "original", {
             "id": "ykt-note", "title": "第六章", "category": "通信原理 C", "status": "completed",
             "started_at": "2026-10-21T08:00:00+08:00", "sample_count": 16000})
+        record.directory.mkdir(parents=True)
         record.segments = [{"id": 1, "start": 0, "end": 1, "raw": "AMI 码把“1”交替编成正负极性。"}]
         record.save_all()
         store = RecordingStore.__new__(RecordingStore)
@@ -713,14 +714,14 @@ class QuestionImageTests(unittest.TestCase):
         quiz = {"id": "quiz:1:1", "classroom_id": "123", "activity_id": "9", "problem_type": "fill_blank",
                 "type_text": "填空题", "body": "", "options": [], "answer": ["受激辐射"], "answer_known": True,
                 "needs_vision": True, "images": [{"kind": "body", "source": "b", **picture("b.png", (300, 120))}],
-                "vision": {"status": "done", "text": "1. 半导体激光器的物理基础是[填空1]。"}}
+                "vision": {"status": "done", "version": "teacher-evidence-v2", "text": "1. 半导体激光器的物理基础是[填空1]。"}}
         slide = {"id": "lesson:1:2", "classroom_id": "123", "activity_id": "9", "problem_type": "single",
                  "type_text": "单选题", "body": "。", "options": [{"key": "A", "value": "甲"}, {"key": "B", "value": "乙"}],
                  "answer": ["B"], "answer_known": True, "needs_vision": True,
                  "images": [{"kind": "slide", "source": "s", **picture("s.png", (400, 300))},
                             {"kind": "remark", "source": "r1", **picture("r1.png", (350, 39), draw=False)},
                             {"kind": "remark", "source": "r2", **picture("r2.png", (360, 150))}],
-                 "vision": {"status": "done", "text": "单选题 在线性近似下……"}}
+                 "vision": {"status": "done", "version": "teacher-evidence-v2", "text": "单选题 在线性近似下……"}}
         plain = {"id": "lesson:1:3", "classroom_id": "123", "activity_id": "9", "problem_type": "single",
                  "type_text": "单选题", "body": "量子阱宽度减小时跃迁能量如何变化？", "options": [{"key": "A", "value": "增大"}],
                  "answer": ["A"], "answer_known": True, "needs_vision": False,

@@ -101,7 +101,8 @@ def rank(questions: Iterable[dict[str, Any]], *, lecture_day: str, transcript: s
 
 def compact(question: dict[str, Any], store: BankStore | None = None) -> dict[str, Any]:
     """The data the note writer sees; no local paths, URLs or raw payloads."""
-    vision = question.get("vision") or {}
+    from .vision import current_vision
+    vision = current_vision(question)
     from .note_images import has_images
     pictures = has_images(question, store)
     stem_image = bool(pictures["stem"])
@@ -401,6 +402,7 @@ INSTRUCTIONS = (
     "1. 在正文对应知识点处用“> 📝 考点：……（见课上习题第N题）”标出该知识点被哪道题考查；\n"
     "2. 解析要讲清正确答案为什么正确、错误选项错在哪里；“答案已知”为 false 时根据课堂内容给出参考解答；\n"
     "3. 不要编造题库中不存在的题目或答案；不写作答者本人的答案、对错、得分，不写题目来源、日期、页码，不区分课前/课中/课后。\n"
+    "绿色圆点、勾选、高亮表示个人作答，不能作为标准答案；只有明确的教师答案和解析才是答案依据，答案未知时独立依据课堂推导参考解答。\n"
     "4. 带“原题图片”的题，程序会在题干处直接插入雨课堂原题图片：题干只写数据中真实的文字题干（“题干见雨课堂原题图片”时题干留空），"
     "不要用文字描述、转写或复述图片内容；“图片内容（仅供理解，不写入笔记）”只用于理解题意和写解析。带“解析图片”的题，程序会在解析后附上教师原图，解析文字不要逐句复述该图。\n"
 )

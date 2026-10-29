@@ -123,8 +123,14 @@ def _execute(request):
         if operation=='inspect':
             return {'pages':len(doc),'blank_pages':[i+1 for i,page in enumerate(doc) if not page.get_text().strip() and not page.get_images()]}
         if operation=='text':
+            from qwen_asr_app.yuketang.pdf_layers import inspect_page
             return [{'page':i+1,'text':page.get_text(sort=bool(request.get('sort'))),
-                'plain_text':page.get_text()} for i,page in enumerate(doc)]
+                'plain_text':page.get_text(),
+                **({'yuketang': inspect_page(page)} if request.get('inspect_yuketang') else {})}
+                for i,page in enumerate(doc)]
+        if operation=='yuketang_layers':
+            from qwen_asr_app.yuketang.pdf_layers import inspect_page
+            return [{'page':i+1, **inspect_page(page)} for i,page in enumerate(doc)]
         if operation=='embedded_markdown':
             return doc.embfile_get('mineru-transcript.md').decode('utf-8',errors='replace') if 'mineru-transcript.md' in doc.embfile_names() else None
         if operation=='render':
@@ -148,10 +154,19 @@ def _execute(request):
                 if not output.exists():
                     output.parent.mkdir(parents=True,exist_ok=True)
                     temporary=output.with_name('.'+output.stem+'.part'+output.suffix)
+                    clean=None
                     try:
-                        page.get_pixmap(matrix=fitz.Matrix(scale,scale),clip=clip,alpha=False).save(temporary)
+                        rendered=page
+                        if request.get('neutralize_yuketang'):
+                            from qwen_asr_app.yuketang.pdf_layers import inspect_page, clean_page
+                            info=inspect_page(page)
+                            if info.get('missing_slide') or info.get('slides'):
+                                clean,rendered=clean_page(doc,page,info)
+                        rendered.get_pixmap(matrix=fitz.Matrix(scale,scale),clip=clip,alpha=False).save(temporary)
                         temporary.replace(output)
-                    finally:temporary.unlink(missing_ok=True)
+                    finally:
+                        if clean is not None:clean.close()
+                        temporary.unlink(missing_ok=True)
                 result.append({'page':number,'text':page.get_text()})
             return result
     raise ValueError('未知 PDF 操作')
@@ -160,6 +175,7 @@ def _execute(request):
 if __name__=='__main__':
     try:
         if sys.argv[1:]!=['--worker']:raise ValueError('无效工作进程参数')
+        sys.path.insert(0,str(Path(__file__).resolve().parent.parent))
         value=_execute(json.loads(sys.stdin.read()))
         print(json.dumps({'result':value},ensure_ascii=False))
     except Exception as error:

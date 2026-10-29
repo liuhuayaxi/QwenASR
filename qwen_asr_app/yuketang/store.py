@@ -310,7 +310,9 @@ class BankStore:
             counts["answer_known"] += bool(question.get("answer_known"))
             if question.get("needs_vision"):
                 counts["needs_vision"] += 1
-                counts["vision_done"] += (question.get("vision") or {}).get("status") == "done"
+                from .vision import VERSION
+                saved = question.get('vision') or {}
+                counts["vision_done"] += saved.get('status') == 'done' and saved.get('version') == VERSION
             counts["wrong"] += question.get("correct") is False
         return counts
 
