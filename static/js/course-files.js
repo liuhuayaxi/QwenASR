@@ -89,7 +89,7 @@ function renderFiles() {
     const ready = ['completed', 'stale'].includes(conversion.status);
     const needsMineru = ready && file.needs_mineru_upgrade;
     const settingsChanged = ready && file.mineru_settings_changed;
-    const tier = {flash: '极速', basic: '基础', standard: '标准', advanced: '高级'}[conversion.mineru_settings?.tier];
+    const tier = {auto: '自动', flash: '极速', basic: '基础', standard: '标准', advanced: '高级'}[conversion.mineru_settings?.tier];
     const working = ['queued', 'running', 'stopping'].includes(conversion.status);
     const failed = ['error', 'failed', 'interrupted', 'paused', 'cancelled'].includes(conversion.status);
     const taskLink = working || failed;

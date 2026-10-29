@@ -42,10 +42,15 @@ def main():
     from mineru.parser import parse
     from mineru.parser.writer import FileBasedDataWriter
     from mineru.render.content_list import render_content_list
+    from mineru_strategy import choose_local_tier
 
-    print(f"QwenASR MinerU {version} · tier={settings['tier']} · all pages", flush=True)
+    tier, strategy = choose_local_tier(args.source, settings["tier"])
+    print(f"QWENASR_EFFECTIVE_TIER {tier}", flush=True)
+    print(json.dumps({"requested_tier": settings["tier"], "effective_tier": tier,
+                      "strategy": strategy}, ensure_ascii=False), flush=True)
+    print(f"QwenASR MinerU {version} · tier={tier} · all pages", flush=True)
     print('QWENASR_STAGE parse', flush=True)
-    result = parse(args.source, tier=settings["tier"], ocr_mode=settings["ocr_mode"],
+    result = parse(args.source, tier=tier, ocr_mode=settings["ocr_mode"],
                    image_analysis=settings["image_analysis"], page_range="all")
     args.output.mkdir(parents=True, exist_ok=True)
     print('QWENASR_STAGE save', flush=True)

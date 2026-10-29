@@ -38,7 +38,7 @@
     if (path.startsWith('/api/library?')) return {json:{records:f.records||[]}};
     if (path==='/api/inference/settings') {if(method==='PUT')f.inference=structuredClone(body.settings);return {json:{settings:f.inference}};}
     if (path==='/api/inference/test') return {json:{capabilities:{version:'fixture-node'}}};
-    if (path==='/api/mineru/settings') {if(method==='PUT')f.mineru=structuredClone(body.settings);return {json:{settings:f.mineru,defaults:f.defaults||f.mineru,runtime:{compatible:true,available:true,version:'4.0.10'}}};}
+    if (path==='/api/mineru/settings') {if(method==='PUT')f.mineru=structuredClone(body.settings);return {json:{settings:f.mineru,defaults:f.defaults||f.mineru,tier_choices:['auto','flash','basic','standard','advanced'],runtime:{compatible:true,available:true,version:'4.0.10'}}};}
     if (path==='/api/library/backup') {
       if(method==='POST')f.backup={id:'backup-'+f.requests.length,status:'packing',completed_files:0,file_count:5,processed_bytes:0,total_bytes:5000,percent:0};
       return {json:{backup:f.backup??null}};

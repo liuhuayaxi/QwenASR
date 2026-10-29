@@ -83,7 +83,7 @@ class SettingsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             store = MinerUSettings(Path(raw) / 'settings.json')
             self.assertEqual(store.read(), DEFAULT_MINERU_SETTINGS)
-            for tier in ('flash', 'basic', 'standard', 'advanced'):
+            for tier in ('auto', 'flash', 'basic', 'standard', 'advanced'):
                 settings = store.save({'tier': tier, 'ocr_mode': 'ocr', 'processing_window_size': 8})
                 self.assertEqual(MinerUSettings(store.path).read(), settings)
             before = store.path.read_bytes()

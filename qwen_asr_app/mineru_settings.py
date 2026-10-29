@@ -15,7 +15,7 @@ DEFAULT_MINERU_SETTINGS = {
     "virtual_vram_gb": 0,
 }
 CHOICES = {
-    "tier": ("flash", "basic", "standard", "advanced"),
+    "tier": ("auto", "flash", "basic", "standard", "advanced"),
     "ocr_mode": ("auto", "txt", "ocr"),
     "small_backend": ("auto", "onnx", "torch"),
     "vlm_engine": ("auto", "llama-cpp", "vllm", "lmdeploy"),

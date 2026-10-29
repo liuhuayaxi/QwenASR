@@ -31,7 +31,7 @@ NET=r'''initial=>{
   let data;
   if(url==='/api/inference/settings') {if(method==='PUT')n.inference=item.body.settings; data={settings:n.inference};}
   else if(url==='/api/inference/test') data={capabilities:{version:'fixture-1'}};
-  else if(url==='/api/mineru/settings'){if(method==='PUT')n.mineru=item.body.settings;data={settings:n.mineru,defaults:n.defaults,runtime:n.runtime};}
+  else if(url==='/api/mineru/settings'){if(method==='PUT')n.mineru=item.body.settings;data={settings:n.mineru,defaults:n.defaults,tier_choices:['auto','flash','basic','standard','advanced'],runtime:n.runtime};}
   else if(url==='/api/library/backup'){data={backup:n.backup};}
   else if(url==='/api/tasks')data=n.tasks;
   else if(url==='/api/pdf-ai/choose-files')data={cancelled:false,paths:['/tmp/picked.pdf']};
