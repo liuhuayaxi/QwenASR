@@ -50,10 +50,10 @@ def problem_type(value: Any) -> str:
         return "unknown"
     if isinstance(value, (int, float)):
         return NUMERIC_TYPES.get(int(value), "unknown")
-    text = re.sub(r"[^a-z]", "", str(value or "").lower())
+    text = str(value or "").strip().lower()
     if text.isdigit():
         return NUMERIC_TYPES.get(int(text), "unknown")
-    return NAMED_TYPES.get(text, "unknown")
+    return NAMED_TYPES.get(re.sub(r"[^a-z]", "", text), "unknown")
 
 
 def strip_url(url: Any) -> str:
@@ -81,6 +81,11 @@ def html_text(value: Any) -> str:
     text = re.sub(r"[ \t\r\f\v]+", " ", text)
     text = re.sub(r"\n\s*\n+", "\n", text)
     return text.strip()
+
+
+def has_meaningful_text(value: Any) -> bool:
+    """Whether HTML-to-text output contains text beyond the image marker."""
+    return bool(re.sub(r"\[图片\]", "", str(value or "")).strip())
 
 
 def ms_to_local(value: Any) -> tuple[str, str]:
@@ -166,6 +171,19 @@ def _num(value: Any) -> float | None:
         return None
 
 
+def bool_value(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    text = str(value or "").strip().lower()
+    if text in {"1", "true", "yes", "correct", "对"}:
+        return True
+    if text in {"0", "false", "no", "wrong", "错"}:
+        return False
+    return None
+
+
 def sort_choice(values: list[str]) -> list[str]:
     return sorted(values) if all(len(value) == 1 and value.isalpha() for value in values) else values
 
@@ -212,6 +230,25 @@ def image_ref(kind: str, url: Any) -> dict[str, str] | None:
     if not text.startswith("http"):
         return None
     return {"kind": kind, "url": text, "source": strip_url(text)}
+
+
+def _rich_images(question: dict[str, Any], body: Any = None, options: Any = None, remark: Any = None) -> None:
+    """Preserve inline pictures, including mixed text/image answer options."""
+    seen = {(image.get("kind"), image.get("source")) for image in question["images"]}
+    if isinstance(options, dict):
+        options = list(options.values())
+    values = [("body", body), ("remark", remark)]
+    for option in options or []:
+        values.append(("body", option.get("value", option.get("Value")) if isinstance(option, dict) else option))
+    for kind, value in values:
+        for url in html_images(value):
+            image = image_ref(kind, url)
+            key = (kind, image["source"]) if image else None
+            if image and key not in seen:
+                question["images"].append(image)
+                seen.add(key)
+    if any(image.get("kind") in {"body", "remark"} for image in question["images"]):
+        question["needs_vision"] = True
 
 
 def parse_course_list(payload: Any) -> list[dict[str, Any]]:
@@ -313,13 +350,14 @@ def parse_exam(activity: dict[str, Any], classroom_id: Any, paper_payload: Any,
         question["answer_known"] = bool(answer)
         if result:
             question["student_answer"] = sort_choice(answer_list(result.get("result")))
-            question["correct"] = result.get("correct") if isinstance(result.get("correct"), bool) else None
+            question["correct"] = bool_value(result.get("correct"))
             question["score"] = _num(result.get("grade"))
         for url in html_images(problem.get("Body")):
             ref = image_ref("body", url)
             if ref:
                 question["images"].append(ref)
-        question["needs_vision"] = not question["body"] and bool(question["images"])
+        question["needs_vision"] = not has_meaningful_text(question["body"]) and bool(question["images"])
+        _rich_images(question, problem.get("Body"), problem.get("Options"), problem.get("Remark"))
         questions.append(question)
     return questions
 
@@ -356,7 +394,7 @@ def parse_quiz(activity: dict[str, Any], classroom_id: Any, result_payload: Any,
             answer=sort_choice(answer), answer_known=bool(answer),
             remark=html_text(shape.get("Remark")),
             student_answer=answer_list(entry.get("result")),
-            correct=entry.get("correct") if isinstance(entry.get("correct"), bool) else None,
+            correct=bool_value(entry.get("correct")),
             score=_num(entry.get("score")),
             max_score=_num(shape.get("Score")),
         )
@@ -367,7 +405,8 @@ def parse_quiz(activity: dict[str, Any], classroom_id: Any, result_payload: Any,
                 ref = image_ref("body", item.get("URL") or item.get("url"))
                 if ref:
                     question["images"].append(ref)
-        question["needs_vision"] = not question["body"] and bool(question["images"])
+        question["needs_vision"] = not has_meaningful_text(question["body"]) and bool(question["images"])
+        _rich_images(question, shape.get("Body"), shape.get("Options"), shape.get("Remark"))
         questions.append(question)
     return questions
 
@@ -429,8 +468,9 @@ def parse_lesson(activity: dict[str, Any], classroom_id: Any, detail_payload: An
         correct = None
         if kind in {"single", "multiple", "judge", "fill_blank"} and graded and correct_flag in (0, 1, True, False):
             correct = bool(correct_flag)
-        if isinstance(mine.get("correct"), bool) and kind != "subjective":
-            correct = mine["correct"]
+        parsed_correct = bool_value(mine.get("correct"))
+        if parsed_correct is not None and kind != "subjective":
+            correct = parsed_correct
         answer = answer_list(content.get("answer"))
         if not answer and correct is True and student:
             answer = list(student)
@@ -461,7 +501,8 @@ def parse_lesson(activity: dict[str, Any], classroom_id: Any, detail_payload: An
             question["has_remark_images"] = True
         # The slide image is the only record of a subjective prompt and of any
         # figure not present in the structured body.
-        question["needs_vision"] = bool(slide) and (not body or kind == "subjective" or bool(rich.get("shapes")))
+        question["needs_vision"] = bool(slide) and (not has_meaningful_text(body) or kind == "subjective" or bool(rich.get("shapes")))
+        _rich_images(question, content.get("body"), content.get("options"), content.get("remark"))
         questions.append(question)
     return questions
 
@@ -502,7 +543,7 @@ def parse_cards(activity: dict[str, Any], classroom_id: Any, detlist_payload: An
             remark=html_text(problem.get("Remark")),
             max_score=_num(problem.get("Score")),
             student_answer=answer_list(result.get("result") or result.get("answer")),
-            correct=result.get("correct") if isinstance(result.get("correct"), bool) else None,
+            correct=bool_value(result.get("correct")),
             score=_num(result.get("score") if result.get("score") is not None else result.get("grade")),
         )
         if kind in {"single", "multiple", "judge"}:
@@ -510,7 +551,8 @@ def parse_cards(activity: dict[str, Any], classroom_id: Any, detlist_payload: An
         slide_ref = image_ref("slide", slide.get("Cover"))
         if slide_ref:
             question["images"].append(slide_ref)
-        question["needs_vision"] = not question["body"] and bool(slide_ref)
+        question["needs_vision"] = not has_meaningful_text(question["body"]) and bool(slide_ref)
+        _rich_images(question, problem.get("Body"), problem.get("Options"), problem.get("Remark"))
         questions.append(question)
     return questions
 

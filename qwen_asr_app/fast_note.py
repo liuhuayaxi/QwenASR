@@ -26,7 +26,7 @@ from .review_materials import collect, extract_image, bind_markdown_images
 from .storage import local_now
 from . import review_scope
 
-VERSION = 'fast-one-turn-v5'
+VERSION = 'fast-one-turn-v6'
 MAX_PAGE_CHARS = 1800
 LOCATOR = re.compile(r'!\[[^\]]*\]\(\.?/?figures/([a-f0-9]{32})_p(\d+)\.png\)')
 
@@ -68,6 +68,17 @@ def _writer_config(config):
 
 class ProposalKept(ValueError):
     """The edited body was kept; the new note is saved as a proposal (not a failure)."""
+
+
+def _fallback_payload(payload):
+    """Build an output-ownership ledger from the already selected inputs."""
+    source = payload.get("transcript") or payload.get("source_pages") or []
+    knowledge = [{"id": f"fast-{i}", "topic": str(block.get("text") or "课件内容")[:100],
+                  "sources": [str(block.get("source") or block.get("source_id") or f"page-{i}")]}
+                 for i, block in enumerate(source, 1)]
+    if not knowledge:
+        raise ValueError("没有可继续分批写作的课堂来源")
+    return {**payload, "coverage": {"knowledge": knowledge, "figures": []}, "images": []}
 
 
 async def generate_fast(record, config):
@@ -135,8 +146,13 @@ async def generate_fast(record, config):
         if found['learning_requirements']:
             payload['learning_requirements'] = note_prompts.requirement_items(scope)
         if questions:
-            payload['yuketang_questions'] = questions
+            # Full questions remain available to the deterministic appendix;
+            # only the bounded copy is sent to the model.
+            from .yuketang.retrieval import fit as fit_yuketang
+            payload['yuketang_questions'] = fit_yuketang(questions)
         try:
+            if (folder / 'markdown-batches' / 'plan.json').is_file():
+                raise AIRequestError('继续已保存的分批笔记', kind='output_truncated')
             try:
                 markdown = await request_ai_text(instructions=instructions, payload=payload, config=_writer_config(config), mode='summary', max_output_tokens=32768)
             except AIRequestError as exc:
@@ -147,7 +163,7 @@ async def generate_fast(record, config):
             if exc.kind != 'output_truncated':
                 raise
             from .note_markdown_batches import write_batches
-            markdown, _ = await write_batches(instructions, payload, config, folder)
+            markdown, _ = await write_batches(instructions, _fallback_payload(payload), config, folder)
         markdown = re.sub(r'^```(?:markdown)?\s*|\s*```\s*$', '', markdown.strip())
         atomic_bytes(raw_path, markdown.encode())
     mark('writing')

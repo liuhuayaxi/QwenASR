@@ -13,6 +13,7 @@ from typing import Any
 
 from ..durable import atomic_json
 from .store import BankStore, now_iso
+from .sync import SyncAborted, safe_error
 
 
 class YuketangService:
@@ -45,6 +46,7 @@ class YuketangService:
         self._save_job()
 
     def _log(self, message: str) -> None:
+        message = safe_error(message, 1000)
         log = self.job.setdefault("log", [])
         log.append(f"{now_iso()[11:19]} {message}")
         del log[:-200]
@@ -103,16 +105,20 @@ class YuketangService:
             def run():
                 try:
                     result = target()
-                    self._update(status="completed", result=result, finished_at=now_iso(),
+                    groups = [*(result.get("classrooms") or []), *(result.get("vision") or [])] if isinstance(result, dict) else []
+                    partial = any(item.get("errors") or item.get("image_errors") for item in groups)
+                    self._update(status="partial" if partial else "completed", result=result, finished_at=now_iso(),
                                  message=self.job.get("message") or "完成")
+                except SyncAborted as exc:
+                    self._update(status="interrupted", finished_at=now_iso(), message=safe_error(exc))
                 except Exception as exc:  # surfaced in the UI
                     from .client import LoginRequired, PlaywrightMissing
                     login = isinstance(exc, LoginRequired)
                     if login:
-                        self.job["login_state"] = {"logged_in": False, "checked_at": now_iso(), "error": str(exc)}
-                    self._update(status="login_required" if login else "failed", error=str(exc),
+                        self.job["login_state"] = {"logged_in": False, "checked_at": now_iso(), "error": safe_error(exc)}
+                    self._update(status="login_required" if login else "failed", error=safe_error(exc),
                                  missing_playwright=isinstance(exc, PlaywrightMissing), finished_at=now_iso(),
-                                 message=str(exc))
+                                 message=safe_error(exc))
             self._thread = threading.Thread(target=run, name=f"yuketang-{kind}", daemon=True)
             self._thread.start()
             return self.job
@@ -120,12 +126,16 @@ class YuketangService:
     def stop(self) -> None:
         self._stop.set()
 
+    def _check_stop(self) -> None:
+        if self._stop.is_set():
+            raise SyncAborted("雨课堂任务已停止；已完成的部分已保存")
+
     def start_login(self, timeout: float = 600) -> dict[str, Any]:
         def target():
             from .client import YuketangSession
             self._log("已打开 Chrome 窗口，请用微信扫码登录雨课堂（10 分钟内有效）")
             with YuketangSession(self.store.profile_dir, headless=False) as session:
-                user = session.interactive_login(timeout=timeout)
+                user = session.interactive_login(timeout=timeout, on_wait=self._check_stop)
                 try:
                     from .sync import refresh_course_list
                     listed = refresh_course_list(session, self.store)
@@ -188,7 +198,8 @@ class YuketangService:
         from .vision import transcribe_classroom
         results = []
         for cid in classroom_ids:
-            coroutine = transcribe_classroom(self.store, cid, limit=limit, progress=self._log)
+            self._check_stop()
+            coroutine = transcribe_classroom(self.store, cid, limit=limit, progress=self._log, should_stop=self._stop.is_set)
             loop = getattr(self, "loop", None)
             if loop is not None and loop.is_running():
                 # Share the service loop's AI gates with note generation.

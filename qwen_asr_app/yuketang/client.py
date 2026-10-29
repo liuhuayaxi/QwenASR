@@ -74,6 +74,12 @@ class YuketangSession:
     def __enter__(self) -> "YuketangSession":
         sync_playwright = _playwright()
         self.profile_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if self.profile_dir.is_symlink() or not self.profile_dir.is_dir():
+            raise RuntimeError("雨课堂浏览器资料目录必须是普通目录")
+        try:
+            self.profile_dir.chmod(0o700)
+        except OSError as exc:
+            raise RuntimeError("无法将雨课堂浏览器资料目录设为仅当前用户可读") from exc
         self._manager = sync_playwright()
         self._playwright = self._manager.__enter__()
         options = dict(headless=self.headless, viewport={"width": 1280, "height": 860}, locale="zh-CN")
@@ -81,10 +87,15 @@ class YuketangSession:
             self.context = self._playwright.chromium.launch_persistent_context(
                 str(self.profile_dir), channel=self.channel, **options)
         except Exception:
-            if not self.channel:
+            try:
+                if not self.channel:
+                    raise
+                self.context = self._playwright.chromium.launch_persistent_context(str(self.profile_dir), **options)
+            except Exception:
+                import sys
+                self._manager.__exit__(*sys.exc_info())
+                self._manager = None
                 raise
-            # Fall back to Playwright's bundled Chromium when Chrome is absent.
-            self.context = self._playwright.chromium.launch_persistent_context(str(self.profile_dir), **options)
         return self
 
     def __exit__(self, *exc: Any) -> None:
@@ -150,37 +161,62 @@ class YuketangSession:
 
     # ------------------------------------------------------------ data
     def get_json(self, url: str, headers: dict[str, str] | None = None) -> Any:
+        from urllib.parse import urlsplit
+        parts = urlsplit(url)
+        if (parts.scheme != "https" or parts.hostname not in {urlsplit(HOST).hostname, urlsplit(EXAM_HOST).hostname}
+                or parts.username or parts.password or parts.port not in (None, 443)):
+            raise ValueError("拒绝读取非雨课堂 API 地址")
         self._pace()
         self.requests += 1
         response = self.context.request.get(url, headers=headers or {}, timeout=30_000, max_redirects=0)
-        status = response.status
-        if status in (401, 403) and url.startswith(HOST) and "/userinfo" in url:
-            raise LoginRequired("雨课堂登录已过期，请重新扫码登录")
-        if status >= 300 and status < 400:
-            raise LoginRequired("雨课堂要求重新登录")
-        text = response.text()
         try:
-            payload = json.loads(text)
-        except ValueError as exc:
-            raise RuntimeError(f"雨课堂接口返回非 JSON（HTTP {status}）：{url.split('?')[0]}") from exc
-        if status >= 400:
-            raise RuntimeError(f"雨课堂接口 HTTP {status}：{url.split('?')[0]}")
-        return payload
+            status = response.status
+            if status == 401 or status == 403 and "/userinfo" in parts.path:
+                raise LoginRequired("雨课堂登录已过期，请重新扫码登录")
+            if 300 <= status < 400:
+                raise LoginRequired("雨课堂要求重新登录")
+            if status >= 400:
+                raise RuntimeError(f"雨课堂接口 HTTP {status}：{parts.path}")
+            try:
+                payload = json.loads(response.text())
+            except ValueError as exc:
+                raise RuntimeError(f"雨课堂接口返回非 JSON（HTTP {status}）：{parts.path}") from exc
+            if not isinstance(payload, dict):
+                raise RuntimeError("雨课堂接口返回了无效数据结构")
+            code = payload.get("errcode", payload.get("code"))
+            message = str(payload.get("errmsg") or payload.get("msg") or "")
+            if str(code) in {"401", "403"} or (code not in (None, 0) and any(word in message for word in ("未登录", "未登陆", "登录过期", "登录已过期"))):
+                raise LoginRequired("雨课堂登录已过期，请重新扫码登录")
+            return payload
+        finally:
+            response.dispose()
 
     def download(self, url: str) -> bytes:
         from urllib.parse import urlsplit
-        host = urlsplit(url).hostname or ""
-        if not any(host.endswith(suffix) for suffix in ALLOWED_IMAGE_HOSTS):
+        parts = urlsplit(url)
+        host = parts.hostname or ""
+        if (parts.scheme != "https" or parts.username or parts.password or parts.port not in (None, 443)
+                or not any(host == suffix.lstrip(".") or host.endswith(suffix) for suffix in ALLOWED_IMAGE_HOSTS)):
             raise ValueError(f"拒绝下载非雨课堂域名的图片：{host}")
         self._pace()
         self.requests += 1
-        response = self.context.request.get(url, timeout=60_000)
-        if response.status >= 400:
-            raise RuntimeError(f"图片下载失败 HTTP {response.status}")
-        body = response.body()
-        if len(body) > 25 * 1024 * 1024:
-            raise ValueError("图片超过 25 MB，未保存")
-        return body
+        response = self.context.request.get(url, timeout=60_000, max_redirects=0)
+        try:
+            if not 200 <= response.status < 300:
+                raise RuntimeError(f"图片下载失败 HTTP {response.status}（不会跟随跳转）")
+            mime = str(response.headers.get("content-type", "")).split(";", 1)[0].strip().lower()
+            if mime and mime not in {"image/png", "image/jpeg", "image/gif", "image/webp", "application/octet-stream"}:
+                raise ValueError("服务器返回的不是支持的题目图片")
+            body = response.body()
+            if len(body) > 25 * 1024 * 1024:
+                raise ValueError("图片超过 25 MB，未保存")
+            raster = (body.startswith((b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a"))
+                      or body.startswith(b"RIFF") and body[8:12] == b"WEBP")
+            if not raster:
+                raise ValueError("图片内容无效，未写入题库")
+            return body
+        finally:
+            response.dispose()
 
     def open_exam(self, classroom_id: Any, exam_id: Any, timeout: float = 30) -> bool:
         """Navigate the web app's exam transit page so the exam host grants a token.

@@ -28,7 +28,7 @@ from typing import Any, Iterable
 
 from ..durable import atomic_bytes, atomic_json
 from ..paths import PRIVATE_ROOT
-from .parsing import search_text
+from .parsing import search_text, strip_url
 
 _LOCK = threading.RLock()
 CLASSROOM_ID = re.compile(r"^\d{1,15}$")
@@ -49,8 +49,27 @@ def _read(path: Path, default: Any) -> Any:
         return json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return default
-    except (OSError, ValueError):
-        return default
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"雨课堂缓存无法读取：{path.name}；请重新同步或恢复备份") from exc
+
+
+def _redact_raw(value: Any) -> Any:
+    """Scrub credentials and signed URLs, including URLs embedded in HTML."""
+    if isinstance(value, dict):
+        secrets = {"token", "accesstoken", "refreshtoken", "authkey", "authorization", "cookie", "sessionid", "signature"}
+        return {key: "[redacted]" if re.sub(r"[^a-z]", "", str(key).lower()) in secrets else _redact_raw(item)
+                for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_raw(item) for item in value]
+    if isinstance(value, str):
+        return re.sub(r"https?://[^\s<>\"']+", lambda match: strip_url(match[0]), value)
+    return value
+
+
+def image_signature(question: dict[str, Any]) -> list[tuple[str, str, str]]:
+    return [(str(image.get("kind") or ""), str(image.get("source") or ""),
+             str(image.get("sha256") or image.get("path") or ""))
+            for image in question.get("images") or [] if isinstance(image, dict) and image.get("kind") != "student"]
 
 
 def safe_name(value: Any) -> str:
@@ -193,44 +212,70 @@ class BankStore:
         return [_read(path, {}) for path in sorted(folder.glob("*.json"))] if folder.is_dir() else []
 
     def save_raw(self, cid: Any, activity_id: Any, name: str, payload: Any) -> None:
-        atomic_json(self.classroom_dir(cid) / "raw" / safe_name(activity_id) / f"{safe_name(name)}.json", payload)
+        atomic_json(self.classroom_dir(cid) / "raw" / safe_name(activity_id) / f"{safe_name(name)}.json", _redact_raw(payload))
 
     def raw(self, cid: Any, activity_id: Any, name: str) -> Any:
         return _read(self.classroom_dir(cid) / "raw" / safe_name(activity_id) / f"{safe_name(name)}.json", None)
 
-    def save_questions(self, cid: Any, activity_id: Any, questions: list[dict[str, Any]]) -> None:
+    def activity_questions(self, cid: Any, activity_id: Any) -> list[dict[str, Any]]:
         path = self.classroom_dir(cid) / "questions" / f"{safe_name(activity_id)}.json"
-        previous = {item.get("id"): item for item in _read(path, []) if isinstance(item, dict)}
-        for question in questions:
-            # Keep finished vision transcriptions and downloaded files when an
-            # unchanged question is re-imported.
-            old = previous.get(question.get("id")) or {}
-            if old.get("vision") and not question.get("vision"):
-                question["vision"] = old["vision"]
-            old_images = {image.get("source"): image for image in old.get("images") or [] if isinstance(image, dict)}
-            for image in question.get("images") or []:
-                kept = old_images.get(image.get("source"))
-                if kept and kept.get("path") and not image.get("path"):
-                    image.update({k: kept[k] for k in ("path", "sha256") if k in kept})
-        atomic_json(path, questions)
+        items = _read(path, [])
+        if not isinstance(items, list) or any(not isinstance(item, dict) or not item.get("id") for item in items):
+            raise RuntimeError(f"雨课堂题目缓存格式错误：{path.name}；请重新同步")
+        return items
+
+    def save_questions(self, cid: Any, activity_id: Any, questions: list[dict[str, Any]]) -> None:
+        self.ensure()
+        path = self.classroom_dir(cid) / "questions" / f"{safe_name(activity_id)}.json"
+        with _LOCK:
+            try:
+                previous = {item.get("id"): item for item in self.activity_questions(cid, activity_id)}
+            except RuntimeError:
+                # A successful explicit re-import can repair a corrupt cache.
+                # Preserve the original bytes outside the *.json read set;
+                # ordinary note retrieval still fails visibly on corruption.
+                import uuid
+                backup = path.with_name(path.name + ".corrupt-" + uuid.uuid4().hex)
+                atomic_bytes(backup, path.read_bytes())
+                previous = {}
+            for question in questions:
+                old = previous.get(question.get("id")) or {}
+                # Student-uploaded answer pictures never enter the image bank,
+                # including when migrating an older cache containing paths.
+                question["images"] = [dict(image) for image in question.get("images") or []
+                                      if isinstance(image, dict) and image.get("kind") != "student"]
+                old_images = {(image.get("kind"), image.get("source")): image for image in old.get("images") or []
+                              if isinstance(image, dict) and image.get("kind") != "student"}
+                for image in question["images"]:
+                    image.pop("url", None)
+                    kept = old_images.get((image.get("kind"), image.get("source")))
+                    if kept and kept.get("path") and not image.get("path") and not image.get("error"):
+                        image.update({key: kept[key] for key in ("path", "sha256") if key in kept})
+                fields = ("body", "options", "remark", "answer", "answer_known", "needs_vision")
+                unchanged = image_signature(question) == image_signature(old) and all(question.get(k) == old.get(k) for k in fields)
+                if old and not unchanged:
+                    question.pop("vision", None)
+                elif old.get("vision") and not question.get("vision"):
+                    question["vision"] = old["vision"]
+            atomic_json(path, questions)
 
     def questions(self, cid: Any) -> list[dict[str, Any]]:
         folder = self.classroom_dir(cid) / "questions"
         result: list[dict[str, Any]] = []
-        if not folder.is_dir():
-            return result
-        for path in sorted(folder.glob("*.json")):
-            items = _read(path, [])
-            result.extend(item for item in items if isinstance(item, dict))
+        if folder.is_dir():
+            for path in sorted(folder.glob("*.json")):
+                result.extend(self.activity_questions(cid, path.stem))
         return result
 
-    def update_question(self, cid: Any, question_id: str, updates: dict[str, Any]) -> bool:
+    def update_question(self, cid: Any, question_id: str, updates: dict[str, Any], *, expected: dict[str, Any] | None = None) -> bool:
         folder = self.classroom_dir(cid) / "questions"
         with _LOCK:
             for path in sorted(folder.glob("*.json")):
                 items = _read(path, [])
                 for item in items:
                     if isinstance(item, dict) and item.get("id") == question_id:
+                        if expected is not None and any(item.get(key) != value for key, value in expected.items()):
+                            return False
                         item.update(updates)
                         atomic_json(path, items)
                         return True

@@ -904,7 +904,8 @@ async def generate(record, config):
     if yuketang_questions:
         # A completed task is reused only for the same 雨课堂 question set;
         # newly bound or newly published questions start a fresh note task.
-        identity_inputs.append({'yuketang_questions':hashlib.sha256(json.dumps(yuketang_questions,sort_keys=True,ensure_ascii=False).encode()).hexdigest()})
+        from .yuketang.retrieval import QUESTION_PIPELINE_VERSION
+        identity_inputs.append({'yuketang_questions':hashlib.sha256(json.dumps(yuketang_questions,sort_keys=True,ensure_ascii=False).encode()).hexdigest(), 'question_pipeline':QUESTION_PIPELINE_VERSION})
     identity=budget_compatible_identity(record.directory/'.review-notes',identity_inputs,config,history_index=5)
     relative=f'.review-notes/{identity}';folder=record.directory/relative;folder.mkdir(parents=True,exist_ok=True,mode=0o700)
     config=note_runtime_config(config)
@@ -1088,9 +1089,10 @@ async def generate(record, config):
         payload['coverage']={**plan,'figures':[{'source_id':i['source_id'],'page':i['page'],'path':i['path'],'concept':i['concept']} for i in images]}
         instructions=TEACHING+'\n'+str(config.get('_note_summary_system_prompt') or '')+'\n'+str(config.get('_note_summary_custom_prompt') or '')+review_scope.instructions(scope)
         if yuketang_questions:
-            from .yuketang.retrieval import instructions as yuketang_instructions
-            # 雨课堂题库: same-lesson in-class problems first, then nearby tests.
-            payload['yuketang_questions']=yuketang_questions
+            from .yuketang.retrieval import instructions as yuketang_instructions, fit as fit_yuketang
+            # The deterministic appendix uses the full bank, but model input
+            # must stay bounded regardless of the number of forced exercises.
+            payload['yuketang_questions']=fit_yuketang(yuketang_questions)
             instructions+=yuketang_instructions(write_section=True)
         if draft_path.exists():markdown=draft_path.read_text()
         else:

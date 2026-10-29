@@ -14,15 +14,20 @@ from urllib.parse import urlsplit
 
 from . import parsing
 from .client import EXAM_HEADERS, EXAM_HOST, HOST, LoginRequired, classroom_headers
-from .store import BankStore, now_iso
+from .store import BankStore, now_iso, safe_name
 
 PAGE_SIZE = 20
 MAX_PAGES = 100
 # Re-check recent lessons whose subjective answers were not graded yet, and
 # exams whose answers were not yet released, at most this often.
 RECHECK_HOURS = 12
+COMPLETE_RECHECK_HOURS = 24 * 7
 RETRY_DELAY = 3.0
 RECENT_LESSON_DAYS = 30
+
+
+def safe_error(value: Any, limit: int = 500) -> str:
+    return re.sub(r"(https?://[^\s?]+)\?[^\s]*", r"\1", str(value or ""))[:limit]
 
 
 class SyncAborted(RuntimeError):
@@ -45,6 +50,7 @@ class ClassroomSync:
         self.university_id = None if university_id in (None, "") else str(university_id)
         self.progress = progress or (lambda message: None)
         self.refresh = refresh
+        self.revalidate_images = refresh
         self.should_stop = should_stop or (lambda: False)
         self.activity_image_errors = 0
         self.summary = {"activities": 0, "imported": 0, "skipped": 0, "pending": 0, "errors": 0,
@@ -82,6 +88,7 @@ class ClassroomSync:
                 continue
             self.progress(f"{label}：读取中")
             self.activity_image_errors = 0
+            self.revalidate_images = self.refresh or self._stale(state, COMPLETE_RECHECK_HOURS)
             try:
                 status, count, extra = self.import_activity(activity)
                 if self.activity_image_errors:
@@ -96,8 +103,8 @@ class ClassroomSync:
                 self.summary["errors"] += 1
                 self.store.save_activity_state(self.cid, activity.get("id"), {
                     **state, "activity": activity, "fingerprint": fingerprint, "status": "error",
-                    "error": str(exc)[:500], "checked_at": now_iso()})
-                self.progress(f"{label}：失败（{exc}）")
+                    "error": safe_error(exc), "checked_at": now_iso()})
+                self.progress(f"{label}：失败（{safe_error(exc)}）")
                 continue
             self.summary["imported" if status == "complete" else "pending"] += 1
             self.store.save_activity_state(self.cid, activity.get("id"), {
@@ -107,9 +114,16 @@ class ClassroomSync:
         questions = self.store.questions(self.cid)
         counts = self.store.counts(questions)
         finished = now_iso()
-        # last_sync = end of the last successful run, whether or not anything changed.
-        info.update(last_sync=finished, last_attempt_at=finished, last_attempt_status="ok", last_error="",
+        # Keep the previous successful timestamp when any activity or image
+        # failed; otherwise the UI would report a partial run as successful.
+        partial = bool(self.summary.get("errors") or self.summary.get("image_errors"))
+        info.update(last_attempt_at=finished,
+                    last_attempt_status="partial" if partial else "ok",
+                    last_error=(f"{self.summary.get('errors', 0)} 个活动失败，{self.summary.get('image_errors', 0)} 张图片待重试"
+                                if partial else ""),
                     counts=counts, last_summary=self.summary)
+        if not partial:
+            info["last_sync"] = finished
         if self.summary.get("imported") or counts != previous_counts:
             info["last_change"] = finished  # internal: when the bank content last changed
         self.store.save_classroom(self.cid, info)
@@ -120,14 +134,47 @@ class ClassroomSync:
             if state.get("status") in {"pending", "ungraded"} and state.get("fingerprint") == fingerprint:
                 return self._stale(state)
             return True
+        if state.get("status") == "complete":
+            # Activity metadata does not include the full paper.  Re-read a
+            # completed activity weekly so teacher edits eventually become
+            # visible without turning every note/sync into a full crawl.
+            return self._stale(state, COMPLETE_RECHECK_HOURS) or self._images_missing(state)
         return False
 
-    def _stale(self, state: dict[str, Any]) -> bool:
+    def _stale(self, state: dict[str, Any], hours: float = RECHECK_HOURS) -> bool:
         try:
             checked = datetime.fromisoformat(str(state.get("checked_at")))
         except ValueError:
             return True
-        return datetime.now(checked.tzinfo) - checked >= timedelta(hours=RECHECK_HOURS)
+        return datetime.now(checked.tzinfo) - checked >= timedelta(hours=hours)
+
+    def _images_missing(self, state: dict[str, Any]) -> bool:
+        activity_id = (state.get("activity") or {}).get("id")
+        if activity_id is None:
+            return False
+        question_file = self.store.classroom_dir(self.cid) / "questions" / f"{safe_name(activity_id)}.json"
+        if not question_file.is_file():
+            return True
+        try:
+            questions = self.store.activity_questions(self.cid, activity_id)
+        except RuntimeError:
+            return True
+        if state.get("question_count") is not None and len(questions) != int(state.get("question_count") or 0):
+            return True
+        for question in questions:
+            if str(question.get("activity_id")) != str(activity_id):
+                continue
+            for image in question.get("images") or []:
+                if image.get("kind") == "student":
+                    continue
+                if image.get("source") and not image.get("path"):
+                    return True
+                if image.get("path"):
+                    try:
+                        self.store.image_path(self.cid, image["path"])
+                    except FileNotFoundError:
+                        return True
+        return False
 
     def classroom_info(self) -> dict[str, Any]:
         info = self.store.classroom(self.cid)
@@ -157,9 +204,11 @@ class ClassroomSync:
                 if key not in seen:
                     seen.add(key)
                     activities.append(item)
-            if not has_more or not items:
-                break
-        return activities
+            if not has_more:
+                return activities
+            if not items:
+                raise RuntimeError("雨课堂活动分页为空但仍声明有下一页，未将不完整列表标为成功")
+        raise RuntimeError("雨课堂活动列表超过分页上限，未将不完整同步标为成功")
 
     # ------------------------------------------------------------ per type
     def import_activity(self, activity: dict[str, Any]) -> tuple[str, int, dict[str, Any]]:
@@ -178,13 +227,21 @@ class ClassroomSync:
         return len(questions)
 
     def download_images(self, activity: dict[str, Any], questions: list[dict[str, Any]]) -> None:
-        existing = {q.get("id"): q for q in self.store.questions(self.cid)}
+        existing = {q.get("id"): q for q in self.store.activity_questions(self.cid, activity.get("id"))}
         for question in questions:
             old_images = {i.get("source"): i for i in (existing.get(question["id"]) or {}).get("images") or []}
             for index, image in enumerate(question.get("images") or []):
+                self.check_stop()
+                if image.get("kind") == "student":
+                    # Student-uploaded answer pictures are sensitive and are
+                    # never needed for note rendering or vision transcription.
+                    image.pop("url", None)
+                    image.pop("path", None)
+                    image.pop("sha256", None)
+                    continue
                 url = image.pop("url", "")
                 kept = old_images.get(image.get("source"))
-                if kept and kept.get("path"):
+                if kept and kept.get("path") and not self.revalidate_images:
                     try:
                         self.store.image_path(self.cid, kept["path"])
                         image.update(path=kept["path"], sha256=kept.get("sha256", ""))
@@ -209,7 +266,7 @@ class ClassroomSync:
                         # Playwright's call log echoes the signed URL; keep only
                         # the first line without query strings.
                         first = (str(exc).splitlines() or [""])[0]
-                        image["error"] = re.sub(r"\?[^\s]*", "", first)[:200]
+                        image["error"] = safe_error(first, 200)
                         self.summary["image_errors"] += 1
                         self.activity_image_errors += 1
 
@@ -245,7 +302,8 @@ class ClassroomSync:
                     "exam_cover": cover if cover.get("errcode") in (0, None) else None}
         # The exam host keeps one open paper per browser session; a token from
         # an earlier exam answers 10006, so open this one first, like the UI.
-        self.session.open_exam(self.cid, exam_id)
+        if not self.session.open_exam(self.cid, exam_id):
+            return None
         return fetch()
 
     def import_quiz(self, activity: dict[str, Any]) -> tuple[str, int, dict[str, Any]]:
@@ -256,12 +314,13 @@ class ClassroomSync:
         shapes = {}
         for entry in [*(data.get("objective_result_list") or []), *(data.get("subjective_result_list") or [])]:
             pid = entry.get("problem_id") if isinstance(entry, dict) else None
-            if pid is None:
+            if pid is None or str(pid) in shapes:
                 continue
+            self.check_stop()
             payload = self.get(f"/v2/api/web/quiz/problem_shape?classroom_id={self.cid}&quiz_id={quiz_id}&problem_id={pid}")
             self.store.save_raw(self.cid, aid, f"problem_shape_{pid}", payload)
-            if payload.get("errcode") in (0, None):
-                shapes[str(pid)] = payload
+            parsing.body_data(payload)  # failed shapes must not erase good cached prompts
+            shapes[str(pid)] = payload
         questions = parsing.parse_quiz(activity, self.cid, result, shapes)
         count = self.save(activity, questions)
         visible = data.get("quiz_visible", True) and all(q["answer_known"] for q in questions)
@@ -274,6 +333,8 @@ class ClassroomSync:
         self.store.save_raw(self.cid, aid, "lesson_info", info)
         self.store.save_raw(self.cid, aid, "student_detail", detail)
         identity = parsing.lesson_identity(info)
+        if not identity and parsing.lesson_problems(detail):
+            raise RuntimeError("课堂题目缺少读取身份，保留上次成功同步的题目")
         answers = {}
         for item in parsing.lesson_problems(detail):
             pid = str(item.get("problemId") or "")
@@ -283,8 +344,8 @@ class ClassroomSync:
             payload = self.get(f"/api/v3/classroom-report/problem/student-answer?identityId={identity}"
                                f"&problemId={pid}&lesson_id={lesson_id}")
             self.store.save_raw(self.cid, aid, f"student_answer_{pid}", payload)
-            if payload.get("code") in (0, None):
-                answers[pid] = payload
+            parsing.body_data(payload)
+            answers[pid] = payload
         questions = parsing.parse_lesson(activity, self.cid, detail, answers, info)
         count = self.save(activity, questions)
         ungraded = any(not q.get("graded") for q in questions)
@@ -329,7 +390,7 @@ def sync_classrooms(store: BankStore, classrooms: list[dict[str, Any]], *, headl
 def record_attempt_failure(store: BankStore, cid: str, status: str, error: str) -> None:
     try:
         info = store.classroom(cid)
-        info.update(last_attempt_at=now_iso(), last_attempt_status=status, last_error=str(error)[:300])
+        info.update(last_attempt_at=now_iso(), last_attempt_status=status, last_error=safe_error(error, 300))
         store.save_classroom(cid, info)
     except Exception:  # pragma: no cover - never mask the original failure
         pass
@@ -344,7 +405,7 @@ def _sync_classrooms(store, classrooms, *, headless, delay, refresh, profile_dir
         except LoginRequired:
             raise
         except Exception as exc:  # the binding dropdown is a convenience
-            progress(f"课程列表未更新：{exc}")
+            progress(f"课程列表未更新：{safe_error(exc)}")
         for item in classrooms:
             cid = str(item["classroom_id"])
             progress(f"同步雨课堂班级 {cid}")
