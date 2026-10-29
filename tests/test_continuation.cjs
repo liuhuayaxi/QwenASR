@@ -23,6 +23,14 @@ test('raw text remains readable when note generation fails',async()=>{
  const stages=recordStages({status:'interrupted',has_transcript:true},[{label:'课后复习笔记',status:'failed',stage:'生成失败',error:'模型限流',inference:{}}]);
  assert.match(stages[0],/可阅读/);assert.match(stages[1],/尚未生成/);assert.match(stages.at(-1),/来源待确认/);
 });
+test('recovered failure receipts are excluded from current workbench counts and stages',async()=>{
+ const {isCurrentTask,recordStages}=await modulePromise;
+ const recovered={id:'old',status:'failed',display_status:'recovered',recovered:true,label:'课程知识索引',error:'历史错误'};
+ assert.equal(isCurrentTask(recovered),false);
+ assert.equal(isCurrentTask({id:'current',status:'failed',error:'实际错误'}),true);
+ const stages=recordStages({status:'completed',has_transcript:true},[recovered]);
+ assert.equal(stages.some(stage=>stage.includes('历史错误')),false);
+});
 test('course and recording labels cannot inject markup',async()=>{
  const {escapeHtml}=await modulePromise;
  assert.equal(escapeHtml('<img src=x onerror="bad()">'), '&lt;img src=x onerror=&quot;bad()&quot;&gt;');

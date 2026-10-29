@@ -1,5 +1,5 @@
 import {cachedJson} from './cached-json.js';
-import {escapeHtml as esc, recordingId, activeStatuses, attentionStatuses} from './workbench/continuation.js?v=20261011-ui-final';
+import {escapeHtml as esc, recordingId, isCurrentTask, activeStatuses, attentionStatuses} from './workbench/continuation.js?v=20261029-recovered-task-sync';
 const $ = id => document.getElementById(id);
 const params = new URLSearchParams(location.search);
 let category = params.get('category') || '', records = [], tasks = [], categories = [], timer, recordsLoaded = false, tasksLoaded = false;
@@ -43,7 +43,7 @@ function render() {
   const lessons = records.filter(record => !category || record.category === category).sort((a,b) => String(b.recorded_at || b.started_at || '').localeCompare(String(a.recorded_at || a.started_at || '')));
   const ids = new Set(lessons.map(record => record.id));
   const related = tasks.filter(task => !category || task.category === category || ids.has(recordingId(task)));
-  const pending = related.filter(task => activeStatuses.has(task.status) || attentionStatuses.has(task.status));
+  const pending = related.filter(task => isCurrentTask(task) && (activeStatuses.has(task.status) || attentionStatuses.has(task.status)));
   $('workspaceMeta').textContent = `${recordTotal} 堂课堂 · ${noteTotal} 份笔记${tasksLoaded ? ` · ${pending.length} 项待处理` : ''}`;
   replace('workspaceRecent', lessons.slice(0,5).map(record => recordRow(record)).join('') || '<p class="workspace-empty">暂无课堂记录</p>');
   const shown = (pending.length ? pending : related.filter(task => task.status === 'completed')).slice(0, pending.length ? 4 : 3);

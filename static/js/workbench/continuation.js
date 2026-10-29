@@ -3,6 +3,13 @@ import {aiTaskPayload} from '../task-config.js';
 
 export const activeStatuses = new Set(['running', 'queued', 'waiting_retry', 'stopping']);
 export const attentionStatuses = new Set(['failed', 'error', 'interrupted', 'pending', 'stale', 'completed_with_errors', 'paused']);
+// The task feed keeps recovered receipts so the task center can explain the
+// history, but they are no longer current work. Every surface that presents
+// current processing must use the same rule instead of looking at `status`
+// alone (a recovered receipt still has its original `failed` status).
+export function isCurrentTask(task) {
+  return !task?.recovered && task?.display_status !== 'recovered';
+}
 const labels = {running:'进行中', queued:'排队中', waiting_retry:'等待重试', stopping:'正在停止', paused:'已暂停', failed:'失败', error:'失败', interrupted:'已中断', pending:'待处理', stale:'原件已更新', completed_with_errors:'部分失败', completed:'已完成', cancelled:'已取消'};
 export const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c]));
 
@@ -32,7 +39,7 @@ export function recordStages(record, tasks = []) {
   const note = record.ai_note_summary?.summary || record.has_ai_summary;
   const raw = record.status === 'completed' ? '原始转写已完成' : record.has_transcript || record.segment_count || record.segments?.length ? '原始转写可阅读 · 尚未完成' : '原始转写等待中';
   const stages = [raw, note ? '课后复习笔记已保存' : '课后复习笔记尚未生成', record.ideashell_sync?.note_id ? '已关联 IdeaShell' : 'IdeaShell 尚未同步'];
-  for (const task of tasks.filter(task => task.status !== 'completed' && task.status !== 'cancelled')) {
+  for (const task of tasks.filter(task => isCurrentTask(task) && task.status !== 'completed' && task.status !== 'cancelled')) {
     const progress = typeof task.progress === 'number' ? ` ${Math.max(0, Math.min(100, task.progress))}%` : '';
     const actual = {remote:'Windows',local:'Mac'}[task.inference?.provider] || '来源待确认';
     stages.push(`${task.label || '任务'}：${task.stage || labels[task.status] || task.status}${progress} · ${actual}${task.error ? ` · ${task.error}` : ''}`);
@@ -47,14 +54,15 @@ export function createContinuation({root = document, openRecord, toast, fetcher 
   const list = root.querySelector('#continuationList'), error = root.querySelector('#continuationError');
   let records = [], tasks = [], timer, loading = false, busy = false, loaded = false, revision = 0, refreshRequested = false;
   function render() {
-    const pending = tasks.filter(task => attentionStatuses.has(task.status));
-    const running = tasks.filter(task => activeStatuses.has(task.status));
+    const currentTasks = tasks.filter(isCurrentTask);
+    const pending = currentTasks.filter(task => attentionStatuses.has(task.status));
+    const running = currentTasks.filter(task => activeStatuses.has(task.status));
     const ordered = [...records].sort((a,b) => String(b.started_at || '').localeCompare(String(a.started_at || '')));
     const latest = records.find(record => record.id === read(RECORD_KEY)) || ordered[0];
-    const items = [...new Set([latest?.id, ...tasks.filter(task => activeStatuses.has(task.status) || attentionStatuses.has(task.status)).map(recordingId)].filter(Boolean))]
+    const items = [...new Set([latest?.id, ...currentTasks.filter(task => activeStatuses.has(task.status) || attentionStatuses.has(task.status)).map(recordingId)].filter(Boolean))]
       .map(id => records.find(record => record.id === id)).filter(Boolean).slice(0, 3);
     list.innerHTML = `<p><a href="/tasks">${loaded ? `待处理 ${pending.length} · 进行中 ${running.length}` : '任务状态读取中'} · 查看并继续 →</a></p>` + items.map(record => {
-      const related = tasks.filter(task => recordingId(task) === record.id);
+      const related = currentTasks.filter(task => recordingId(task) === record.id);
       const actions = related.flatMap(task => (task.actions || []).filter(action => ['continue','retry'].includes(action)).slice(0,1).map(action =>
         `<button class="secondary-button" data-task="${escapeHtml(task.id)}" data-action="${action}" ${busy ? 'disabled' : ''}>${action === 'retry' ? '重试' : '继续'}${escapeHtml(task.label || '处理')}</button>`));
       return `<article class="continuation-card"><b>${escapeHtml(record.title || '未命名课堂')}</b><ul>${recordStages(record,related).map(text => `<li>${escapeHtml(text)}</li>`).join('')}</ul><div class="continuation-actions"><button class="secondary-button" data-recording="${escapeHtml(record.id)}">阅读原文 / 打开课堂笔记</button>${actions.join('')}</div></article>`;
@@ -71,7 +79,7 @@ export function createContinuation({root = document, openRecord, toast, fetcher 
         if (result.status === 'fulfilled') { if (index === 0) records = result.value.records || []; else { tasks = result.value.tasks || []; loaded = true; } }
         else problems.push(`${index === 0 ? '课堂记录' : '任务状态'}暂时无法读取`);
       });
-      const wanted = [...new Set([read(RECORD_KEY), ...tasks.filter(task => activeStatuses.has(task.status) || attentionStatuses.has(task.status)).map(recordingId)].filter(Boolean))]
+      const wanted = [...new Set([read(RECORD_KEY), ...tasks.filter(task => isCurrentTask(task) && (activeStatuses.has(task.status) || attentionStatuses.has(task.status))).map(recordingId)].filter(Boolean))]
         .filter(id => !records.some(record => record.id === id)).slice(0, 100);
       if (wanted.length) {
         try {
@@ -88,7 +96,7 @@ export function createContinuation({root = document, openRecord, toast, fetcher 
     } finally {
       loading = false;
       if (refreshRequested && !busy) queueMicrotask(refresh);
-      else if (!document.hidden && !busy) timer = setTimeout(refresh, tasks.some(task => activeStatuses.has(task.status)) ? 15000 : 60000);
+      else if (!document.hidden && !busy) timer = setTimeout(refresh, tasks.some(task => isCurrentTask(task) && activeStatuses.has(task.status)) ? 15000 : 60000);
     }
   }
   list.addEventListener('click', async event => {

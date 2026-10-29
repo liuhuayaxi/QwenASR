@@ -20,7 +20,7 @@ import { createSettingsNavigation } from "./js/settings-navigation.js?v=20261019
 import { createLibraryBackup } from "./js/library-backup.js?v=20261014-daily";
 import { createDriveBackup } from "./js/drive-backup.js?v=20261022-ykt-drive-1";
 
-import { createContinuation, recognitionText } from "./js/workbench/continuation.js?v=20261011-ui-final";
+import { createContinuation, recognitionText } from "./js/workbench/continuation.js?v=20261029-recovered-task-sync";
 
 const $ = (selector) => document.querySelector(selector);
 
