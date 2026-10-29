@@ -3,7 +3,27 @@
  * Follows the QwenASR knowledge development contract.
  */
 
+import { questionHtml, hydrateImages, releaseImages } from "./yuketang-render.js?v=20261028-ykt-5";
+
 const $ = (selector) => document.querySelector(selector);
+
+// 雨课堂 questions of the bound course(s) that match the query. Courses
+// without a binding simply return nothing; failures never block 检索.
+export async function searchYuketang(categories, query, fetchJson, limit = 5) {
+  const hits = [];
+  for (const course of categories) {
+    try {
+      const data = await fetchJson(`/api/yuketang/questions?${new URLSearchParams({ category: course, q: query, mode: "rank", limit: String(limit) })}`);
+      hits.push(...(data.questions || []).map((q) => ({ ...q, _category: course })));
+    } catch { /* no binding or no bank */ }
+  }
+  return hits.sort((a, b) => (b._score || 0) - (a._score || 0));
+}
+
+export function yuketangHitsHtml(hits, showCourse = false) {
+  return hits.map((q) => questionHtml(q, undefined, { label: showCourse ? `雨课堂习题 · ${q._category}` : "雨课堂习题" })
+    .replace('<article class="ykt-question">', '<article class="ykt-question ykt-hit knowledge-result-card">')).join("");
+}
 
 function escapeHtml(str) {
   if (typeof str !== "string") return "";
@@ -16,7 +36,7 @@ function stamp(seconds) {
 }
 
 async function api(url, options = {}) {
-  const response = await fetch(url, { cache: "no-store", ...options });
+  const response = await fetch(url, { cache: "no-store", ...options, headers: {"X-QwenASR-Client": "course-files", ...(options.headers || {})} });
   let payload = null;
   try {
     payload = await response.json();
@@ -84,6 +104,7 @@ export function initCourseKnowledge() {
   if (!els.searchInput) return;
 
   let currentCategory = "";
+  let yuketangHits = { hits: [], cross: false };
   let isSearching = false;
   let activeJobId = null;
   let jobPollInterval = null;
@@ -144,18 +165,22 @@ export function initCourseKnowledge() {
       });
       const categories=isCross ? [...new Set([...document.querySelectorAll('#courses [data-category]')].map(x=>x.dataset.category).filter(Boolean))] : [category];
       const results=[];
+      const yuketang=searchYuketang(categories, query, api);
       for (const course of categories) {
         params.set('category',course);
         const data=await api(`/api/knowledge/search?${params.toString()}`);
         results.push(...(data.results || []));
       }
       results.sort((a,b)=>(b.score || 0)-(a.score || 0));
+      yuketangHits={hits: await yuketang, cross: isCross};
       renderSearchResults(results, query, category);
       if (els.searchStatus) {
-        els.searchStatus.textContent = `找到 ${results.length} 条相关知识段落${category ? `（${category}）` : "（全课程）"}`;
+        const ykt=yuketangHits.hits.length ? `、${yuketangHits.hits.length} 道雨课堂习题` : "";
+        els.searchStatus.textContent = `找到 ${results.length} 条相关知识段落${ykt}${category ? `（${category}）` : "（全课程）"}`;
       }
     } catch (err) {
       if (els.searchStatus) els.searchStatus.textContent = `检索失败：${err.message}`;
+      yuketangHits={hits: [], cross: false};
       renderSearchResults([], query, category);
     } finally {
       isSearching = false;
@@ -165,7 +190,22 @@ export function initCourseKnowledge() {
 
   function renderSearchResults(results, query, category) {
     if (!els.resultsList) return;
+    const previousHits = els.resultsList.parentElement?.querySelector(".ykt-hits");
+    if (previousHits) { releaseImages(previousHits); previousHits.remove(); }
+    if (yuketangHits.hits.length) {
+      const box = document.createElement("div");
+      box.className = "ykt-hits knowledge-results-list";
+      box.setAttribute("aria-label", "雨课堂习题检索结果");
+      box.innerHTML = yuketangHitsHtml(yuketangHits.hits, yuketangHits.cross);
+      els.resultsList.before(box);
+      void hydrateImages(box);
+    }
 
+    if (!results.length && yuketangHits.hits.length) {
+      if (els.emptyState) els.emptyState.classList.add("hidden");
+      els.resultsList.replaceChildren();
+      return;
+    }
     if (!results.length) {
       if (els.emptyState) {
         els.emptyState.classList.remove("hidden");

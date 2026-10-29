@@ -2,6 +2,21 @@
 (() => {
   const f = window.__fixture;
   f.requests = []; f.pending = {}; f.responses = []; f.archived = [];
+  f.bodyReads = 0;
+  // Await consumed Response bodies and their UI continuations. A fixed 25/40ms
+  // sleep races real browser JSON stream delivery, especially under CPU load.
+  // Intentionally held requests are excluded so in-flight assertions still run.
+  f.settle = async () => {
+    let quiet = 0, previous = -1;
+    const deadline = Date.now() + 3000;
+    while (quiet < 3) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      const count = f.requests.length;
+      quiet = f.bodyReads === 0 && count === previous ? quiet + 1 : 0;
+      previous = count;
+      if (Date.now() > deadline) throw new Error('Fixture response consumption did not settle');
+    }
+  };
   f.location = new URL(f.url || 'http://fixture.invalid/tasks');
   f.history = {state:null, replaceState(state, unused, value) { this.state=state; f.location.href=new URL(value,f.location).href; }};
   const storage = new Map(Object.entries(f.storage || {}));
@@ -38,7 +53,7 @@
     if (path.startsWith('/api/library?')) return {json:{records:f.records||[]}};
     if (path==='/api/inference/settings') {if(method==='PUT')f.inference=structuredClone(body.settings);return {json:{settings:f.inference}};}
     if (path==='/api/inference/test') return {json:{capabilities:{version:'fixture-node'}}};
-    if (path==='/api/mineru/settings') {if(method==='PUT')f.mineru=structuredClone(body.settings);return {json:{settings:f.mineru,defaults:f.defaults||f.mineru,runtime:{compatible:true,available:true,version:'4.0.10'}}};}
+    if (path==='/api/mineru/settings') {if(method==='PUT')f.mineru=structuredClone(body.settings);return {json:{settings:f.mineru,defaults:f.defaults||f.mineru,tier_choices:['auto','flash','basic','standard','advanced'],runtime:{compatible:true,available:true,version:'4.0.10'}}};}
     if (path==='/api/library/backup') {
       if(method==='POST')f.backup={id:'backup-'+f.requests.length,status:'packing',completed_files:0,file_count:5,processed_bytes:0,total_bytes:5000,percent:0};
       return {json:{backup:f.backup??null}};
@@ -59,6 +74,12 @@
     if (plan.error) {request.error=plan.error;throw plan.error==='timeout'?new DOMException('Timed out','TimeoutError'):new TypeError('Network request failed');}
     const spec=Object.hasOwn(plan,'json')||plan.raw!==undefined ? plan : serve(path,method,body,headers);
     const status=spec.status||200;request.status=status;f.responses.push({index:request.index,status});
-    return new Response(spec.raw!==undefined?spec.raw:JSON.stringify(spec.json),{status,headers:{'Content-Type':'application/json',...(spec.headers||{})}});
+    const response = new Response(spec.raw!==undefined?spec.raw:JSON.stringify(spec.json),{status,headers:{'Content-Type':'application/json',...(spec.headers||{})}});
+    const json = response.json.bind(response);
+    response.json = async () => {
+      f.bodyReads += 1;
+      try { return await json(); } finally { f.bodyReads -= 1; }
+    };
+    return response;
   };
 })();

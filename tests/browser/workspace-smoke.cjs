@@ -386,10 +386,11 @@ async function fixtures(route) {
     await page.locator('#noteDialog[open]').waitFor();await page.locator('#askNoteClass').click();
     await page.locator('#chatQuestion:not([disabled])').waitFor();assert.equal(await page.locator('#noteDialog[open]').count(),0);
   });
-  await scenario('外部复习资料导入默认折叠',async(page,context,origin)=>{
+  await scenario('旧复习生成工具已移除，资料上传统一使用课程入口',async(page,context,origin)=>{
     await page.goto(origin+'/notes');
-    assert.equal(await page.locator('.external-import').getAttribute('open'),null);
-    await page.locator('.external-import > summary').click();await page.locator('#review-noteFile').waitFor();
+    await page.locator('#filesInput').waitFor({state:'attached'});
+    assert.equal(await page.locator('.external-import, #review-lessons, #review-noteFile').count(),0);
+    assert.equal(await page.locator('#uploadKind').count(),1);
   });
   await scenario('课程资料与已有复习 PDF 同页检索与上传',async(page,context,origin)=>{
     await page.goto(origin+'/course-files');

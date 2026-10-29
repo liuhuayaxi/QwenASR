@@ -51,7 +51,24 @@ class KnowledgeService:
             store=self.store,
         )
 
-        self.job_manager = JobManager(store=self.store, sync_fn=self.sync_course)
+        self.job_manager = JobManager(store=self.store, sync_fn=self.sync_course,
+                                      defer=self._defer_indexing)
+
+    def _defer_indexing(self, category: str) -> bool:
+        # Background reindexing must not repeatedly consume changing partial
+        # transcripts or time out behind the ASR worker's Metal lease.
+        from ..inference_providers import inference_settings
+        if inference_settings.for_task('knowledge').get('knowledge_provider', 'local') != 'local':
+            return False
+        items = getattr(self.recording_store, 'iter_list_items', None)
+        if items is not None:
+            return any(item.get('status') in {'active', 'recording', 'processing'}
+                       for item in items())
+        records = getattr(self.recording_store, 'list_records', None)
+        if records is None:
+            return False
+        return any(record.metadata.get('status') in {'active', 'recording', 'processing'}
+                   for record in records())
 
     def _ensure_storage(self):
         root=Path(self.settings.storage_root).resolve()

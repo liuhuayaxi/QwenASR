@@ -44,12 +44,39 @@ def native_read_range(path, arguments, output, *, media=None):
     return start, end
 
 
-def output_limit_before_failure(session_id, prompt, *, root=None):
+FINISH_REMINDER = "You did not call any tools. You should continue calling tools until you've completed your task. If you have completed your task call the finish tool."
+
+
+def _request_text(entry):
+    text=str(entry.get('content') or '')
+    match=re.search(r'<USER_REQUEST>\s*(.*?)\s*(?:</USER_REQUEST>|\Z)',text,re.S)
+    return match[1].strip() if match else text.strip()
+
+
+def last_turn(entries, prior_prompts):
+    """Entries of the final turn of a continued lesson conversation.
+
+    Earlier turns must be exactly the prompts this lesson session sent, in
+    order; otherwise the conversation is not ours and nothing is accepted.
+    """
+    if not prior_prompts:
+        return entries
+    starts=[i for i,e in enumerate(entries) if e.get('type')=='USER_INPUT' and _request_text(e)!=FINISH_REMINDER]
+    if len(starts)!=len(prior_prompts)+1:
+        raise SessionEvidenceError('AGY 续接会话的轮次与本节会话记录不一致')
+    for index,prompt in zip(starts,prior_prompts):
+        if _request_text(entries[index])!=str(prompt).strip():
+            raise SessionEvidenceError('AGY 续接会话的历史轮次与本节会话记录不一致')
+    return entries[starts[-1]:]
+
+
+def output_limit_before_failure(session_id, prompt, *, root=None, prior_prompts=()):
     """Classify a cut-off generation even if its continuation later disconnects."""
     if not re.fullmatch(r'[0-9a-fA-F-]{36}',str(session_id or '')):return False
     root=Path(root) if root is not None else Path.home()/'.gemini/antigravity-cli/brain'
     try:
         entries=[json.loads(line) for line in (root/session_id/'.system_generated/logs/transcript_full.jsonl').read_text().splitlines() if line.strip()]
+        entries=last_turn(entries,prior_prompts)
     except (OSError,ValueError):return False
     users=[e for e in entries if e.get('type')=='USER_INPUT']
     if len(users)!=1 or users[0].get('status')!='DONE':return False
@@ -122,7 +149,7 @@ def _arguments(call):
 
 
 def read_session(session_id, prompt, *, root=None, allowed_files=None, required_files=None, schema=None,
-                 require_output_continuation=False):
+                 require_output_continuation=False, prior_prompts=()):
     """Return only a verified completed turn and its successful read receipts."""
     if not re.fullmatch(r'[0-9a-fA-F-]{36}', str(session_id or '')):
         raise SessionEvidenceError('AGY 没有返回有效会话编号')
@@ -132,6 +159,7 @@ def read_session(session_id, prompt, *, root=None, allowed_files=None, required_
         entries = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
     except (OSError, ValueError) as exc:
         raise SessionEvidenceError('AGY 会话完成记录尚不可用') from exc
+    entries = last_turn(entries, prior_prompts)
     users = [e for e in entries if e.get('type') == 'USER_INPUT']
     # Schema print mode can insert this fixed internal finish reminder after
     # the answer. It is not another source-data request. No arbitrary later

@@ -149,3 +149,36 @@ class AttachmentRouteMigrationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(response.json()["duplicate"])
             connection.call_tool.assert_awaited_once_with("note_detail", {"note_id": ident, "scope": "brief"})
             store.save.assert_not_called()
+
+
+class StaleGrantTests(unittest.IsolatedAsyncioTestCase):
+    async def test_resource_mismatch_sets_old_grant_aside_and_starts_fresh_auth(self):
+        from mcp.client.auth.exceptions import OAuthFlowError
+        from qwen_asr_app import ideashell_sync
+        with tempfile.TemporaryDirectory() as tmp, patch.object(ideashell_sync, "PRIVATE_ROOT", Path(tmp)):
+            connection = IdeaShellConnection(NEW)
+            connection.storage.path.write_text(json.dumps({"tokens": {"access_token": "old"}}))
+            mismatch = ExceptionGroup("unhandled errors in a TaskGroup", [OAuthFlowError(
+                f"Protected resource {NEW} does not match expected {LEGACY_CHINA_SERVER}")])
+            calls = []
+
+            async def session():
+                calls.append(connection.storage.path.exists())
+                if len(calls) == 1:
+                    raise mismatch
+                connection.authorization_url = "https://mcp.ideashell.cn/authorize?x=1"
+                raise RuntimeError("waiting for user")
+
+            connection._client_session = session
+            await connection._probe_locked()
+            self.assertEqual(calls, [True, False], "second attempt runs without the stale grant")
+            backups = list(Path(tmp).glob("*.stale-*.json"))
+            self.assertEqual(len(backups), 1)
+            self.assertIn("old", backups[0].read_text())
+
+    def test_readable_error_flattens_task_groups(self):
+        from mcp.client.auth.exceptions import OAuthFlowError
+        from qwen_asr_app.ideashell_sync import readable_error
+        group = ExceptionGroup("unhandled errors in a TaskGroup", [OAuthFlowError("Protected resource a does not match expected b")])
+        self.assertIn("重新授权", readable_error(group))
+        self.assertEqual(readable_error(ExceptionGroup("g", [RuntimeError("boom")])), "boom")

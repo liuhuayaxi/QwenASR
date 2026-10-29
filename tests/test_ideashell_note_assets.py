@@ -39,7 +39,7 @@ def illustrated_record(root, count=20):
 
 
 class NoteAssetsTests(unittest.TestCase):
-    def test_images_and_pdf_are_real_bytes_and_pull_restores_local_illustrations(self):
+    def test_images_are_real_bytes_pdf_not_uploaded_and_pull_restores_local_illustrations(self):
         with tempfile.TemporaryDirectory() as raw:
             record, folder = illustrated_record(Path(raw), 2)
             note = record.metadata['ai_note_summary']
@@ -55,7 +55,7 @@ class NoteAssetsTests(unittest.TestCase):
             self.assertNotIn('](assets/', archive['content'])
             self.assertEqual(len(images), 2)
             self.assertTrue(all(i['data'].startswith(b'\x89PNG') for i in images))
-            self.assertEqual(documents[0]['data'], data)
+            self.assertEqual(documents, [])  # the review PDF is never uploaded
             self.assertNotIn('data', archive['images'][0])
             restored = restore_image_markdown(summary_from_archive(archive['content'], {'content_mode': 'summary'}), bindings)
             self.assertEqual(restored, content)
@@ -71,7 +71,7 @@ class NoteAssetsTests(unittest.TestCase):
             record.metadata['ai_note_summary'].update(review_status='passed', pdf_sha256='old')
             archive, _, documents, _ = prepare_push_assets(record, compose_push(record, 'summary'))
             self.assertEqual(documents, [])
-            self.assertTrue(archive['pdf_warning'])
+            self.assertEqual(archive['pdf_warning'], '')
             (folder / 'assets' / 'fig-0000000000000000.png').unlink()
             with self.assertRaisesRegex(ValueError, '图片不存在'):
                 prepare_push_assets(record, compose_push(record, 'summary'))
@@ -84,14 +84,14 @@ class PushAssetsTests(unittest.IsolatedAsyncioTestCase):
     async def test_twenty_images_share_one_note_with_partial_progress_and_safe_retry(self):
         with tempfile.TemporaryDirectory() as raw:
             record, _ = illustrated_record(Path(raw))
-            failure = True
+            failure = 3  # survives the in-request retries
             async def remote(name, arguments):
                 nonlocal failure
                 if name == 'note_create':
                     self.assertEqual(len(arguments['images']), 9)
                     return {'note_id': 'b' * 32}
                 if name == 'note_update' and failure:
-                    failure = False
+                    failure -= 1
                     raise RuntimeError('上传中断')
                 return {}
             connection = SimpleNamespace(server_url='https://mcp.ideashell.cn/mcp',
@@ -120,7 +120,10 @@ class PushAssetsTests(unittest.IsolatedAsyncioTestCase):
             calls = connection.call_tool.call_args_list
             self.assertEqual(sum(call.args[0] == 'note_create' for call in calls), 1)
             batches = [call.args[1]['images'] for call in calls if call.args[0] == 'note_update']
-            self.assertEqual([len(items) for items in batches], [9, 9, 9, 2])
+            # Three failed attempts at batch 2, then the retry resumes with only
+            # the missing images and never re-sends the text (no extra memo).
+            self.assertEqual([len(items) for items in batches], [9, 9, 9, 9, 2])
+            self.assertFalse(any('content' in call.args[1] for call in calls if call.args[0] == 'note_update'))
 
     async def test_changed_figure_bytes_require_a_fresh_preview(self):
         with tempfile.TemporaryDirectory() as raw:

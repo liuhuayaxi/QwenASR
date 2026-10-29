@@ -81,7 +81,7 @@ class ReviewBatchConcurrencyTests(unittest.IsolatedAsyncioTestCase):
             warning={'page':1,'severity':'warning','problem':'标点','evidence':'句号前空格'}
             report={'status':'passed','issues':[warning]}
             with patch('qwen_asr_app.review_notes.review_scope.prepare',AsyncMock(return_value={'enabled':False})), \
-                 patch('qwen_asr_app.note_latex_author.export_direct',AsyncMock(return_value=((pdf,export),{}))) as render, \
+                 patch('qwen_asr_app.review_notes.export_note_pdf',AsyncMock(return_value=((pdf,export),{}))) as render, \
                  patch('qwen_asr_app.review_notes.visual_review',AsyncMock(return_value=report)) as review, \
                  patch('qwen_asr_app.note_review_repair.repair_review',AsyncMock()) as repair:
                 result=await upgrade_pdf(record,{'ai':{},'note_review_enabled':True})

@@ -4,6 +4,7 @@ import argparse
 import importlib.metadata
 import json
 import os
+import sys
 from pathlib import Path
 
 
@@ -22,11 +23,11 @@ def main():
     for key in tuple(os.environ):
         if key.startswith("MINERU_"):
             os.environ.pop(key)
-    home = Path.home() / ".qwenasr" / "mineru4"
-    os.environ["MINERU_HOME"] = str(home)
+    # Models live in MinerU's own global home (~/.mineru/models), shared with
+    # every other program on this Mac; this run only pins backend choices.
     config_path = args.output.parent / "mineru-config.json"
     config_path.write_text(json.dumps({"model": {
-        "base_dir": str(home / "models"), "source": settings["model_source"],
+        "source": settings["model_source"],
         "small_backend": settings["small_backend"], "vlm": {
             "engine": settings["vlm_engine"], "server_url": "",
             "max_concurrency": settings["vlm_concurrency"],
@@ -41,10 +42,15 @@ def main():
     from mineru.parser import parse
     from mineru.parser.writer import FileBasedDataWriter
     from mineru.render.content_list import render_content_list
+    from mineru_strategy import choose_local_tier
 
-    print(f"QwenASR MinerU {version} · tier={settings['tier']} · all pages", flush=True)
+    tier, strategy = choose_local_tier(args.source, settings["tier"])
+    print(f"QWENASR_EFFECTIVE_TIER {tier}", flush=True)
+    print(json.dumps({"requested_tier": settings["tier"], "effective_tier": tier,
+                      "strategy": strategy}, ensure_ascii=False), flush=True)
+    print(f"QwenASR MinerU {version} · tier={tier} · all pages", flush=True)
     print('QWENASR_STAGE parse', flush=True)
-    result = parse(args.source, tier=settings["tier"], ocr_mode=settings["ocr_mode"],
+    result = parse(args.source, tier=tier, ocr_mode=settings["ocr_mode"],
                    image_analysis=settings["image_analysis"], page_range="all")
     args.output.mkdir(parents=True, exist_ok=True)
     print('QWENASR_STAGE save', flush=True)
@@ -54,6 +60,11 @@ def main():
     (args.output / "document_content_list.json").write_text(
         json.dumps(content, ensure_ascii=False), encoding="utf-8")
     print('QWENASR_STAGE done', flush=True)
+    # llama.cpp/Metal worker threads can still hold a mutex while C++ static
+    # destructors run at interpreter exit ("libc++abi ... recursive_mutex lock
+    # failed"). Everything is written, so leave without running them.
+    sys.stdout.flush(); sys.stderr.flush()
+    os._exit(0)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,122 @@
+{
+ "errcode": 0,
+ "data": {
+  "activities": [
+   {
+    "type": 5,
+    "id": 35004890,
+    "courseware_id": "2194951",
+    "title": "第六章数字基带传输系统1（常用码型和线路编码）",
+    "create_time": 1792547342000,
+    "status": 2,
+    "score": null,
+    "limit": 0,
+    "deadline": 1792547760000,
+    "total_score": 6,
+    "problem_count": 5,
+    "online_proctor": 0,
+    "progress": 5,
+    "is_single_paper": true,
+    "is_partial_participation": false,
+    "unfinished": 0,
+    "is_offline": false,
+    "identity_auth": 0
+   },
+   {
+    "type": 5,
+    "id": 34905382,
+    "courseware_id": "2187205",
+    "title": "4-模拟通信系统第二次测试",
+    "create_time": 1792367959000,
+    "status": 3,
+    "score": 6,
+    "limit": 0,
+    "deadline": 1792368300000,
+    "total_score": 6,
+    "problem_count": 5,
+    "online_proctor": 0,
+    "progress": 5,
+    "is_single_paper": true,
+    "is_partial_participation": false,
+    "unfinished": 0,
+    "is_offline": false,
+    "identity_auth": 0
+   },
+   {
+    "type": 5,
+    "id": 34766555,
+    "courseware_id": "2176756",
+    "title": "3-模拟通信系统第一次测试",
+    "create_time": 1791942542000,
+    "status": 3,
+    "score": 6,
+    "limit": 0,
+    "deadline": 1791942960000,
+    "total_score": 6,
+    "problem_count": 5,
+    "online_proctor": 0,
+    "progress": 5,
+    "is_single_paper": true,
+    "is_partial_participation": false,
+    "unfinished": 0,
+    "is_offline": false,
+    "identity_auth": 0
+   },
+   {
+    "type": 14,
+    "id": 35003874,
+    "courseware_id": "1801117984421960576",
+    "title": "通信原理——绪论（2）",
+    "create_time": 1792546795000,
+    "attend_status": true,
+    "is_finished": true
+   },
+   {
+    "type": 2,
+    "id": 33658965,
+    "courseware_id": "3289089",
+    "title": "二进制带通信号的最佳接收",
+    "create_time": 1788051623000,
+    "end": null,
+    "count": 14,
+    "view": {
+     "depth": 14,
+     "done": true
+    },
+    "has_mooc": false
+   },
+   {
+    "type": 14,
+    "id": 34996679,
+    "courseware_id": "1801064923783613184",
+    "title": "第四章 半导体激光器的性能 1",
+    "create_time": 1792540470000,
+    "attend_status": true,
+    "is_finished": true
+   },
+   {
+    "type": 4,
+    "id": 34665451,
+    "courseware_id": "1755034",
+    "title": "2026光电子学第二章测试",
+    "create_time": 1791769742000,
+    "status": 3,
+    "score": 17,
+    "limit": 600,
+    "deadline": 1791770400000,
+    "total_score": 20,
+    "problem_count": 2,
+    "progress": null
+   },
+   {
+    "type": 15,
+    "id": 1,
+    "courseware_id": "1",
+    "title": "MOOC 视频",
+    "create_time": 1790000000000
+   }
+  ],
+  "has_more": false,
+  "prev_id": -1
+ }
+}

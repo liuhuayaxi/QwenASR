@@ -70,6 +70,19 @@ class IntelligenceTasks:
                         task.update(recovered=True, display_status='recovered',
                                     recovery_reason='该来源已在后续任务中完成索引，旧错误保留在历史中',
                                     recovery=recovery)
+            elif status in {'failed', 'interrupted'}:
+                # Older index jobs failed before they could name a source
+                # (for example a concurrent RecordingStore refresh raised
+                # ``dictionary changed size during iteration`` or a stale
+                # recording ID was removed).  Once a later successful index
+                # has completed for the same category and every current
+                # source is ready, those receipts are historical failures,
+                # not current work needing attention.
+                recovery = self._recovered_category_index(job, jobs)
+                if recovery:
+                    task.update(recovered=True, display_status='recovered',
+                                recovery_reason='该课程已在后续索引任务中完成，旧错误保留在历史中',
+                                recovery=recovery)
             result.append(task)
         for record in visit():
             try:
@@ -94,6 +107,28 @@ class IntelligenceTasks:
                                'result_url':'/?'+urlencode({'chat':record.id,'panel':'scribbles'}),
                                'actions':['cancel'] if status in {'running','waiting_retry'} else [] if status=='completed' else ['retry']})
         return result
+
+    def _recovered_category_index(self, job, jobs):
+        if job.get('status') not in {'failed', 'interrupted'}:
+            return None
+        failed_at = _time(job.get('updated_at') or job.get('created_at'))
+        successors = [item for item in jobs
+                      if item.get('category') == job.get('category')
+                      and item.get('status') == 'completed'
+                      and _time(item.get('created_at')) > failed_at]
+        if not successors:
+            return None
+        try:
+            sources = self.knowledge.store.list_sources(job['category'], active_only=True)
+        except (OSError, ValueError, RuntimeError):
+            return None
+        if not sources or any(source.get('error') or source.get('needs_vectors')
+                              or source.get('status') != 'active' for source in sources):
+            return None
+        successor = max(successors, key=lambda item: _time(item.get('updated_at') or item.get('created_at')))
+        return {'category': job['category'], 'job_id': successor['job_id'],
+                'updated_at': successor.get('updated_at') or successor.get('created_at'),
+                'sources': len(sources)}
 
     def _recovered_index(self, job, source, jobs):
         if (job.get('status') not in {'failed', 'interrupted'}

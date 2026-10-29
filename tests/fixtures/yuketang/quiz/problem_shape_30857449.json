@@ -1,0 +1,156 @@
+{
+ "errcode": 0,
+ "errmsg": "Success",
+ "data": {
+  "ProblemBodys": [],
+  "Blanks": [
+   {
+    "Score": 1,
+    "Answers": [
+     "错"
+    ],
+    "CaseSensitive": false,
+    "score": 100,
+    "FuzzyMatch": false,
+    "Num": 1
+   },
+   {
+    "Score": 1,
+    "Answers": [
+     "对"
+    ],
+    "CaseSensitive": false,
+    "score": 100,
+    "FuzzyMatch": false,
+    "Num": 2
+   },
+   {
+    "Score": 1,
+    "Answers": [
+     "对"
+    ],
+    "CaseSensitive": false,
+    "score": 100,
+    "FuzzyMatch": false,
+    "Num": 3
+   },
+   {
+    "Score": 1,
+    "Answers": [
+     "对"
+    ],
+    "CaseSensitive": false,
+    "score": 100,
+    "FuzzyMatch": false,
+    "Num": 4
+   },
+   {
+    "Score": 1,
+    "Answers": [
+     "错"
+    ],
+    "CaseSensitive": false,
+    "score": 100,
+    "FuzzyMatch": false,
+    "Num": 5
+   },
+   {
+    "Score": 1,
+    "Answers": [
+     "错"
+    ],
+    "CaseSensitive": false,
+    "score": 100,
+    "FuzzyMatch": false,
+    "Num": 6
+   },
+   {
+    "Score": 1,
+    "Answers": [
+     "错"
+    ],
+    "CaseSensitive": false,
+    "score": 100,
+    "FuzzyMatch": false,
+    "Num": 7
+   },
+   {
+    "Score": 1,
+    "Answers": [
+     "对"
+    ],
+    "CaseSensitive": false,
+    "score": 100,
+    "FuzzyMatch": false,
+    "Num": 8
+   },
+   {
+    "Score": 1,
+    "Answers": [
+     "对"
+    ],
+    "CaseSensitive": false,
+    "score": 100,
+    "FuzzyMatch": false,
+    "Num": 9
+   }
+  ],
+  "from": 0,
+  "ProblemID": 30857449,
+  "Height": 720,
+  "Shapes": [
+   {
+    "ShapeType": 17,
+    "URL": "https://changjiang-public-qn.yuketang.cn/public/20000002/slide_3_3_20261011125803.png",
+    "Top": 106.729019,
+    "Height": 582.56,
+    "Width": 413.531982,
+    "ZOrderPosition": 2,
+    "Line": {
+     "DashStyle": "msoLineDashStyleMixed",
+     "Visble": false,
+     "Weight": -2147483650,
+     "BackColor": "#FFFFFF"
+    },
+    "Left": 18.2340164,
+    "Type": "msoTextBox",
+    "Rotation": 0,
+    "ID": 3,
+    "Fill": {
+     "Visble": false,
+     "Transparency": 1,
+     "BackColor": "#FFFFFF"
+    }
+   },
+   {
+    "ShapeType": 17,
+    "URL": "https://changjiang-public-qn.yuketang.cn/public/20000002/slide_3_19_20261011125803.png",
+    "Top": 58.6484261,
+    "Height": 36.3515739,
+    "Width": 442.8,
+    "ZOrderPosition": 12,
+    "Line": {
+     "DashStyle": "msoLineDashStyleMixed",
+     "Visble": false,
+     "Weight": -2147483650,
+     "BackColor": "#FFFFFF"
+    },
+    "Left": 24.7385044,
+    "Type": "msoTextBox",
+    "Rotation": 0,
+    "ID": 19,
+    "Fill": {
+     "Visble": false,
+     "Transparency": 1,
+     "BackColor": "#FFFFFF"
+    }
+   }
+  ],
+  "Width": 450,
+  "Score": 9,
+  "HasRemark": false,
+  "OrderInsensitive": false,
+  "Answer": "",
+  "Type": "FillBlank"
+ }
+}

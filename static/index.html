@@ -406,9 +406,10 @@
               <label class="settings-checkbox"><span>资料库中的 PDF</span><input id="driveOption-pdf" type="checkbox" checked /></label>
               <label class="settings-checkbox"><span>原始转写、修正文本和时间轴</span><input id="driveOption-transcripts" type="checkbox" checked /></label>
               <label class="settings-checkbox"><span>课堂笔记和 AI 总结</span><input id="driveOption-notes" type="checkbox" /></label>
+              <label class="settings-checkbox"><span>雨课堂题库（题目、答案、题图与课程绑定；不含登录信息）</span><input id="driveOption-yuketang" type="checkbox" checked /></label>
               <label class="settings-checkbox"><span>启用自动增量备份</span><input id="driveOption-automatic" type="checkbox" /></label>
               <label><span>自动检查间隔</span><select id="driveBackupInterval" class="field-select"><option value="5">每 5 分钟</option><option value="10" selected>每 10 分钟</option><option value="30">每 30 分钟</option><option value="60">每小时</option><option value="1440">每天</option></select></label>
-              <p class="setting-hint wide">按资料库目录保存到“QwenASR备份”。自动备份在 QwenASR 服务运行时检查新增和变化的文件；本地删除不删除云端副本。备份范围不含录音音频、应用配置、密钥和缓存。<a href="https://gist.github.com/liuhuayaxi/f979839837fd3de783d620b5005b1a57#file-privacy-md" target="_blank" rel="noopener noreferrer">隐私说明</a></p>
+              <p class="setting-hint wide">按资料库目录保存到“QwenASR备份”。自动备份在 QwenASR 服务运行时检查新增和变化的文件；本地删除不删除云端副本。备份范围不含录音音频、应用配置、密钥和缓存；雨课堂只备份题库与绑定，不含浏览器登录资料和含实名的原始接口数据。<a href="https://gist.github.com/liuhuayaxi/f979839837fd3de783d620b5005b1a57#file-privacy-md" target="_blank" rel="noopener noreferrer">隐私说明</a></p>
               <div class="inline-setting wide">
                 <button id="driveBackupStart" class="mini-button primary-mini-button" type="button" data-drive-action="start">立即备份</button>
                 <a id="driveBackupFolder" class="mini-button hidden" target="_blank" rel="noopener noreferrer">打开云盘目录</a>
@@ -464,7 +465,7 @@
           <section class="settings-group wide" id="mineruSettingsGroup" data-settings-page="documents">
             <div class="settings-group-heading"><b>MinerU 文件识别</b><small id="mineruRuntimeStatus">打开设置后读取本机版本</small></div>
             <div class="settings-group-grid">
-              <label class="wide"><span>质量档位</span><select id="mineruTier" class="field-select"><option value="flash">极速 · Flash</option><option value="basic">基础 · Basic</option><option value="standard" selected>标准 · Standard（推荐）</option><option value="advanced">高级 · Advanced（更高计算量）</option></select><small id="mineruTierHint" class="setting-hint"></small></label>
+              <label class="wide"><span>质量档位</span><select id="mineruTier" class="field-select"><option value="auto">自动 · 按内容选择</option><option value="flash">极速 · Flash</option><option value="basic">基础 · Basic</option><option value="standard" selected>标准 · Standard</option><option value="advanced">高级 · Advanced（效果优先）</option></select><small id="mineruTierHint" class="setting-hint"></small></label>
               <label><span>文字识别方式</span><select id="mineruOcrMode" class="field-select"><option value="auto">自动判断（推荐）</option><option value="ocr">强制 OCR · 扫描件或文字层有误</option><option value="txt">优先原生文字层</option></select></label>
               <label class="settings-checkbox"><span>图像内容分析</span><input id="mineruImageAnalysis" type="checkbox" checked /></label>
             </div>
@@ -592,6 +593,7 @@
   "store": false
 }</textarea></label>
 
+<label class="wide toggle-row note-latex-toggle"><span><b>AI LaTeX 重新排版（较慢）</b><small>默认关闭。关闭时笔记直接由 Markdown + KaTeX 打印为 PDF（几秒、不调用 AI）；开启后由 AI 重写为 LaTeX 再编译，每节约多 15–20 分钟。</small></span><input id="noteAiLatexEnabled" type="checkbox" /><span class="toggle" aria-hidden="true"></span></label>
 <label class="wide toggle-row note-review-toggle"><span><b>生成后开启 AI 逐页审核</b><small>默认关闭。仅在你明确开启后，生成或重新导出笔记才会进行审核；关闭时直接保存可下载的未审核版本。</small></span><input id="noteReviewEnabled" type="checkbox" /><span class="toggle" aria-hidden="true"></span></label>
 <label class="wide">
                 <span>课后复习笔记提示词 </span>
@@ -925,6 +927,6 @@
     </dialog>
 
     <div id="toast" class="toast" role="status"></div>
-    <script src="/static/app.js?v=20261022-local-main-1" type="module"></script>
+    <script src="/static/app.js?v=20261022-direct-pdf-1" type="module"></script>
   </body>
 </html>

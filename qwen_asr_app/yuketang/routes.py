@@ -1,0 +1,116 @@
+"""HTTP API for the 雨课堂题库 panel on the course page."""
+from __future__ import annotations
+
+from typing import Any, Callable
+
+from fastapi import APIRouter, Body, HTTPException, Query, Request, Response
+from fastapi.responses import FileResponse
+
+from .service import YuketangService
+
+
+def yuketang_router(service: YuketangService, guard: Callable[[Request], None], categories: Callable[[], list[str]]) -> APIRouter:
+    router = APIRouter(prefix="/api/yuketang")
+
+    def known(category: str) -> str:
+        category = str(category or "").strip()
+        if category not in categories():
+            raise HTTPException(404, "课程不存在，请刷新后重试")
+        return category
+
+    @router.get("/status")
+    def status(request: Request, category: str | None = Query(None)) -> dict[str, Any]:
+        guard(request)
+        return service.status(known(category) if category else None)
+
+    @router.post("/bind")
+    def bind(request: Request, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        guard(request)
+        category = known(payload.get("category"))
+        try:
+            entry = service.store.bind(category, payload.get("classroom_id"),
+                                       university_id=payload.get("university_id"), name=str(payload.get("name") or ""),
+                                       replace=bool(payload.get("replace")))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"binding": entry, **service.status(category)}
+
+    @router.post("/unbind")
+    def unbind(request: Request, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        guard(request)
+        category = known(payload.get("category"))
+        try:
+            removed = service.store.unbind(category, payload.get("classroom_id"))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"removed": removed, **service.status(category)}
+
+    def start(action):
+        try:
+            return action()
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @router.get("/courses")
+    def courses(request: Request, category: str | None = Query(None)) -> dict[str, Any]:
+        guard(request)
+        return service.courses(known(category) if category else None)
+
+    @router.post("/courses/refresh")
+    def refresh_courses(request: Request) -> dict[str, Any]:
+        guard(request)
+        return {"job": start(service.start_courses)}
+
+    @router.post("/login")
+    def login(request: Request) -> dict[str, Any]:
+        guard(request)
+        return {"job": start(service.start_login)}
+
+    @router.post("/sync")
+    def sync(request: Request, payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+        guard(request)
+        category = known(payload.get("category")) if payload.get("category") else None
+        return {"job": start(lambda: service.start_sync(category, refresh=bool(payload.get("refresh")),
+                                                        transcribe=bool(payload.get("transcribe"))))}
+
+    @router.post("/transcribe")
+    def transcribe(request: Request, payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+        guard(request)
+        category = known(payload.get("category")) if payload.get("category") else None
+        return {"job": start(lambda: service.start_transcribe(category))}
+
+    @router.post("/stop")
+    def stop(request: Request) -> dict[str, Any]:
+        guard(request)
+        service.stop()
+        return {"stopping": service.running}
+
+    @router.get("/questions")
+    def questions(request: Request, category: str = Query(...), q: str = Query(""), source: str = Query(""),
+                  limit: int = Query(200), mode: str = Query("filter")) -> dict[str, Any]:
+        guard(request)
+        category = known(category)
+        # mode=rank serves the course 检索 box (natural-language query).
+        items = service.store.search_ranked(category, q, limit) if mode == "rank" else service.store.search(category, q, source, limit)
+        items = [{**item, "images": [{k: v for k, v in image.items() if k not in {"url", "source"}}
+                                    for image in item.get("images") or [] if image.get("kind") != "student"]} for item in items]
+        return {"category": category, "questions": items, "counts": service.store.counts(service.store.course_questions(category))}
+
+    @router.get("/image/{classroom_id}/{path:path}")
+    def image(request: Request, classroom_id: str, path: str) -> FileResponse:
+        guard(request)
+        try:
+            if not any(category in categories() for category in service.store.categories_for(classroom_id)):
+                raise FileNotFoundError(path)
+            allowed = {image.get("path") for question in service.store.questions(classroom_id)
+                       for image in question.get("images") or [] if image.get("kind") != "student" and image.get("path")}
+            if path not in allowed:
+                raise FileNotFoundError(path)
+            return FileResponse(service.store.image_path(classroom_id, path), headers={
+                "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Cross-Origin-Resource-Policy": "same-origin"})
+        except (FileNotFoundError, ValueError) as exc:
+            raise HTTPException(404, "图片不存在") from exc
+
+    return router

@@ -260,11 +260,22 @@ class KnowledgeStore:
         source_folder, target_folder = Path(source_folder), Path(target_folder)
         now = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
 
+        # Ingest stores resolved paths, while callers pass the configured
+        # library path; they differ when the library sits behind a symlink
+        # (e.g. macOS /var -> /private/var). Match either spelling.
+        folder_pairs = [(source_folder, target_folder)]
+        resolved_pair = (source_folder.resolve(), target_folder.resolve())
+        if resolved_pair != folder_pairs[0]:
+            folder_pairs.append(resolved_pair)
+
         def moved_path(value):
             if not value:
                 return value
             path = Path(value)
-            return str(target_folder / path.relative_to(source_folder)) if path.is_relative_to(source_folder) else value
+            for old, new in folder_pairs:
+                if path.is_relative_to(old):
+                    return str(new / path.relative_to(old))
+            return value
 
         def moved_url(value):
             url = urlsplit(value)

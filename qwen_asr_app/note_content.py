@@ -78,7 +78,7 @@ def compose_push(record: Any, mode: str = "combined") -> dict[str, Any]:
     title = str(record.metadata.get("title") or "未命名录音")
     # Visible section boundaries survive Markdown sanitizers at the destination.
     body = [f"# {title}", f"课程：{record.metadata.get('category') or '未分类'}  \n"
-            f"日期：{record.metadata.get('started_at') or '未知'}  \n时长：{clock(record.duration)}"]
+            f"日期：{_date(record.metadata.get('started_at'))}  \n时长：{clock(record.duration)}"]
     if mode != "transcript":
         # Generated summaries already contain a title and metadata. Keep the
         # original verbatim inside its section to make pull round trips lossless.
@@ -93,6 +93,11 @@ def compose_push(record: Any, mode: str = "combined") -> dict[str, Any]:
     markdown = "\n\n".join(body).strip() + "\n"
     return {"content": markdown, "mode": mode, "unrefined_blocks": missing if mode != "summary" else 0,
             "digest": hashlib.sha256(markdown.encode()).hexdigest(), "characters": len(markdown)}
+
+
+def _date(value):
+    from .note_prompts import human_date
+    return human_date(value) if value else '未知'
 
 
 def compose_push_part(
@@ -123,7 +128,7 @@ def compose_push_part(
     title = str(record.metadata.get("title") or "未命名录音")
     label = "上半段" if part_index == 1 else "下半段"
     body = [f"# {title}（{label}）", f"课程：{record.metadata.get('category') or '未分类'}  \n"
-            f"日期：{record.metadata.get('started_at') or '未知'}  \n时长：{clock(max(0, end_seconds - start_seconds))}"]
+            f"日期：{_date(record.metadata.get('started_at'))}  \n时长：{clock(max(0, end_seconds - start_seconds))}"]
     if mode != "transcript":
         body.extend(["## AI 总结", summary])
     if mode != "summary":

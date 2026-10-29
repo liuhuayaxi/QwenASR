@@ -62,6 +62,7 @@ jobs:
       - run: node tests/browser/deep-ui/run.cjs . output/playwright/deep-ui
       - run: node tests/browser/transcription-review.cjs
       - run: node tests/browser/frontend-lifecycle.cjs
+      - run: node tests/browser/yuketang-bank.cjs
       - run: node tests/browser/workspace-smoke.cjs
         env:
           QWEN_ASR_BROWSER_CHANNEL: chromium

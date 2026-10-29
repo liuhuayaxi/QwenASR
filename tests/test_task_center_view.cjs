@@ -125,3 +125,32 @@ test('an explicitly unknown PDF progress is not inferred from file totals',async
  const unknown=taskProgressView({type:'course_pdf',family:'mineru',status:'running',progress:null,total:1,completed:0});
  assert.equal(unknown.percent,null);
 });
+test('disabled AI 逐页审核 is not listed as a pending summary step',async()=>{
+ const {taskProgressView}=await modulePromise;
+ const off=taskProgressView({type:'summary',status:'running',stage:'LaTeX 排版 · 第 2/4 批',completed:1,total:4,progress_unit:'批',note_review_enabled:false});
+ assert.deepEqual(off.steps,['核对资料','梳理知识','编写图文','排版（PDF）','保存']);assert.equal(off.index,3);
+ assert.equal(taskProgressView({type:'summary',status:'running',stage:'录音库短摘要',note_review_enabled:false,note_ai_latex_enabled:true}).index,4);
+ const on=taskProgressView({type:'summary',status:'running',stage:'LaTeX 排版',note_review_enabled:true});
+ assert.ok(on.steps.includes('逐页审查'));
+});
+
+test('queued summary shows 排队中 with position', async () => {
+  const {taskProgressView} = await modulePromise;
+  const view = taskProgressView({type:'summary',status:'queued',queue_position:3,stage:'排队中 · 第 3 位'});
+  assert.equal(view.label, '排队中');
+  assert.match(view.count, /第 3 位/);
+});
+
+test('default direct PDF has no 排版 step; opted-in AI LaTeX keeps it', async () => {
+  const {taskProgressView} = await modulePromise;
+  const off = taskProgressView({type:'summary',status:'running',stage:'生成 PDF',note_review_enabled:false,note_ai_latex_enabled:false});
+  assert.deepEqual(off.steps, ['核对资料','梳理知识','编写图文','保存']);
+  assert.equal(off.index, 3);
+  assert.equal(taskProgressView({type:'summary',status:'running',stage:'编写笔记',note_review_enabled:false}).steps.includes('排版（PDF）'), false);
+  const on = taskProgressView({type:'summary',status:'running',stage:'LaTeX 排版',note_review_enabled:false,note_ai_latex_enabled:true});
+  assert.deepEqual(on.steps, ['核对资料','梳理知识','编写图文','排版（PDF）','保存']);
+  assert.equal(on.index, 3);
+  const review = taskProgressView({type:'summary',status:'running',stage:'独立审查',note_review_enabled:true});
+  assert.deepEqual(review.steps, ['核对资料','梳理知识','编写图文','逐页审查','保存']);
+  assert.equal(review.index, 3);
+});

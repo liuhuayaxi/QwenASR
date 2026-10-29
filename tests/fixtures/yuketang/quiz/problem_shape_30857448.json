@@ -1,0 +1,160 @@
+{
+ "errcode": 0,
+ "errmsg": "Success",
+ "data": {
+  "ProblemBodys": [],
+  "Blanks": [
+   {
+    "Score": 1,
+    "Answers": [
+     "正向"
+    ],
+    "CaseSensitive": false,
+    "score": 100,
+    "FuzzyMatch": false,
+    "Num": 1
+   },
+   {
+    "Score": 1,
+    "Answers": [
+     "P",
+     "p"
+    ],
+    "CaseSensitive": false,
+    "score": 100,
+    "FuzzyMatch": false,
+    "Num": 2
+   },
+   {
+    "Score": 1,
+    "Answers": [
+     "注入"
+    ],
+    "CaseSensitive": false,
+    "score": 100,
+    "FuzzyMatch": false,
+    "Num": 3
+   },
+   {
+    "Score": 1,
+    "Answers": [
+     "全反射"
+    ],
+    "CaseSensitive": false,
+    "score": 100,
+    "FuzzyMatch": false,
+    "Num": 4
+   },
+   {
+    "Score": 1,
+    "Answers": [
+     "异质",
+     "异质结",
+     "双异质结"
+    ],
+    "CaseSensitive": false,
+    "score": 100,
+    "FuzzyMatch": false,
+    "Num": 5
+   },
+   {
+    "Score": 1,
+    "Answers": [
+     "饱和"
+    ],
+    "CaseSensitive": false,
+    "score": 100,
+    "FuzzyMatch": false,
+    "Num": 6
+   },
+   {
+    "Score": 1,
+    "Answers": [
+     "宽",
+     "大"
+    ],
+    "CaseSensitive": false,
+    "score": 100,
+    "FuzzyMatch": false,
+    "Num": 7
+   },
+   {
+    "Score": 1,
+    "Answers": [
+     "1"
+    ],
+    "CaseSensitive": false,
+    "score": 100,
+    "FuzzyMatch": false,
+    "Num": 8
+   },
+   {
+    "Score": 1,
+    "Answers": [
+     "漏电流",
+     "泄漏电流"
+    ],
+    "CaseSensitive": false,
+    "score": 100,
+    "FuzzyMatch": false,
+    "Num": 9
+   },
+   {
+    "Score": 1,
+    "Answers": [
+     "非平衡少子",
+     "少子"
+    ],
+    "CaseSensitive": false,
+    "score": 100,
+    "FuzzyMatch": false,
+    "Num": 10
+   },
+   {
+    "Score": 1,
+    "Answers": [
+     "辐射",
+     "自发辐射"
+    ],
+    "CaseSensitive": false,
+    "score": 100,
+    "FuzzyMatch": false,
+    "Num": 11
+   }
+  ],
+  "from": 0,
+  "ProblemID": 30857448,
+  "Height": 720,
+  "Shapes": [
+   {
+    "ShapeType": 17,
+    "URL": "https://changjiang-public-qn.yuketang.cn/public/20000002/slide_2_3_20261011125803.png",
+    "Top": 67.9230957,
+    "Height": 648,
+    "Width": 434.7,
+    "ZOrderPosition": 2,
+    "Line": {
+     "DashStyle": "msoLineDashStyleMixed",
+     "Visble": false,
+     "Weight": -2147483650,
+     "BackColor": "#FFFFFF"
+    },
+    "Left": 7.5,
+    "Type": "msoTextBox",
+    "Rotation": 0,
+    "ID": 3,
+    "Fill": {
+     "Visble": false,
+     "Transparency": 1,
+     "BackColor": "#FFFFFF"
+    }
+   }
+  ],
+  "Width": 450,
+  "Score": 11,
+  "HasRemark": false,
+  "OrderInsensitive": false,
+  "Answer": "",
+  "Type": "FillBlank"
+ }
+}

@@ -115,15 +115,24 @@ def attachment_arguments(schema, attachments, fields, label, default_limit):
     raise ValueError(f"当前闪念贝壳接口未提供可用的{label}附件参数，请重新连接后重试")
 
 
-def image_attachment_batches(schema, attachments):
+def image_attachment_batches(schema, attachments, max_bytes=None):
+    """Split images into calls of at most maxItems (and max_bytes raw, if set)."""
     if not attachments:
         return []
     definition = _resolve(schema, (schema.get('properties') or {}).get('images'))
     limit = min(9, int(definition.get('maxItems') or 9))
     if limit < 1:
         raise ValueError('当前闪念贝壳接口不接受图片附件')
-    return [attachment_arguments(schema, attachments[index:index + limit], ('images',), '图片', 9)
-            for index in range(0, len(attachments), limit)]
+    groups, current, size = [], [], 0
+    for attachment in attachments:
+        length = len(attachment.get('data') or b'')
+        if current and (len(current) >= limit or (max_bytes and size + length > max_bytes)):
+            groups.append(current)
+            current, size = [], 0
+        current.append(attachment)
+        size += length
+    groups.append(current)
+    return [attachment_arguments(schema, group, ('images',), '图片', 9) for group in groups]
 
 
 def document_attachment_arguments(schema, attachments):

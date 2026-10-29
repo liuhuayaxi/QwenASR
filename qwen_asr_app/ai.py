@@ -1310,6 +1310,17 @@ def summary_instructions(config: dict[str, Any], *, live: bool = False) -> str:
         from .transcription_assist.service import evidence_instructions
         instructions += evidence_instructions(config,note=True)
         instructions += '\n<course_evidence>\n' + json.dumps(config['_knowledge_evidence'],ensure_ascii=False) + '\n</course_evidence>'
+    if not live and config.get('_yuketang_questions'):
+        # Chunked notes receive the deterministic appendix after all chunks are
+        # merged. Sending the full bank with every chunk multiplies prompt size
+        # and can make an otherwise valid lecture exceed the context window.
+        from .yuketang.retrieval import instructions as yuketang_instructions, prompt_block
+        detailed_chunk = bool(config.get('_detailed_chunk'))
+        instructions += yuketang_instructions(write_section=not detailed_chunk)
+        if not detailed_chunk and not config.get('_yuketang_appendix_only'):
+            instructions += prompt_block(config['_yuketang_questions'])
+        elif detailed_chunk:
+            instructions += "\n雨课堂题目将在最终合并稿中由程序附加；本分块只整理当前课堂内容，不生成题库小节。"
     return instructions
 
 

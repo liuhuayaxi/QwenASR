@@ -3,6 +3,7 @@ from tests import isolation  # Must precede application imports.
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from qwen_asr_app import storage
@@ -10,6 +11,38 @@ from qwen_asr_app.storage import RecordingRecord, RecordingStore
 
 
 class ReadOnlyStoreTests(unittest.TestCase):
+    def test_list_keeps_directory_snapshot_when_another_reader_changes_paths(self):
+        store = RecordingStore.__new__(RecordingStore)
+        store.paths = {'first-record': Path('/first'), 'second-record': Path('/second')}
+        store.active = None
+        first = SimpleNamespace(id='first-record', metadata={'started_at': '1'})
+        second = SimpleNamespace(id='second-record', metadata={'started_at': '2'})
+        class Cache(dict):
+            def get(self, path):
+                if path == Path('/first/session.json'):
+                    store.paths.pop('second-record', None)
+                return super().get(path)
+        store._read_cache = Cache({Path('/first/session.json'): (None, first),
+                                   Path('/second/session.json'): (None, second)})
+        with patch.object(store, 'refresh'):
+            result = store.list_records()
+        self.assertEqual([record.id for record in result], ['second-record', 'first-record'])
+
+    def test_refresh_prunes_a_snapshot_when_cache_changes_during_pruning(self):
+        store = RecordingStore.__new__(RecordingStore)
+        store.paths = {}
+        store.active = None
+        record = SimpleNamespace(metadata={})
+        class CacheKey:
+            @property
+            def parent(self):
+                store._read_cache[Path('/new/session.json')] = ((), record)
+                return Path('/removed')
+        store._read_cache = {CacheKey(): ((), record)}
+        with patch.object(store, '_metadata_paths', return_value=[]):
+            store.refresh()
+        self.assertEqual(store._read_cache, {})
+
     def fixture(self, root):
         record = RecordingRecord(root / '目录类别' / '课堂', {
             'id': 'read-only-fixture', 'title': '课堂', 'category': '旧类别',

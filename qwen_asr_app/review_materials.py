@@ -32,7 +32,8 @@ def learning_scope_candidates(sources):
         matches=[]
         for page in source['pages']:
             text=page.get('text','')
-            if (re.search(r'(?:\d+(?:\.\d+)*\s*[章节]|本[章节]|学习|教学|考核)\s*(?:基本)?要求|学习目标',text)
+            if (re.search(r'(?:\d+(?:\.\d+)*\s*[章节]|本[章节]|学习|教学|考核)\s*(?:基本)?要求|学习目标|学习重点|要掌握|'
+                          r'(?i:learning\s+(?:goals?|objectives?|outcomes?)|course\s+objectives?)',text)
                     or re.search(r'(?:^|\n)\s*(?:\d+[.、．)]\s*)?(?:掌握|了解|理解|能够计算)',text)):
                 matches.append(page)
         # A chapter may put its requirements in an image at the very front.
@@ -141,7 +142,19 @@ def native_pages(path):
     raise ValueError('原件暂不支持原生读取，请补选 PDF 或 PPTX；未使用转写排版 PDF 作为原图')
 
 
-def collect(record, folder, selected=None, settings=None):
+def _retrieval_by_source(blocks, originals):
+    """Each file's summed top-2 page-match score over all transcript blocks."""
+    indexed=[(source,page,tokens(page['text'])) for source in originals for page in source['pages']]
+    totals={s['source_id']:0.0 for s in originals}
+    for block in blocks:
+        terms=tokens(block['text'])
+        ranked=sorted(((len(terms&v)/max(1,len(v)**.5),s) for s,p,v in indexed),key=lambda x:-x[0])
+        for score,source in ranked[:2]:
+            if score>0:totals[source['source_id']]+=score
+    return totals
+
+
+def collect(record, folder, selected=None, settings=None, lesson_title=None):
     settings=settings or app_settings
     folder=Path(folder);folder.mkdir(parents=True,exist_ok=True,mode=0o700)
     category=record.metadata.get('category')
@@ -157,7 +170,7 @@ def collect(record, folder, selected=None, settings=None):
     from .classroom_intelligence.integrations import saved_notes_markdown
     notes=saved_notes_markdown(record)
     (folder/'accepted-notes.md').write_text(notes,encoding='utf-8')
-    originals=[];seen=set();excluded=[]
+    originals=[];seen=set();excluded=[];ai_warnings=[]
     for item in files.list(category):
         if selected is not None and item['id'] not in selected:continue
         if item.get('status') in {'deleted','superseded','excluded'} or item.get('superseded_by'):
@@ -172,10 +185,11 @@ def collect(record, folder, selected=None, settings=None):
             seen.add(digest)
             suffix=path.suffix.lower();relative=f'sources/{item["id"]}{suffix}'
             target=safe_path(folder,relative);target.parent.mkdir(exist_ok=True)
-            if not target.exists():shutil.copy2(path,target)
+            # Only files chosen for this lesson are copied into the package
+            # (below); text is read from the verified original in place.
             cache=folder/'sources'/(digest+'.pages.json')
             if cache.exists():pages=json.loads(cache.read_text())
-            else:pages=native_page_cache(target,digest);atomic_json(cache,pages)
+            else:pages=native_page_cache(path,digest);atomic_json(cache,pages)
             if suffix=='.pdf':
                 # Reclassify old caches as well; keep their original text and
                 # reuse the already converted, source-bound navigation layer.
@@ -185,7 +199,11 @@ def collect(record, folder, selected=None, settings=None):
             conversion=item.get('conversion') or {}
             # Reuse a successful existing OCR layer strictly for navigation.
             # Page markers bind it to the original; scans remain image-primary.
-            if suffix=='.pdf' and any(p['image_primary'] for p in pages) and conversion.get('status')=='completed' and conversion.get('source_sha256')==digest:
+            # Prefer the up-to-date AI友好型 text (headings, formulas, OCR'd
+            # scans) for every page, not only scans; the original page image
+            # stays primary for figures and page numbers via the page markers.
+            ai_friendly=False
+            if suffix=='.pdf' and conversion.get('status')=='completed' and conversion.get('source_sha256')==digest:
                 try:
                     _,derived=files.file(category,item['id'],'pdf')
                     derived_digest=digest_file(derived)
@@ -199,13 +217,38 @@ def collect(record, folder, selected=None, settings=None):
                                 original_page['text']=text
                                 original_page['text_authority']='existing_ocr_navigation_only; original image is primary'
                                 original_page['text_lineage']={'derived_sha256':derived_digest,'original_page':int(marker[1])}
+                                ai_friendly=True
                 except (OSError,ValueError):pass
+            if suffix=='.pdf' and not ai_friendly:
+                state='已过期' if conversion.get('status')=='completed' else '缺少'
+                ai_warnings.append(f'{item["name"]}：AI友好型版本{state}，本次使用原件文字层')
+                import logging
+                logging.getLogger(__name__).warning('AI-friendly PDF %s for %s; using original text',state,item['name'])
             originals.append({'source_id':item['id'],'name':item['name'],'sha256':digest,'path':relative,
+                'text_source':'ai_friendly' if ai_friendly else 'original',
                 'course_id':cid,'pages':pages,'origin':'original','kind':item.get('kind'),'asset_created_at':item.get('created_at')})
         except (OSError,ValueError,zipfile.BadZipFile) as exc:
             excluded.append({'id':item['id'],'reason':str(exc)})
     if selected is not None and set(selected)-{s['source_id'] for s in originals}:
         raise ValueError('补选课件不属于本课程、已过期或无法读取')
+    # Lesson scope: keep only this lesson's files (chapter / 雨课堂 title /
+    # transcript retrieval), not every chapter of the course.
+    from . import material_scope
+    if lesson_title is None:lesson_title=material_scope.lesson_title_for(record)
+    try:coverage=material_scope.coverage_scores(blocks,originals,tokens)
+    except Exception:coverage=None
+    try:prior=material_scope.previous_lesson_files(record,settings)
+    except Exception:prior=set()
+    chosen_ids,decisions=material_scope.choose(originals,_retrieval_by_source(blocks,originals),lesson_title,selected,coverage,prior)
+    for row in decisions:
+        if not row['chosen']:excluded.append({'id':row['source_id'],'reason':'not_in_lesson_scope','detail':'；'.join(row['reasons'])})
+    originals=[s for s in originals if s['source_id'] in set(chosen_ids)]
+    for source in originals:
+        target=safe_path(folder,source['path'])
+        if not target.exists():
+            _,original=files.file(category,source['source_id'],'original');shutil.copy2(original,target)
+    material_selection={'version':material_scope.VERSION,'lesson_title':lesson_title,'files':decisions,
+        'summary':material_scope.summary(decisions,lesson_title)}
     # Score every real transcript block, including the middle and final blocks.
     associations=[];page_scores={}
     indexed=[(source,page,tokens(page['text'])) for source in originals for page in source['pages']]
@@ -238,8 +281,10 @@ def collect(record, folder, selected=None, settings=None):
         relevant.append({'source_id':sid,'page':number,'score':score,'text':page['text'],'visual_source':page['visual_source']})
     package={'format':FORMAT,'recording_id':record.id,'course_id':cid,'category':category,'lesson_date':cutoff,
         'sources':originals,'excluded':excluded,'associations':associations,'relevant_pages':relevant,
+        'material_selection':material_selection,
         'history_count':len(history),'history_scope':'仅已收录且早于本节的转写；未收录不能证明此前未讲',
-        'warnings':([] if originals else ['没有可读课件，请补选本课程资料'])+([] if history else ['缺少此前课次，首次引入的判断范围有限'])}
+        'warnings':([] if originals else ['没有可读课件，请补选本课程资料'])+([] if history else ['缺少此前课次，首次引入的判断范围有限'])
+            +[w for w in ai_warnings if any(w.startswith(s['name']+'：') for s in originals)]}
     package['learning_scope_candidates']=learning_scope_candidates(originals)
     atomic_json(folder/'materials.json',package)
     return package
@@ -293,6 +338,13 @@ def bind_markdown_images(markdown, folder, images, rejected=()):
             if key in excluded:
                 bindings.append({'requested':uri,'status':'excluded','reason':excluded[key]['reason']})
                 return ''
+        if not image:
+            from .yuketang.note_images import registered
+            sha=registered(folder).get(uri)
+            actual=safe_path(folder,uri)
+            if sha and actual.is_file() and digest_file(actual)==sha:
+                bindings.append({'requested':uri,'path':uri,'status':'yuketang'})
+                return f'![{alt}]({uri})'
         if not image:raise ValueError('正文引用了未抽取或未看图确认的图片：'+uri)
         actual=safe_path(folder,image['path'])
         if not actual.is_file() or digest_file(actual)!=image['sha256']:raise ValueError('笔记图片缺失或版本改变')

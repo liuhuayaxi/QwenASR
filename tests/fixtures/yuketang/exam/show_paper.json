@@ -1,0 +1,155 @@
+{
+ "errcode": 0,
+ "errmsg": "",
+ "data": {
+  "problems": [
+   {
+    "Body": "FDM系统中,各路信号在______上是分开的。",
+    "Type": "SingleChoice",
+    "data": {},
+    "Score": 1,
+    "index": 0,
+    "score": 1,
+    "Answer": [
+     "B"
+    ],
+    "Remark": "",
+    "Options": [
+     {
+      "key": "B",
+      "value": "频域"
+     },
+     {
+      "key": "A",
+      "value": "码域"
+     },
+     {
+      "key": "C",
+      "value": "空域"
+     },
+     {
+      "key": "D",
+      "value": "时域"
+     }
+    ],
+    "Version": "1467d3a541064e1ca0ad5e450e62f792",
+    "FolderID": 0,
+    "TypeText": "单选题",
+    "HasRemark": false,
+    "LibraryID": 688416,
+    "ProblemID": 102651560,
+    "folder_id": 0,
+    "max_retry": 1,
+    "TemplateID": 52119694,
+    "difficulty": 1,
+    "library_id": 688416,
+    "problem_id": 102651560,
+    "ProblemType": 1,
+    "template_id": 52119694,
+    "problem_type": 1,
+    "isContinueWithWrong": 0,
+    "create_template_type": "import_by_excel",
+    "scope_of_question_answer": 0
+   },
+   {
+    "Body": "调频波的相位偏移随调制信号的______作_______变化。&nbsp;",
+    "Type": "SingleChoice",
+    "data": {},
+    "Score": 1,
+    "index": 0,
+    "score": 1,
+    "Answer": [
+     "B"
+    ],
+    "Remark": "",
+    "Options": [
+     {
+      "key": "A",
+      "value": "积分,非线性"
+     },
+     {
+      "key": "B",
+      "value": "积分,线性"
+     },
+     {
+      "key": "C",
+      "value": "微分,非线性"
+     },
+     {
+      "key": "D",
+      "value": "微分,线性"
+     }
+    ],
+    "Version": "f5810b412650468ab67c17dd9041e9db",
+    "FolderID": 0,
+    "TypeText": "单选题",
+    "HasRemark": false,
+    "LibraryID": 688416,
+    "ProblemID": 102651557,
+    "folder_id": 0,
+    "max_retry": 1,
+    "TemplateID": 52119691,
+    "difficulty": 1,
+    "library_id": 688416,
+    "problem_id": 102651557,
+    "ProblemType": 1,
+    "template_id": 52119691,
+    "problem_type": 1,
+    "isContinueWithWrong": 0,
+    "create_template_type": "import_by_excel",
+    "scope_of_question_answer": 0
+   },
+   {
+    "Body": "调频信号的功率等于_____,其功率分配的比例与_____有关。&nbsp;",
+    "Type": "SingleChoice",
+    "data": {},
+    "Score": 1,
+    "index": 0,
+    "score": 1,
+    "Answer": [
+     "D"
+    ],
+    "Remark": "",
+    "Options": [
+     {
+      "key": "A",
+      "value": "调制信号功率与载波功率之和,&nbsp; 调频指数"
+     },
+     {
+      "key": "B",
+      "value": "调制信号功率,&nbsp; 调频指数"
+     },
+     {
+      "key": "C",
+      "value": "载波功率,&nbsp; 载波频率"
+     },
+     {
+      "key": "D",
+      "value": "载波功率,&nbsp; 调频指数"
+     }
+    ],
+    "Version": "74ae660007d2402cb27112ce704a047c",
+    "FolderID": 0,
+    "TypeText": "单选题",
+    "HasRemark": false,
+    "LibraryID": 688416,
+    "ProblemID": 102651558,
+    "folder_id": 0,
+    "max_retry": 1,
+    "TemplateID": 52119692,
+    "difficulty": 1,
+    "library_id": 688416,
+    "problem_id": 102651558,
+    "ProblemType": 1,
+    "template_id": 52119692,
+    "problem_type": 1,
+    "isContinueWithWrong": 0,
+    "create_template_type": "import_by_excel",
+    "scope_of_question_answer": 0
+   }
+  ],
+  "has_problem_dict": false,
+  "font": "",
+  "title": "4-模拟通信系统第二次测试"
+ }
+}

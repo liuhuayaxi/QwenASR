@@ -1,4 +1,4 @@
-import {taskGroups, filterTaskGroups, groupCounts, actionableTasks, completedTasks, taskMatchesType, activeStatuses, errorStatuses, leadingTask, taskProgressView, progressGroups} from './task-center-view.js?v=20261018-recovery-1';
+import {taskGroups, filterTaskGroups, groupCounts, actionableTasks, completedTasks, taskMatchesType, activeStatuses, errorStatuses, leadingTask, taskProgressView, progressGroups} from './task-center-view.js?v=20261022-direct-pdf-1';
 import {createTaskPdfDialog} from './task-pdf-dialog.js?v=20261018-recovery-1';
 import {aiTaskPayload} from './task-config.js?v=20260913-tasks-1';
 import {mergeLiveCourseProgress} from './course-progress.js?v=20261018-recovery-1';
@@ -80,6 +80,8 @@ function dateLabel(value) {
 }
 function friendlyError(task) {
   if (!task.error) return '';
+  // The server's own countdown text ("网络出口地区被拒，3 分钟后自动重试（第 n 次）").
+  if (task.status === 'waiting_retry' && task.error_kind === 'provider_region') return task.error;
   const messages = {
     network_dns: '模型服务域名暂时无法解析，网络恢复后可继续。',
     output_truncated: '模型输出达到长度上限，可继续处理或重试。',
@@ -87,7 +89,7 @@ function friendlyError(task) {
     rate_limit: '模型服务临时限流。', provider_busy: '模型服务暂时繁忙。',
     provider_quota: '服务商余额或额度不足，请补充额度或更换模型后重试。',
     provider_auth: '模型服务认证失败，请检查该功能已保存的接口和密钥。',
-    provider_region: 'AGY/Gemini 当前账号或地区不可用，请在 AGY CLI 中确认登录状态与地区。',
+    provider_region: 'AGY/Gemini 拒绝了当前网络出口地区（User location is not supported）。通常是 VPN/代理节点切到了不支持的地区；切换节点后继续生成，已完成的步骤会保留。',
     agy_cli_unavailable: '本机没有可用的 agy CLI，请检查安装路径。',
     agy_cli_config: 'AGY CLI 配置不完整，请选择模型后保存设置。',
     material_tool_violation: 'AGY 使用了本次请求未允许的工具，本次结果未采用；已完成检查点保留，可从此处继续。',

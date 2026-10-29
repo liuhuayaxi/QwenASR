@@ -1,0 +1,147 @@
+{
+ "code": 0,
+ "msg": "OK",
+ "data": {
+  "detail": {
+   "identityId": 10000002,
+   "name": "学生甲",
+   "number": "REDACTED",
+   "avatar": "https://example.invalid/avatar.png",
+   "score": 30.0,
+   "rank": 23,
+   "rankFloat": 2,
+   "tag": [],
+   "selfTag": [],
+   "checkinSource": 1,
+   "checkInName": "扫二维码",
+   "checkInTime": 1792540575839,
+   "checkInChannel": "微信",
+   "valid": 1,
+   "active": -1.0,
+   "exception": [],
+   "excellent": [],
+   "addScore": 0,
+   "checkinTagCode": 0
+  },
+  "quiz": [],
+  "presentation": [
+   {
+    "presentationId": "1801065060551780480",
+    "title": "第四章 半导体激光器的性能 ",
+    "cover": "https://changjiang-private-qn.yuketang.cn/slide/20000002/cover256_20261021075436.jpg",
+    "totalCount": 101,
+    "problemCount": 7,
+    "doubtTagCount": 0,
+    "collectTagCount": 0,
+    "showPresentation": "all"
+   }
+  ],
+  "shared": [],
+  "board": [],
+  "statistics": {
+   "durationTotal": 5562,
+   "durationTime": 5,
+   "tougaoCount": 0,
+   "danmuCount": 0,
+   "quickAnswerCount": 0,
+   "groupDiscussionCount": 0,
+   "studentReportCount": 0
+  },
+  "problem": {
+   "studentList": [
+    {
+     "idx": 10,
+     "problemId": "1801065060585334921",
+     "groupId": "0",
+     "teamId": "0",
+     "problem_type": 5,
+     "cover": "https://changjiang-private-qn.yuketang.cn/slide/20000002/cover697_20261021084604.jpg",
+     "anonymous": false,
+     "send_time": 1792541558035,
+     "problemTime": 115459,
+     "score": 5,
+     "problemscore": -1,
+     "result": {
+      "content": "d 过小的时候限制影子小",
+      "pics": [
+       {
+        "pic": ""
+       }
+      ],
+      "videos": []
+     },
+     "correct": 0,
+     "isAnswered": true,
+     "redExist": false,
+     "redAmount": 0.0,
+     "doubt": false,
+     "collect": false
+    },
+    {
+     "idx": 16,
+     "problemId": "1801065060585334927",
+     "groupId": "0",
+     "teamId": "0",
+     "problem_type": 5,
+     "cover": "https://changjiang-private-qn.yuketang.cn/slide/20000002/cover705_20261021084605.jpg",
+     "anonymous": false,
+     "send_time": 1792543052461,
+     "problemTime": 109757,
+     "score": 10,
+     "problemscore": -1,
+     "result": {
+      "content": "俄歇复合和带隙宽度有关",
+      "pics": [
+       {
+        "pic": ""
+       }
+      ],
+      "videos": []
+     },
+     "correct": 0,
+     "isAnswered": true,
+     "redExist": false,
+     "redAmount": 0.0,
+     "doubt": false,
+     "collect": false
+    }
+   ],
+   "answer_range": {
+    "status": -1
+   },
+   "StudentLessonStatistics": {
+    "avgScore": 0.0,
+    "lessonSumTime": -79588688792,
+    "sumScore": 0,
+    "sumTime": 391489
+   }
+  },
+  "live": {
+   "lives_count": 0,
+   "finish_replay_count": 0,
+   "live_rate": 0,
+   "finish_replay": 0,
+   "replay_count": 0,
+   "finish_live_count": 0,
+   "replay_rate": 0,
+   "finish_live": 0
+  },
+  "memoContent": "",
+  "problemStatistics": {
+   "hasProblem": true,
+   "subProblemCorrectSum": 0,
+   "subProblemCorrectTotal": 0,
+   "problemTotalScore": 25,
+   "problemScore": 0,
+   "redSum": 0,
+   "redAmount": 0.0
+  },
+  "quizStatistics": {
+   "hasQuiz": false,
+   "subProblemCorrectSum": 0,
+   "subProblemCorrectTotal": 0,
+   "problemScore": 0.0,
+   "problemTotalScore": 0.0
+  }
+ }
+}

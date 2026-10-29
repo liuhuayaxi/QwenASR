@@ -164,7 +164,7 @@ def main():
     parser.add_argument('--apply', action='store_true')
     args = parser.parse_args()
     project = Path(__file__).resolve().parents[1]
-    private = Path.home() / '.qwenasr'
+    private = Path(os.getenv('QWEN_ASR_PRIVATE_DIR') or project / 'local-data').expanduser()
     if args.apply:
         with socket.socket() as connection:
             connection.settimeout(1)

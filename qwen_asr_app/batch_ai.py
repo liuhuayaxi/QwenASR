@@ -380,6 +380,19 @@ def note_summary_chunks(blocks: list[str], config: dict[str, Any]) -> list[str]:
         budget = max(128, budget // 2)
 
 
+async def _yuketang_questions(record: RecordingRecord, source_blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Questions from the bound 雨课堂 classrooms; never blocks note generation."""
+    try:
+        from .yuketang.retrieval import questions_for_record
+        transcript = "\n".join(str(block.get("text") or "") for block in source_blocks)
+        return await asyncio.to_thread(questions_for_record, record, transcript=transcript)
+    except Exception as exc:
+        logger.exception("Yuketang question retrieval failed recording=%s", getattr(record, "id", ""))
+        # A bound classroom with a retrieval error must not silently produce a
+        # note that violates the one-question-not-missed guarantee.
+        raise RuntimeError("雨课堂题库读取失败，未生成笔记以免漏题") from exc
+
+
 async def build_note_summary(
     record: RecordingRecord,
     config: dict[str, Any],
@@ -389,6 +402,11 @@ async def build_note_summary(
     from .ai import provider_for_mode
     provider = provider_for_mode(config.get('ai', {}), 'summary')
     if provider.get('transport') == 'agy_cli':
+        if config.get('note_pipeline', 'fast') == 'fast':
+            # One AGY turn per lesson (see fast_note); the multi-stage
+            # pipeline stays available with note_pipeline='full'.
+            from .fast_note import generate_fast
+            return await generate_fast(record, config)
         from .review_notes import generate
         return await generate(record, config)
     result = await _build_text_note_summary(record, config)
@@ -431,12 +449,19 @@ async def _build_text_note_summary(
         from .transcription_assist.service import attach_accepted_evidence
         chunk_config=await attach_accepted_evidence(record,chunk_config)
         chunk_config['_accepted_classroom_notes'] = accepted_notes
+    yuketang_questions = await _yuketang_questions(record, source_blocks)
+    if yuketang_questions:
+        chunk_config['_yuketang_questions'] = yuketang_questions
+    # Full-note planning includes the bounded bank, exactly like the request;
+    # detailed chunks omit it automatically and use the local appendix.
+    chunk_config['_yuketang_appendix_only'] = False
     window = context_window_for(chunk_config, 'summary')
     chunks = note_summary_chunks(blocks, chunk_config)
     if not chunks:
         raise ValueError('录音还没有可用于生成总结的转写内容')
     chunk_config['_detailed_chunk'] = len(chunks)>1
     chunk_config['_full_note'] = len(chunks)==1
+    chunk_config['_yuketang_appendix_only'] = len(chunks)>1
     # Low verbosity is appropriate for the library abstract, not lecture notes.
     provider = chunk_config.setdefault("ai", {}).setdefault("summary_provider", {})
     extra = provider.get("extra_params")
@@ -528,6 +553,19 @@ async def _build_text_note_summary(
                        + "\n\n## 按课堂时间展开\n\n" + "\n\n".join(details))
     if len(chunks) == 1:
         rolling_summary = saved_parts["0"]
+    question_package, question_images = "", []
+    if yuketang_questions:
+        from .yuketang.retrieval import ensure_section, normalize_section, resolve_markers
+        rolling_summary = resolve_markers(normalize_section(ensure_section(rolling_summary, yuketang_questions)))
+        if any(item.get("原题图片") or item.get("解析图片") for item in yuketang_questions):
+            from .yuketang.note_images import attach
+            ident = hashlib.sha256(json.dumps(["text-yuketang-v3", record.id, yuketang_questions],
+                                              ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:24]
+            question_package = f".review-notes/{ident}"
+            folder = record.directory / question_package
+            folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+            rolling_summary, question_images = await asyncio.to_thread(
+                attach, rolling_summary, yuketang_questions, folder, str(record.metadata.get("category") or ""))
     key_points: list[str] = []
     started_at = str(record.metadata.get("started_at") or "")
     try:
@@ -569,7 +607,14 @@ async def _build_text_note_summary(
         "knowledge_source_map": knowledge_map,
         "knowledge_source_validation": knowledge_validation,
         "student_notes_included": bool(accepted_notes),
+        "yuketang_question_ids": [item.get("id") for item in yuketang_questions],
+        "yuketang_forced_ids": [item.get("id") for item in yuketang_questions if item.get("必含")],
     }
+    if question_package:
+        from .durable import atomic_bytes
+        item.update(review_package=question_package, yuketang_images=question_images,
+                    image_count=sum(row["stem_images"] + row["explain_images"] for row in question_images))
+        atomic_bytes(record.directory / question_package / "note.md", rolling_summary.encode())
     draft["phase"] = "录音库短摘要"
     # Persist the detailed Markdown before the independent short-abstract call.
     # A failed abstract must never discard a usable full summary.

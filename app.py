@@ -65,12 +65,14 @@ from qwen_asr_app.live_session import TranscriptionSession
 from qwen_asr_app.ideashell_sync import ideashell_manager
 from qwen_asr_app.ideashell_attachments import MAX_AUDIO_BYTES, audio_attachment_arguments_many, audio_file_metadata
 from qwen_asr_app.ideashell_attachments import image_attachment_batches, document_attachment_arguments
+# Image-only note_update calls over a few MB time out on the IdeaShell side.
+IDEASHELL_APPEND_BATCH_BYTES = 1_500_000
 from qwen_asr_app.ideashell_note_assets import prepare_push_assets, restore_image_markdown
 from qwen_asr_app.model_runtime import ModelManager
 from qwen_asr_app.ai_activity import track_ai_activity, task_ai_activity
 from qwen_asr_app.request_security import websocket_origin_allowed, http_request_allowed
 from qwen_asr_app.pdf_ai import find_mineru_binary
-from qwen_asr_app.mineru_settings import mineru_settings, runtime_info, DEFAULT_MINERU_SETTINGS
+from qwen_asr_app.mineru_settings import mineru_settings, runtime_info, DEFAULT_MINERU_SETTINGS, CHOICES
 from qwen_asr_app.pdf_jobs import PDFJobs
 from qwen_asr_app.task_center import task_center_router
 from qwen_asr_app.course_file_routes import CourseFileAPI
@@ -132,6 +134,7 @@ async def lifespan(_: FastAPI):
         # without opening another listener.
         async with smartclass_service.lifespan(smartclass_service.app):
             await library_watch.start()
+            yuketang_service.loop = asyncio.get_running_loop()
             await drive_backup_manager.start_loop()
             await knowledge_service.start()
             await knowledge_coordinator.start()
@@ -215,6 +218,10 @@ from qwen_asr_app.classroom_intelligence.service import configure_intelligence
 configure_intelligence(intelligence_router.intelligence_service)
 from qwen_asr_app.classroom_chat import classroom_chat_router
 app.include_router(classroom_chat_router(recording_store, ai_preferences, ai_secret_store, live_sessions, classroom_chat_running, knowledge_service))
+from qwen_asr_app.yuketang.service import YuketangService
+from qwen_asr_app.yuketang.routes import yuketang_router
+yuketang_service = YuketangService()
+app.include_router(yuketang_router(yuketang_service, course_file_api.guard, lambda: list(app_settings.categories)))
 
 
 class EphemeralFileResponse(FileResponse):
@@ -373,6 +380,7 @@ async def get_ai_settings():
 async def get_mineru_settings():
     try:
         return {"settings": mineru_settings.read(), "defaults": DEFAULT_MINERU_SETTINGS,
+                "tier_choices": CHOICES["tier"],
                 "runtime": runtime_info(find_mineru_binary())}
     except (OSError, ValueError) as exc:
         raise HTTPException(500, "本机 MinerU 配置读取失败，未用默认值覆盖") from exc
@@ -533,6 +541,7 @@ async def summary_status(session_id: str) -> dict[str, Any]:
             "completed_parts": progress['completed_parts'],
             "total_parts": progress['total_parts'], "progress_unit": progress.get('unit', '批'),
             "phase": (job or {}).get("phase") or progress['phase'],
+            "material_selection": str(draft.get("material_selection") or ""),
             "elapsed_seconds": round(time.monotonic() - job["started"]) if job else 0,
             "has_summary": bool(record.metadata.get("ai_note_summary", {}).get("summary")),
             "review_status": (record.metadata.get('ai_note_summary') or {}).get('review_status','unreviewed')}
@@ -706,6 +715,8 @@ def _task_error_kind(error: str) -> str:
             return "network_connect_timeout"
         if "响应超时" in value:
             return "network_read_timeout"
+    if "网络出口地区" in value or "服务地区不可用" in value:
+        return "provider_region"
     if "agy cli" in value:
         from qwen_asr_app.agy_cli import _error_kind as agy_error_kind
         kind, _ = agy_error_kind(value)
@@ -788,6 +799,23 @@ AUTO_RETRY_KINDS = {
     "network_connect_timeout", "network_read_timeout", "network_transport",
 }
 MAX_AUTOMATIC_RETRIES = 6
+# Google rejects the network exit region intermittently (VPN/TUN node
+# switches). Retry the note job every 3 minutes for at most 30 minutes; the
+# review-note task resumes from its saved steps on each attempt.
+REGION_RETRY_DELAY_SECONDS = 180
+REGION_RETRY_WINDOW_SECONDS = 1800
+
+
+def _region_retry_delay(attempt: int) -> int | None:
+    """Seconds to wait before region retry ``attempt`` (1-based), or None."""
+    if attempt < 1 or attempt * REGION_RETRY_DELAY_SECONDS > REGION_RETRY_WINDOW_SECONDS:
+        return None
+    return REGION_RETRY_DELAY_SECONDS
+
+
+def _region_wait_message(attempt: int, delay: int) -> str:
+    minutes = max(1, round(delay / 60))
+    return f"网络出口地区被拒，{minutes} 分钟后自动重试（第 {attempt} 次）；已完成的步骤会保留"
 
 
 def _error_kind(exc: BaseException) -> str:
@@ -892,9 +920,14 @@ def compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any]]:
 def _build_compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any]]:
     tasks: list[dict[str, Any]] = []
     try:
-        saved_providers = (ai_preferences.read().get("function_providers") or {})
+        saved_preferences = ai_preferences.read()
+        saved_providers = (saved_preferences.get("function_providers") or {})
+        note_review_enabled = saved_preferences.get("note_review_enabled") is True
+        note_ai_latex_enabled = saved_preferences.get("note_ai_latex_enabled") is True
     except (OSError, ValueError):
         saved_providers = {}
+        note_review_enabled = False
+        note_ai_latex_enabled = False
 
     def ai_provider_snapshot(kind: str) -> dict[str, Any]:
         mode = {"summary": "summary", "refinement": "correction", "live_summary": "review"}.get(kind, "sentence")
@@ -905,6 +938,9 @@ def _build_compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any
             "configured_ai_transport": transport,
             "configured_ai_model": str(provider.get("cli_model") or provider.get("model") or ""),
             "configured_ai_effort": str(provider.get("cli_effort") or ""),
+            # The saved 逐页审核 switch (default off); the task view hides the
+            # 逐页审查 step when it is off.
+            **({"note_review_enabled": note_review_enabled, "note_ai_latex_enabled": note_ai_latex_enabled} if kind == "summary" else {}),
         }
 
     for record in getattr(recording_store,'iter_records',recording_store.list_records)():
@@ -947,8 +983,11 @@ def _build_compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any
                 "progress_unit": summary_progress.get('unit', '批'),
                 "review_round":summary_progress.get('review_round'),
                 "review_batches":summary_progress.get('review_batches',[]),
-                "phase": ("详细笔记已保存 · 短摘要待补齐" if abstract_pending and status == "completed_with_errors"
+                "phase": (f"排队中 · 第 {summary_queue_position(record.id)} 位，前面的笔记完成后自动开始"
+                          if status == "queued" and summary_queue_position(record.id)
+                          else "详细笔记已保存 · 短摘要待补齐" if abstract_pending and status == "completed_with_errors"
                           else "录音库短摘要" if abstract_pending else summary_progress['phase']),
+                "queue_position": summary_queue_position(record.id),
                 "ai_activity": task_ai_activity(f"summary:{record.id}"),
                 "resume_stage": "abstract" if abstract_pending else "",
                 "retry_in_seconds": int(summary.get("retry_in_seconds") or 0),
@@ -1945,6 +1984,12 @@ def change_library_category(category: str, name: str | None = None) -> dict[str,
             result = change_category(app_settings, recording_store, category, name)
     except (ValueError, OSError, RuntimeError) as exc:
         raise HTTPException(400, str(exc)) from exc
+    if name != category:
+        try:
+            # 雨课堂 bindings follow the course name; deleting a course unbinds it.
+            yuketang_service.store.rename_category(category, name)
+        except (OSError, ValueError) as exc:
+            print(f"雨课堂课程绑定未能随分类更新：{exc}", flush=True)
     for record in records:
         course_stream_manager.jobs.pop(record.id, None)
         session = live_sessions.pop(record.id, None)
@@ -2063,7 +2108,9 @@ async def generate_library_summary(
     if not any(
         str(item.get("corrected") or item.get("raw") or "").strip()
         for item in record.segments
-    ):
+    ) and not record.metadata.get("review_material_ids"):
+        # A lesson with chosen 课件 but no usable speech still gets a
+        # material-only note from the fast pipeline.
         raise HTTPException(status_code=400, detail="录音还没有可用于生成详细 AI 总结的转写内容")
     try:
         config = ai_preferences.task_config(payload.get("config"), course=record.metadata.get("course_settings") or {}, required_modes=("summary",))
@@ -2107,11 +2154,44 @@ async def generate_library_summary(
         record.save_metadata()
         return {"summary": summary, "session": record.public(include_segments=False)}
     except ValueError as exc:
+        from qwen_asr_app.fast_note import ProposalKept
+        if isinstance(exc, ProposalKept):
+            # The user's edited body stays; the new version waits as a proposal.
+            record = recording_store.find(session_id) or record
+            record.metadata.pop('ai_note_summary_draft', None)
+            record.save_metadata()
+            return {"summary": {**(record.metadata.get("ai_note_summary") or {}), "proposal_kept": True},
+                    "session": record.public(include_segments=False)}
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except (RuntimeError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"AI 总结请求失败：{exc}") from exc
+
+
+# Each note owns one AGY conversation, so several notes can run side by side.
+# Bounded (default 6, at most 12) to stay within the AGY account rate and local memory.
+SUMMARY_QUEUE_CONCURRENCY = max(1, min(12, int(os.getenv("QWEN_ASR_SUMMARY_CONCURRENCY") or 6)))
+_summary_queue_semaphore: asyncio.Semaphore | None = None
+summary_queue_order: list[str] = []
+
+
+_summary_queue_loop = None
+
+
+def summary_queue() -> asyncio.Semaphore:
+    global _summary_queue_semaphore, _summary_queue_loop
+    loop = asyncio.get_running_loop()
+    if _summary_queue_semaphore is None or _summary_queue_loop is not loop or getattr(_summary_queue_semaphore, "_qwen_limit", None) != SUMMARY_QUEUE_CONCURRENCY:
+        _summary_queue_semaphore, _summary_queue_loop = asyncio.Semaphore(SUMMARY_QUEUE_CONCURRENCY), loop
+        _summary_queue_semaphore._qwen_limit = SUMMARY_QUEUE_CONCURRENCY
+        summary_queue_order.clear()
+    return _summary_queue_semaphore
+
+
+def summary_queue_position(session_id: str) -> int:
+    """1-based place among notes still waiting for a slot, or 0."""
+    return summary_queue_order.index(session_id) + 1 if session_id in summary_queue_order else 0
 
 
 def start_summary_job(record: RecordingRecord, payload: dict[str, Any], *, automatic: bool = False) -> None:
@@ -2155,6 +2235,7 @@ def start_summary_job(record: RecordingRecord, payload: dict[str, Any], *, autom
 
     async def execute() -> None:
         automatic_attempt = 0
+        region_attempt = 0
         continue_abstract = resume_abstract
 
         def save_state(status: str, error: str = "", **values: Any) -> None:
@@ -2195,6 +2276,21 @@ def start_summary_job(record: RecordingRecord, payload: dict[str, Any], *, autom
                 except Exception as exc:
                     error = str(exc.detail) if isinstance(exc, HTTPException) else str(exc)
                     error_kind = _error_kind(exc)
+                    if error_kind == "upstream" or not error_kind:
+                        error_kind = _task_error_kind(error)
+                    if error_kind == "provider_region":
+                        region_attempt += 1
+                        delay = _region_retry_delay(region_attempt)
+                        if delay is not None:
+                            save_state("waiting_retry", _region_wait_message(region_attempt, delay),
+                                       error_kind=error_kind, region_retry_count=region_attempt,
+                                       retry_in_seconds=delay, last_region_error=error[:500])
+                            await asyncio.sleep(delay)
+                            continue
+                        save_state("failed", f"{error}（已每 {REGION_RETRY_DELAY_SECONDS // 60} 分钟自动重试 {region_attempt - 1} 次，"
+                                             f"共 {REGION_RETRY_WINDOW_SECONDS // 60} 分钟仍被拒）",
+                                   error_kind=error_kind, region_retry_count=region_attempt - 1, retry_in_seconds=0)
+                        return
                     automatic_attempt += 1
                     if _may_auto_retry(exc) and automatic_attempt <= MAX_AUTOMATIC_RETRIES:
                         delay = _automatic_retry_delay(automatic_attempt)
@@ -2231,8 +2327,18 @@ def start_summary_job(record: RecordingRecord, payload: dict[str, Any], *, autom
             schedule_memory_cleanup()
 
     async def run() -> None:
-        with track_ai_activity(f"summary:{session_id}"):
-            await execute()
+        # Serial note queue: queued jobs wait here (status "queued", shown as
+        # 排队中 in the task center) and run one after another.
+        summary_queue_order.append(session_id)
+        try:
+            async with summary_queue():
+                if session_id in summary_queue_order:
+                    summary_queue_order.remove(session_id)
+                with track_ai_activity(f"summary:{session_id}"):
+                    await execute()
+        finally:
+            if session_id in summary_queue_order:
+                summary_queue_order.remove(session_id)
 
     task = asyncio.create_task(run())
     background_summary_tasks[session_id] = task
@@ -2618,6 +2724,9 @@ def ideashell_folders(payload: Any) -> list[dict[str, str]]:
     return folders
 
 
+IDEASHELL_TRASH_FOLDER = '待删除'
+
+
 async def ensure_ideashell_course_folder(connection: Any, category: str) -> str:
     """Read remote folders first, then reuse or create the matching course folder."""
     listing = await connection.call_tool("folder_list", {})
@@ -2689,7 +2798,8 @@ async def preview_ideashell_push(session_id: str, payload: dict[str, Any] = Body
     try:
         mode = str(payload.get("content_mode") or "combined")
         try:
-            audio_parts = await ideashell_recording_audio_parts(record)
+            # include_audio=false: 闪念贝壳 gets the note text and figures only.
+            audio_parts = await ideashell_recording_audio_parts(record) if payload.get("include_audio") is not False else []
             audio_error = ""
         except (ValueError, OSError) as exc:
             audio_parts = []
@@ -2720,7 +2830,8 @@ async def push_recording_summary_to_ideashell(
     try:
         mode = str(payload.get("content_mode") or "combined")
         try:
-            audio_parts = await ideashell_recording_audio_parts(record)
+            # include_audio=false: 闪念贝壳 gets the note text and figures only.
+            audio_parts = await ideashell_recording_audio_parts(record) if payload.get("include_audio") is not False else []
             audio_error = ""
         except (ValueError, OSError) as exc:
             audio_parts = []
@@ -2766,6 +2877,12 @@ async def push_recording_summary_to_ideashell(
             record.metadata['ideashell_sync'] = sync
             record.save_metadata()
             raise HTTPException(409, '上次新建结果未知，普通重试不会再次新建。请在 IdeaShell 查找后填写笔记 ID 核对关联；确认需要另一篇时，单独选择“明确新建另一篇”。')
+        # 闪念贝壳 note_update appends a new memo instead of replacing the old
+        # one, so a re-push publishes a fresh note and retires the old one to
+        # the 「待删除」 folder for the user to delete.
+        replaced = list(previous_ids) if (previous_ids and not create_new and sync.get("status") == "synced"
+                                         and payload.get("replace_existing") is not False) else []
+        create_new = create_new or bool(replaced)
         server_url = sync.get("server_url") if previous_ids else payload.get("server_url")
         connection = ideashell_manager.connection(
             str(server_url or payload.get("server_url") or "")
@@ -2787,10 +2904,12 @@ async def push_recording_summary_to_ideashell(
         excerpt = str(summary.get("abstract") or "").strip() if isinstance(summary, dict) else ""
         excerpt = excerpt[:100] or record._compact_summary(archive["content"], 180)
         schema = schemas.get("note_update" if note_id else "note_create", {})
-        image_batches = image_attachment_batches(schema, images)
+        # The create/update carrying the text is size-bounded as well: a ~5 MB
+        # first call (9 slide images) is rejected by 闪念贝壳 as "tool call failed".
+        image_batches = image_attachment_batches(schema, images, IDEASHELL_APPEND_BATCH_BYTES)
         # Validate all later batches before the first remote write.
         first_image_count = len(image_batches[0]['images']) if image_batches else 0
-        remaining_batches = image_attachment_batches(schemas.get('note_update', {}), images[first_image_count:])
+        remaining_batches = image_attachment_batches(schemas.get('note_update', {}), images[first_image_count:], IDEASHELL_APPEND_BATCH_BYTES)
         if remaining_batches and set(schemas.get('note_update', {}).get('required') or []) - {'note_id', 'images'}:
             raise ValueError('当前闪念贝壳接口不支持仅追加图片附件，请重新连接后重试')
         max_title = schema.get("properties", {}).get("title", {}).get("maxLength", 30)
@@ -2810,7 +2929,18 @@ async def push_recording_summary_to_ideashell(
             arguments.update(image_batches[0])
         if documents:
             arguments.update(document_attachment_arguments(schema, documents))
-        if note_id:
+        # Resume a create whose later image batches failed: only append the
+        # missing images (note_update with images alone adds no memo).
+        resume = bool(note_id and sync.get('status') == 'partial'
+                      and operation.get('status') == 'confirmed' and operation.get('note_id') == note_id
+                      and operation.get('content_digest') == archive['digest']
+                      and sync.get('assets_digest') == archive['assets_digest']
+                      and 0 < int(sync.get('images_uploaded') or 0) < len(images))
+        if resume:
+            first_image_count = int(sync['images_uploaded'])
+            remaining_batches = image_attachment_batches(schemas.get('note_update', {}), images[first_image_count:], IDEASHELL_APPEND_BATCH_BYTES)
+            replaced = [value for value in (sync.get('legacy_note_ids') or []) if value != note_id]
+        elif note_id:
             arguments["note_id"] = note_id
             result = await connection.call_tool("note_update", arguments)
         else:
@@ -2850,12 +2980,34 @@ async def push_recording_summary_to_ideashell(
         record.metadata["ideashell_sync"] = sync
         record.save_metadata()
         for batch in remaining_batches:
-            await connection.call_tool('note_update', {'note_id': note_id, **batch})
+            for attempt in range(3):
+                try:
+                    await connection.call_tool('note_update', {'note_id': note_id, **batch})
+                    break
+                except Exception:
+                    if attempt == 2:
+                        raise
+                    await asyncio.sleep(3 * (attempt + 1))
             sync['images_uploaded'] += len(batch['images'])
             record.save_metadata()
         # Persist the created/updated note before moving it. A failed move
         # must not lose the note id and cause a duplicate on the next push.
         await connection.call_tool("note_move", {"note_ids": [note_id], "folder_id": folder_id})
+        retired = []
+        visible_old = ""
+        if replaced and "folder_notes" in schemas:
+            # Only retire notes still in the course folder: moving a note the
+            # user already trashed would pull it back out of the recycle bin.
+            visible_old = json.dumps(await connection.call_tool("folder_notes", {"folder_id": folder_id}), ensure_ascii=False)
+        for old_id in replaced:
+            if old_id == note_id or old_id not in visible_old:
+                continue
+            try:
+                trash = await ensure_ideashell_course_folder(connection, IDEASHELL_TRASH_FOLDER)
+                await connection.call_tool("note_move", {"note_ids": [old_id], "folder_id": trash})
+                retired.append(old_id)
+            except Exception as exc:  # the new note is already linked; report, don't fail
+                sync["retire_error"] = str(exc)
         sync.update(
             {
                 "note_id": note_ids[0],
@@ -2898,6 +3050,7 @@ async def push_recording_summary_to_ideashell(
             "audio_error": audio_error,
             "images_attached": len(images),
             "documents_attached": len(documents),
+            "retired_note_ids": retired,
             "session": record.public(include_segments=False),
         }
     except HTTPException:
@@ -2909,6 +3062,60 @@ async def push_recording_summary_to_ideashell(
         detail = ideashell_error_text(exc)
         print(f"IdeaShell 推送异常 recording={session_id}: {detail}", flush=True)
         raise HTTPException(status_code=502, detail=f"IdeaShell 推送失败：{detail}") from exc
+
+
+def _ideashell_trim(value, depth=0):
+    if isinstance(value, dict):
+        return {k: _ideashell_trim(v, depth + 1) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_ideashell_trim(v, depth + 1) for v in value[:40]]
+    if isinstance(value, str) and len(value) > 300:
+        return value[:300] + f'…(+{len(value) - 300})'
+    return value
+
+
+@app.post('/api/recordings/{session_id}/ideashell/verify')
+@recording_operation
+async def verify_ideashell_note(session_id: str, payload: dict[str, Any] = Body(default={})):
+    """Read back the linked note; optionally retire old notes still in the course folder."""
+    record = recording_store.find(session_id)
+    if record is None:
+        raise HTTPException(404, '没有找到这条录音')
+    sync = dict(record.metadata.get('ideashell_sync') or {})
+    note_id = str(sync.get('note_id') or '')
+    if not note_id:
+        raise HTTPException(400, '尚未推送')
+    connection = ideashell_manager.connection(str(sync.get('server_url') or ''))
+    detail = await connection.call_tool('note_detail', {'note_id': note_id, 'scope': 'full'})
+    folder_id = await ensure_ideashell_course_folder(connection, str(record.metadata.get('category') or '未分类'))
+    visible = json.dumps(await connection.call_tool('folder_notes', {'folder_id': folder_id}), ensure_ascii=False)
+    old_ids = [value for value in (sync.get('legacy_note_ids') or []) if value != note_id]
+    lingering = [value for value in old_ids if value in visible]
+    retired = []
+    if payload.get('retire') is True and lingering:
+        trash = await ensure_ideashell_course_folder(connection, IDEASHELL_TRASH_FOLDER)
+        await connection.call_tool('note_move', {'note_ids': lingering, 'folder_id': trash})
+        retired = lingering
+        trash_listing = json.dumps(await connection.call_tool('folder_notes', {'folder_id': trash}), ensure_ascii=False)
+        retired = [value for value in lingering if value in trash_listing]
+        if len(retired) == len(lingering):
+            sync.pop('retire_error', None)
+            record.metadata['ideashell_sync'] = sync
+            record.save_metadata()
+    text = json.dumps(detail, ensure_ascii=False)
+    full = str(detail.get('text') or '') if isinstance(detail, dict) else text
+    files = re.findall(r'[\w\-.（）()]+\.(png|jpe?g|webp|gif|pdf|aac|m4a|mp3|wav)\b', full, re.I)
+    kinds = {}
+    for ext in files:
+        kind = 'image' if ext.lower() in {'png', 'jpg', 'jpeg', 'webp', 'gif'} else 'pdf' if ext.lower() == 'pdf' else 'audio'
+        kinds[kind] = kinds.get(kind, 0) + 1
+    trash = await ensure_ideashell_course_folder(connection, IDEASHELL_TRASH_FOLDER)
+    trash_listing = json.dumps(await connection.call_tool('folder_notes', {'folder_id': trash}), ensure_ascii=False)
+    return {'note_id': note_id, 'in_course_folder': note_id in visible, 'old_still_in_course_folder': lingering,
+            'retired_now': retired, 'old_in_trash': [value for value in old_ids if value in trash_listing],
+            'memo_count': len(re.findall(r'^\*\*Memo \d+', full, re.M)), 'attachment_mentions': kinds,
+            'attachment_lines': [line[:160] for line in full.splitlines() if re.search(r'\.(png|jpe?g|webp|pdf|aac|m4a)\b', line, re.I)][:40],
+            'detail': _ideashell_trim(detail)}
 
 
 @app.post('/api/recordings/{session_id}/ideashell/reconcile')

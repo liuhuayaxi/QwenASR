@@ -30,15 +30,24 @@ def cleanup_legacy_course_listener():
     before starting the unified 8765 service. The cwd and command checks keep
     unrelated Python services untouched.
     """
+    import socket
+    probe = socket.socket()
+    probe.settimeout(1)
     try:
-        raw = subprocess.check_output(['/usr/sbin/lsof', '-ti', 'tcp:8766'], text=True, stderr=subprocess.DEVNULL)
-    except (OSError, subprocess.CalledProcessError):
+        if probe.connect_ex(('127.0.0.1', 8766)) != 0:
+            return  # nothing listening: skip lsof, which can hang on macOS
+    finally:
+        probe.close()
+    try:
+        # lsof can hang indefinitely on macOS; never let it block startup.
+        raw = subprocess.check_output(['/usr/sbin/lsof', '-ti', 'tcp:8766'], text=True, stderr=subprocess.DEVNULL, timeout=5)
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return
     for value in raw.splitlines():
         try:
             pid = int(value.strip())
             command = subprocess.check_output(['/bin/ps', '-p', str(pid), '-o', 'command='], text=True).strip()
-            cwd = subprocess.check_output(['/usr/sbin/lsof', '-a', '-p', str(pid), '-d', 'cwd', '-Fn'], text=True).strip()
+            cwd = subprocess.check_output(['/usr/sbin/lsof', '-a', '-p', str(pid), '-d', 'cwd', '-Fn'], text=True, timeout=5).strip()
             if ('uvicorn' in command and '--port 8766' in command
                     and str(ROOT) in cwd):
                 os.kill(pid, signal.SIGTERM)
@@ -50,7 +59,7 @@ def cleanup_legacy_course_listener():
                     except PermissionError:
                         break
                     time.sleep(.1)
-        except (OSError, ValueError, subprocess.CalledProcessError):
+        except (OSError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
             continue
 
 

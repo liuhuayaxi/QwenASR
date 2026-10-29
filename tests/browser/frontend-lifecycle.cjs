@@ -49,7 +49,10 @@ async function main(){
         if(spec.status)status=spec.status;data=spec.data;
         await route.fulfill({status,contentType:'application/json',body:JSON.stringify(data)});return;
       }
-      if(p==='/course/api/status')data=state.course;
+      if(p==='/api/yuketang/status')data={playwright:true,running:false,job:{status:'idle'},classrooms:[],counts:{total:0}};
+      else if(p==='/api/yuketang/courses')data={courses:[]};
+      else if(p==='/api/yuketang/questions')data={questions:[]};
+      else if(p==='/course/api/status')data=state.course;
       else if(p==='/course/api/ensure-session')data={started:true};
       else if(p==='/api/course-files')data={category:url.searchParams.get('category')||'未分类',categories:['未分类','合成课程'],shared_folder:true,files:state.files,directory:'/synthetic',capabilities:{office:false,mineru:true}};
       else if(p==='/api/notes')data={category:url.searchParams.get('category')||'未分类',categories:['未分类','合成课程'],notes:[],lessons:[{id:'A',title:'合成课堂 A',date:'2026-10-10'}],prompt_template:'合成提示词',storage_root:'/synthetic'};
@@ -185,6 +188,7 @@ async function main(){
       await page.locator('#libraryTab').click();await page.locator('.library-card[data-id="B"] .library-open').click();
       await page.locator('#notePlayToggle').click();assert.equal(await page.locator('#noteAudio').getAttribute('src'),'/api/recordings/B/playback');
       await page.locator('#closeNoteDialog').click();
+      await page.waitForFunction(()=>document.getElementById('noteAudio').getAttribute('src')===null);
       assert.equal(await page.locator('#noteAudio').getAttribute('src'),null);
       await page.locator('#workbenchNav').click();await page.locator('#sideTabRelated').click();
       await page.locator('.related-open-link').waitFor();await page.evaluate(()=>window.__mediaPlay=[]);
@@ -288,7 +292,7 @@ async function main(){
       s.files=[{id:'file-A',name:'合成课件.pdf',kind:'课件',size:1024,created_at:'2026-10-10',conversion:{status:'running',stage:'正在识别',progress:20},sync:[]}];
       s.knowledgeJobs=[{id:'index-A',category:'合成课程',status:'running',progress:.2}];
       await page.goto(origin+'/course-files?category='+encodeURIComponent('合成课程'));
-      await page.locator('.file-card[data-id="file-A"]').waitFor();await page.locator('#review-lessons [data-lesson="A"]').waitFor({state:'attached'});
+      await page.locator('.file-card[data-id="file-A"]').waitFor();assert.equal(await page.locator('#review-lessons').count(),0,'obsolete review-builder controls must stay removed');
       const card=await page.locator('.file-card[data-id="file-A"]').elementHandle();
       const count=()=>s.requests.filter(r=>r.p==='/api/course-files').length,before=count();
       await until(()=>count()>before,'Active conversion did not retain fast polling');await page.waitForTimeout(100);

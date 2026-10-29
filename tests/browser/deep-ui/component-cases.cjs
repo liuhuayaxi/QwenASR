@@ -1,6 +1,6 @@
 module.exports=({test,assert,task,COURSE_A})=>{
  const inference={component:'inference'},mineru={component:'mineru'};
- const wait=async t=>t.p.waitForTimeout(40);
+ const wait=async t=>t.p.evaluate(()=>__fixture.settle());
  const text=(t,id)=>t.p.locator('#'+id).textContent();
  test('40-inference-save-keeps-later-draft',async t=>{
   const p=t.p;await t.plan({path:'/api/inference/settings',method:'PUT',hold:'save'});
@@ -23,7 +23,7 @@ module.exports=({test,assert,task,COURSE_A})=>{
   await t.p.locator('#inferenceRemoteUrl').fill('not a url');await t.p.locator('#saveInferenceSettings').click();await wait(t);assert.equal((await t.requests()).filter(r=>r.method==='PUT').length,0);
  },inference);
  test('45-inference-failure-retains-form-and-unlocks',async t=>{
-  await t.plan({path:'/api/inference/settings',method:'PUT',status:503,json:{detail:'Fixture unavailable'}});await t.p.locator('#inferenceRemoteUrl').fill('http://edited.invalid');await t.p.locator('#saveInferenceSettings').click();await wait(t);assert.equal(await t.p.locator('#inferenceRemoteUrl').inputValue(),'http://edited.invalid');assert(!(await t.p.locator('#saveInferenceSettings').isDisabled()));assert.equal(await t.p.evaluate(()=>__controller.current().base_url),'http://fixture.invalid:8765');
+  await t.plan({path:'/api/inference/settings',method:'PUT',status:503,json:{detail:'Fixture unavailable'}});await t.p.locator('#inferenceRemoteUrl').fill('http://edited.invalid');await t.p.locator('#saveInferenceSettings').click();await t.p.waitForFunction(()=>!document.querySelector('#saveInferenceSettings').disabled && document.querySelector('#inferenceSettingsStatus').textContent.includes('Fixture unavailable'));assert.equal(await t.p.locator('#inferenceRemoteUrl').inputValue(),'http://edited.invalid');assert(!(await t.p.locator('#saveInferenceSettings').isDisabled()));assert.equal(await t.p.evaluate(()=>__controller.current().base_url),'http://fixture.invalid:8765');
  },inference);
  test('46-inference-failed-reload-disables-stale-snapshot',async t=>{
   await t.plan({path:'/api/inference/settings',method:'GET',status:503,json:{detail:'Fixture unavailable'}});await t.p.evaluate(()=>__load());assert.equal(await t.p.evaluate(()=>__controller.isReady()),false);assert(await t.p.locator('#saveInferenceSettings').isDisabled());
@@ -50,7 +50,7 @@ module.exports=({test,assert,task,COURSE_A})=>{
   await t.plan({path:'/api/mineru/settings',method:'GET',status:503,json:{detail:'Fixture unavailable'}});await t.p.evaluate(()=>__load());assert.equal(await t.p.evaluate(()=>__controller.isReady()),false);assert(await t.p.locator('#saveMineruSettings').isDisabled());
  },mineru);
  test('56-mineru-save-error-retains-draft',async t=>{
-  await t.plan({path:'/api/mineru/settings',method:'PUT',status:500,json:{detail:'Fixture unavailable'}});await t.p.locator('#mineruTier').selectOption('advanced');await t.p.locator('#saveMineruSettings').click();await wait(t);assert.equal(await t.p.locator('#mineruTier').inputValue(),'advanced');assert(!(await t.p.locator('#saveMineruSettings').isDisabled()));
+  await t.plan({path:'/api/mineru/settings',method:'PUT',status:500,json:{detail:'Fixture unavailable'}});await t.p.locator('#mineruTier').selectOption('advanced');await t.p.locator('#saveMineruSettings').click();await t.p.waitForFunction(()=>!document.querySelector('#saveMineruSettings').disabled && document.querySelector('#mineruSettingsStatus').textContent.includes('Fixture unavailable'));assert.equal(await t.p.locator('#mineruTier').inputValue(),'advanced');assert(!(await t.p.locator('#saveMineruSettings').isDisabled()));
  },mineru);
  test('57-mineru-dirty-number-before-blur',async t=>{
   await t.p.locator('details > summary').click();await t.p.locator('#mineruWindowSize').fill('8');assert.match(await text(t,'mineruSettingsStatus'),/\u672a\u4fdd\u5b58/);

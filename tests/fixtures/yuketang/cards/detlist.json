@@ -1,0 +1,617 @@
+{
+ "errcode": 0,
+ "errmsg": "Success",
+ "data": {
+  "view_permission": 0,
+  "max_retry": 1,
+  "Masters": [
+   {
+    "Shapes": [],
+    "Layouts": [
+     {
+      "Shapes": []
+     }
+    ]
+   }
+  ],
+  "contain_subjective": false,
+  "Language": "zh-CN",
+  "Title": "二进制带通信号的最佳接收",
+  "view_set_time": 0,
+  "Height": 540,
+  "Slides": [
+   {
+    "PageIndex": 1,
+    "MasterIndex": 1,
+    "ClickCount": 0,
+    "is_simple": true,
+    "discussion": null,
+    "SlideID": 348,
+    "Cover": "https://qn-st0.yuketang.cn/Fg00lnUIh8mpPvi_PmsX-fZ09yD-",
+    "Shapes": [
+     {
+      "Orientation": "msoTextOrientationHorizontal",
+      "ShapeType": 14,
+      "Top": 474,
+      "Height": 37.5,
+      "Width": 180.25,
+      "FontSize": 14,
+      "ZOrderPosition": 1,
+      "Paragraphs": [
+       {
+        "SpaceBefore": 0,
+        "Lines": [
+         {
+          "Html": "<p style='text-align:right;'>\r\n<span style='font-family:\"Arial\";font-size:1.00em;color:#0033CC;'>1</span></p>\r\n",
+          "Bound": {
+           "Width": 7.755039,
+           "Top": 0,
+           "Height": 16.8,
+           "Left": 0
+          }
+         }
+        ],
+        "Bound": {
+         "Width": 7.755039,
+         "Top": 3.600006,
+         "Height": 16.8,
+         "Left": 165.200012
+        },
+        "SpaceLine": true,
+        "SpaceWithin": 1,
+        "ParagraphNumber": 1,
+        "SpaceAfter": 0
+       }
+      ],
+      "Line": {
+       "DashStyle": "msoLineSolid",
+       "Visble": false,
+       "Weight": 0.75,
+       "BackColor": "#000000"
+      },
+      "Fill": {
+       "Visble": false,
+       "Transparency": 0,
+       "BackColor": "#FFFFFF"
+      },
+      "Type": "msoPlaceholder",
+      "Rotation": 0,
+      "ID": 76802,
+      "Left": 516
+     },
+     {
+      "Orientation": "msoTextOrientationHorizontal",
+      "ShapeType": 14,
+      "Top": 27,
+      "Height": 144,
+      "Width": 672.5,
+      "FontSize": 40,
+      "ZOrderPosition": 2,
+      "Paragraphs": [
+       {
+        "SpaceBefore": 0,
+        "Lines": [
+         {
+          "Html": "",
+          "Bound": {
+           "Width": 11.1250391,
+           "Top": 0,
+           "Height": 48,
+           "Left": 328.75
+          }
+         },
+         {
+          "Html": "<p style='text-align:center;'>\r\n<span style='font-family:\"Arial\";font-size:1.00em;color:#3333FF;font-weight:bold;'>5.4</span><span style='font-family:\"宋体\";font-size:1.00em;color:#3333FF;font-weight:bold;'>二进制带通信号的最佳接收机结构</span></p>\r\n",
+          "Bound": {
+           "Width": 657.5,
+           "Top": 48,
+           "Height": 48,
+           "Left": 0
+          }
+         },
+         {
+          "Html": "<p style='text-align:center;'>\r\n<span style='font-family:\"宋体\";font-size:1.00em;color:#3333FF;font-weight:bold;'>与性能</span><span style='font-family:\"Arial\";font-size:1.10em;color:#3333FF;font-weight:bold;'>  </br></span></p>\r\n",
+          "Bound": {
+           "Width": 131.5,
+           "Top": 96,
+           "Height": 48,
+           "Left": 268.56
+          }
+         }
+        ],
+        "Bound": {
+         "Width": 657.5,
+         "Top": -26.4,
+         "Height": 144,
+         "Left": 7.5
+        },
+        "SpaceLine": true,
+        "SpaceWithin": 1,
+        "ParagraphNumber": 1,
+        "SpaceAfter": 0
+       }
+      ],
+      "Line": {
+       "DashStyle": "msoLineSolid",
+       "Visble": false,
+       "Weight": 0.75,
+       "BackColor": "#000000"
+      },
+      "Fill": {
+       "Visble": false,
+       "Transparency": 0,
+       "BackColor": "#FFFFFF"
+      },
+      "Type": "msoPlaceholder",
+      "Rotation": 0,
+      "ID": 76803,
+      "Left": 23.75
+     },
+     {
+      "Orientation": "msoTextOrientationHorizontal",
+      "ShapeType": 14,
+      "Top": 156,
+      "Height": 306,
+      "Width": 672.5,
+      "FontSize": 32,
+      "ZOrderPosition": 3,
+      "Paragraphs": [
+       {
+        "SpaceBefore": 0,
+        "BulletBound": {
+         "Width": -46.4,
+         "Top": 3.600006,
+         "Height": 38.4,
+         "FontSize": 22.4,
+         "Left": 11.8000011
+        },
+        "Character": 118,
+        "Lines": [
+         {
+          "Html": "<p style='text-align:left;'>\r\n<span style='font-family:\"Arial\";font-size:1.00em;color:#0033CC;font-weight:bold;'>2ASK</span><span style='font-family:\"宋体\";font-size:1.00em;color:#0033CC;font-weight:bold;'>信号的最佳机收机及其性能</span><span style='font-family:\"Arial\";font-size:1.00em;color:#0033CC;'> </span></p>\r\n",
+          "Bound": {
+           "Width": 479.755035,
+           "Top": 0,
+           "Height": 38.4,
+           "Left": 0
+          }
+         }
+        ],
+        "SpaceLine": true,
+        "Bound": {
+         "Width": 479.755035,
+         "Top": 3.600006,
+         "Height": 38.4,
+         "Left": 34.2
+        },
+        "SpaceWithin": 1,
+        "BulletFont": {
+         "Name": "Wingdings",
+         "Symbol": false,
+         "Underline": false,
+         "RGB": 6684876,
+         "Italic": false,
+         "Strike": false,
+         "Highlight": 0,
+         "Shadow": null,
+         "Superscript": false,
+         "Bold": false,
+         "Subscript": false,
+         "Size": 22.4
+        },
+        "ParagraphNumber": 1,
+        "IsNumber": false,
+        "BulletHtml": "<span style='font-family:\"Wingdings\";font-size:1em;color:#CC0066'>&#118;</span>",
+        "SpaceAfter": 0
+       }
+      ],
+      "Line": {
+       "DashStyle": "msoLineSolid",
+       "Visble": false,
+       "Weight": 0.75,
+       "BackColor": "#000000"
+      },
+      "Fill": {
+       "Visble": false,
+       "Transparency": 0,
+       "BackColor": "#FFFFFF"
+      },
+      "Type": "msoPlaceholder",
+      "Rotation": 0,
+      "ID": 76804,
+      "Left": 24
+     }
+    ],
+    "SlideIndex": 1,
+    "EffectCount": 0,
+    "LayoutIndex": 1,
+    "Background": {
+     "Type": "FillPicture",
+     "Data": "https://qn-st0.yuketang.cn/Fs3FYCc7mv-Zr3aF8ZowDp0VVHAg",
+     "Transparency": 0
+    },
+    "CardID": 97694675
+   },
+   {
+    "PageIndex": 2,
+    "MasterIndex": 1,
+    "ClickCount": 0,
+    "is_simple": false,
+    "discussion": null,
+    "SlideID": 349,
+    "Cover": "https://qn-st0.yuketang.cn/FsWbtxIY-CyfaI9ZHLcA0SNMOJlf",
+    "Shapes": [
+     {
+      "Orientation": "msoTextOrientationHorizontal",
+      "ShapeType": 14,
+      "Top": 474,
+      "Height": 37.5,
+      "Width": 180.25,
+      "FontSize": 14,
+      "ZOrderPosition": 1,
+      "Paragraphs": [
+       {
+        "SpaceBefore": 0,
+        "Lines": [
+         {
+          "Html": "<p style='text-align:right;'>\r\n<span style='font-family:\"Arial\";font-size:1.00em;color:#0033CC;'>2</span></p>\r\n",
+          "Bound": {
+           "Width": 7.755039,
+           "Top": 0,
+           "Height": 16.8,
+           "Left": 0
+          }
+         }
+        ],
+        "Bound": {
+         "Width": 7.755039,
+         "Top": 3.600006,
+         "Height": 16.8,
+         "Left": 165.200012
+        },
+        "SpaceLine": true,
+        "SpaceWithin": 1,
+        "ParagraphNumber": 1,
+        "SpaceAfter": 0
+       }
+      ],
+      "Line": {
+       "DashStyle": "msoLineSolid",
+       "Visble": false,
+       "Weight": 0.75,
+       "BackColor": "#000000"
+      },
+      "Fill": {
+       "Visble": false,
+       "Transparency": 0,
+       "BackColor": "#FFFFFF"
+      },
+      "Type": "msoPlaceholder",
+      "Rotation": 0,
+      "ID": 78850,
+      "Left": 516
+     },
+     {
+      "Orientation": "msoTextOrientationHorizontal",
+      "ShapeType": 14,
+      "Top": 78,
+      "Height": 48,
+      "Width": 648,
+      "FontSize": 32,
+      "ZOrderPosition": 2,
+      "Paragraphs": [
+       {
+        "SpaceBefore": 0,
+        "Lines": [
+         {
+          "Html": "<p style='text-align:left;'>\r\n<span style='font-family:\"Arial\";font-size:1.00em;color:#007572;font-weight:bold;'>2ASK</span><span style='font-family:\"宋体\";font-size:1.00em;color:#007572;font-weight:bold;'>信号可以表示成</span></p>\r\n",
+          "Bound": {
+           "Width": 310.255035,
+           "Top": 0,
+           "Height": 38.4,
+           "Left": 0
+          }
+         }
+        ],
+        "Bound": {
+         "Width": 310.255035,
+         "Top": 4.800003,
+         "Height": 38.4,
+         "Left": 7.200001
+        },
+        "SpaceLine": true,
+        "SpaceWithin": 1,
+        "ParagraphNumber": 1,
+        "SpaceAfter": 0
+       }
+      ],
+      "Line": {
+       "DashStyle": "msoLineSolid",
+       "Visble": false,
+       "Weight": 0.75,
+       "BackColor": "#000000"
+      },
+      "Fill": {
+       "Visble": false,
+       "Transparency": 0,
+       "BackColor": "#FFFFFF"
+      },
+      "Type": "msoPlaceholder",
+      "Rotation": 0,
+      "ID": 78851,
+      "Left": 36
+     },
+     {
+      "Orientation": "msoTextOrientationHorizontal",
+      "ShapeType": 14,
+      "Top": 248.75,
+      "Height": 213.25,
+      "Width": 672.5,
+      "FontSize": 32,
+      "ZOrderPosition": 3,
+      "Paragraphs": [
+       {
+        "SpaceBefore": 0,
+        "Lines": [
+         {
+          "Html": "<p style='text-align:left;'>\r\n<span style='font-family:\"宋体\";font-size:1.00em;color:#0033CC;font-weight:bold;'>因此，得出</span><span style='font-family:\"Arial\";font-size:1.00em;color:#0033CC;font-weight:bold;'>2ASK</span><span style='font-family:\"宋体\";font-size:1.00em;color:#0033CC;font-weight:bold;'>信号的最佳接收机结构，如</span></p>\r\n",
+          "Bound": {
+           "Width": 631.5,
+           "Top": 0,
+           "Height": 57.6,
+           "Left": 0
+          }
+         },
+         {
+          "Html": "<p style='text-align:left;'>\r\n<span style='font-family:\"宋体\";font-size:1.00em;color:#0033CC;font-weight:bold;'>图</span><span style='font-family:\"Arial\";font-size:1.00em;color:#0033CC;font-weight:bold;'>5.4-1</span><span style='font-family:\"宋体\";font-size:1.00em;color:#0033CC;font-weight:bold;'>所示。</span><span style='font-family:\"Arial\";font-size:1.00em;color:#0033CC;font-weight:bold;'>\r</span></p>\r\n",
+          "Bound": {
+           "Width": 210.125046,
+           "Top": 57.6000061,
+           "Height": 57.6,
+           "Left": 27
+          }
+         }
+        ],
+        "Bound": {
+         "Width": 631.5,
+         "Top": 3.600006,
+         "Height": 115.2,
+         "Left": 7.200001
+        },
+        "SpaceLine": true,
+        "SpaceWithin": 1.5,
+        "ParagraphNumber": 1,
+        "SpaceAfter": 0
+       }
+      ],
+      "Line": {
+       "DashStyle": "msoLineSolid",
+       "Visble": false,
+       "Weight": 0.75,
+       "BackColor": "#000000"
+      },
+      "Fill": {
+       "Visble": false,
+       "Transparency": 0,
+       "BackColor": "#FFFFFF"
+      },
+      "Type": "msoPlaceholder",
+      "Rotation": 0,
+      "ID": 78852,
+      "Left": 24
+     },
+     {
+      "ShapeType": 7,
+      "URL": "https://qn-st0.yuketang.cn/FkC21U0S_kxoZ_ebsKtBMmunEj2L",
+      "Top": 144,
+      "Height": 86,
+      "Width": 283.375031,
+      "ZOrderPosition": 5,
+      "Line": {
+       "DashStyle": "msoLineDashStyleMixed",
+       "Visble": false,
+       "Weight": -2147483650,
+       "BackColor": "#FFFFFF"
+      },
+      "Fill": {
+       "Visble": false,
+       "Transparency": 1,
+       "BackColor": "#000000"
+      },
+      "Type": "msoEmbeddedOLEObject",
+      "Rotation": 0,
+      "ID": 78854,
+      "Left": 168
+     }
+    ],
+    "SlideIndex": 2,
+    "EffectCount": 0,
+    "LayoutIndex": 1,
+    "Background": {
+     "Type": "FillPicture",
+     "Data": "https://qn-st0.yuketang.cn/Fs3FYCc7mv-Zr3aF8ZowDp0VVHAg",
+     "Transparency": 0
+    },
+    "CardID": 97694676
+   },
+   {
+    "PageIndex": 3,
+    "MasterIndex": 1,
+    "ClickCount": 0,
+    "is_simple": false,
+    "discussion": null,
+    "SlideID": 350,
+    "Cover": "https://qn-st0.yuketang.cn/FoVU9KBMYdVoFp8nJD8puG3GO9k3",
+    "Shapes": [
+     {
+      "Orientation": "msoTextOrientationHorizontal",
+      "ShapeType": 14,
+      "Top": 474,
+      "Height": 37.5,
+      "Width": 180.25,
+      "FontSize": 14,
+      "ZOrderPosition": 1,
+      "Paragraphs": [
+       {
+        "SpaceBefore": 0,
+        "Lines": [
+         {
+          "Html": "<p style='text-align:right;'>\r\n<span style='font-family:\"Arial\";font-size:1.00em;color:#0033CC;'>3</span></p>\r\n",
+          "Bound": {
+           "Width": 7.755039,
+           "Top": 0,
+           "Height": 16.8,
+           "Left": 0
+          }
+         }
+        ],
+        "Bound": {
+         "Width": 7.755039,
+         "Top": 3.600006,
+         "Height": 16.8,
+         "Left": 165.200012
+        },
+        "SpaceLine": true,
+        "SpaceWithin": 1,
+        "ParagraphNumber": 1,
+        "SpaceAfter": 0
+       }
+      ],
+      "Line": {
+       "DashStyle": "msoLineSolid",
+       "Visble": false,
+       "Weight": 0.75,
+       "BackColor": "#000000"
+      },
+      "Fill": {
+       "Visble": false,
+       "Transparency": 0,
+       "BackColor": "#FFFFFF"
+      },
+      "Type": "msoPlaceholder",
+      "Rotation": 0,
+      "ID": 80898,
+      "Left": 516
+     },
+     {
+      "Orientation": "msoTextOrientationHorizontal",
+      "ShapeType": 14,
+      "Top": 54,
+      "Height": 90,
+      "Width": 672.5,
+      "FontSize": 36,
+      "ZOrderPosition": 2,
+      "Paragraphs": [
+       {
+        "SpaceBefore": 0,
+        "Lines": [
+         {
+          "Html": "<p style='text-align:left;'>\r\n<span style='font-family:\"宋体\";font-size:1.00em;color:#007572;font-weight:bold;'>  图</span><span style='font-family:\"Arial\";font-size:1.00em;color:#007572;font-weight:bold;'>5.4-1  2ASK</span><span style='font-family:\"宋体\";font-size:1.00em;color:#007572;font-weight:bold;'>信号最佳接收机结构</span><span style='font-family:\"Arial\";font-size:1.00em;color:#007572;font-weight:bold;'>  </br></span></p>\r\n",
+          "Bound": {
+           "Width": 605.5,
+           "Top": 0,
+           "Height": 43.2,
+           "Left": 0
+          }
+         },
+         {
+          "Html": "<p style='text-align:left;'>\r\n<span style='font-family:\"Arial\";font-size:1.00em;color:#007572;font-weight:bold;'>   </span><span style='font-family:\"Arial\";font-size:0.78em;color:#007572;font-weight:bold;'>(a) 2ASK</span><span style='font-family:\"宋体\";font-size:0.78em;color:#007572;font-weight:bold;'>相关接收机</span><span style='font-family:\"Arial\";font-size:1.00em;color:#007572;font-weight:bold;'> </span><span style='font-family:\"Arial\";font-size:0.78em;color:#007572;font-weight:bold;'>(b) 2ASK</span><span style='font-family:\"宋体\";font-size:0.78em;color:#007572;font-weight:bold;'>匹配相关接收机</span><span style='font-family:\"Arial\";font-size:1.00em;color:#007572;font-weight:bold;'> </span></p>\r\n",
+          "Bound": {
+           "Width": 622.755066,
+           "Top": 43.2,
+           "Height": 43.2,
+           "Left": 0
+          }
+         }
+        ],
+        "Bound": {
+         "Width": 622.755066,
+         "Top": 1.79999924,
+         "Height": 86.4,
+         "Left": 7.200001
+        },
+        "SpaceLine": true,
+        "SpaceWithin": 1,
+        "ParagraphNumber": 1,
+        "SpaceAfter": 0
+       }
+      ],
+      "Line": {
+       "DashStyle": "msoLineSolid",
+       "Visble": false,
+       "Weight": 0.75,
+       "BackColor": "#000000"
+      },
+      "Fill": {
+       "Visble": false,
+       "Transparency": 0,
+       "BackColor": "#FFFFFF"
+      },
+      "Type": "msoPlaceholder",
+      "Rotation": 0,
+      "ID": 80899,
+      "Left": 23.75
+     },
+     {
+      "ShapeType": 13,
+      "URL": "https://qn-st0.yuketang.cn/FmtQJz9XgeYn7L9UlER45B0dHDwx",
+      "Top": 156.625046,
+      "Height": 329.5,
+      "Width": 623.624939,
+      "ZOrderPosition": 3,
+      "Line": {
+       "DashStyle": "msoLineSolid",
+       "Visble": false,
+       "Weight": 0.75,
+       "BackColor": "#000000"
+      },
+      "Fill": {
+       "Visble": false,
+       "Transparency": 0,
+       "BackColor": "#FFFFFF"
+      },
+      "Type": "msoPicture",
+      "Rotation": 0,
+      "ID": 80900,
+      "Left": 36.87504
+     }
+    ],
+    "SlideIndex": 3,
+    "EffectCount": 0,
+    "LayoutIndex": 1,
+    "Background": {
+     "Type": "FillPicture",
+     "Data": "https://qn-st0.yuketang.cn/Fs3FYCc7mv-Zr3aF8ZowDp0VVHAg",
+     "Transparency": 0
+    },
+    "CardID": 97694677
+   }
+  ],
+  "Width": 720,
+  "Version": "1.6",
+  "allow_attachment": 1,
+  "answer_mode": 1,
+  "Fonts": [
+   {
+    "FontFamily": "Arial",
+    "FontFile": "https://qn-st0.yuketang.cn/0b55b706c6954d3a8952bd626dafbd97"
+   },
+   {
+    "FontFamily": "宋体",
+    "FontFile": "https://qn-st0.yuketang.cn/4a038c62b15f4eb09b3a552cf7c3b3df"
+   },
+   {
+    "FontFamily": "Wingdings",
+    "FontFile": "https://qn-st0.yuketang.cn/78cf17fcd9f14029b0be2558a7e29606"
+   }
+  ],
+  "allow_copy": 1,
+  "studentProblemStatus": {
+   "before_answer_time": false,
+   "full_score": 0,
+   "student_score": 0,
+   "answer_time": null
+  },
+  "problem_results": []
+ }
+}

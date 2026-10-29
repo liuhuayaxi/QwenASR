@@ -1,0 +1,98 @@
+{
+ "errcode": 0,
+ "errmsg": "",
+ "data": {
+  "problem_results": [
+   {
+    "problem_id": 102651559,
+    "problem_type": 1,
+    "correct": true,
+    "finished": true,
+    "result": [
+     "A"
+    ],
+    "result_type": 1,
+    "answer": [
+     "A"
+    ],
+    "grade": 1.0,
+    "finally_answer_problem_time": null,
+    "answer_problem_record_list": []
+   },
+   {
+    "problem_id": 102651561,
+    "problem_type": 2,
+    "correct": true,
+    "finished": true,
+    "result": [
+     "D",
+     "C"
+    ],
+    "result_type": 1,
+    "answer": [
+     "C",
+     "D"
+    ],
+    "grade": 2.0,
+    "finally_answer_problem_time": null,
+    "answer_problem_record_list": []
+   },
+   {
+    "problem_id": 102651558,
+    "problem_type": 1,
+    "correct": true,
+    "finished": true,
+    "result": [
+     "D"
+    ],
+    "result_type": 1,
+    "answer": [
+     "D"
+    ],
+    "grade": 1.0,
+    "finally_answer_problem_time": null,
+    "answer_problem_record_list": []
+   },
+   {
+    "problem_id": 102651557,
+    "problem_type": 1,
+    "correct": true,
+    "finished": true,
+    "result": [
+     "B"
+    ],
+    "result_type": 1,
+    "answer": [
+     "B"
+    ],
+    "grade": 1.0,
+    "finally_answer_problem_time": null,
+    "answer_problem_record_list": []
+   },
+   {
+    "problem_id": 102651560,
+    "problem_type": 1,
+    "correct": true,
+    "finished": true,
+    "result": [
+     "B"
+    ],
+    "result_type": 1,
+    "answer": [
+     "B"
+    ],
+    "grade": 1.0,
+    "finally_answer_problem_time": null,
+    "answer_problem_record_list": []
+   }
+  ],
+  "grade": 6.0,
+  "duration": 165,
+  "create_time": "2026-10-19 08:00:09",
+  "start_time": null,
+  "auto_submit": false,
+  "submit_time": "2026-10-19 08:02:55",
+  "IP_list": [],
+  "role": 0
+ }
+}

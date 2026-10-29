@@ -80,7 +80,7 @@ def _material_failure(detail, *, returncode=None):
         kind,retriable='provider_unavailable',True
     reason={
         'provider_auth':'登录状态不可用，请检查 AGY 登录',
-        'provider_region':'当前账号的服务地区不可用',
+        'provider_region':'被 Google 拒绝：当前网络出口地区不受支持（User location is not supported，通常是 VPN/代理节点切到了不支持的地区，不是账号或程序故障；切换到受支持地区后点继续生成即可）',
         'provider_quota':'额度不足',
         'rate_limit':'请求受限，稍后将重试',
         'provider_unavailable':'上游服务暂时不可用',

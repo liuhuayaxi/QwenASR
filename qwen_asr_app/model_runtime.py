@@ -190,10 +190,16 @@ class ModelManager:
                     channel.cancel_join_thread()
                 except Exception:
                     pass
-        self.worker = None
         self._retained_unready_worker = False
         self.request_queue = None
         self.result_queue = None
+        # Publish the lifecycle state before exposing a missing worker. The
+        # event loop can observe these fields while this shutdown thread is
+        # returning, before _unload_worker's async finally clause runs.
+        if self._unloading or self.status == "ready":
+            self.status = "idle"
+            self.detail = "Qwen3-ASR 已卸载释放内存 · 下次转写时自动加载"
+        self.worker = None
 
     def _infer_with_lease(
         self,

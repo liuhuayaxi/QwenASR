@@ -12,7 +12,7 @@ import zipfile
 import contextlib
 from pathlib import Path
 from typing import Callable, Iterable
-from .mineru_settings import RUNTIME_ROOT, mineru_settings, normalize_mineru_settings, runtime_info
+from .mineru_settings import mineru_settings, normalize_mineru_settings, runtime_info
 from .conversion_control import check_stopped
 
 
@@ -30,9 +30,9 @@ def find_mineru_binary() -> Path | None:
     configured = os.getenv("QWEN_ASR_MINERU", "").strip()
     candidates = [
         Path(configured).expanduser() if configured else None,
-        RUNTIME_ROOT / "bin" / "mineru-kit",
-        Path(shutil.which("mineru")) if shutil.which("mineru") else None,
-        Path.home() / ".local" / "bin" / "mineru",
+        # The one system install: `uv tool install mineru==4.0.10`.
+        Path.home() / ".local" / "bin" / "mineru-kit",
+        Path(shutil.which("mineru-kit")) if shutil.which("mineru-kit") else None,
     ]
     for candidate in candidates:
         if candidate and candidate.is_file() and os.access(candidate, os.X_OK):
@@ -198,14 +198,28 @@ def convert_pdf_to_ai(
             runtime_python = first_line.removeprefix("#!").strip()
             if not Path(runtime_python).is_file():
                 raise RuntimeError("MinerU 启动脚本没有有效的 Python 解释器")
-            _run_mineru(
+            mineru_output_log = _run_mineru(
                 [runtime_python, str(builder_script.parent / "run_mineru4.py"),
                  str(source), "-o", str(mineru_output), "--settings", str(settings_path)],
                 work / "mineru.log", report, stop,
             )
-            return {"metrics": {"mineru_version": info.get("version", ""), "tier": settings["tier"],
-                                "configured_vlm_engine": settings["vlm_engine"],
-                                "parse_seconds_including_load": time.monotonic() - started}}
+            effective_tier = settings["tier"]
+            strategy = None
+            for line in mineru_output_log.splitlines():
+                if line.startswith("{") and '"effective_tier"' in line:
+                    try:
+                        detail = json.loads(line)
+                        effective_tier = detail.get("effective_tier") or effective_tier
+                        strategy = detail.get("strategy")
+                    except (TypeError, ValueError):
+                        pass
+            metrics = {"mineru_version": info.get("version", ""), "tier": effective_tier,
+                       "requested_tier": settings["tier"],
+                       "configured_vlm_engine": settings["vlm_engine"],
+                       "parse_seconds_including_load": time.monotonic() - started}
+            if strategy is not None:
+                metrics["tier_strategy"] = strategy
+            return {"metrics": metrics}
         def local_parse():
             with local_guard or contextlib.nullcontext():
                 return compute_local()

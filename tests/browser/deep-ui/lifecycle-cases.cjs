@@ -1,6 +1,6 @@
 module.exports=({test,assert,task,COURSE_A})=>{
  const backup={component:'backup'},discard={component:'discard'};
- const pause=async t=>t.p.waitForTimeout(40),events=t=>t.p.evaluate(()=>__fixture.events);
+ const pause=async t=>t.p.evaluate(()=>__fixture.settle()),events=t=>t.p.evaluate(()=>__fixture.events);
  const submit=async t=>{await t.p.locator('#discardRecordingButton').click();await t.p.locator('[data-discard-continue]').click();await t.p.locator('[data-discard-confirm]').click();};
  const message=(t,type)=>t.p.evaluate(type=>__controller.receive({type,session_id:'r1'}),type);
  test('60-backup-read-retry-never-creates-new-archive',async t=>{
@@ -13,10 +13,10 @@ module.exports=({test,assert,task,COURSE_A})=>{
   await t.plan({path:'/api/library/backup',method:'POST',error:'network'});await t.p.locator('#exportLibraryBackup').click();await pause(t);await t.p.locator('#exportLibraryBackup').click();await pause(t);assert.equal((await t.posts()).length,1);assert.equal((await t.requests()).at(-1).method,'GET');
  },backup);
  test('63-backup-recovery-clears-stale-error',async t=>{
-  await t.p.locator('[data-settings-tab=library]').click();await pause(t);assert(!(await t.p.locator('#libraryBackupStatus').textContent()).includes('Network request failed'));
+  await t.p.locator('[data-settings-tab=library]').click();await t.p.waitForFunction(()=>!document.querySelector('#exportLibraryBackup').disabled && !document.querySelector('#libraryBackupStatus').textContent.includes('Network request failed'));assert(!(await t.p.locator('#libraryBackupStatus').textContent()).includes('Network request failed'));
  },{...backup,plans:[{path:'/api/library/backup',method:'GET',error:'network'}]});
  test('64-backup-released-result-removes-stale-download',async t=>{
-  assert.equal(await t.p.locator('#downloadLibraryBackup').getAttribute('href'),'/fixture/archive.zip');await t.p.evaluate(()=>__fixture.backup={status:'released'});await t.p.locator('[data-settings-tab=library]').click();await pause(t);assert.equal(await t.p.locator('#downloadLibraryBackup').getAttribute('href'),null);assert(await t.p.locator('#downloadLibraryBackup').isHidden());
+  assert.equal(await t.p.locator('#downloadLibraryBackup').getAttribute('href'),'/fixture/archive.zip');await t.p.evaluate(()=>__fixture.backup={status:'released'});await t.p.locator('[data-settings-tab=library]').click();await t.p.waitForFunction(()=>document.querySelector('#downloadLibraryBackup').getAttribute('href')===null);assert.equal(await t.p.locator('#downloadLibraryBackup').getAttribute('href'),null);assert(await t.p.locator('#downloadLibraryBackup').isHidden());
  },{...backup,backup:{status:'completed',file_count:2,archive_bytes:4000,filename:'fixture.zip',download_url:'/fixture/archive.zip'}});
  test('65-backup-initial-read-prevents-premature-export',async t=>{
   await t.waitGate('read');assert(await t.p.locator('#exportLibraryBackup').isDisabled());await t.resolve('read');assert(!(await t.p.locator('#exportLibraryBackup').isDisabled()));

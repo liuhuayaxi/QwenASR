@@ -182,6 +182,23 @@ class ExactRecoveryTests(unittest.TestCase):
         self.jobs[1].update(created_at='2021-01-01T00:00:00Z', updated_at='2021-01-01T00:00:08Z')
         self.assertNotIn('recovered', self.old_task())
 
+    def test_source_less_old_failure_is_recovered_by_later_ready_category_index(self):
+        self.jobs[0]['error'] = 'dictionary changed size during iteration'
+        generic = self.old_task()
+        self.assertEqual((generic['status'], generic['display_status']), ('failed', 'recovered'))
+        self.assertEqual(generic['recovery']['category'], '数学')
+        self.jobs[0]['error'] = "'missing-recording-id'"
+        generic = self.old_task()
+        self.assertEqual((generic['status'], generic['display_status']), ('failed', 'recovered'))
+        self.assertEqual(generic['recovery']['category'], '数学')
+
+    def test_source_less_failure_stays_current_if_any_current_source_is_unready(self):
+        self.jobs.append({**self.jobs[0], 'job_id': 'old-generic', 'error': 'dictionary changed size during iteration'})
+        with self.store._connect() as db:
+            db.execute("UPDATE sources SET needs_vectors=1 WHERE source_id=?", (self.source_id,))
+        generic = next(t for t in self.adapter.tasks() if t['job_id'] == 'old-generic')
+        self.assertNotIn('recovered', generic)
+
 
 class FilteredFeedTests(unittest.IsolatedAsyncioTestCase):
     async def test_unfiltered_feed_keeps_all_courses_and_owner_action_targets(self):

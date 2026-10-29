@@ -369,3 +369,14 @@ class MaterialTransportTests(unittest.IsolatedAsyncioTestCase):
 
 
 if __name__=='__main__':unittest.main()
+
+
+class RegionFailureMessageTests(unittest.TestCase):
+    def test_region_rejection_names_the_network_exit_not_the_account(self):
+        from qwen_asr_app.agy_materials import _material_failure
+        error = _material_failure('E1022 session.go:273] FAILED_PRECONDITION (code 400): User location is not supported for the API use.', returncode=3)
+        self.assertEqual(error.kind, 'provider_region')
+        self.assertFalse(error.retriable)
+        self.assertIn('网络出口地区', str(error))
+        self.assertIn('User location is not supported', str(error))
+        self.assertIn('既有成果', str(error))

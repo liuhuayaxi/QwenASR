@@ -6,7 +6,7 @@
 
 国内 MCP 请求改为 `https://mcp.ideashell.cn/mcp`。全球端点仍为 `https://api.ideashell.com/ideashell/mcp`。
 
-旧国内地址 `https://api.ideashell.cn/ideashell/mcp` 在前后端均作为新地址的别名。已有笔记关联、课程资料匹配和附件上传去重仍然有效；成功推送或拉取后，笔记的同步记录会写入新地址。凭证仍使用原有的 `~/.qwenasr/api.ideashell.cn-oauth.json`，避免复制刷新令牌后出现两个存储同时刷新。
+旧国内地址 `https://api.ideashell.cn/ideashell/mcp` 在前后端均作为新地址的别名。已有笔记关联、课程资料匹配和附件上传去重仍然有效；成功推送或拉取后，笔记的同步记录会写入新地址。凭证仍使用原有的 `<项目>/local-data/api.ideashell.cn-oauth.json`，避免复制刷新令牌后出现两个存储同时刷新。
 
 服务端目前存在 OAuth 发现配置不一致：新域名的 `/.well-known/oauth-protected-resource/mcp` 和 `/.well-known/oauth-protected-resource` 仍声明旧资源 URI。Codex CLI 0.160.0 新授权因此报 resource mismatch。
 

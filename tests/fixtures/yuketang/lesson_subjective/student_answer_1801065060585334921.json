@@ -1,0 +1,124 @@
+{
+ "code": 0,
+ "msg": "OK",
+ "data": {
+  "content": {
+   "problemId": 1801065060585334921,
+   "problemType": 5,
+   "body": "",
+   "score": 500,
+   "halfScore": 0,
+   "remark": "",
+   "cover": "https://changjiang-private-qn.yuketang.cn/slide/20000002/cover697_20261021084604.jpg",
+   "coverProvider": "",
+   "answer": [],
+   "from": 0,
+   "submit": {
+    "width": 121.5,
+    "height": 32.37496,
+    "top": 489.375031,
+    "left": 486.0
+   },
+   "remarkRich": {
+    "width": 302.4,
+    "height": 540.0,
+    "shapes": [
+     {
+      "shapeType": 17,
+      "paragraphs": [
+       {
+        "paragraphNumber": 1,
+        "indentLevel": 1,
+        "bound": {
+         "width": 160.005035,
+         "height": 24.0,
+         "left": 7.200012,
+         "top": 3.59999847
+        },
+        "spaceLine": true,
+        "spaceBefore": 0.0,
+        "spaceAfter": 0.0,
+        "spaceWithin": 1.0,
+        "lines": [
+         {
+          "bound": {
+           "width": 160.005035,
+           "height": 24.0,
+           "left": 0.0,
+           "top": 0.0
+          },
+          "html": "<p style='text-align:left;'>\r\n<span style='font-family:\"Microsoft Yahei\";font-size:1.00em;color:#000000;'>此处添加答案解析</span></p>\r\n"
+         }
+        ]
+       }
+      ],
+      "width": 262.375031,
+      "height": 31.5047245,
+      "left": 20.000061,
+      "top": 50.0,
+      "zOrderPosition": 14,
+      "rotation": 0.0,
+      "url": "https://changjiang-public-qn.yuketang.cn/problem/20000002/shape_10_24591_20261021084604.png",
+      "fontSize": 20.0,
+      "type": "msoTextBox",
+      "id": "24591"
+     },
+     {
+      "fill": {
+       "backColor": "#FFFFFF",
+       "transparency": 0.0,
+       "visible": false
+      },
+      "line": {
+       "dashStyle": "msoLineSolid",
+       "backColor": "#000000",
+       "visible": false,
+       "weight": 0.75
+      },
+      "shapeType": 13,
+      "width": 347.5,
+      "height": 73.25,
+      "left": -3.749939,
+      "top": 76.25,
+      "zOrderPosition": 15,
+      "rotation": 0.0,
+      "url": "https://changjiang-public-qn.yuketang.cn/problem/20000002/shape_10_24592_20261021084604.png",
+      "type": "msoPicture",
+      "id": "24592"
+     }
+    ]
+   },
+   "index": 10
+  },
+  "problem": {
+   "problemResultId": "1801075019431700608",
+   "problemId": "1801065060585334921",
+   "groupId": "0",
+   "teamId": "0",
+   "answerTime": 115459,
+   "result": {
+    "content": "d 过小的时候限制影子小",
+    "pics": [
+     {
+      "pic": ""
+     }
+    ],
+    "videos": []
+   },
+   "extra_info": {
+    "blankStatus": "",
+    "deviceType": "0"
+   },
+   "score": -1,
+   "correct": false,
+   "half": false,
+   "remark_detail": {},
+   "comment": {},
+   "problem_type": 5
+  },
+  "doubt": false,
+  "collect": false,
+  "redExist": false,
+  "redAmount": 0
+ }
+}

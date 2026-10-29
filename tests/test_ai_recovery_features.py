@@ -376,3 +376,146 @@ class AutomaticRetryTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RegionRetryTests(unittest.IsolatedAsyncioTestCase):
+    """Google's 'User location is not supported' is retried every 3 min for 30 min."""
+
+    async def run_job(self, outcomes):
+        from qwen_asr_app.agy_materials import _material_failure
+        from qwen_asr_app.storage import RecordingStore
+        raw = tempfile.TemporaryDirectory()
+        self.addCleanup(raw.cleanup)
+        record = RecordingRecord(Path(raw.name), {
+            "id": "region-retry", "title": "课堂", "category": "未分类", "kind": "upload", "status": "completed",
+            "sample_count": 0, "next_segment_id": 1, "sample_rate": 16000, "audio_filename": "recording.aac"})
+        record.save_all()
+        store = RecordingStore.__new__(RecordingStore)
+        store.active = None
+        store.paths = {record.id: record.directory}
+        calls, waits, states = [], [], []
+
+        async def generate(session_id, payload):
+            calls.append(session_id)
+            if outcomes and outcomes.pop(0) == "region":
+                raise _material_failure("FAILED_PRECONDITION (code 400): User location is not supported for the API use.", returncode=3)
+            return {"summary": {"summary": "## 笔记", "abstract": "摘要"}}
+
+        async def sleep(seconds):
+            current = store.find(record.id)
+            states.append(dict(current.metadata["summary_job"]))
+            waits.append(seconds)
+
+        with patch.object(app, "recording_store", store), \
+             patch.object(app, "generate_library_summary", generate), \
+             patch.object(app.asyncio, "sleep", sleep):
+            app.start_summary_job(store.find(record.id), {"config": {"ai": {}}})
+            await app.background_summary_tasks[record.id]
+        return store.find(record.id).metadata["summary_job"], calls, waits, states
+
+    async def test_region_rejection_waits_and_resumes(self):
+        job, calls, waits, states = await self.run_job(["region", "region", "ok"])
+        self.assertEqual(job["status"], "completed")
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(waits, [180, 180])
+        self.assertEqual(states[1]["status"], "waiting_retry")
+        self.assertEqual(states[1]["error"], "网络出口地区被拒，3 分钟后自动重试（第 2 次）；已完成的步骤会保留")
+        self.assertEqual(states[1]["error_kind"], "provider_region")
+
+    async def test_region_retry_gives_up_after_thirty_minutes_with_the_clear_message(self):
+        job, calls, waits, _ = await self.run_job(["region"] * 50)
+        self.assertEqual(waits, [180] * 10)
+        self.assertEqual(len(calls), 11)
+        self.assertEqual(job["status"], "failed")
+        self.assertIn("网络出口地区不受支持", job["error"])
+        self.assertIn("自动重试 10 次", job["error"])
+        self.assertEqual(job["region_retry_count"], 10)
+
+    def test_redacted_message_maps_back_to_the_region_kind(self):
+        self.assertEqual(app._task_error_kind("AGY 资料会话被 Google 拒绝：当前网络出口地区不受支持"), "provider_region")
+        self.assertIsNone(app._region_retry_delay(11))
+
+
+class SummaryQueueTests(unittest.IsolatedAsyncioTestCase):
+    async def test_summary_jobs_run_in_parallel_up_to_the_limit(self):
+        import app
+        from qwen_asr_app.storage import RecordingStore
+        raw = tempfile.TemporaryDirectory()
+        self.addCleanup(raw.cleanup)
+        store = RecordingStore.__new__(RecordingStore)
+        store.active = None
+        store.paths = {}
+        ids = ("par-p1", "par-p2", "par-p3")
+        for ident in ids:
+            folder = Path(raw.name) / ident
+            folder.mkdir()
+            RecordingRecord(folder, {
+                "id": ident, "title": ident, "category": "未分类", "kind": "upload", "status": "completed",
+                "sample_count": 0, "next_segment_id": 1, "sample_rate": 16000, "audio_filename": "recording.aac"}).save_all()
+            store.paths[ident] = folder
+        store.iter_records = lambda: [store.find(i) for i in ids]
+        running, peak = set(), []
+        release = asyncio.Event()
+
+        async def generate(session_id, payload):
+            running.add(session_id)
+            peak.append(len(running))
+            await release.wait()
+            running.discard(session_id)
+            return {"summary": {"summary": "## 笔记", "abstract": "摘要"}}
+
+        with patch.object(app, "recording_store", store), patch.object(app, "generate_library_summary", generate), \
+                patch.object(app, "SUMMARY_QUEUE_CONCURRENCY", 2):
+            for ident in ids:
+                app.start_summary_job(store.find(ident), {"config": {"ai": {}}})
+            for _ in range(5):
+                await asyncio.sleep(0)
+            self.assertEqual(max(peak), 2)
+            self.assertEqual(store.find("par-p3").metadata["summary_job"]["status"], "queued")
+            release.set()
+            await asyncio.gather(*[app.background_summary_tasks[i] for i in ids if i in app.background_summary_tasks])
+
+    async def test_summary_jobs_run_one_at_a_time_and_report_queue_position(self):
+        import app
+        from qwen_asr_app.storage import RecordingStore
+        raw = tempfile.TemporaryDirectory()
+        self.addCleanup(raw.cleanup)
+        store = RecordingStore.__new__(RecordingStore)
+        store.active = None
+        store.paths = {}
+        for ident in ("queue-q1", "queue-q2", "queue-q3"):
+            folder = Path(raw.name) / ident
+            folder.mkdir()
+            record = RecordingRecord(folder, {
+                "id": ident, "title": ident, "category": "未分类", "kind": "upload", "status": "completed",
+                "sample_count": 0, "next_segment_id": 1, "sample_rate": 16000, "audio_filename": "recording.aac"})
+            record.save_all()
+            store.paths[ident] = folder
+        store.iter_records = lambda: [store.find(i) for i in ("queue-q1", "queue-q2", "queue-q3")]
+        running, order, positions = set(), [], []
+        release = asyncio.Event()
+
+        async def generate(session_id, payload):
+            running.add(session_id)
+            self.assertEqual(len(running), 1)
+            order.append(session_id)
+            positions.append({i: app.summary_queue_position(i) for i in ("queue-q1", "queue-q2", "queue-q3")})
+            await release.wait()
+            running.discard(session_id)
+            return {"summary": {"summary": "## 笔记", "abstract": "摘要"}}
+
+        with patch.object(app, "recording_store", store), patch.object(app, "generate_library_summary", generate), \
+                patch.object(app, "SUMMARY_QUEUE_CONCURRENCY", 1):
+            for ident in ("queue-q1", "queue-q2", "queue-q3"):
+                app.start_summary_job(store.find(ident), {"config": {"ai": {}}})
+            for _ in range(5):
+                await asyncio.sleep(0)
+            self.assertEqual(order, ["queue-q1"])
+            self.assertEqual(store.find("queue-q3").metadata["summary_job"]["status"], "queued")
+            tasks = {t["id"]: t for t in app._build_compact_ai_tasks()}
+            self.assertEqual(tasks["summary:queue-q3"]["queue_position"], 2)
+            self.assertIn("排队中", tasks["summary:queue-q3"]["phase"])
+            release.set()
+            await asyncio.gather(*[app.background_summary_tasks[i] for i in ("queue-q1", "queue-q2", "queue-q3") if i in app.background_summary_tasks])
+        self.assertEqual(order, ["queue-q1", "queue-q2", "queue-q3"])
+        self.assertEqual(positions[1], {"queue-q1": 0, "queue-q2": 0, "queue-q3": 1})

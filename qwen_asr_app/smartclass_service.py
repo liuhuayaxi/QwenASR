@@ -737,7 +737,9 @@ async def import_stream(local, group, config, entry):
                 return state
             if state["status"] == "interrupted":
                 raise SmartClassError(state["error"] or "分段转写中断，可重新勾选课次继续")
-            await asyncio.sleep(1)
+            # Once all audio is handed over only ASR/refinement remain; those
+            # move in seconds-to-minutes steps, so poll less often.
+            await asyncio.sleep(1 if not finished_input else 5)
     finally:
         local_stop.set()
         if downloading and not downloading.done():
