@@ -331,6 +331,62 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                         service.stop_event.set()
                         await asyncio.gather(*tasks, return_exceptions=True)
 
+    async def test_note_wait_does_not_hold_the_only_course_ingestion_slot(self):
+        with tempfile.TemporaryDirectory() as raw:
+            groups = {ident: {**self.groups[ident], 'course_name': '测试', 'duration': 100,
+                'start': '2026-10-15 13:45', 'stop': '2026-10-15 15:20', 'periods': []}
+                for ident in 'AB'}
+            service.group_rows.update(groups)
+            submitted = []
+
+            def handler(request):
+                if request.url.path == '/api/library':
+                    return httpx.Response(200, json={'records': [], 'category_profiles': {}})
+                if request.url.path.endswith('/summary-jobs'):
+                    submitted.append(request.url.path.split('/')[3])
+                    return httpx.Response(200, json={'accepted': True})
+                self.fail('Course ingestion must not poll a blocked note: ' + request.url.path)
+
+            async def transcribed(local, group, config, entry):
+                return {'id': group['id'], 'directory': raw, 'status': 'completed',
+                    'ai_in_background': True, 'refinement': {'remaining_segments': 4}}
+
+            real_client = httpx.AsyncClient
+            with patch.object(service.httpx, 'AsyncClient',
+                              side_effect=lambda **kwargs: real_client(transport=httpx.MockTransport(handler))), \
+                 patch.object(service, 'import_stream', transcribed), \
+                 patch.object(service, 'PIPELINE_CONCURRENCY', 1):
+                await service.start_import(service.Selection(ids=['A', 'B']))
+                await asyncio.wait_for(service.job, 2)
+            self.assertEqual(submitted, ['A', 'B'])
+            self.assertEqual(service.queue_view()['remaining'], 0)
+            for entry in service.imports.values():
+                self.assertFalse(entry['summary_generated'])
+                self.assertEqual(entry['phases']['asr']['state'], 'completed')
+                self.assertEqual(entry['phases']['correction']['state'], 'running')
+                self.assertEqual(entry['phases']['summary']['state'], 'running')
+
+    async def test_note_submission_failure_keeps_successful_asr_and_error_truthful(self):
+        group = {**self.groups['A'], 'course_name': '测试', 'duration': 100,
+                 'start': '2026-10-15 13:45', 'stop': '2026-10-15 15:20', 'periods': []}
+        with tempfile.TemporaryDirectory() as raw:
+            def handler(request):
+                if request.url.path == '/api/library':
+                    return httpx.Response(200, json={'records': [], 'category_profiles': {}})
+                return httpx.Response(409, json={'detail': 'synthetic AI configuration failure'})
+
+            client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+            with patch.object(service.httpx, 'AsyncClient', return_value=client), \
+                 patch.object(service, 'import_stream', AsyncMock(return_value={
+                     'id': 'saved-record', 'directory': raw, 'status': 'completed'})):
+                await service.import_group(group, {'generate_summary': True, 'summary_provider': {'model': 'saved'}})
+            entry = service.imports['A']
+            self.assertEqual(entry['state'], 'completed')
+            self.assertFalse(entry['summary_generated'])
+            self.assertEqual(entry['phases']['asr']['state'], 'completed')
+            self.assertEqual(entry['phases']['summary']['state'], 'error')
+            self.assertIn('尚未确认', entry['message'])
+
 
 class ProgressCheckpointTests(unittest.TestCase):
     def test_progress_checkpoint_is_throttled_and_completion_forces_a_save(self):

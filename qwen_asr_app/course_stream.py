@@ -48,6 +48,52 @@ class CourseStreamJob:
         self.event = asyncio.Event()
         self.lock = asyncio.Lock()
         self.task = None
+        self.pipeline = None
+
+    def defer_correction(self, error):
+        self.state.update(correction_deferred=True, correction_error=str(error))
+        self.record.save_metadata()
+
+    async def submit_correction(self, segment):
+        pipeline = self.pipeline
+        if pipeline is None:
+            return
+        try:
+            if pipeline.jobs.full():
+                raise RuntimeError('AI 精修积压，已保存原文，转写继续；可稍后补齐精修')
+            await pipeline.submit(segment)
+        except asyncio.CancelledError:
+            if asyncio.current_task().cancelling():
+                raise
+            if self.pipeline is pipeline:
+                self.pipeline = None
+                await pipeline.close()
+                self.defer_correction('AI 精修进程已中断，原文已保存，转写继续')
+        except Exception as exc:
+            self.pipeline = None
+            await pipeline.close()
+            self.defer_correction(exc)
+
+    async def pause_correction(self, cancelled=False):
+        pipeline, self.pipeline = self.pipeline, None
+        if pipeline:
+            await pipeline.close()
+        message = "AI 精修已取消，转写继续" if cancelled else "AI 精修已暂停，转写继续"
+        self.defer_correction(message)
+        self.record.metadata.setdefault('ai_jobs', {})['refinement'] = {
+            'status': 'cancelled' if cancelled else 'paused', 'error': message,
+            'error_kind': 'cancelled' if cancelled else 'paused', 'updated_at': local_now(),
+        }
+        self.record.save_metadata()
+
+    def interrupt_input(self, error):
+        # Drain all accepted PCM before ending this attempt. A download failure
+        # must not cancel an unrelated in-flight ASR or erase its result.
+        if not self.state.get('input_complete'):
+            self.state['download_error'] = str(error)[:1000]
+            self.record.save_metadata()
+            self.event.set()
+        return self.snapshot()
 
     def recover_chunks(self):
         folder = self.record.directory / ".course-chunks"
@@ -77,6 +123,14 @@ class CourseStreamJob:
         self.record.metadata.update(status="processing", batch_options=public_config(self.config))
         self.record.metadata['inference_settings']=self.config['inference_settings']
         self.state.pop("error", None)
+        self.state.pop("download_error", None)
+        correction = (self.record.metadata.get('ai_jobs') or {}).get('refinement') or {}
+        if correction.get('status') in {'paused', 'cancelled'}:
+            self.state.update(correction_deferred=True, correction_error=correction.get('error') or 'AI 精修已暂停，转写继续')
+        else:
+            self.state.pop("correction_deferred", None)
+            self.state.pop("correction_error", None)
+        self.state['ai_in_background'] = False
         self.state["paused"] = False
         self.state.setdefault("started_at", time.time())
         self.state["stage"] = "等待音频分段"
@@ -138,6 +192,9 @@ class CourseStreamJob:
                 "ai_errors": sum(bool(v.get("ai_error")) for v in r.segments),
                 "download_complete": bool(s.get("input_complete")), "stage": s.get("stage", ""),
                 "error": s.get("error", ""), "paused": bool(s.get("paused")),
+                "correction_deferred": bool(s.get("correction_deferred")),
+                "correction_error": s.get("correction_error", ""),
+                "ai_in_background": bool(s.get("ai_in_background")),
                 "ai_pending": sum(bool(v.get("ai_pending")) for v in r.segments),
                 "metrics": {"first_text_seconds": s.get("first_text_seconds"),
                             "download_wall_seconds": s.get("download_wall_seconds"),
@@ -209,26 +266,40 @@ class CourseStreamJob:
         self.record.ensure_aac()
 
     async def run(self):
-        pipeline = None
+        from .ai_activity import track_ai_activity
+        with track_ai_activity('refinement:' + self.record.id):
+            await self._run()
+
+    async def _run(self):
         inference = None
         assembly = None
         asr_owned = True
+        archive_complete = False
         self.model.active_jobs += 1
         self.model.cancel_unload()
         try:
-            if self.config.get("ai_correction"):
-                pipeline = SegmentCorrectionPipeline(self.record, self.config)
+            if self.config.get("ai_correction") and not self.state.get('correction_deferred'):
+                try:
+                    self.pipeline = SegmentCorrectionPipeline(self.record, self.config)
+                except Exception as exc:
+                    self.defer_correction(exc)
+                if self.pipeline:
+                    self.record.metadata.setdefault('ai_jobs', {}).setdefault('refinement', {}).update(
+                        status='running', error='', error_kind='', updated_at=local_now())
+                    self.record.save_metadata()
                 from .refinement import pending_ids
                 pending=pending_ids(self.record)
                 for segment in list(self.record.segments):
                     if int(segment['id']) in pending or (self.config.get('translation','off')!='off' and not segment_ai_complete(segment,self.config)):
-                        await pipeline.submit(segment)
+                        await self.submit_correction(segment)
             while True:
                 index = int(self.state.get("completed_chunks", 0))
                 chunks = self.state["chunks"]
                 if index >= len(chunks):
                     if self.state.get("input_complete"):
                         break
+                    if self.state.get('download_error'):
+                        raise ValueError(self.state['download_error'])
                     self.state["stage"] = "等待下一段下载 · 已有文字同时精修"
                     self.event.clear()
                     try:
@@ -315,8 +386,8 @@ class CourseStreamJob:
                                    "duration": round(seconds, 2), "start": round(offset + start / SAMPLE_RATE, 3),
                                    "end": round(offset + end / SAMPLE_RATE, 3), "reason": "course_stream",
                                    "course_chunk": index, "chunk_end_sample": end, "metrics": metrics,
-                                   "ai_pending": bool(pipeline)}
-                        if pipeline:
+                                   "ai_pending": bool(self.pipeline)}
+                        if self.config.get('ai_correction'):
                             segment["ai_requested"] = {"correction": True, "translation": "off"}
                         self.record.upsert_segment(segment)
                     # Advance only after the transcript is durable. A crash
@@ -325,8 +396,8 @@ class CourseStreamJob:
                     chunks[index]["transcribed_samples"] = end
                     self.record.save_metadata()
                     next_id += 1
-                    if text and pipeline:
-                        await pipeline.submit(segment)
+                    if text:
+                        await self.submit_correction(segment)
                 self.state["completed_chunks"] = index + 1
                 self.record.metadata["batch_progress"] = {
                     "stage": "asr", "completed_seconds": offset + len(audio) / SAMPLE_RATE,
@@ -335,29 +406,35 @@ class CourseStreamJob:
                     "message": self.state["stage"],
                 }
                 self.record.save_all()
-                if pipeline:
-                    while not pipeline.events.empty():
-                        pipeline.events.get_nowait()
+                if self.pipeline:
+                    while not self.pipeline.events.empty():
+                        self.pipeline.events.get_nowait()
             # AI correction and AAC archival do not use the ASR model. Release
-            # this job's lease after the last inference, while keeping record
-            # ownership until every AI writer has finished.
+            # this job's lease after the last inference. The audio and raw
+            # transcript are the durable course result; correction is allowed
+            # to finish afterwards so a stuck AI request cannot hold the
+            # course queue at the ASR completion boundary.
             self.model.active_jobs = max(0, self.model.active_jobs - 1)
             asr_owned = False
             self.model.schedule_unload()
             self.state["stage"] = "语音识别已完成，等待剩余精修并合并归档"
             self.record.save_metadata()
-            if pipeline:
-                await pipeline.finish()
             if not self.record.segments:
                 raise ValueError("没有从音频中识别到文字，下载的音频已保留")
             archive_started = time.monotonic()
             assembly = asyncio.create_task(asyncio.to_thread(self.assemble))
             await asyncio.shield(assembly)
             self.state["archive_seconds"] = round(time.monotonic() - archive_started, 3)
-            # No AI worker can write the record while final exports are built.
+            # Mark the ASR/archive boundary complete before waiting for AI.
+            # Segment correction only writes derived fields and preserves this
+            # completed status when it saves later.
             self.record.metadata.update(status="completed", ended_at=local_now(), updated_at=local_now())
-            self.state["stage"] = "音频、转写与精修已归档"
+            self.state["stage"] = ("音频与转写已归档，AI 精修在后台继续" if self.pipeline
+                                   else "音频与转写已归档，AI 精修待继续" if self.state.get('correction_deferred')
+                                   else "音频与转写已归档")
+            self.state["ai_in_background"] = bool(self.pipeline)
             self.record.save_all()
+            archive_complete = True
             for path in [self.record.working_audio_path, *(self.record.directory / ".course-chunks").glob("*.pcm"), *(self.record.directory / ".course-chunks").glob("*.json")]:
                 if path == self.record.audio_path:
                     continue
@@ -370,13 +447,52 @@ class CourseStreamJob:
                 (self.record.directory / '.course-chunks').rmdir()
             except OSError:
                 pass
+            if self.pipeline:
+                try:
+                    await self.pipeline.finish()
+                    from .refinement import saved_progress
+                    if saved_progress(self.record)['remaining_segments']:
+                        self.defer_correction(next((s['ai_error'] for s in self.record.segments if s.get('ai_error')),
+                            '部分 AI 精修尚未完成，原始转写已归档，可稍后补齐'))
+                    if self.state.get('correction_deferred'):
+                        self.state['stage'] = '音频与转写已归档，AI 精修待继续'
+                    else:
+                        self.state['stage'] = '音频、转写与精修已归档'
+                    self.state["ai_in_background"] = False
+                    self.record.save_metadata()
+                except (Exception, asyncio.CancelledError) as exc:
+                    # Keep the durable ASR result completed. The task center
+                    # can resume the missing derived fields from checkpoints.
+                    self.state["correction_deferred"] = True
+                    self.state["correction_error"] = str(exc) or "AI 精修未完成，原始转写已保留"
+                    self.state["ai_in_background"] = False
+                    self.state["stage"] = "音频与转写已归档，AI 精修待继续"
+                    self.record.metadata["status"] = "completed"
+                    self.record.save_metadata()
         except (Exception, asyncio.CancelledError) as exc:
-            self.state.update(stage="interrupted", error=str(exc) or "任务已停止，分段与转写已保留")
-            self.record.metadata["status"] = "interrupted"
-            self.record.save_all()
+            if archive_complete:
+                self.state.update(
+                    correction_deferred=True,
+                    correction_error=str(exc) or "AI 精修未完成，原始转写已保留",
+                    stage="音频与转写已归档，AI 精修待继续",
+                )
+                self.record.metadata["status"] = "completed"
+                self.record.save_metadata()
+            else:
+                self.state.update(stage="interrupted", error=str(exc) or "任务已停止，分段与转写已保留")
+                self.record.metadata["status"] = "interrupted"
+                self.record.save_all()
         finally:
-            if pipeline:
-                await pipeline.close()
+            if self.pipeline:
+                await self.pipeline.close()
+            self.pipeline = None
+            self.state['ai_in_background'] = False
+            correction = (self.record.metadata.get('ai_jobs') or {}).get('refinement') or {}
+            if correction.get('status') not in {'paused', 'cancelled'} and self.config.get('ai_correction'):
+                correction.update(status='pending' if self.state.get('correction_deferred') else 'completed' if archive_complete else 'interrupted',
+                    error=self.state.get('correction_error', ''), updated_at=local_now())
+                self.record.metadata.setdefault('ai_jobs', {})['refinement'] = correction
+            self.record.save_metadata()
             if inference and not inference.done():
                 await asyncio.gather(inference, return_exceptions=True)
             if assembly and not assembly.done():
@@ -399,8 +515,9 @@ class CourseStreamJob:
 
 
 class CourseStreamManager:
-    def __init__(self, model, store, settings, busy_ids, is_record_busy=None):
+    def __init__(self, model, store, settings, busy_ids, is_record_busy=None, prepare_resume=None):
         self.model, self.store, self.settings, self.busy_ids = model, store, settings, busy_ids
+        self.prepare_resume = prepare_resume
         self.jobs = {}
         self.is_record_busy = is_record_busy or (lambda ident: False)
         self.lock = asyncio.Lock()
@@ -461,7 +578,12 @@ class CourseStreamManager:
             if record and record.id in self.jobs and self.jobs[record.id].task is not None and not self.jobs[record.id].task.done():
                 return self.jobs[record.id].snapshot()
             if record and record.metadata.get("status") == "completed":
+                if record.metadata.get('course_stream'):
+                    return CourseStreamJob(record, record.metadata.get('batch_options', {}), self.model, self.busy_ids).snapshot()
                 return {"id": record.id, "directory": str(record.directory), "status": "completed", "download_complete": True}
+            if record and self.prepare_resume:
+                await self.prepare_resume(record.id)
+                record = self.store.find(record.id) or record
             if record and self.is_record_busy(record.id):
                 raise HTTPException(409, "这条录音正在处理，请完成后再继续课程转写")
             if record and not record.metadata.get("course_stream"):
@@ -546,5 +668,10 @@ def course_stream_router(manager):
         local(request)
         await manager.get(ident).stop(paused=bool((await request.body()) and (await request.json()).get("paused")))
         return manager.get(ident).snapshot()
+
+    @router.post("/{ident}/input-interrupted")
+    async def input_interrupted(ident: str, request: Request):
+        local(request)
+        return manager.get(ident).interrupt_input((await request.json()).get('error') or '音频下载中断，可从断点继续')
 
     return router

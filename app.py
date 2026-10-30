@@ -983,7 +983,9 @@ def _build_compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any
                 "progress_unit": summary_progress.get('unit', '批'),
                 "review_round":summary_progress.get('review_round'),
                 "review_batches":summary_progress.get('review_batches',[]),
-                "phase": (f"排队中 · 第 {summary_queue_position(record.id)} 位，前面的笔记完成后自动开始"
+                "phase": ("音频与转写已归档，等待本课校对；其他课程继续处理"
+                          if status == 'queued' and summary.get('waiting_for') == 'correction'
+                          else f"排队中 · 第 {summary_queue_position(record.id)} 位，前面的笔记完成后自动开始"
                           if status == "queued" and summary_queue_position(record.id)
                           else "详细笔记已保存 · 短摘要待补齐" if abstract_pending and status == "completed_with_errors"
                           else "录音库短摘要" if abstract_pending else summary_progress['phase']),
@@ -1003,6 +1005,10 @@ def _build_compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any
         from qwen_asr_app.refinement import saved_progress
         refinement_progress=saved_progress(record)
         refinement_running = f"refinement:{record.id}" in background_ai_tasks
+        stream_job = globals().get('course_stream_manager')
+        stream_job = stream_job.jobs.get(record.id) if stream_job else None
+        if stream_job and stream_job.task and not stream_job.task.done() and stream_job.pipeline:
+            refinement_running = True
         live_session = live_sessions.get(record.id)
         if live_session and (
             live_session.periodic_tasks.get("review")
@@ -1026,7 +1032,8 @@ def _build_compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any
             if status != "completed":
                 historical_error = failed_errors[-1] if failed_errors else ""
                 retrying = refinement_running and saved_status in {"queued", "running"}
-                task_error = str(refinement_job.get("error") or ("" if retrying else historical_error))
+                stream_error = (record.metadata.get('course_stream') or {}).get('correction_error') or ''
+                task_error = '' if stream_job and stream_job.pipeline else str(refinement_job.get("error") or stream_error or ("" if retrying else historical_error))
                 if review_blocks and not unprocessed_blocks and not refinement_running and status=='pending':task_error=''
                 review_only = bool(review_blocks and not unprocessed_blocks and not task_error
                                    and not refinement_running and status == "pending")
@@ -1438,7 +1445,22 @@ async def ai_task_action(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
     record = recording_store.find(record_id)
     if record is None:
         raise HTTPException(status_code=404, detail="没有找到这条录音")
-    if record_id in running_batch_ids:
+    stream = course_stream_manager.jobs.get(record_id)
+    if stream and stream.task and not stream.task.done():
+        record = stream.record
+    refinement_owner = background_ai_tasks.get(f"refinement:{record_id}")
+    refinement_active = refinement_owner is not None and not refinement_owner.done()
+    summary_dependency = bool(kind == 'summary' and (
+        refinement_active or (stream and stream.task and not stream.task.done()
+                              and record.metadata.get('status') == 'completed')
+    ))
+    if (kind == 'refinement' and action in {'pause', 'cancel'} and stream
+            and stream.task and not stream.task.done()):
+        await stream.pause_correction(cancelled=action == 'cancel')
+        return {'paused' if action == 'pause' else 'cancelled': True, 'asr_continues': True}
+    if (record_id in running_batch_ids
+            and not (kind == 'summary' and (action in {'pause', 'cancel'} and record_id in background_summary_tasks
+                                            or summary_dependency))):
         raise HTTPException(409, "课程正在转写或补齐，请完成后再操作 AI 任务")
     if kind=='remote_asr':
         if action not in {'pause','cancel','retry','continue'}:raise HTTPException(400,'待补转任务操作无效')
@@ -1535,7 +1557,8 @@ async def ai_task_action(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
                 else background_ai_tasks.get(f"{kind}:{record_id}"))
     if existing is not None and not existing.done():
         return {"accepted": False}
-    require_recording_available(record_id)
+    if not summary_dependency:
+        require_recording_available(record_id)
     try:
         # Ignore browser-supplied provider/model/key fields completely. The
         # durable local settings and endpoint-bound secret store are the sole
@@ -2208,7 +2231,20 @@ def start_summary_job(record: RecordingRecord, payload: dict[str, Any], *, autom
         if direct_task is not None and not direct_task.done():
             return
         summary_jobs.pop(session_id, None)
-    require_recording_available(session_id, owner=asyncio.current_task())
+    stream = globals().get('course_stream_manager')
+    stream = stream.jobs.get(session_id) if stream else None
+    dependency = (stream.task if stream and stream.task and not stream.task.done()
+                  and stream.record.metadata.get('status') == 'completed'
+                  else background_ai_tasks.get(f"refinement:{session_id}"))
+    if dependency is not None and dependency.done():
+        dependency = None
+    if dependency:
+        # The stream still owns correction writes after archiving. Queue the
+        # note against that exact object and wait before taking a note slot.
+        if stream is not None and dependency is stream.task:
+            record = stream.record
+    else:
+        require_recording_available(session_id, owner=asyncio.current_task())
     try:
         _remember_ai_keys(payload.get("config"))
         payload = {**payload, "config": ai_preferences.task_config(
@@ -2217,6 +2253,9 @@ def start_summary_job(record: RecordingRecord, payload: dict[str, Any], *, autom
         )}
     except (OSError, ValueError) as exc:
         if os.getenv("QWEN_ASR_TESTING") != "1":
+            record.metadata.setdefault('summary_job', {}).update(
+                status='failed', error=str(exc), error_kind='configuration', updated_at=local_now())
+            record.save_metadata()
             raise HTTPException(status_code=409, detail=str(exc)) from exc
     cancel_requested_tasks.discard(f"summary:{session_id}")
     resume_abstract = bool(payload.get("_resume_abstract")) and _summary_abstract_pending(record)
@@ -2230,6 +2269,7 @@ def start_summary_job(record: RecordingRecord, payload: dict[str, Any], *, autom
         "previous_error": previous_error,
         "checkpoint": copy.deepcopy(previous.get('checkpoint') or {}),
         "custom_prompt": str(payload.get('custom_prompt') or '')[:20_000],
+        "waiting_for": "correction" if dependency else "",
     }
     record.save_metadata()
 
@@ -2247,7 +2287,7 @@ def start_summary_job(record: RecordingRecord, payload: dict[str, Any], *, autom
         try:
             while True:
                 try:
-                    save_state("running", error_kind="", retry_in_seconds=0)
+                    save_state("running", error_kind="", retry_in_seconds=0, waiting_for="")
                     result = await (upgrade_library_note_pdf(session_id, payload) if payload.get('_pdf_only') else generate_library_summary_abstract(session_id, payload) if continue_abstract
                                     else generate_library_summary(session_id, payload))
                     note_result = result.get('summary') or {}
@@ -2327,11 +2367,14 @@ def start_summary_job(record: RecordingRecord, payload: dict[str, Any], *, autom
             schedule_memory_cleanup()
 
     async def run() -> None:
-        # Serial note queue: queued jobs wait here (status "queued", shown as
-        # 排队中 in the task center) and run one after another.
-        summary_queue_order.append(session_id)
         try:
-            async with summary_queue():
+            if dependency:
+                # Cancelling this note must never cancel the ASR/correction
+                # owner. Waiting for a lesson does not consume a note slot.
+                await asyncio.shield(asyncio.gather(dependency, return_exceptions=True))
+            gate = summary_queue()
+            summary_queue_order.append(session_id)
+            async with gate:
                 if session_id in summary_queue_order:
                     summary_queue_order.remove(session_id)
                 with track_ai_activity(f"summary:{session_id}"):
@@ -2348,7 +2391,7 @@ def start_summary_job(record: RecordingRecord, payload: dict[str, Any], *, autom
         if background_summary_tasks.get(session_id) is done:
             background_summary_tasks.pop(session_id, None)
             if done.cancelled():
-                current = recording_store.find(session_id)
+                current = stream.record if dependency and not dependency.done() else recording_store.find(session_id)
                 if current is not None:
                     job = current.metadata.setdefault("summary_job", {})
                     task_id = f"summary:{session_id}"
@@ -3483,10 +3526,20 @@ def stream_event(event_type: str, **payload: Any) -> bytes:
 
 running_batch_ids: set[str] = set()
 
+
+async def prepare_course_resume(session_id):
+    # A manually restarted correction uses a separate record snapshot. Save
+    # and release it before the course worker resumes writing newer segments.
+    task = background_ai_tasks.get('refinement:' + session_id)
+    if task is not None and not task.done():
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
 from qwen_asr_app.course_stream import CourseStreamManager, course_stream_router
 course_stream_manager = CourseStreamManager(
     model_manager, recording_store, app_settings, running_batch_ids,
     is_record_busy=recording_is_busy,
+    prepare_resume=prepare_course_resume,
 )
 app.include_router(course_stream_router(course_stream_manager))
 

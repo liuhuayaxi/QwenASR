@@ -25,9 +25,15 @@ def lesson_phases(entry, record=None):
     pending=len(active_candidates(record))
     if 'correction' in phases:
         done=asr_done and progress['remaining_segments']==0
-        put('correction','首轮文字修正',100 if done else phases['correction'].get('percent',0),
-            'completed' if done else phases['correction'].get('state','pending'),
-            f"已保存 {progress['saved_segments']}/{progress['total_segments']} 段")
+        correction_job = (record.metadata.get('ai_jobs') or {}).get('refinement') or {}
+        correction_state = ('completed' if done else correction_job.get('status')
+                            if correction_job.get('status') in {'paused', 'cancelled'}
+                            else 'error' if stream.get('correction_deferred')
+                            else 'running' if stream.get('ai_in_background')
+                            else phases['correction'].get('state', 'pending'))
+        put('correction','首轮文字修正',100 if done else 100*progress['saved_segments']/max(1,progress['total_segments']),
+            correction_state, f"已保存 {progress['saved_segments']}/{progress['total_segments']} 段"
+            + ('；'+stream['correction_error'] if not done and stream.get('correction_error') else ''))
         state=record.metadata.get('correction_verification') or {}
         retrying=entry.get('state') in {'running','queued'} and stream.get('stage')!='interrupted'
         failed=not retrying and (state.get('status')=='failed' or (done and pending and stream.get('error')))

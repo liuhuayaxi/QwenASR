@@ -608,7 +608,10 @@ async def import_stream(local, group, config, entry):
     if state["status"] == "completed":
         complete_import_phase(entry, "download", "回放音频已获取")
         complete_import_phase(entry, "asr", "语音转写已完成")
-        complete_import_phase(entry, "correction", "AI 精修已完成")
+        if not state.get("ai_in_background") and not state.get("correction_deferred") and not (state.get("refinement") or {}).get("remaining_segments"):
+            complete_import_phase(entry, "correction", "AI 精修已完成")
+        else:
+            update_import_phase(entry, "correction", 0, "转写已归档，AI 精修在后台继续", "running")
         return state
     local_stop = threading.Event()
     downloading = None
@@ -674,16 +677,28 @@ async def import_stream(local, group, config, entry):
             if stop_event.is_set():
                 raise SmartClassError("任务已停止；重新勾选课次可从已下载位置继续")
             if downloading and downloading.done() and not finished_input:
-                manifest = await downloading
-                source_path = Path(state["directory"]) / "课程来源.json"
-                existing = read_json(source_path, {})
-                completed = {(str(s["video_id"]), str(s["segment_id"])): s
-                             for s in existing.get("completed_sources", [])}
-                completed.update({(str(s["video_id"]), str(s["segment_id"])): s for s in manifest})
-                private_json(source_path, {**existing, "completed_sources": list(completed.values())})
-                r = await local.post(WORKBENCH + f"/api/course-streams/{ident}/finish", json={"count": next_index}, headers=headers)
-                r.raise_for_status()
-                finished_input = True
+                try:
+                    manifest = await downloading
+                except Exception as exc:
+                    # Download owns only the input side. Let the ASR worker
+                    # commit every already accepted chunk before ending this
+                    # attempt, and preserve the actual download error.
+                    message = str(exc) if isinstance(exc, SmartClassError) else '音频下载中断，已接收分段继续转写，可从断点续传'
+                    update_import_phase(entry, 'download', entry['phases']['download']['percent'], message, 'error')
+                    r = await local.post(WORKBENCH + f'/api/course-streams/{ident}/input-interrupted',
+                        json={'error': message}, headers=headers)
+                    r.raise_for_status()
+                    downloading = None
+                else:
+                    source_path = Path(state["directory"]) / "课程来源.json"
+                    existing = read_json(source_path, {})
+                    completed = {(str(s["video_id"]), str(s["segment_id"])): s
+                                 for s in existing.get("completed_sources", [])}
+                    completed.update({(str(s["video_id"]), str(s["segment_id"])): s for s in manifest})
+                    private_json(source_path, {**existing, "completed_sources": list(completed.values())})
+                    r = await local.post(WORKBENCH + f"/api/course-streams/{ident}/finish", json={"count": next_index}, headers=headers)
+                    r.raise_for_status()
+                    finished_input = True
             r = await local.get(WORKBENCH + f"/api/course-streams/{ident}")
             r.raise_for_status()
             state = r.json()
@@ -715,7 +730,11 @@ async def import_stream(local, group, config, entry):
                 segment_count = int(state["segments"] or 0)
                 refinement=state.get('refinement') or {}
                 saved=refinement.get('saved_segments',state['corrected_segments'])
-                correction_done=state['status']=='completed' or bool(state.get('asr_complete') and refinement and not refinement.get('remaining_segments'))
+                correction_done=bool(
+                    not state.get('correction_deferred') and not state.get('ai_in_background')
+                    and (state['status'] == 'completed'
+                         or (state.get('asr_complete') and refinement and not refinement.get('remaining_segments')))
+                )
                 correction_percent = 100 if correction_done else 100 * saved / max(1, segment_count)
                 update_import_phase(
                     entry,
@@ -830,51 +849,56 @@ async def import_group(group: dict, run_options: dict | None = None):
         entry.update(record_id=complete["id"], directory=complete["directory"])
         complete_import_phase(entry, "download", "回放音频已获取")
         complete_import_phase(entry, "asr", "语音转写已完成")
-        complete_import_phase(entry, "correction", "首轮文字修正已保存")
-        complete_import_phase(entry, "verification", "独立文字复核已完成")
+        stream_state = complete.get('course_stream')
+        stream_state = stream_state if isinstance(stream_state, dict) else {}
+        correction_deferred = bool(complete.get("correction_deferred") or complete.get('ai_in_background')
+                                   or stream_state.get('correction_deferred') or stream_state.get('ai_in_background'))
+        refinement = complete.get("refinement") or {}
+        store = getattr(app.state, 'recording_store', None)
+        saved_record = store.find(complete['id']) if store else None
+        if saved_record is not None:
+            from .refinement import saved_progress
+            refinement = saved_progress(saved_record)
+        if not correction_deferred and not refinement.get("remaining_segments"):
+            complete_import_phase(entry, "correction", "首轮文字修正已保存")
+            complete_import_phase(entry, "verification", "独立文字复核已完成")
+        else:
+            percent = 100 * refinement.get('saved_segments', 0) / max(1, refinement.get('total_segments', 0))
+            update_import_phase(entry, "correction", percent, "转写已归档，AI 精修在后台继续", "running")
+            entry["message"] = "转写已归档，AI 精修在后台继续"
+        entry.update(state="completed", message="转写已归档，AI 精修在后台继续" if correction_deferred else "音频与转写已归档")
+        save_imports()
         if manifest_path.exists():
             private_json(Path(complete["directory"]) / "课程来源.json", read_json(manifest_path, {}))
         if options.get("generate_summary", True):
             update_import_phase(entry, "summary", 1, "正在提交课堂笔记任务")
             entry.update(message="正在生成整堂课笔记")
             save_imports()
-            response = await local.post(WORKBENCH + f"/api/recordings/{complete['id']}/summary-jobs", json={
-                "config": config, "summary_system_prompt": options.get("summary_system_prompt", ""),
-                "abstract_system_prompt": options.get("abstract_system_prompt", ""),
-            })
-            if response.status_code != 200:
-                raise SmartClassError("转写已保存，笔记任务提交失败；重新勾选课次可重试")
-            while True:
-                if stop_event.is_set():
-                    raise SmartClassError("已停止等待；已提交的笔记任务仍可在语音工作台查看")
-                r = await local.get(WORKBENCH + f"/api/recordings/{complete['id']}/summary-status")
-                r.raise_for_status()
-                state = r.json()
-                if not state.get("running"):
-                    if state.get("status") != "completed":
-                        raise SmartClassError("转写已保存，AI 笔记尚未完成；可在语音工作台 AI 任务中查看并重试")
-                    complete_import_phase(entry, "summary", "课堂笔记已生成")
-                    break
-                completed_parts = int(state.get("completed_parts") or 0)
-                total_parts = int(state.get("total_parts") or 0)
-                summary_percent = 5 if not total_parts else min(95, 100 * completed_parts / total_parts)
-                summary_detail = str(state.get("phase") or "正在生成课堂笔记")
-                if total_parts:
-                    unit = state.get('progress_unit') if state.get('progress_unit') in {'页', '批'} else '个分块'
-                    summary_detail += f" · {completed_parts}/{total_parts} {unit}"
-                if re.search('独立审查|逐页审查|修订',summary_detail):
-                    complete_import_phase(entry,'summary','笔记已生成并排版')
-                    update_import_phase(entry,'review',summary_percent,summary_detail)
-                else:
-                    update_import_phase(entry, "summary", summary_percent, summary_detail)
-                entry["message"] = summary_detail
-                status["message"] = f"{group['title']}：{summary_detail}"
-                save_imports(force=False)
-                await asyncio.sleep(3)
+            try:
+                response = await local.post(WORKBENCH + f"/api/recordings/{complete['id']}/summary-jobs", json={
+                    "config": config, "summary_system_prompt": options.get("summary_system_prompt", ""),
+                    "abstract_system_prompt": options.get("abstract_system_prompt", ""),
+                })
+                response.raise_for_status()
+            except httpx.HTTPError:
+                # A failure of this optional task does not undo ASR completion
+                # or consume a course-ingestion slot indefinitely.
+                entry.update(message="转写已归档，笔记提交尚未确认；可在任务中心查看或重试")
+                update_import_phase(entry, "summary", 0, entry["message"], "error")
+                save_imports()
+            else:
+                # Note generation owns its own durable task. Do not make the
+                # course queue wait for a model request that may take minutes
+                # or become stuck; the task center and reconciliation observe
+                # its progress independently.
+                update_import_phase(entry, "summary", 1, "课堂笔记已提交到后台", "running")
+                entry.update(message="转写已归档，课堂笔记在后台生成")
+                save_imports()
         generated = bool(options.get("generate_summary", True))
-        complete_import_progress(entry)
-        entry.update(state="completed", message="已归档为一份课堂笔记" if generated else "已归档合并音频与逐字稿", progress=100,
-                     summary_generated=generated,
+        if not generated and not correction_deferred:
+            complete_import_progress(entry)
+            entry['message'] = '已归档合并音频与逐字稿'
+        entry.update(state="completed", summary_generated=False,
                      bundle=WORKBENCH + f"/api/recordings/{complete['id']}/download/bundle",
                      summary=WORKBENCH + f"/api/recordings/{complete['id']}/download/ai-summary" if generated else "")
         save_imports()
