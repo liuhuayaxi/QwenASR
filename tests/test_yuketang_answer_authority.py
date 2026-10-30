@@ -1,6 +1,7 @@
 from tests import isolation  # noqa: F401
 import copy
 import unittest
+from datetime import datetime, timezone
 
 from qwen_asr_app.yuketang import parsing, retrieval, vision
 from tests.test_yuketang import activities, fixture, lesson_answers
@@ -12,7 +13,9 @@ class AnswerAuthorityTests(unittest.TestCase):
         sync = ClassroomSync(None, None, '1')
         legacy = {'status':'complete', 'fingerprint':'same'}
         self.assertTrue(sync.needs_import(legacy, 'same'))
-        self.assertFalse(sync.needs_import({**legacy,'parser_version':parsing.PARSER_VERSION}, 'same'))
+        current = {**legacy, 'parser_version': parsing.PARSER_VERSION,
+                   'checked_at': datetime.now(timezone.utc).isoformat()}
+        self.assertFalse(sync.needs_import(current, 'same'))
 
     def test_student_choice_never_becomes_teacher_answer_when_teacher_did_not_publish(self):
         answers = copy.deepcopy(lesson_answers('lesson_objective'))
