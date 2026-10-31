@@ -4,6 +4,7 @@ import copy
 import time
 from pathlib import Path
 from contextlib import nullcontext
+from .background_wakeup import library_changes
 
 
 class SilentSocket:
@@ -55,12 +56,15 @@ async def retry_once(store, manager, live_sessions, unavailable, claim=None, on_
 
 
 async def recovery_loop(store, manager, live_sessions, unavailable, claim=None, on_completed=None, on_idle=None):
-    last_idle_cleanup=0
+    had_work=False
     while True:
-        await asyncio.sleep(5)
+        version=library_changes.version
         try:
             worked=await retry_once(store,manager,live_sessions,unavailable,claim,on_completed)
-            if not worked and on_idle and time.monotonic()-last_idle_cleanup>=30:
-                on_idle();last_idle_cleanup=time.monotonic()
+            if not worked and had_work and on_idle:
+                on_idle()
+            had_work=worked
+            pending=bool(store.remote_backlog_ids()) if hasattr(store,'remote_backlog_ids') else worked
+            await library_changes.wait(version,5 if pending else 300)
         except asyncio.CancelledError:raise
-        except Exception:await asyncio.sleep(5)
+        except Exception:await library_changes.wait(version,30)

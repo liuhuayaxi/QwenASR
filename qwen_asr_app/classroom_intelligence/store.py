@@ -50,6 +50,8 @@ def save_notes_doc(record: Any, doc: dict[str, Any]) -> None:
     path = notes_file_path(record)
     doc['updated_at'] = local_now()
     atomic_json(path, doc)
+    from ..background_wakeup import library_changes
+    library_changes.notify([str(path)])
     try:
         path.chmod(0o600)
     except OSError:

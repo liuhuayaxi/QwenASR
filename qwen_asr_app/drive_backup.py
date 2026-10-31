@@ -218,6 +218,7 @@ class DriveBackup:
         self.next_run = time.monotonic() + 60
         self.preview_result = None
         self.operation_lock = asyncio.Lock()
+        self.schedule_changed = asyncio.Event()
 
     @property
     def busy(self):
@@ -229,6 +230,7 @@ class DriveBackup:
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(self.directory, 0o700)
         atomic_json(self.path, {**self.state, "job": self.job})
+        self.schedule_changed.set()
 
     def public(self):
         account_id = self.state.get("account_id")
@@ -524,6 +526,7 @@ class DriveBackup:
                     "failed": 0, "errors": [], "current": "", "file_bytes": 0, "file_size": 0}
         self.save()
         self.task = asyncio.create_task(self.run(sample))
+        self.task.add_done_callback(lambda _: self.schedule_changed.set())
         return self.public()
 
     async def upload(self, client, item, entry, parent, snapshot_path, hashes):
@@ -705,14 +708,24 @@ class DriveBackup:
 
     async def automatic_loop(self):
         while True:
-            await asyncio.sleep(15)
-            if (not self.closing and not self.load_error and not self.busy and not self.pending_auth
-                    and self.can_run() and self.state["options"]["automatic"] and self.public()["connected"]
-                    and time.monotonic() >= self.next_run):
+            self.schedule_changed.clear()
+            enabled = (not self.closing and not self.load_error and not self.busy and not self.pending_auth
+                       and self.can_run() and self.state["options"]["automatic"] and self.public()["connected"])
+            delay = (max(0, self.next_run - time.monotonic()) if enabled else
+                     300 if self.state["options"]["automatic"] else None)
+            if delay == 0:
                 try:
                     self.start()
                 except DriveError:
                     self.next_run = time.monotonic() + 60
+                continue
+            try:
+                if delay is None:
+                    await self.schedule_changed.wait()
+                else:
+                    await asyncio.wait_for(self.schedule_changed.wait(), delay)
+            except asyncio.TimeoutError:
+                pass
 
     async def close(self):
         self.closing = True

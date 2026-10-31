@@ -1895,6 +1895,7 @@ async def update_library_settings(payload: dict[str, Any] = Body(...)) -> dict[s
             for session in live_sessions.values():
                 session.recording = None
             live_sessions.clear()
+        library_watch.publish()
         return {**app_settings.public(), "migration": migration}
     except (ValueError, OSError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

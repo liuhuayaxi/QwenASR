@@ -93,8 +93,9 @@ def owned_process(saved, snapshot):
         return False
     if not token or (saved.get('started') and saved['started'] != row['started']):
         raise RuntimeError('服务进程标识已变化，已拒绝停止其他程序')
-    expected = f'{sys.executable} -m uvicorn app:app --host 127.0.0.1 --port {PORT}'
-    if not (row['command'] == expected or row['command'].startswith(expected + ' ')):
+    expected = [f'{sys.executable} -m {module} app:app --host 127.0.0.1 --port {PORT}'
+                for module in ('uvicorn', 'qwen_asr_app.server')]
+    if not any(row['command'] == prefix or row['command'].startswith(prefix + ' ') for prefix in expected):
         raise RuntimeError('服务进程路径不匹配，已拒绝停止其他程序')
     # Check the launch token without printing environment variables or secrets.
     environment = subprocess.check_output(
@@ -228,7 +229,7 @@ def main():
                 raise RuntimeError('QwenASR 主服务已运行但课程页面未挂载，请先停止后再启动新版')
 
             token = uuid.uuid4().hex
-            command = [sys.executable, '-m', 'uvicorn', 'app:app', '--host', '127.0.0.1', '--port', str(PORT), '--timeout-graceful-shutdown', '10']
+            command = [sys.executable, '-m', 'qwen_asr_app.server', 'app:app', '--host', '127.0.0.1', '--port', str(PORT), '--timeout-graceful-shutdown', '10']
             from .launch_memory import service_environment
             env = {**service_environment(), 'QWEN_ASR_INSTANCE': token}
             with (ROOT / 'server.log').open('ab') as output:

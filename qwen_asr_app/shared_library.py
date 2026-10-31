@@ -63,7 +63,9 @@ class LibraryWatch:
         self.revision = time.time_ns()
         self.draining = False
 
-    def publish(self):
+    def publish(self, paths=None):
+        from .background_wakeup import library_changes
+        library_changes.notify(paths)
         self.revision = time.time_ns()
         for queue in tuple(self.listeners):
             if queue.empty():
@@ -85,8 +87,8 @@ class LibraryWatch:
         while not self.stop.is_set():
             root = self.settings.storage_root
             try:
-                async for changes in awatch(root, debounce=200, step=50, stop_event=self.stop,
-                                            yield_on_timeout=True, rust_timeout=1000, watch_filter=None):
+                async for changes in awatch(root, debounce=500, step=500, stop_event=self.stop,
+                                            yield_on_timeout=True, rust_timeout=30000, watch_filter=None):
                     if root != self.settings.storage_root:
                         break
                     relevant = [path for _, path in changes if not any(
@@ -96,7 +98,7 @@ class LibraryWatch:
                     if relevant:
                         discover_courses(self.settings)
                         self.recordings.refresh()
-                        self.publish()
+                        self.publish(relevant)
             except (OSError, ValueError) as exc:
                 print(f'资料文件夹监听暂未完成：{exc}', flush=True)
                 try:

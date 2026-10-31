@@ -5,17 +5,38 @@ import asyncio
 import hashlib
 import os
 import json
+import time
 from pathlib import Path
+
+from ..background_wakeup import library_changes
 
 
 class KnowledgeCoordinator:
-    def __init__(self, service, interval=20):
+    def __init__(self, service, interval=20, reconcile_interval=300):
         self.service=service
         self.interval=interval
+        self.reconcile_interval=reconcile_interval
         self.task=None
         self.stamps={}
         self.errors={}
         self.pending={}
+        self.dirty=set()
+
+    def mark_dirty(self, paths=None):
+        if paths is None:
+            self.dirty.update(self.service.settings.categories)
+            return
+        root=Path(self.service.settings.storage_root)
+        for raw in paths:
+            path=Path(raw)
+            try:
+                parts=path.relative_to(root).parts
+            except ValueError:
+                continue
+            if not parts:
+                self.dirty.update(self.service.settings.categories)
+            elif not path.name.endswith(('.tmp','.part','.aac','.wav','.flac','.mp3','.m4a','.pcm')):
+                self.dirty.add(parts[0])
 
     def fingerprint(self, category):
         folder=Path(self.service.settings.storage_root)/category
@@ -39,11 +60,22 @@ class KnowledgeCoordinator:
     async def start(self):
         if self.task and not self.task.done():
             return
+        self.mark_dirty()
+        library_changes.callbacks.add(self.mark_dirty)
         self.task=asyncio.create_task(self.run())
 
     async def run(self):
+        next_reconcile=0
         while True:
-            for category in list(self.service.settings.categories):
+            version=library_changes.version
+            now=time.monotonic()
+            categories=set(self.service.settings.categories)
+            if now>=next_reconcile:
+                self.dirty.update(categories)
+                next_reconcile=now+self.reconcile_interval
+            check=(self.dirty | set(self.pending)) & categories
+            self.dirty.difference_update(check)
+            for category in sorted(check):
                 try:
                     stamp=await asyncio.to_thread(self.fingerprint, category)
                     previous=self.stamps.get(category)
@@ -61,9 +93,17 @@ class KnowledgeCoordinator:
                     self.errors.pop(category,None)
                 except (OSError, ValueError, RuntimeError) as exc:
                     self.errors[category]=str(exc)
-            await asyncio.sleep(self.interval)
+            delay=max(0,next_reconcile-time.monotonic())
+            if self.pending or self.errors:
+                delay=min(delay,self.interval)
+                self.dirty.update(self.errors)
+            await library_changes.wait(version,delay)
+            # Coalesce bursts from recording saves and external syncs.
+            if self.dirty:
+                await asyncio.sleep(min(1,self.interval))
 
     async def close(self):
+        library_changes.callbacks.discard(self.mark_dirty)
         if self.task:
             self.task.cancel()
             await asyncio.gather(self.task,return_exceptions=True)

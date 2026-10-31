@@ -165,9 +165,17 @@ class ClassroomIntelligenceService:
             self._debounce_tasks.clear()
 
     async def _retry_loop(self):
+        from ..background_wakeup import library_changes
         while True:
-            await asyncio.sleep(15)
+            version = library_changes.version
             await self._retry_once()
+            deadlines = [float((note.get('job') or {}).get('next_retry_at') or 0)
+                         for _, rows in self._note_job_index.records(self.store) for note in rows
+                         if not note.get('locked') and note.get('status') == 'failed'
+                         and (note.get('job') or {}).get('retryable')]
+            remaining = min(deadlines) - time.time() if deadlines else 300
+            delay = max(.1, remaining) if remaining > 0 else 15
+            await library_changes.wait(version, min(300, delay))
 
     async def _retry_once(self):
         for ident, rows in self._note_job_index.records(self.store):

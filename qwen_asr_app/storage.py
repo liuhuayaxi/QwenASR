@@ -665,6 +665,8 @@ class RecordingRecord:
         from .note_history import capture
         capture(self, self._persisted_note)
         atomic_json(self.meta_path, self.metadata)
+        from .background_wakeup import library_changes
+        library_changes.notify([str(self.meta_path)])
         self._persisted_note = copy.deepcopy(self.metadata.get("ai_note_summary"))
 
     def refresh_location(self) -> None:
