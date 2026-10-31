@@ -3,19 +3,21 @@ import "./js/knowledge-settings.js?v=20261015-illustrated-windows";
 import {cachedJson} from './js/cached-json.js';
 import {createVisiblePoll} from './js/visible-poll.js';
 import { createBatchView } from "./js/batch-view.js?v=20261015-reader-math-scope-8";
-import { createLibraryTools } from "./js/library-tools.js?v=20261019-idle-lifecycle-1";
+import { createLibraryTools } from "./js/library-tools.js?v=20261031-browser-fixes-1";
 import { createMarkdownReader, renderMarkdown } from "./js/markdown-reader.js?v=20261015-reader-math-scope-8";
 import { createNoteAutosave } from "./js/note-autosave.js?v=20260923-upgrade-1";
+import { downloadNotePdf } from "./js/note-download.js?v=20261031";
+import { chapterValue, chapterLabel, createChapterControls } from './js/recording-chapters.js?v=20261031-browser-fixes-2';
 import { DEFAULT_NOTE_SUMMARY_PROMPT } from "./js/default-prompts.js?v=20261015-learning-scope-1";
 import { resample } from "./js/audio.js";
 import { createSummaryView } from "./js/summary-view.js?v=20261015-reader-math-scope-8";
-import { createTranscriptView } from "./js/transcript-view.js?v=20261015-reader-math-scope-8";
+import { createTranscriptView } from "./js/transcript-view.js?v=20261031-browser-fixes-1";
 import { createRecordingDiscard } from "./js/recording-discard.js?v=20261015-reader-math-scope-8";
 import { IDEASHELL_SERVERS, normalizeIdeashellServer } from "./js/ideashell-config.js?v=20261007";
-import { createMineruSettings } from "./js/mineru-settings.js?v=20261015-illustrated-windows";
+import { createMineruSettings } from "./js/mineru-settings.js?v=20261031-browser-fixes-1";
 import { createInferenceSettings } from "./js/inference-settings.js?v=20261015-illustrated-windows";
-import { createClassroomIntelligence } from "./js/classroom-intelligence.js?v=20261019-idle-lifecycle-1";
-import { createClassroomChat } from "./js/classroom-chat.js?v=20261019-idle-lifecycle-1";
+import { createClassroomIntelligence } from "./js/classroom-intelligence.js?v=20261031-browser-fixes-1";
+import { createClassroomChat } from "./js/classroom-chat.js?v=20261031-browser-fixes-1";
 import { createSettingsNavigation } from "./js/settings-navigation.js?v=20261019-idle-lifecycle-1";
 import { createLibraryBackup } from "./js/library-backup.js?v=20261014-daily";
 import { createDriveBackup } from "./js/drive-backup.js?v=20261022-ykt-drive-1";
@@ -199,6 +201,16 @@ const libraryTools = createLibraryTools({getSession: () => state.noteSession, op
   saveNote: () => saveNoteSummary({quiet:true}), finishEditing: () => noteReader.finish(),
   renderNote: session => {state.noteSession=session; renderNoteDialog(session); loadLibrary();},
   toast, escapeHtml, formatDuration});
+
+const chapterControls = createChapterControls({getSession: () => state.noteSession, toast, refreshLibrary: loadLibrary,
+  onSaved: async session => {
+    if (state.noteSession?.id === session.id) {
+      state.noteSession = {...state.noteSession, chapter:session.chapter, chapters:session.chapters, chapter_info:session.chapter_info};
+      chapterControls.render(state.noteSession);
+    }
+    if (state.activeSession?.id === session.id) Object.assign(state.activeSession, {chapter:session.chapter, chapters:session.chapters, chapter_info:session.chapter_info});
+    await loadLibrary();
+  }});
 
 function toast(message, duration = 2600) {
   els.toast.textContent = message;
@@ -757,7 +769,7 @@ function switchView(view) {
   document.title = library ? "课堂记录 · QwenASR" : "录音工作台 · QwenASR";
   const target = library ? "/library" : "/";
   if (location.pathname !== target) history.pushState(null, "", target);
-  if (library) renderLibrary();
+  if (library) {renderLibrary(); chapterControls.syncLibraryUrl(els.libraryCategory, state);}
   document.dispatchEvent(new Event('qwenasr:viewchange'));
   if (state.capturing && !state.animation) drawMeter();
 }
@@ -1058,7 +1070,7 @@ function renderLibrary() {
   if (!records.length) {
     $("#libraryPageStatus").textContent = "0 条录音";
     $("#libraryPrevious").disabled = $("#libraryNext").disabled = true;
-    const scope = state.selectedLibraryDate
+    const scope = $('#libraryChapter').value ? '这个章节下没有符合条件的录音' : state.selectedLibraryDate
       ? `${formatCalendarDate(state.selectedLibraryDate)}没有录音`
       : "这个分类还没有录音";
     els.libraryList.innerHTML = `<div class="library-empty">${escapeHtml(scope)}</div>`;
@@ -1088,6 +1100,7 @@ function renderLibrary() {
     const sync = record.ideashell_sync || {};
     const syncLabel = sync.status === "local_changes" ? "推送修改" : sync.note_id ? "再次推送" : "同步到 IdeaShell";
     card.innerHTML = `<div class="library-card-top"><div><h3 class="library-card-title">${escapeHtml(record.title || "未命名录音")}</h3>
+      <div class="library-card-chapter">${escapeHtml(chapterLabel(record))}</div>
       <div class="library-card-meta">${escapeHtml(record.category || "未分类")} · ${escapeHtml(when)} · ${formatDuration(record.duration)}</div></div>
       <span class="library-status${statusClass}">${recordingStatus(record)}</span></div>
       <div class="library-card-summary${hasSummary ? "" : " missing"}"><span>课堂记录短摘要</span>
@@ -1100,7 +1113,8 @@ function renderLibrary() {
         <button class="library-ai-title" type="button" ${canEdit ? "" : "disabled"}>AI 取名</button>
         <select class="library-category-select" aria-label="分类">${categorySelectOptions(record.category)}</select>
         <input class="library-category-new hidden" type="text" maxlength="80" placeholder="输入新分类名称" aria-label="新分类名称" />
-        <button class="library-save" type="button" ${canEdit ? "" : "disabled"}>保存名称与分类</button>
+        <input class="library-chapter-input" value="${escapeHtml(chapterValue(record))}" data-original="${escapeHtml(chapterValue(record))}" maxlength="500" placeholder="章节待确认；跨章用；分隔" aria-label="所属章节" />
+        <button class="library-save" type="button" ${canEdit ? "" : "disabled"}>保存名称、分类与章节</button>
         <button class="library-open" type="button">查看笔记</button>
         <button class="library-sync" type="button" ${canEdit ? "" : "disabled"}>${syncLabel}</button>
         ${["interrupted", "failed"].includes(record.status) ? '<button class="library-resume" type="button">继续处理</button>' : ""}
@@ -1197,7 +1211,13 @@ async function watchSummaryJob(record) {
     await loadLibrary();
     if (state.noteSession?.id === record.id) {
       const current = state.library.find((item) => item.id === record.id);
-      if (current) { state.noteSession = { ...state.noteSession, ...current }; renderNoteSummary(state.noteSession); }
+      if (current) {
+        // List DTOs intentionally omit the note body. Refresh list metadata
+        // without replacing the full reader document with its compact summary.
+        state.noteSession = { ...state.noteSession, ...current,
+          ai_note_summary: {...state.noteSession.ai_note_summary, ...current.ai_note_summary} };
+        renderNoteSummary(state.noteSession);
+      }
     }
   }
 }
@@ -1354,7 +1374,7 @@ async function loadLibrary() {
   const request = ++libraryRequest;
   try {
     const query = new URLSearchParams({category: els.libraryCategory.value || '',
-      date: state.selectedLibraryDate || '', offset: String(state.libraryPage * 20), limit: '20'});
+      chapter: $('#libraryChapter').value || '', date: state.selectedLibraryDate || '', offset: String(state.libraryPage * 20), limit: '20'});
     const payload = await cachedJson('/api/library?' + query);
     if (request !== libraryRequest) return;
     state.libraryTotal = payload.total;
@@ -1363,6 +1383,9 @@ async function loadLibrary() {
       state.libraryPage = Math.floor((payload.total - 1) / 20); return loadLibrary();
     }
     state.library = payload.records || [];
+    chapterControls.updateOptions(payload.chapter_counts || []);
+    chapterControls.syncLibraryUrl(els.libraryCategory, state);
+    document.dispatchEvent(new Event('qwenasr:library-filters'));
     continuation.setRecords(state.library);
     for (const record of state.library) {
       if (record.status === "completed" && ["queued", "running"].includes(record.summary_job?.status)) {
@@ -1433,6 +1456,7 @@ function renderNoteDialog(session) {
   if (linkedRegion) els.ideashellRegion.value = linkedRegion;
   const when = session.started_at ? new Date(session.started_at).toLocaleString() : "";
   els.noteDialogTitle.textContent = session.title || "未命名录音";
+  chapterControls.render(session);
   els.noteDialogMeta.textContent = `${session.category || "未分类"} · ${when} · ${formatDuration(session.duration)}`;
   libraryTools.attach(session);
   renderNoteTranscript(session);
@@ -1485,6 +1509,7 @@ function renderNoteTranscript(session) {
 function renderNoteSummary(session) {
   $('#previewNoteProposal').hidden = !session.ai_note_proposal;
   els.noteDialogTitle.textContent = session.title || "未命名录音";
+  chapterControls.render(session);
   const summary = session.ai_note_summary || {};
   const markdown = summary.summary || "";
   const reviewTask = String(summary.review_package || '').split('/').pop();
@@ -1517,7 +1542,7 @@ function renderNoteSummary(session) {
       : session.ideashell_sync?.note_id ? " · 已关联 IdeaShell" : "";
     const abstractNotice = summary.abstract_error ? ` · 课堂记录短摘要失败：${summary.abstract_error}` : "";
     const titleNotice = summary.title_error ? " · 自动取名未完成，可在课堂记录点击“AI 取名”重试" : "";
-    const reviewNotice = summary.review_status === 'passed' ? ' · PDF 已逐页独立审查' : summary.review_status === 'skipped' ? ' · 未审核（审核已关闭），可直接下载 PDF' : ' · 当前版本未审核，下载时按已保存的审核开关处理';
+    const reviewNotice = summary.review_status === 'passed' ? ' · PDF 已逐页独立审查，下载时核验当前版本' : summary.review_status === 'skipped' ? ' · 未审核（审核已关闭），下载时核验当前 PDF' : ' · 当前版本未审核，下载时按已保存的审核开关处理';
     els.noteSummaryHint.textContent = `图文复习笔记${edited}${syncState}${abstractNotice}${titleNotice}${reviewNotice}${summary.updated_at ? ` · ${new Date(summary.updated_at).toLocaleString()}` : ""}`;
   } else {
     els.noteSummaryHint.textContent = summary.abstract_error
@@ -1538,7 +1563,7 @@ els.downloadNoteSummary.addEventListener('click', async event => {
     if (!await saveNoteSummary({quiet:true})) return;
     if (state.noteSession?.id !== session.id) return;
     if (state.noteSession.ai_note_summary?.review_status === 'passed' || (state.noteSession.ai_note_summary?.review_status === 'skipped' && !els.noteReviewEnabled.checked)) {
-      window.location.assign(state.noteSession.downloads.ai_summary);
+      await downloadNotePdf(state.noteSession.downloads.ai_summary, {title:state.noteSession.title, onStatus:message => toast(message, 5000)});
       return;
     }
     const response = await fetch(`/api/recordings/${encodeURIComponent(session.id)}/review-pdf`, {method:'POST'});
@@ -1550,9 +1575,14 @@ els.downloadNoteSummary.addEventListener('click', async event => {
 
 document.addEventListener('click', async event => {
   const link = event.target.closest?.('a[data-review-pdf]');
-  if (!link || link.dataset.pdfReady === 'true' || link.classList.contains('disabled-download')) return;
+  if (!link) return;
   event.preventDefault();
+  if (link.classList.contains('disabled-download')) return;
   try {
+    if (link.dataset.pdfReady === 'true') {
+      await downloadNotePdf(link.href, {onStatus:message => toast(message, 5000)});
+      return;
+    }
     const response = await fetch(`/api/recordings/${encodeURIComponent(link.dataset.reviewPdf)}/review-pdf`,{method:'POST'});
     const result = await response.json(); if (!response.ok) throw new Error(result.detail || '无法导出 PDF');
     toast(els.noteReviewEnabled.checked?'已安排 PDF 导出与逐页审核，请在任务中心查看':'已安排 PDF 导出，审核已关闭；保存后即可下载');
@@ -1622,6 +1652,12 @@ async function closeNoteDialog() {
   if (!saved) toast("暂未写入笔记文件，草稿已保留，下次打开会恢复", 4800);
   els.noteDialog.close();
   state.noteSession = null;
+  const url = new URL(location.href);
+  if (url.searchParams.get('recording') === id) {
+    url.searchParams.delete('recording'); url.searchParams.delete('start');
+    if (/^#(?:t=|source-)/.test(url.hash)) url.hash = '';
+    history.replaceState(null, '', url);
+  }
   if (state.activeView === "library") renderLibrary();
 }
 
@@ -1925,13 +1961,15 @@ async function updateLibraryRecord(sessionId, card) {
       body: JSON.stringify({
         title: card.querySelector(".library-title-input").value.trim(),
         category,
+        ...(card.querySelector('.library-chapter-input').value.trim() !== card.querySelector('.library-chapter-input').dataset.original
+          ? {chapter:card.querySelector('.library-chapter-input').value.trim()} : {}),
       }),
     });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.detail || "保存失败");
     if (state.activeSession?.id === sessionId) state.activeSession = payload.session;
     await loadLibrary();
-    toast("名称和分类已保存");
+    toast("名称、分类与章节已保存");
   } catch (error) { toast(error.message, 5000); }
   finally { button.disabled = false; }
 }
@@ -2060,7 +2098,9 @@ async function loadSession() {
       els.recordName.value = payload.session.title || "";
       setRecordCategory(payload.session.category || "未分类");
       applySessionCourseSettings(payload.session);
-      showSession(payload.session, true);
+      // Restoring capture state must not navigate away from a library, note,
+      // settings or embedded course route that the user explicitly opened.
+      showSession(payload.session, true, {navigate:false});
       els.listeningLabel.textContent = "会话已恢复 · 点击恢复收音";
       toast("已恢复上次未结束的录音会话", 3800);
       if (payload.session.finalization?.status === "running") {
@@ -2512,11 +2552,16 @@ els.transcriptTab.addEventListener("click", () => switchView("transcript"));
 els.summaryTab.addEventListener("click", () => switchView("summary"));
 els.libraryTab.addEventListener("click", event => { event.preventDefault(); switchView("library"); });
 $("#workbenchNav").addEventListener("click", event => {event.preventDefault(); switchView("transcript");});
-window.addEventListener("popstate", () => switchView(location.pathname === "/library" ? "library" : "transcript"));
+window.addEventListener("popstate", () => {
+  if (location.pathname === '/library') chapterControls.restoreLibrary(els.libraryCategory, state);
+  switchView(location.pathname === "/library" ? "library" : "transcript");
+  if (location.pathname === '/library') void loadLibrary();
+});
 $("#librarySettings").addEventListener("click", () => openAdvancedSettings());
 $("#libraryPrevious").addEventListener("click", () => {state.libraryPage--; void loadLibrary();});
 $("#libraryNext").addEventListener("click", () => {state.libraryPage++; void loadLibrary();});
-els.libraryCategory.addEventListener("change", () => { state.libraryPage = 0; void loadLibrary(); });
+els.libraryCategory.addEventListener("change", () => { state.libraryPage = 0; $('#libraryChapter').value = ''; void loadLibrary(); });
+$('#libraryChapter').addEventListener('change', () => {state.libraryPage = 0; void loadLibrary();});
 els.refreshLibrary.addEventListener("click", loadLibrary);
 els.calendarPrevious.addEventListener("click", () => {
   const anchor = state.libraryMonth || new Date();
@@ -2775,6 +2820,8 @@ window.addEventListener("pagehide", () => { if (apiSettingsDirty) saveApiSetting
 window.addEventListener("beforeunload", () => { if (apiSettingsDirty) saveApiSettings(); stopAudioNodes(); state.ws?.close(); });
 
 async function init() {
+  const query = new URLSearchParams(location.search);
+  chapterControls.restoreLibrary(els.libraryCategory, state);
   drawIdleMeter();
   if (location.pathname === "/library") switchView("library");
   await Promise.all([loadConfig(), loadSession(), loadLibrary(), loadIdeashellStatus(), loadAiTasks()]);
@@ -2787,10 +2834,9 @@ async function init() {
   if (state.activeSession) applySessionCourseSettings(state.activeSession);
   else applyCategoryProfile(selectedRecordCategory() || "未分类");
   healthPoll.wake();
-  const query = new URLSearchParams(location.search);
-  if (query.get("category") && !state.activeSession) {
+  if (query.get("category")) {
     const course = query.get("category");
-    setRecordCategory(course); applyCategoryProfile(course);
+    if (!state.activeSession) { setRecordCategory(course); applyCategoryProfile(course); }
     els.libraryCategory.value = course; await loadLibrary();
   }
   if (query.get("source") === "upload") els.fileInput.click();

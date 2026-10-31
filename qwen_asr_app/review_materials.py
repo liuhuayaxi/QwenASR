@@ -26,9 +26,16 @@ def substantive_page_text(text):
     return re.sub(r'《[^》\n]*》', '', value).strip()
 
 
+def text_only_source(source):
+    """Text originals remain evidence, but have no original page canvas."""
+    return Path(source.get('path') or source.get('name') or '').suffix.lower() in {'.txt', '.md'}
+
+
 def learning_scope_candidates(sources):
     candidates=[]
     for source in sources:
+        if text_only_source(source):
+            continue
         matches=[]
         for page in source['pages']:
             text=page.get('text','')

@@ -19,9 +19,9 @@ function stamp(seconds) {
 }
 
 function parseStamp(text) {
-  if (!text || typeof text !== "string") return null;
+  if (typeof text !== "string" || !/^\d+(?::\d{1,2}){0,2}(?:\.\d+)?$/.test(text.trim())) return null;
   const parts = text.trim().split(":").map(Number);
-  if (parts.some(isNaN)) return null;
+  if (parts.some(value => !Number.isFinite(value)) || parts.slice(1).some(value => value >= 60)) return null;
   if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
   if (parts.length === 2) return parts[0] * 60 + parts[1];
   if (parts.length === 1) return parts[0];
@@ -239,6 +239,26 @@ export function createClassroomIntelligence({ toast = () => {}, openSettings = (
     const text = submittedDraft.trim();
     if (!text) return;
 
+    const manual = {};
+    if (selectedAnchor === "manual") {
+      for (const [key, field] of [["start", scribblesEls.manualStart], ["end", scribblesEls.manualEnd]]) {
+        const value = field?.value.trim() || "";
+        if (!value) continue; // Empty bounds retain the existing full-range default.
+        const seconds = parseStamp(value);
+        if (seconds === null) {
+          const message = "时间格式无效，请输入秒数、分:秒或时:分:秒；草稿已保留";
+          if (scribblesEls.status) scribblesEls.status.textContent = message;
+          toast(message); field?.focus(); return;
+        }
+        manual[key] = seconds;
+      }
+      if (manual.start != null && manual.end != null && manual.end < manual.start) {
+        const message = "结束时间不能早于开始时间；草稿已保留";
+        if (scribblesEls.status) scribblesEls.status.textContent = message;
+        toast(message); scribblesEls.manualEnd?.focus(); return;
+      }
+    }
+
     isSaving = true;
     updateComposerControls();
     if (scribblesEls.status) scribblesEls.status.textContent = "正在保存速记…";
@@ -251,14 +271,8 @@ export function createClassroomIntelligence({ toast = () => {}, openSettings = (
       text,
       anchor: selectedAnchor,
       request_id: requestId,
+      ...manual,
     };
-
-    if (selectedAnchor === "manual") {
-      const startSec = parseStamp(scribblesEls.manualStart?.value);
-      const endSec = parseStamp(scribblesEls.manualEnd?.value);
-      if (startSec !== null) payload.start = startSec;
-      if (endSec !== null) payload.end = endSec;
-    }
 
     try {
       // 1. Instant raw save
@@ -280,6 +294,7 @@ export function createClassroomIntelligence({ toast = () => {}, openSettings = (
         renderScribbles();
       }
       toast("速记已保存");
+      if (currentSessionId === id && scribblesEls.status) scribblesEls.status.textContent = "速记已保存";
 
       // 2. Trigger async enhance if checked
       if (autoEnhance && newNote?.id) {
@@ -336,8 +351,8 @@ export function createClassroomIntelligence({ toast = () => {}, openSettings = (
       toast(labelMap[action] || "操作成功");
     } catch (err) {
       if (err.status === 409) {
-        toast("内容已被修改，已刷新最新版本");
-        void loadScribbles(false);
+        toast(`操作未完成：${err.message}；已刷新最新版本`);
+        if (currentSessionId === id) void loadScribbles(false);
       } else {
         toast(`操作未完成: ${err.message}`);
       }

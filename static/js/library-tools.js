@@ -201,7 +201,8 @@ export function createLibraryTools({getSession, openRecord, saveNote, renderNote
     if (!query) return;
     $('librarySearchStatus').textContent = '正在搜索转写与笔记…';
     try {
-      const params = new URLSearchParams({q:query, category:$('libraryCategory').value, offset:searchOffset, limit:30});
+      const params = new URLSearchParams({q:query, category:$('libraryCategory').value,
+        chapter:$('libraryChapter')?.value || '', date:new URLSearchParams(location.search).get('date') || '', offset:searchOffset, limit:30});
       const response = await fetch('/api/library/search?' + params, {signal:queryController.signal});
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || '搜索失败');
@@ -210,7 +211,7 @@ export function createLibraryTools({getSession, openRecord, saveNote, renderNote
       for (const match of data.matches) {
         const button = document.createElement('button'); button.className='search-match'; button.type='button';
         const label = {title:'标题',summary:'笔记',transcript:'转写'}[match.kind];
-        button.innerHTML = `<b>${escapeHtml(match.title)}</b><small>${escapeHtml(match.category)} · ${label}${match.start !== null ? ' · ' + formatDuration(match.start) : ''}</small><span>${escapeHtml(match.snippet)}</span>`;
+        button.innerHTML = `<b>${escapeHtml(match.title)}</b><small>${escapeHtml(match.chapter || match.chapters?.join('；') || '章节待确认')}</small><small>${escapeHtml(match.category)} · ${label}${match.start !== null ? ' · ' + formatDuration(match.start) : ''}</small><span>${escapeHtml(match.snippet)}</span>`;
         button.addEventListener('click', async () => {
           await openRecord(match.recording_id, {query, kind: match.kind, start: match.start});
         });
@@ -223,6 +224,8 @@ export function createLibraryTools({getSession, openRecord, saveNote, renderNote
   }
   $('librarySearch').addEventListener('input', () => { clearTimeout(queryTimer); queryTimer=setTimeout(() => search(), 250); });
   $('libraryCategory').addEventListener('change', () => search());
+  $('libraryChapter')?.addEventListener('change', () => search());
+  document.addEventListener('qwenasr:library-filters', () => {if ($('librarySearch').value.trim()) search();});
   $('moreLibraryMatches').addEventListener('click', () => search(true));
   $('openNoteVersions').addEventListener('click', async () => {
     finishEditing(); if (!await saveNote()) return;

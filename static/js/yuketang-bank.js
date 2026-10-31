@@ -7,6 +7,7 @@ const $ = id => document.getElementById(id);
 const STATUS = {running: '进行中', completed: '已完成', failed: '失败', login_required: '需要登录', interrupted: '已中断', partial: '部分完成'};
 const KIND = {sync: '同步', login: '登录', transcribe: '图片转写', courses: '读取课程列表'};
 const state = {category: '', status: null, courses: {courses: []}, rebinding: false, searchTimer: null, loaded: '', questionRequest: 0};
+let bindRender = {category: '', mode: '', markup: ''};
 
 async function api(path, body) {
   const options = body === undefined ? {cache: 'no-store', headers: {'X-QwenASR-Client': 'course-files'}} : {method: 'POST', headers: {'Content-Type': 'application/json', 'X-QwenASR-Client': 'course-files'}, body: JSON.stringify(body)};
@@ -26,11 +27,24 @@ function renderBind() {
   const view = bindView(state.status || {}, state.courses, state.rebinding);
   const area = $('ykt-bind');
   area.hidden = view.mode === 'hidden';
+  let markup = '';
   if (view.mode === 'login') {
-    area.innerHTML = `<span class="muted">登录雨课堂后即可从课程列表中选择要绑定的课程。</span><button class="ui-button primary mini-button" type="button" data-ykt="login">登录雨课堂</button>${state.rebinding ? '<button class="ghost-button mini-button" type="button" data-ykt="cancel">取消</button>' : ''}`;
+    markup = `<span class="muted">登录雨课堂后即可从课程列表中选择要绑定的课程。</span><button class="ui-button primary mini-button" type="button" data-ykt="login">登录雨课堂</button>${state.rebinding ? '<button class="ghost-button mini-button" type="button" data-ykt="cancel">取消</button>' : ''}`;
   } else if (view.mode === 'select') {
-    area.innerHTML = `<label class="sr-only" for="ykt-course">雨课堂课程</label><select id="ykt-course" class="ui-field">${view.options.map(option => `<option value="${esc(option.value)}" data-university="${esc(option.university)}"${option.value === view.selected ? ' selected' : ''}>${esc(option.label)}</option>`).join('')}</select><button class="ui-button primary mini-button" type="button" data-ykt="bind">绑定</button>${state.rebinding ? '<button class="ghost-button mini-button" type="button" data-ykt="cancel">取消</button>' : ''}<button class="ghost-button mini-button" type="button" data-ykt="courses" title="重新读取雨课堂课程列表">刷新列表</button>`;
+    markup = `<label class="sr-only" for="ykt-course">雨课堂课程</label><select id="ykt-course" class="ui-field">${view.options.map(option => `<option value="${esc(option.value)}" data-university="${esc(option.university)}"${option.value === view.selected ? ' selected' : ''}>${esc(option.label)}</option>`).join('')}</select><button class="ui-button primary mini-button" type="button" data-ykt="bind">绑定</button>${state.rebinding ? '<button class="ghost-button mini-button" type="button" data-ykt="cancel">取消</button>' : ''}<button class="ghost-button mini-button" type="button" data-ykt="courses" title="重新读取雨课堂课程列表">刷新列表</button>`;
   }
+  // Status polling must not replace an unchanged, possibly focused binding
+  // form. Preserve its draft even when the available course list is refreshed.
+  if (bindRender.category === state.category && bindRender.mode === view.mode && bindRender.markup === markup) return;
+  const previous = $('ykt-course');
+  const keepDraft = bindRender.category === state.category && bindRender.mode === 'select' && view.mode === 'select';
+  const selected = keepDraft ? previous?.value : null;
+  const focused = keepDraft && document.activeElement === previous;
+  area.innerHTML = markup;
+  bindRender = {category: state.category, mode: view.mode, markup};
+  const next = $('ykt-course');
+  if (next && selected !== null && [...next.options].some(option => option.value === selected)) next.value = selected;
+  if (focused) next?.focus({preventScroll: true});
 }
 
 function render() {

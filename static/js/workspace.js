@@ -36,7 +36,8 @@ function recordRow(record, chat = false) {
   const date = dateParts(record);
   const duration = record.duration > 0 ? `${Math.max(1, Math.round(record.duration / 60))} 分钟` : '';
   const detail = [category ? '' : record.category, date.full, duration, hasNote(record) ? '笔记已就绪' : record.status === 'completed' ? '转写已完成' : '处理中'].filter(Boolean).join(' · ');
-  return `<button class="workspace-record" ${chat ? 'data-chat' : 'data-recording'}="${esc(record.id)}" aria-label="${chat ? '提问' : '打开课堂记录'}：${esc(record.title || '未命名课堂')}"><span class="workspace-record-date" aria-hidden="true"><strong>${esc(date.day)}</strong><span>${esc(date.month)}</span></span><span class="workspace-record-body"><span class="workspace-record-title">${esc(record.title || '未命名课堂')}</span><span class="workspace-record-meta">${esc(detail)}</span></span><span class="workspace-record-arrow" aria-hidden="true">${chat ? '提问 →' : '↗'}</span></button>`;
+  const chapter = record.chapters?.length ? record.chapters.join('；') : record.chapter || '章节待确认';
+  return `<button class="workspace-record" ${chat ? 'data-chat' : 'data-recording'}="${esc(record.id)}" aria-label="${chat ? '提问' : '打开课堂记录'}：${esc(record.title || '未命名课堂')}"><span class="workspace-record-date" aria-hidden="true"><strong>${esc(date.day)}</strong><span>${esc(date.month)}</span></span><span class="workspace-record-body"><span class="workspace-record-title">${esc(record.title || '未命名课堂')}</span><span class="workspace-record-chapter">${esc(chapter)}</span><span class="workspace-record-meta">${esc(detail)}</span></span><span class="workspace-record-arrow" aria-hidden="true">${chat ? '提问 →' : '↗'}</span></button>`;
 }
 function render() {
   $('workspaceTitle').textContent = category || '全部课程';
@@ -61,7 +62,7 @@ function render() {
   $('microphoneSource').href = '/?' + query({});
   $('uploadSource').href = '/?' + query({source:'upload'});
 }
-function tab(name, recording) {
+function tab(name, recording, {preserveFrame = false} = {}) {
   if (!['overview','review',...Object.keys(routes)].includes(name)) return;
   currentTab = name;
   const address = new URLSearchParams(location.search);
@@ -76,7 +77,7 @@ function tab(name, recording) {
     if (button.dataset.tab === name) button.setAttribute('aria-current','page');
     else button.removeAttribute('aria-current');
   });
-  if (name !== 'overview' && name !== 'review') setFrameSource($('workspaceFrame'), routes[name] + '?' + query({embedded:'1', ...(recording ? {recording} : {})}));
+  if (!preserveFrame && name !== 'overview' && name !== 'review') setFrameSource($('workspaceFrame'), routes[name] + '?' + query({embedded:'1', ...(recording ? {recording} : {})}));
 }
 // Avoid tearing down a live iframe when the selected destination is unchanged.
 // dataset stores the requested URL; frame.src may be absolute in a browser.
@@ -276,8 +277,7 @@ async function loadMore() {
     finishRequest(request);
   }
 }
-$('workspaceCourse').addEventListener('change', () => {
-  const nextCategory = $('workspaceCourse').value;
+function changeCourse(nextCategory, {preserveFrame = false} = {}) {
   if (nextCategory === category) return;
   if (activeRequest) {
     clearTimeout(activeRequest.timeout);
@@ -286,13 +286,37 @@ $('workspaceCourse').addEventListener('change', () => {
   }
   clearTimeout(timer);
   category = nextCategory;
+  const selector = $('workspaceCourse');
+  if (category && ![...selector.options].some(option => option.value === category)) selector.add(new Option(category, category));
+  selector.value = category;
   refreshQueued = moreQueued = loadingMore = false;
   loadedPages = 1; paginationError = '';
   records = []; tasks = []; recordsLoaded = tasksLoaded = false;
   recordTotal = noteTotal = 0; nextOffset = null;
   $('workspaceError').hidden = true;
   try { localStorage.setItem('qwen-asr-last-course-v1',category); } catch { /* optional preference */ }
-  render(); tab(currentTab); void load();
+  render(); tab(currentTab, undefined, {preserveFrame}); void load();
+}
+$('workspaceCourse').addEventListener('change', () => changeCourse($('workspaceCourse').value));
+$('workspaceFrame').addEventListener('load', () => {
+  const frame = $('workspaceFrame');
+  try {
+    if (frame.contentWindow.location.pathname !== '/library') return;
+    const filter = frame.contentDocument?.getElementById('libraryCategory');
+    filter?.addEventListener('change', () => {
+      // The embedded library has its own course filter. Keep the workspace
+      // heading, counts, links and following tabs in that same course without
+      // reloading the library and discarding its search or scroll position.
+      const nextCategory = filter.value;
+      const address = new URL(frame.contentWindow.location.href);
+      if (nextCategory) address.searchParams.set('category', nextCategory);
+      else address.searchParams.delete('category');
+      address.searchParams.delete('recording');
+      frame.contentWindow.history.replaceState(null, '', address.pathname + address.search);
+      frame.dataset.requestedSource = '/library?' + new URLSearchParams({category:nextCategory, embedded:'1'});
+      changeCourse(nextCategory, {preserveFrame:true});
+    });
+  } catch { /* Only the same-origin library participates in course selection. */ }
 });
 document.addEventListener('click', event => {
   const button = event.target.closest('button');

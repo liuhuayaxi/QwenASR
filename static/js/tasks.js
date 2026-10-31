@@ -1,4 +1,4 @@
-import {taskGroups, filterTaskGroups, groupCounts, actionableTasks, completedTasks, taskMatchesType, activeStatuses, errorStatuses, leadingTask, taskProgressView, progressGroups} from './task-center-view.js?v=20261022-direct-pdf-1';
+import {taskGroups, filterTaskGroups, groupCounts, actionableTasks, completedTasks, taskMatchesType, activeStatuses, errorStatuses, leadingTask, taskProgressView, progressGroups} from './task-center-view.js?v=20261031-browser-fixes-1';
 import {createTaskPdfDialog} from './task-pdf-dialog.js?v=20261018-recovery-1';
 import {aiTaskPayload} from './task-config.js?v=20260913-tasks-1';
 import {mergeLiveCourseProgress} from './course-progress.js?v=20261018-recovery-1';
@@ -153,8 +153,9 @@ function card(task, historical = false) {
   const reviewCount = Number(task.review_required_blocks) || Number(task.total) || 0;
   const count = (task.type === 'summary' || task.type === 'course_queue' || task.type === 'refinement') && !done ? phaseProgress.count : review ? (reviewCount ? `${reviewCount} 段待核对` : '等待人工核对') : task.total ? `${task.family === 'ai' ? '已完成 ' : ''}${task.completed || 0}/${task.total}${task.type === 'course_queue' ? ' 堂课' : task.family === 'mineru' ? ' 个文件' : task.family === 'ai' ? ` ${task.progress_unit || '批'}` : ' 段'}` : '';
   const wait = task.status === 'waiting_retry' && task.retry_in_seconds ? ` · 约 ${task.retry_in_seconds} 秒后自动重试` : '';
-  const stage = (activity ? [task.stage, activity.label].filter(Boolean).join(' · ')
-    : task.stage || (task.status === 'pending' ? '等待手动开始处理' : labels[task.status])) + wait;
+  const readableStage = task.type === 'knowledge_index' ? phaseProgress.label : task.stage;
+  const stage = (activity ? [readableStage, activity.label].filter(Boolean).join(' · ')
+    : readableStage || (task.status === 'pending' ? '等待手动开始处理' : labels[task.status])) + wait;
   const error = historical ? '' : friendlyError(task);
   const inference = task.inference || {}; // Mixed batches report each file separately.
   const inferMetrics = inference.metrics || {};
@@ -292,10 +293,13 @@ function render() {
       : focusedId ? [...(group?.querySelectorAll('[data-id]') || [])].find(node => node.dataset.id === focusedId) : group;
     [...(owner?.querySelectorAll('a[href]') || [])].find(node => node.getAttribute('href') === focusedHref)?.focus({preventScroll:true});
   }
-  document.querySelectorAll('[data-count]').forEach(node => node.textContent = state.counts[node.dataset.count] || 0);
+  // Navigation counts share the same course/type/search scope as the cards.
+  // Keep state.counts global only for background polling decisions.
+  const scopedCounts = groupCounts(filteredGroups('all'));
+  document.querySelectorAll('[data-count]').forEach(node => node.textContent = scopedCounts[node.dataset.count] || 0);
   document.querySelectorAll('#statusFilters [data-status]').forEach(node => node.setAttribute('aria-current', node.dataset.status === state.filter ? 'page' : 'false'));
   document.querySelectorAll('[data-summary]').forEach(node => node.setAttribute('aria-pressed', String(node.dataset.summary === state.filter)));
-  $('taskOverview').textContent = `${state.counts.active || 0} 项正在处理 · ${state.counts.review || 0} 项待核对 · ${state.counts.completed || 0} 项已完成`;
+  $('taskOverview').textContent = `${scopedCounts.active || 0} 项正在处理 · ${scopedCounts.review || 0} 项待核对 · ${scopedCounts.completed || 0} 项已完成`;
   selectionControls();
 }
 function applyFilters() { state.selected.clear(); render(); }

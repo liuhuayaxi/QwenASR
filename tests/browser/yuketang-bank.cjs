@@ -71,6 +71,23 @@ const server = http.createServer((req, res) => {
     page.setDefaultTimeout(10000);
     page.on('pageerror', e => errors.push(e.message));
     await page.goto(origin);
+    await page.locator('#ykt-rebind').click();
+    await page.locator('#ykt-course').selectOption('2');
+    await page.locator('#ykt-course').focus();
+    await page.evaluate(() => { window.__bindingDraft = document.querySelector('#ykt-course'); });
+    const refreshed = page.waitForResponse(r => new URL(r.url()).pathname === '/api/yuketang/status');
+    await page.evaluate(() => window.dispatchEvent(new Event('online')));
+    await refreshed;
+    await page.waitForFunction(() => document.querySelector('#ykt-course')?.value === '2');
+    await page.waitForTimeout(100); // allow render after both status/course reads
+    assert.equal(await page.locator('#ykt-course').inputValue(), '2');
+    assert.equal(await page.evaluate(() => document.querySelector('#ykt-course') === __bindingDraft), true);
+    assert.equal(await page.locator('#ykt-course').evaluate(el => el === document.activeElement), true);
+    await page.getByRole('button', {name: '取消', exact: true}).click();
+    await page.locator('#ykt-rebind').click();
+    assert.equal(await page.locator('#ykt-course').inputValue(), '1', 'cancel must discard the previous binding draft');
+    await page.getByRole('button', {name: '取消', exact: true}).click();
+    results.push({name: 'status refresh preserves binding draft and focus; cancel discards it', passed: true});
     await page.locator('#ykt-browseSummary').click();
     await page.waitForFunction(() => document.querySelectorAll('#ykt-questions img').length === 8 &&
       [...document.querySelectorAll('#ykt-questions img')].every(i => i.complete && i.naturalWidth > 0));

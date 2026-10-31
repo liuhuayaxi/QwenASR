@@ -2,6 +2,7 @@
 import asyncio
 import shutil
 import tempfile
+import re
 from pathlib import Path
 from fastapi import APIRouter, Body, HTTPException
 from fastapi.responses import FileResponse
@@ -24,10 +25,10 @@ def note_router(store, recording_operation):
         return record
 
     @router.get('/api/library/search')
-    async def search(q: str = '', category: str = '', offset: int = 0, limit: int = 30):
-        if len(q) > 200 or offset < 0 or not 1 <= limit <= 100:
+    async def search(q: str = '', category: str = '', offset: int = 0, limit: int = 30, chapter: str = '', date: str = ''):
+        if len(q) > 200 or len(chapter) > 120 or offset < 0 or not 1 <= limit <= 100 or (date and not re.fullmatch(r'\d{4}-\d{2}-\d{2}', date)):
             raise HTTPException(400, '搜索参数无效')
-        return search_index.search(store.list_records(), q, category, offset, limit)
+        return search_index.search(store.list_records(), q, category, offset, limit, chapter, date)
 
     @router.get('/api/recordings/{session_id}/versions')
     async def versions(session_id: str):

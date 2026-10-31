@@ -42,7 +42,7 @@ async function main(){
       if(url.origin!==origin){state.unknown.push(req.url());await route.abort();return;}
       if(!p.startsWith('/api/')&&!p.startsWith('/course/api/'))return route.continue();
       const body=method==='GET'?null:(req.headers()['content-type']||'').includes('json')?req.postDataJSON():null;
-      state.requests.push({p,method,body});
+      state.requests.push({p,method,body,query:url.search});
       let data={},status=200;
       if(state.gates[p+':'+method]){
         const g=state.gates[p+':'+method];g.reached=true;const spec=await g.promise;
@@ -60,7 +60,7 @@ async function main(){
       else if(p==='/api/health')data={status:'idle',detail:'合成服务就绪',model:'fixture',device:'fixture',asr_provider:'remote_only'};
       else if(p==='/api/session')data={active:false,session:null};
       else if(p==='/api/ai-tasks'||p==='/api/tasks')data={tasks:[],history:{},warnings:[]};
-      else if(p==='/api/library')data={records:Object.values(state.records).map(({segments,ai_note_summary,...rest})=>({...rest,has_note:true,ai_note_summary:{abstract:ai_note_summary.abstract}})),total:2,note_count:2,next_offset:null,calendar:{'2026-10-10':{count:2,duration:1200}},categories:['未分类','合成课程'],category_profiles:{},storage_root:'/synthetic'};
+      else if(p==='/api/library')data={records:Object.values(state.records).map(({segments,ai_note_summary,...rest})=>({...rest,has_note:true,ai_note_summary:{abstract:ai_note_summary.abstract}})),total:2,note_count:2,next_offset:null,calendar:{'2026-10-10':{count:2,duration:1200}},categories:['未分类','合成课程'],chapter_counts:state.chapterCounts||[],category_profiles:{},storage_root:'/synthetic'};
       else if(p==='/api/ai/settings')data={settings:{function_providers:{},ai_correction:false,translation:'off',summary_enabled:false},has_api_key:false};
       else if(p==='/api/inference/settings')data={settings:{asr_provider:'remote_only',mineru_provider:'local',knowledge_provider:'local',base_url:'http://fixture.invalid',classroom_power_saving:false}};
       else if(p==='/api/mineru/settings')data={settings:{tier:'standard',engine:'pipeline'},defaults:{}};
@@ -325,6 +325,88 @@ async function main(){
       await page.locator('#relatedSourceSelect option[value="cf_added"]').waitFor({state:'attached'});
       assert.equal(s.requests.filter(r=>r.p==='/api/knowledge/status').length,2);
       s.proof={sameLessonRefreshDiscoversSource:'cf_added',relatedDeepLinkOpensRelatedPanel:true};
+    });
+    await scenario('14-manual-anchor-validation-and-save-status',async(page,s,context,origin)=>{
+      await scribbles(page,origin);await page.locator('#scribbleAutoEnhance').uncheck();
+      await page.locator('#anchorManual').click();await page.locator('#scribbleInput').fill('保留这份时间草稿');
+      for(const invalid of ['abc','-1','1:99','Infinity']) {
+        await page.locator('#manualStartTime').fill(invalid);await page.locator('#saveScribbleBtn').click();
+        assert.match(await page.locator('#scribblesStatus').textContent(),/时间格式无效/);
+        assert.equal(await page.locator('#scribbleInput').inputValue(),'保留这份时间草稿');
+      }
+      assert.equal(s.requests.filter(r=>r.p.endsWith('/scribbles')&&r.method==='POST').length,0);
+      await page.locator('#manualStartTime').fill('00:05');await page.locator('#manualEndTime').fill('00:10');
+      const g=gate();s.gates['/api/recordings/A/scribbles:POST']=g;
+      await page.locator('#saveScribbleBtn').click();await until(()=>g.reached,'Valid manual note was not posted');
+      const req=s.requests.find(r=>r.p.endsWith('/scribbles')&&r.method==='POST');assert.equal(req.body.start,5);assert.equal(req.body.end,10);
+      g.resolve({data:{note:{id:'manual',raw:'保留这份时间草稿',content:'保留这份时间草稿',revision:1,status:'saved'}}});
+      await page.waitForFunction(()=>document.getElementById('scribblesStatus').textContent==='速记已保存');
+      s.proof={invalidInputsPreserveDraftAndDoNotPost:true,validAnchor:[5,10],savedStatus:'速记已保存'};
+    });
+    await scenario('15-scribble-conflict-preserves-specific-server-reason',async(page,s,context,origin)=>{
+      s.notes.A=[{id:'note-conflict',raw:'原文',content:'原文',revision:1,status:'suggestion_ready',suggestion:{id:'suggestion',input_revision:1,content:'增强内容'}}];
+      const g=gate();g.resolve({status:409,data:{detail:'来源版本已改变，请重新增强后核对'}});s.gates['/api/recordings/A/scribbles/note-conflict/action:POST']=g;
+      await scribbles(page,origin);await page.getByRole('button',{name:'采纳建议',exact:true}).click();
+      await page.locator('#toast').filter({hasText:'来源版本已改变，请重新增强后核对'}).waitFor();
+      s.proof={conflictReasonVisible:true};
+    });
+    await scenario('16-chapter-edit-preview-save-and-url-scope',async(page,s,context,origin)=>{
+      s.records.A.chapter='第六章 数字基带';s.records.A.chapters=['第六章 数字基带'];
+      await page.goto(origin+'/library?category='+encodeURIComponent('合成课程')+'&chapter='+encodeURIComponent('第六章 数字基带')+'&date=2026-10-10');
+      await page.locator('.library-card[data-id="A"] .library-card-chapter').filter({hasText:'第六章 数字基带'}).waitFor();
+      assert.equal(await page.locator('#libraryChapter').inputValue(),'第六章 数字基带');
+      assert(s.requests.filter(r=>r.p==='/api/library').some(r=>new URLSearchParams(r.query).get('chapter')==='第六章 数字基带'&&new URLSearchParams(r.query).get('date')==='2026-10-10'));
+      await page.locator('.library-card[data-id="A"] .library-open').click();await page.locator('#editNoteChapter').click();
+      const suggest=gate();s.gates['/api/recordings/A/chapter-suggestion:POST']=suggest;
+      await page.locator('#suggestNoteChapter').click();await until(()=>suggest.reached,'No suggestion request');
+      await page.locator('#noteChapterInput').fill('手动修改的章节');suggest.resolve({data:{chapter:'过期建议',chapters:['过期建议']}});
+      await page.locator('#noteChapterStatus').filter({hasText:'保留你刚修改'}).waitFor();
+      assert.equal(await page.locator('#noteChapterInput').inputValue(),'手动修改的章节');
+      assert.equal(s.requests.filter(r=>r.method==='PATCH').length,0);
+      const save=gate();s.gates['/api/recordings/A:PATCH']=save;
+      await page.locator('#noteChapterInput').fill('第六章；第七章');await page.locator('#saveNoteChapter').click();await until(()=>save.reached,'No chapter PATCH');
+      assert.equal(s.requests.find(r=>r.p==='/api/recordings/A'&&r.method==='PATCH').body.chapter,'第六章；第七章');
+      s.records.A.chapter='第六章；第七章';s.records.A.chapters=['第六章','第七章'];save.resolve({data:{session:s.records.A}});
+      await page.locator('#noteDialogChapter').filter({hasText:'第六章；第七章'}).waitFor();
+      await page.waitForFunction(()=>document.getElementById('noteChapterEditor').hidden);
+      s.proof={urlScopePreserved:true,staleSuggestionDoesNotOverwrite:true,suggestionDoesNotSave:true,manualMultiChapterSaved:true};
+    });
+    await scenario('17-mineru-success-clears-initial-placeholder',async(page,s,context,origin)=>{
+      const settings={tier:'advanced',ocr_mode:'auto',image_analysis:true,small_backend:'torch',vlm_engine:'llama_cpp',model_source:'huggingface',processing_window_size:8,vlm_concurrency:2,virtual_vram_gb:8};
+      const g=gate();g.resolve({data:{settings,defaults:settings,tier_choices:['auto','advanced'],runtime:{compatible:true,version:'4.0.10'}}});s.gates['/api/mineru/settings:GET']=g;
+      await page.goto(origin+'/?settings=mineru');
+      await page.waitForFunction(()=>document.getElementById('mineruSettingsStatus').textContent==='配置已读取');
+      assert.equal(await page.locator('#saveMineruSettings').isEnabled(),true);
+      s.proof={loadStatus:'配置已读取'};
+    });
+    await scenario('18-bulk-chapters-refresh-counts-and-preserve-course-url',async(page,s,context,origin)=>{
+      await page.goto(origin+'/library?category='+encodeURIComponent('合成课程'));
+      await page.getByRole('button',{name:'识别课程章节',exact:true}).waitFor();
+      const g=gate();s.gates['/api/library/chapters/detect:POST']=g;
+      await page.locator('#detectLibraryChapters').click();await until(()=>g.reached,'No bulk chapter request');
+      assert.equal(await page.locator('#detectLibraryChapters').isDisabled(),true);
+      assert.deepEqual(s.requests.find(r=>r.p==='/api/library/chapters/detect').body,{category:'合成课程'});
+      s.chapterCounts=[{chapter:'第六章',records:25,notes:24},{chapter:'',records:1,notes:0}];
+      s.records.A.chapter='第六章';s.records.A.chapters=['第六章'];
+      g.resolve({data:{updated:1,unchanged:0,unassigned:1,busy:0}});
+      await page.locator('#libraryChapterStatus').filter({hasText:'章节已更新 1 节'}).waitFor();
+      assert.match(await page.locator('#libraryChapter option[value="第六章"]').textContent(),/25节 \/ 24份笔记/);
+      await page.locator('#libraryChapter').selectOption('第六章');
+      await page.waitForFunction(()=>new URL(location.href).searchParams.get('chapter')==='第六章');
+      await page.locator('#workbenchNav').click();await page.locator('#libraryTab').click();
+      assert.equal(new URL(page.url()).searchParams.get('chapter'),'第六章');
+      await page.reload();await page.waitForFunction(()=>document.getElementById('libraryChapter').value==='第六章');
+      s.proof={courseScopedBulkRequest:true,globalCountsNotCurrentPage:true,chapterSurvivesNavigationAndReload:true};
+    });
+    await scenario('19-closing-deeplink-note-keeps-filters-without-reopening',async(page,s,context,origin)=>{
+      await page.goto(origin+'/library?recording=A&category='+encodeURIComponent('合成课程')+'&chapter='+encodeURIComponent('第六章'));
+      await page.locator('#noteDialog[open]').waitFor();await page.locator('#closeNoteDialog').click();
+      await page.waitForFunction(()=>!document.getElementById('noteDialog').open);
+      assert.equal(new URL(page.url()).searchParams.has('recording'),false);
+      assert.equal(new URL(page.url()).searchParams.get('chapter'),'第六章');
+      await page.reload();await page.locator('.library-card').first().waitFor();
+      assert.equal(await page.locator('#noteDialog').evaluate(e=>e.open),false);
+      s.proof={closedNoteStaysClosedAfterReload:true,chapterFilterPreserved:true};
     });
   } finally {await browser.close();await new Promise(r=>server.close(r));}
   console.log(JSON.stringify(results,null,2));

@@ -22,6 +22,16 @@ _guard=threading.RLock()
 def digest(path):return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def chapter_provenance(provenance, metadata):
+    from .chapters import labels_from_metadata
+    result = dict(provenance or {})
+    result.pop('chapter_labels', None)
+    labels = labels_from_metadata(metadata)
+    if labels:
+        result['chapter_labels'] = labels
+    return result
+
+
 def _reuse_identical_latex_review(folder,output,export,provenance):
     """Carry a visual result across adapter revisions only for identical bytes.
 
@@ -123,7 +133,8 @@ def _export_markdown_pdf(markdown, folder, provenance=None):
         if os.getenv('QWEN_ASR_NODE_MODULES'):modules.insert(0,os.environ['QWEN_ASR_NODE_MODULES'])
         modules.extend(str(p) for p in (Path.home()/'.cache/codex-runtimes').glob('*/dependencies/node/node_modules'))
         request=output/'render-request.json';part=output/'candidate.part.pdf'
-        atomic_json(request,{'repo_root':str(ROOT),'output':str(part),'markdown':content,'module_roots':modules})
+        atomic_json(request,{'repo_root':str(ROOT),'output':str(part),'markdown':content,'module_roots':modules,
+                             'chapters': (provenance or {}).get('chapter_labels', [])})
         node=shutil.which('node')
         if not node:raise RuntimeError('PDF 导出需要 Node.js 和 Chromium 渲染器')
         with PDF_LOCK:
@@ -155,7 +166,7 @@ def _export_latex_pdf(markdown, folder, provenance):
         raise ValueError('正文或资料已改变，LaTeX源稿需要重新生成；未下载旧PDF')
     transcript=json.loads((folder/'transcript.json').read_text()) if (folder/'transcript.json').exists() else {'blocks':[]}
     images=json.loads((folder/'images.json').read_text()) if (folder/'images.json').exists() else []
-    prepared=prepare_document(body,folder,transcript,images)
+    prepared=prepare_document(body,folder,transcript,images,(provenance or {}).get('chapter_labels'))
     ident=hashlib.sha256(json.dumps({'source':prepared['source'],'assets':prepared['assets'],
         'provenance':provenance,'renderer':'xelatex-course-v1',
         'compiler_adapter':digest(Path(__file__).with_name('note_latex.py')),
@@ -168,7 +179,8 @@ def _export_latex_pdf(markdown, folder, provenance):
             _reuse_identical_latex_review(folder,output,cached,provenance)
             return pdf,cached
         with PDF_LOCK:
-            generated,details=compile_document(body,folder,output/'tex-build',transcript=transcript,images=images)
+            generated,details=compile_document(body,folder,output/'tex-build',transcript=transcript,images=images,
+                                                chapters=(provenance or {}).get('chapter_labels'))
         part=output/'candidate.part.pdf';shutil.copyfile(generated,part)
         with part.open('rb') as stream:os.fsync(stream.fileno())
         from .native_pdf import pdf_operation
@@ -198,7 +210,7 @@ def reviewed_pdf(record):
     markdown=note.get('summary','');relative=note.get('review_package')
     if not relative:raise ValueError('历史 Markdown 尚未导出并完成独立视觉审查，请在笔记页升级 PDF')
     folder=safe_path(record.directory,relative)
-    pdf,export=export_pdf(markdown,folder,note.get('material_version'))
+    pdf,export=export_pdf(markdown,folder,chapter_provenance(note.get('material_version'),record.metadata))
     if note.get('review_status')=='skipped' and note.get('review_enabled') is False and note.get('review_policy')=='disabled_by_settings':
         if note.get('pdf_sha256')!=export['pdf_sha256']:
             raise ValueError('笔记或 PDF 已改变，请重新导出当前未审核版本')

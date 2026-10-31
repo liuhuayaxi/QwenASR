@@ -302,6 +302,54 @@ async function fixtures(route) {
     assert.equal(posts,0);
   });
   await scenario('课堂记录直接打开笔记',async(page,context,origin)=>{await page.goto(origin+'/library?recording='+record.id);await page.locator('#noteDialog[open]').waitFor();assert.match(await page.locator('#noteSummaryReader').innerText(),/菲涅耳公式/);});
+  await scenario('实测回归：活动录音恢复不抢占课堂记录与嵌入笔记入口',async(page,context,origin)=>{
+    activeSession={...record,id:'active-other',title:'另一条未结束录音',category:'第二课程',status:'active',kind:'microphone'};
+    const query='?category='+encodeURIComponent(record.category)+'&embedded=1&recording='+record.id;
+    await page.goto(origin+'/library'+query);
+    await page.locator('#noteDialog[open]').waitFor();
+    assert.equal(new URL(page.url()).pathname,'/library');
+    assert.equal(new URL(page.url()).searchParams.get('embedded'),'1');
+    assert.equal(await page.locator('#libraryCategory').inputValue(),record.category);
+    assert.equal(await page.locator('#recordCategory').inputValue(),'第二课程');
+    assert.match(await page.locator('#noteSummaryReader').innerText(),/菲涅耳公式/);
+    await page.reload();await page.locator('#noteDialog[open]').waitFor();
+    assert.equal(new URL(page.url()).searchParams.get('recording'),record.id);
+    await page.goto(origin+'/library?category='+encodeURIComponent(record.category)+'&embedded=1');
+    await page.locator('.library-card').first().waitFor();
+    assert.equal(await page.locator('body').evaluate(el=>el.classList.contains('library-page')),true);
+    assert.equal(await page.locator('#libraryCategory').inputValue(),record.category);
+  });
+  await scenario('实测回归：PDF暂忙保留笔记页面并允许重试下载',async(page,context,origin)=>{
+    noteReviewEnabled=false;
+    const pdfRecord={...record,ai_note_summary:{...record.ai_note_summary,review_status:'skipped',review_enabled:false,review_policy:'disabled_by_settings'},downloads:{...record.downloads,ai_summary:'/api/recordings/smoke-class/download/ai-summary'}};
+    await context.route('**/api/recordings/smoke-class',route=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({session:pdfRecord})}));
+    await context.route('**/api/recordings/smoke-class/summary-status',route=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({job:{running:false,status:'completed'},session:pdfRecord})}));
+    let downloads=0;
+    await context.route('**/api/recordings/smoke-class/download/ai-summary',route=>++downloads===1
+      ? route.fulfill({status:409,contentType:'application/json',body:JSON.stringify({detail:'这条录音正在处理，请完成后再操作'})})
+      : route.fulfill({status:200,contentType:'application/pdf',headers:{'Content-Disposition':"attachment; filename*=UTF-8''%E8%AF%BE%E5%A0%82%E7%AC%94%E8%AE%B0.pdf"},body:'%PDF-1.4\nsynthetic download\n%%EOF'}));
+    await page.goto(origin+'/library?recording='+record.id);await page.locator('#noteDialog[open]').waitFor();
+    const before=page.url();await page.locator('#downloadNoteSummary').click();
+    await page.locator('#toast').filter({hasText:'请稍后重试下载'}).waitFor();
+    assert.equal(page.url(),before);assert.equal(await page.locator('#noteDialog').evaluate(el=>el.open),true);
+    const received=page.waitForEvent('download');await page.locator('#downloadNoteSummary').click();
+    assert.equal((await received).suggestedFilename(),'课堂笔记.pdf');
+    assert.equal(page.url(),before);assert.equal(downloads,2);
+  });
+  await scenario('实测回归：任务状态中文显示且计数跟随筛选范围',async(page,context,origin)=>{
+    tasks=[{id:'knowledge:A',type:'knowledge_index',family:'knowledge',title:'课程A索引',label:'课程知识索引',category:'课程A',status:'queued',stage:'waiting_asr',progress:0,actions:['cancel']},
+      {id:'knowledge:B',type:'knowledge_index',family:'knowledge',title:'课程B索引',label:'课程知识索引',category:'课程B',status:'completed',stage:'completed',progress:100,actions:[]}];
+    await page.goto(origin+'/tasks');await page.locator('#lastUpdated').filter({hasText:'已同步'}).waitFor();
+    await page.locator('#categoryFilter').selectOption('课程A');
+    assert.equal(await page.locator('[data-count="all"]').innerText(),'1');
+    assert.equal(await page.locator('[data-count="active"]').innerText(),'1');
+    assert.equal(await page.locator('[data-count="completed"]').innerText(),'0');
+    assert.match(await page.locator('#taskList').innerText(),/等待本机转写完成后建立知识索引/);
+    assert.doesNotMatch(await page.locator('#taskList').innerText(),/waiting_asr/);
+    await page.locator('#taskSearch').fill('不存在');
+    await page.waitForFunction(()=>document.querySelector('[data-count="all"]').textContent==='0');
+    assert.equal(await page.locator('[data-count="active"]').innerText(),'0');
+  });
   await scenario('任务默认过滤分组与恢复',async(page,context,origin)=>{await page.goto(origin+'/tasks');await page.locator('.task-group').waitFor();assert.equal(await page.locator('.task-group').count(),1);assert.equal(await page.locator('.task-card').count(),2);const gd=page.locator('.group-details');if(await gd.count()&&!(await gd.first().evaluate(e=>e.open)))await page.locator('.group-details > summary').first().click();await page.locator('article.task-card[data-id="summary:smoke-class"] [data-action="continue"]').click();await page.getByText('任务已加入后台队列',{exact:true}).waitFor();assert.ok(requests.some(request=>request.path==='/api/tasks/action'));await page.locator('[data-status="completed"]').click();assert.equal(await page.locator('.task-card').count(),1);await page.goto(origin+'/tasks?category='+encodeURIComponent('空课程'));await page.locator('#lastUpdated').filter({hasText:'已同步'}).waitFor();assert.equal(await page.locator('.task-card').count(),0);});
   await scenario('MinerU 两端稳定耗时进度、刷新与旧任务兼容',async(page,context,origin)=>{
     const task={id:'mineru-remote',type:'course_pdf',family:'mineru',label:'课程资料识别',title:'合成讲义 · Windows',category:'合成课程',status:'running',
@@ -755,6 +803,26 @@ async function fixtures(route) {
     await reader.locator('#closeNoteDialog').click();await reader.locator('#toast').filter({hasText:'保存失败，请保留页面'}).waitFor();
     assert.equal(await outer.isVisible(),true);assert.equal(await reader.locator('#noteDialog').isVisible(),true);assert.match(await reader.locator('#noteSummaryEditor').inputValue(),/未保存保护/);
     failSave=false;await reader.locator('#closeNoteDialog').click();await outer.waitFor({state:'hidden'});
+  });
+  await scenario('后台笔记完成后摘要列表刷新不覆盖阅读正文',async(page,context,origin)=>{
+    let finish, completed=false;
+    const ready=new Promise(resolve=>finish=resolve);
+    const full={...record,ai_note_summary:{...record.ai_note_summary,summary:'# 后台完整笔记\n\n正文必须保留在阅读器中。'}};
+    await context.route('**/api/library?*',route=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({
+      categories:[record.category],storage_root:'/synthetic',total:1,next_offset:null,calendar:{},
+      records:[{...record,segments:undefined,has_note:true,summary_job:{status:completed?'completed':'running'},ai_note_summary:{abstract:'只用于列表的摘要'}}]})}));
+    await context.route('**/api/recordings/smoke-class',route=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({session:full})}));
+    await context.route('**/api/recordings/smoke-class/summary-status',async route=>{
+      await ready;completed=true;
+      await route.fulfill({status:200,contentType:'application/json',body:'{"running":false,"status":"completed"}'});
+    });
+    await page.goto(origin+'/library?recording=smoke-class');
+    await page.locator('#noteDialog[open]').waitFor();
+    finish();
+    await page.locator('#toast').filter({hasText:'课后复习笔记已保存'}).waitFor();
+    await page.waitForTimeout(350);
+    assert.match(await page.locator('#noteSummaryReader').innerText(),/正文必须保留在阅读器中/);
+    assert.equal(await page.locator('#downloadNoteSummary').evaluate(el=>el.classList.contains('disabled-download')),false);
   });
   await scenario('已保存课堂的速记增强会自动更新，原手记保留',async(page,context,origin)=>{
     let polls=0;

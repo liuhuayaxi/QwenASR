@@ -68,7 +68,7 @@ export function createMineruSettings({root = document, fetcher = fetch} = {}) {
   const load = () => {
     if (loading) return loading;
     if (saving) return Promise.resolve();
-    ready = false; controls();
+    ready = false; controls(); status.textContent = '正在读取配置…';
     loading = (async () => {
       try {
         const response = await fetcher('/api/mineru/settings', {cache:'no-store', signal:AbortSignal.timeout(30000)});
@@ -82,7 +82,7 @@ export function createMineruSettings({root = document, fetcher = fetch} = {}) {
           status.textContent = '当前后端尚未支持自动档，已暂时使用兼容档位；更新后端并重启后可启用自动档';
         }
         populate(settings); runtime(data.runtime); ready = true;
-        if (!status.textContent) status.textContent = '配置已读取';
+        if (autoTierSupported || data.settings.tier !== 'auto') status.textContent = '配置已读取';
       } catch (error) { ready = false; status.textContent = `读取失败：${error.message}。重新打开设置可重试。`; }
       finally { loading = null; controls(); }
     })();

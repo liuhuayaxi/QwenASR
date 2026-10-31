@@ -87,29 +87,45 @@ def build_page_transcripts(content_list: list[dict], page_count: int) -> list[st
     return transcripts
 
 
+def insert_cover_text(page, rect, text, *, font_file, fontsize, color, lineheight=1.3):
+    """Fit visible cover text and fail explicitly instead of silently omitting it."""
+    size = fontsize
+    while size >= 6:
+        shape = page.new_shape()
+        remaining = shape.insert_textbox(rect, text, fontname="AIUnicode",
+            fontfile=str(font_file), fontsize=size, color=color, lineheight=lineheight)
+        if remaining >= 0:
+            shape.commit()
+            return
+        size -= 0.5
+    raise ValueError("AI PDF cover text does not fit its layout")
+
+
 def add_cover(
     doc: fitz.Document, title: str, source_name: str, stats: dict, font_file: Path
 ) -> None:
     width, height = stats["page_size"]
+    # The explanatory cover needs its own readable canvas. Source pages keep
+    # their exact dimensions; a small slide must not clip the cover or drop its
+    # instructions when a textbox returns a negative remaining height.
+    width, height = max(width, 595), max(height, 842)
     page = doc.new_page(width=width, height=height)
     blue = (0.12, 0.32, 0.68)
     dark = (0.10, 0.13, 0.19)
     muted = (0.35, 0.39, 0.46)
 
     page.draw_rect(fitz.Rect(0, 0, width, 14), color=blue, fill=blue)
-    page.insert_text(
-        fitz.Point(56, 72),
+    insert_cover_text(page,
+        fitz.Rect(56, 48, width - 56, 90),
         "AI 友好型 PDF / AI-readable PDF",
-        fontname="AIUnicode",
-        fontfile=str(font_file),
+        font_file=font_file,
         fontsize=25,
         color=dark,
     )
-    page.insert_text(
-        fitz.Point(56, 108),
+    insert_cover_text(page,
+        fitz.Rect(56, 100, width - 56, 165),
         title,
-        fontname="AIUnicode",
-        fontfile=str(font_file),
+        font_file=font_file,
         fontsize=17,
         color=blue,
     )
@@ -125,11 +141,10 @@ def add_cover(
         "search and text processing, but verify ambiguous equations and diagrams against "
         "the original page image."
     )
-    page.insert_textbox(
-        fitz.Rect(56, 145, width - 56, height - 115),
+    insert_cover_text(page,
+        fitz.Rect(56, 180, width - 56, height - 180),
         body,
-        fontname="AIUnicode",
-        fontfile=str(font_file),
+        font_file=font_file,
         fontsize=11.5,
         lineheight=1.55,
         color=dark,
@@ -144,16 +159,15 @@ def add_cover(
         "说明页为新增第 1 页，因此原 PDF 第 n 页对应本文件第 n+1 页。"
     )
     page.draw_rect(
-        fitz.Rect(56, height - 105, width - 56, height - 34),
+        fitz.Rect(56, height - 155, width - 56, height - 34),
         color=(0.84, 0.87, 0.92),
         fill=(0.96, 0.97, 0.99),
         width=0.8,
     )
-    page.insert_textbox(
-        fitz.Rect(69, height - 96, width - 69, height - 41),
+    insert_cover_text(page,
+        fitz.Rect(69, height - 143, width - 69, height - 41),
         info,
-        fontname="AIUnicode",
-        fontfile=str(font_file),
+        font_file=font_file,
         fontsize=7.2,
         lineheight=1.15,
         color=muted,

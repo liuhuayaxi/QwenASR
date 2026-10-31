@@ -280,7 +280,7 @@ def _validate_body(body):
     return clean
 
 
-def prepare_document(latex_body,folder,transcript=None,images=None):
+def prepare_document(latex_body,folder,transcript=None,images=None,chapters=None):
     folder=Path(folder).resolve();clean=_validate_body(latex_body)
     if sum(match.group(1)=='CourseTitle' for match in _TOKENS.finditer(clean))!=1:raise ValueError('LaTeX 正文必须恰好包含一个 CourseTitle 标题')
     if transcript is None:
@@ -323,8 +323,18 @@ def prepare_document(latex_body,folder,transcript=None,images=None):
     patches=[]
     for match in (match for match in _TOKENS.finditer(mask) if match.group(1)=='SourceRef'):
         number,end=_argument(mask,match.end());patches.append((match.start(),end,replacements[number]))
+    if chapters:
+        from .chapters import normalize_chapters
+        labels=normalize_chapters(chapters)
+        if labels:
+            escapes={'\\':r'\textbackslash{}','{':r'\{','}':r'\}','%':r'\%','&':r'\&',
+                     '#':r'\#','_':r'\_','$':r'\$','^':r'\textasciicircum{}','~':r'\textasciitilde{}'}
+            subtitle=''.join(escapes.get(char,char) for char in '；'.join(labels))
+            title=next(match for match in _TOKENS.finditer(mask) if match.group(1)=='CourseTitle')
+            _,end=_argument(mask,title.end());_,end=_argument(mask,end)
+            patches.append((end,end,'\n'+r'\par\noindent{\large '+subtitle+r'}\par\medskip'+'\n'))
     body=latex_body
-    for start,end,replacement in reversed(patches):body=body[:start]+replacement+body[end:]
+    for start,end,replacement in sorted(patches,reverse=True):body=body[:start]+replacement+body[end:]
     template=TEMPLATE.read_text();source=template.replace('% QWENASR_BODY',body.rstrip()+'\n')
     return {'source':source,'version':VERSION,'body_sha256':hashlib.sha256(latex_body.encode()).hexdigest(),
         'source_sha256':hashlib.sha256(source.encode()).hexdigest(),'template_sha256':_sha(TEMPLATE),
@@ -357,10 +367,10 @@ def _sandbox(build,executable,toolchain):
         '(allow file-read* file-write* (literal "/dev/null"))(allow file-read* (literal "/dev/urandom"))'
 
 
-def compile_document(body,folder,outdir,*,transcript=None,images=None):
+def compile_document(body,folder,outdir,*,transcript=None,images=None,chapters=None):
     folder=Path(folder).resolve();build=Path(outdir).resolve()
     if not build.is_relative_to(folder):raise ValueError('LaTeX 编译目录必须位于本任务目录内')
-    prepared=prepare_document(body,folder,transcript,images);tools=toolchain_identity()
+    prepared=prepare_document(body,folder,transcript,images,chapters);tools=toolchain_identity()
     if sys.platform!='darwin' or not Path('/usr/bin/sandbox-exec').is_file():raise RuntimeError('当前系统缺少受控 LaTeX 文件沙箱，未放开编译')
     build.mkdir(parents=True,exist_ok=True)
     if any(path.is_symlink() for path in build.iterdir()):raise ValueError('LaTeX 编译目录含符号链接，未写入或执行')

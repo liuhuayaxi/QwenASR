@@ -59,10 +59,10 @@ export function createTranscriptView({
     return `${hours}:${minutes}:${secs}`;
   }
 
-  function showSession(session, renderSegments = false) {
+  function showSession(session, renderSegments = false, {navigate = true} = {}) {
     if (!session) return;
     followLatest = true;
-    switchView("transcript");
+    if (navigate) switchView("transcript");
     state.shownSession = session;
     els.sessionBar.classList.remove("hidden");
     const active = session.status === "active";

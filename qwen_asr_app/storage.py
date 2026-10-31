@@ -1008,6 +1008,9 @@ class RecordingRecord:
         keys = ('id', 'title', 'category', 'status', 'kind', 'started_at', 'recorded_at',
                 'ended_at', 'updated_at', 'sample_count', 'source_filename')
         result = {key: self.metadata[key] for key in keys if key in self.metadata}
+        from .chapters import labels_from_metadata
+        chapters = labels_from_metadata(self.metadata)
+        result.update(chapter='；'.join(chapters), chapters=chapters)
         note = self.metadata.get('ai_note_summary') or {}
         summary, source = self.library_summary()
         result.update(duration=round(self.duration, 1), has_note=bool(note.get('summary')),
@@ -1033,9 +1036,12 @@ class RecordingRecord:
 
     def public(self, include_segments: bool = True) -> dict[str, Any]:
         from .lesson_pdfs import lesson_pdfs
+        from .chapters import labels_from_metadata
         library_summary, summary_source = self.library_summary()
         payload = {
             **self.metadata,
+            "chapter": '；'.join(labels_from_metadata(self.metadata)),
+            "chapters": labels_from_metadata(self.metadata),
             "duration": round(self.duration, 1),
             "directory": str(self.directory),
             "note_pdfs": lesson_pdfs(self),

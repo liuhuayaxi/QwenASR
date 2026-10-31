@@ -1808,9 +1808,9 @@ async def public_config() -> dict[str, Any]:
 
 @app.get("/api/library")
 async def recording_library(request: Request = None, category: str = '', date: str = '',
-                            offset: int = 0, limit: int = 0, include_settings: bool = True, ids: str = ''):
+                            offset: int = 0, limit: int = 0, include_settings: bool = True, ids: str = '', chapter: str = ''):
     from qwen_asr_app.library_query import listing, conditional
-    if offset < 0 or not 0 <= limit <= 100 or (date and not re.fullmatch(r'\d{4}-\d{2}-\d{2}', date)):
+    if offset < 0 or not 0 <= limit <= 100 or len(chapter) > 120 or (date and not re.fullmatch(r'\d{4}-\d{2}-\d{2}', date)):
         raise HTTPException(400, '分页或日期参数无效')
     discover_courses(app_settings)
     visit = getattr(recording_store, 'iter_list_items', None) or getattr(recording_store,'iter_records',recording_store.list_records)
@@ -1833,7 +1833,7 @@ async def recording_library(request: Request = None, category: str = '', date: s
         selected_ids = set(wanted)
         records = (record for record in records if (record.get('id') if isinstance(record, dict) else record.id) in selected_ids)
     payload = {**(app_settings.public() if include_settings else {'categories': app_settings.categories}),
-               **listing(records, category, date, offset, limit)}
+               **listing(records, category, date, offset, limit, chapter)}
     # Legacy callers without pagination still get all records, as small DTOs.
     return conditional(payload, request) if request is not None else payload
 
@@ -2062,9 +2062,14 @@ async def update_recording(session_id: str, payload: dict[str, Any] = Body(...))
     title = str(payload.get("title") or record.metadata.get("title") or "").strip()
     category = str(payload.get("category") or record.metadata.get("category") or "未分类")
     try:
-        updated = recording_store.update(session_id, title, category)
+        from qwen_asr_app.chapters import normalize_chapters
+        from qwen_asr_app.chapter_routes import apply_manual_chapter
+        chapter = normalize_chapters(payload.get('chapters', payload.get('chapter'))) if ('chapters' in payload or 'chapter' in payload) else None
+        updated = recording_store.update(session_id, title, category) if ('title' in payload or 'category' in payload) else record
+        if chapter is not None:
+            apply_manual_chapter(updated, chapter)
         return {"session": updated.public(), **app_settings.public()}
-    except (ValueError, OSError) as exc:
+    except (ValueError, TypeError, OSError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
@@ -4174,6 +4179,8 @@ app.include_router(task_center_router(compact_ai_tasks, ai_task_action, course_f
 from qwen_asr_app.note_routes import note_router
 from qwen_asr_app.note_library import NoteLibrary, note_library_router
 app.include_router(note_router(recording_store, recording_operation))
+from qwen_asr_app.chapter_routes import chapter_router
+app.include_router(chapter_router(recording_store, recording_operation))
 review_library = NoteLibrary(app_settings, recording_store)
 app.include_router(note_library_router(app_settings, recording_store, library=review_library))
 drive_backup_manager = DriveBackup(app_settings, recording_store, review_library,

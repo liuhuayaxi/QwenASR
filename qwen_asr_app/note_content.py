@@ -79,6 +79,12 @@ def compose_push(record: Any, mode: str = "combined") -> dict[str, Any]:
     # Visible section boundaries survive Markdown sanitizers at the destination.
     body = [f"# {title}", f"课程：{record.metadata.get('category') or '未分类'}  \n"
             f"日期：{_date(record.metadata.get('started_at'))}  \n时长：{clock(record.duration)}"]
+    from .chapters import labels_from_metadata
+    chapters=labels_from_metadata(record.metadata)
+    if chapters:
+        # Keep it outside the AI summary section so pull round trips remain
+        # lossless; this is record metadata, not an edit to the note body.
+        body.insert(1,'章节：'+'；'.join(chapters))
     if mode != "transcript":
         # Generated summaries already contain a title and metadata. Keep the
         # original verbatim inside its section to make pull round trips lossless.

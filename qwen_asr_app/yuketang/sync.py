@@ -147,9 +147,12 @@ class ClassroomSync:
     def _stale(self, state: dict[str, Any], hours: float = RECHECK_HOURS) -> bool:
         try:
             checked = datetime.fromisoformat(str(state.get("checked_at")))
+            current = datetime.fromisoformat(str(now_iso()))
         except ValueError:
             return True
-        return datetime.now(checked.tzinfo) - checked >= timedelta(hours=hours)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=checked.tzinfo)
+        return current.astimezone(checked.tzinfo) - checked >= timedelta(hours=hours)
 
     def _images_missing(self, state: dict[str, Any]) -> bool:
         activity_id = (state.get("activity") or {}).get("id")

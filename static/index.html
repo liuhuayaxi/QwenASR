@@ -7,7 +7,7 @@
     <title>Qwen3-ASR · 本地语音工作台</title>
     <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
     <script src="/static/js/theme.js?v=20261011-ui-final"></script>
-    <link rel="stylesheet" href="/static/styles.css?v=20261016-decisions-1" />
+    <link rel="stylesheet" href="/static/styles.css?v=20261031-browser-fixes-1" />
     <link rel="stylesheet" href="/static/ui.css?v=20261011-ui-final" />
     <link rel="stylesheet" href="/static/classroom-chat.css?v=20261011-ui-final" />
     <link rel="stylesheet" href="/static/classroom-intelligence.css?v=20261014-knowledge-1" />
@@ -201,8 +201,13 @@
               <label>分类
                 <select id="libraryCategory"><option value="">全部分类</option></select>
               </label>
+              <label>章节
+                <select id="libraryChapter"><option value="">全部章节</option></select>
+              </label>
+              <button id="detectLibraryChapters" class="ghost-button" type="button">识别全部章节</button>
               <button id="refreshLibrary" class="ghost-button" type="button">刷新</button>
             </div>
+            <p id="libraryChapterStatus" role="status"></p>
             <section class="library-calendar" aria-label="录音日历热力图">
               <div class="calendar-header">
                 <div class="calendar-month-actions">
@@ -840,7 +845,14 @@
       <div class="note-dialog-header">
         <div>
           <b id="noteDialogTitle">查看笔记</b>
+          <div class="note-chapter-line"><small id="noteDialogChapter">章节待确认</small><button id="editNoteChapter" class="mini-button" type="button">编辑章节</button></div>
           <small id="noteDialogMeta"></small>
+          <form id="noteChapterEditor" class="note-chapter-editor" hidden>
+            <label for="noteChapterInput">所属章节（跨章用“；”分隔）</label>
+            <input id="noteChapterInput" class="ui-field" maxlength="500" placeholder="例如：第六章 数字基带传输系统" />
+            <div><button id="suggestNoteChapter" type="button" class="mini-button">从课件识别</button> <button id="saveNoteChapter" type="submit" class="mini-button">保存章节</button> <button id="cancelNoteChapter" type="button" class="mini-button">取消</button></div>
+            <small id="noteChapterStatus" role="status"></small>
+          </form>
         </div>
         <div class="note-header-actions"><button id="toggleNoteMobilePane" class="ghost-button note-mobile-pane-switch" type="button" aria-pressed="false">查看原文</button><button id="closeNoteDialog" class="ghost-button" type="button">关闭</button></div>
       </div>
@@ -927,6 +939,6 @@
     </dialog>
 
     <div id="toast" class="toast" role="status"></div>
-    <script src="/static/app.js?v=20261022-direct-pdf-1" type="module"></script>
+    <script src="/static/app.js?v=20261031-chapters-final-1" type="module"></script>
   </body>
 </html>

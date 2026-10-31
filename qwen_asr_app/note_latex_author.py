@@ -52,6 +52,9 @@ def strip_fence(value):
     return match[1].strip() if match else text
 
 def _binding(markdown,provenance):
+    # Chapter labels are presentation metadata. Updating a subtitle must not
+    # require a model to rewrite an unchanged, already validated LaTeX body.
+    provenance={key:value for key,value in (provenance or {}).items() if key!='chapter_labels'}
     return {'markdown_sha256':hashlib.sha256(markdown.encode()).hexdigest(),
         'provenance_sha256':hashlib.sha256(json.dumps(provenance or {},sort_keys=True,ensure_ascii=False).encode()).hexdigest()}
 

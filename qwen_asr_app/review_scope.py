@@ -14,7 +14,7 @@ import re
 from .agy_materials import request_materials, parse_json
 from .durable import atomic_json
 from .paths import PRIVATE_ROOT
-from .review_materials import digest_file, extract_image, safe_path
+from .review_materials import digest_file, extract_image, safe_path, text_only_source
 
 VERSION = 'objectives-v1'
 REVIEW_POLICY = 'visual-pages-and-originals-scope-v4'
@@ -78,6 +78,11 @@ async def prepare(package, folder, provider):
     for source in package.get('sources', []):
         if digest_file(safe_path(folder, source['path'])) != source['sha256']:
             raise ValueError('学习要求的课件原件版本已改变')
+        # Old saved packages may still contain visual discovery candidates for
+        # TXT/Markdown. Keep their native text as writing evidence, without
+        # inventing a slide image or consulting a visual-objective cache.
+        if text_only_source(source):
+            continue
         candidates = [p for p in package.get('learning_scope_candidates', []) if p.get('source_id') == source['source_id']]
         cache_path = PRIVATE_ROOT/'review-materials-cache'/VERSION/(source['sha256']+'.json')
         if cache_path.exists():

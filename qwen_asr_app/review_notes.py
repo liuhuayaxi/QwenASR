@@ -431,6 +431,7 @@ def coverage_batches(folder, source_blocks, payload_for, instructions, config):
 
 
 def validate_plan(plan, source_ids, package):
+    from .review_materials import text_only_source
     if not isinstance(plan.get('knowledge'),list):raise ValueError('本节知识清单格式无效')
     for item in plan['knowledge']:
         if item.get('kind') not in KINDS or not set(item.get('sources',[])).issubset(source_ids):raise ValueError('知识清单来源或新旧分类无效')
@@ -438,6 +439,7 @@ def validate_plan(plan, source_ids, package):
     for request in plan.get('figures',[]):
         source=next((s for s in package['sources'] if s['source_id']==request.get('source_id')),None)
         if not source or type(request.get('page')) is not int or not 1<=request['page']<=len(source['pages']):raise ValueError('选图请求来源或页码无效')
+        if text_only_source(source):raise ValueError('纯文本资料没有原始页图，请将其内容作为文字证据，不要选择为配图')
     review_scope.validate_plan(plan,source_ids,package.get('learning_scope',{}),package.get('_scope_transcript_blocks',[]))
     return plan
 
@@ -929,6 +931,12 @@ async def generate(record, config):
     try:
         stage(record,task,folder,'匹配课件',status='running')
         package=await owned_thread(collect,record,folder,selection)
+        from .chapters import infer_chapters, labels_from_metadata
+        if (record.metadata.get('chapter_info') or {}).get('source') != 'manual':
+            chapter_fields = infer_chapters(package, record.metadata)
+            if chapter_fields['chapters']:
+                record.metadata.update(chapter_fields)
+                record.save_metadata()
         if package.get('material_selection'):
             task['material_selection']=package['material_selection']
             stage(record,task,folder,'匹配课件')
@@ -953,6 +961,7 @@ async def generate(record, config):
         # The fingerprint above stays bound to the historical layout key so
         # resumed tasks keep their finished steps; the PDF engine is chosen here.
         provenance={**material_version,'layout_engine':AI_LATEX_ENGINE if ai_latex_enabled(config) else DIRECT_PDF_ENGINE}
+        if labels_from_metadata(record.metadata):provenance['chapter_labels']=labels_from_metadata(record.metadata)
         stage(record,task,folder,'识别本节新内容')
         plan_path=folder/'coverage.json'
         if plan_path.exists():plan=json.loads(plan_path.read_text())
@@ -1287,6 +1296,8 @@ async def upgrade_pdf(record, config):
     if scope.get('enabled') and not note.get('material_version',{}).get('learning_scope',{}).get('enabled'):
         raise ValueError('此光电子学旧笔记尚未按原课件学习要求区分掌握与了解，请重新生成范围修订候选；原正文已保留')
     note['material_version']={**(note.get('material_version') or {}),'layout_engine':AI_LATEX_ENGINE if ai_latex_enabled(config) else DIRECT_PDF_ENGINE}
+    from .note_pdf import chapter_provenance
+    note['material_version']=chapter_provenance(note['material_version'],record.metadata)
     images=json.loads((folder/'images.json').read_text()) if (folder/'images.json').exists() else []
     task_path=folder/'task.json';task=json.loads(task_path.read_text()) if task_path.exists() else None
     for repair_round in range(3):

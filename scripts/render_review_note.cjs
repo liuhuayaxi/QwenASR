@@ -18,6 +18,7 @@ async function main(){
     @page{size:A4}*{box-sizing:border-box}body{font-family:"PingFang SC","Microsoft YaHei","Noto Sans CJK SC",sans-serif;color:#172438;font-size:11pt;line-height:1.75;overflow-wrap:anywhere}
     h1{font-size:23pt;line-height:1.35;color:#183f63}h2{font-size:16pt;color:#1c5275;border-bottom:1px solid #b7cbd7;padding-bottom:5pt;margin-top:20pt}h3{font-size:13pt;color:#254f69;margin-top:15pt}h1,h2,h3,h4{break-after:avoid}p{orphans:3;widows:3}img{display:block;max-width:100%;max-height:175mm;object-fit:contain;margin:10pt auto 3pt}figure{break-inside:avoid;margin:12pt 0}figcaption{font-size:9pt;color:#42586a;line-height:1.5}table{border-collapse:collapse;width:100%;font-size:9pt}th,td{border:1px solid #bfcbd4;padding:5pt;vertical-align:top}thead{display:table-header-group}tr{break-inside:avoid}blockquote{border-left:3pt solid #7197b1;margin:10pt 0;padding:6pt 12pt;background:#f2f6fa}a{color:#315b79;text-decoration:none}.katex-display{overflow:visible;font-size:.95em}pre{white-space:pre-wrap;font-size:9pt}code{font-size:.9em}hr{border:0;border-top:1px solid #ddd}
     body{line-break:strict}p{break-inside:avoid}.lesson-time-range{break-after:avoid}a[href^="#source-"]{white-space:nowrap}li{break-inside:avoid}li>ul,li>ol{break-before:avoid}figure img{max-height:130mm}figcaption p{margin:3pt 0}figcaption ul,figcaption ol{margin:3pt 0;padding-left:17pt}figcaption li{break-inside:avoid}p:has(+figure){break-after:avoid}
+    .note-chapter-subtitle{font-size:13pt;line-height:1.6;color:#415b70;margin-top:-7pt;margin-bottom:16pt;break-after:avoid}
     </style><script src="/static/vendor/katex/katex.min.js"></script><main id="note"></main><script type="module">import {renderMarkdown} from '/static/js/markdown-reader.js';window.renderNote=renderMarkdown;</script></html>`});
    const rel=decodeURIComponent(url.pathname).slice(1);
    if(!rel.startsWith('static/vendor/')&&rel!=='static/js/markdown-reader.js')return route.abort();
@@ -57,6 +58,13 @@ async function main(){
     }
    }
   },request.markdown);
+  await page.evaluate(chapters=>{
+   if(!Array.isArray(chapters)||!chapters.length)return;
+   const subtitle=document.createElement('p');subtitle.className='note-chapter-subtitle';
+   subtitle.textContent=chapters.join('；');
+   const title=document.querySelector('#note h1');
+   if(title)title.after(subtitle);else document.querySelector('#note').prepend(subtitle);
+  },request.chapters||[]);
   await page.evaluate(async()=>{await document.fonts.ready;await Promise.all([...document.images].map(im=>im.decode()));});
   const problems=await page.evaluate(()=>({math:document.querySelectorAll('.katex-error').length,broken:[...document.images].filter(i=>!i.naturalWidth).length,images:document.images.length,
    captionBlockquotes:document.querySelectorAll('figcaption > blockquote').length,

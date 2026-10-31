@@ -76,7 +76,13 @@ export function leadingTask(group) {
 }
 
 export function taskProgressView(task) {
-  const stage=String(task.stage || task.phase || '');
+  const rawStage=String(task.stage || task.phase || '');
+  const stage=task.type === 'knowledge_index' ? ({
+    waiting_asr:'等待本机转写完成后建立知识索引',
+    queued:'等待建立知识索引', indexing:'正在建立课程知识索引',
+    completed:'课程知识索引已完成', failed:'课程知识索引失败',
+    cancelled:'知识索引已取消', interrupted:'知识索引已中断',
+  }[rawStage] || rawStage) : rawStage;
   const done=task.status==='completed' || task.recovered;
   if (task.attention_kind==='auto_review' || (task.type==='refinement' && stage.startsWith('AI 自动复核'))) {
     return {label:stage || 'AI 自动复核',count:task.verification?.total?`已复核 ${task.verification.completed || 0}/${task.verification.total} 条修改`:`剩余 ${task.review_required_blocks || 0} 条修改`,detail:'AI 逐项检查改动；无法确认时保留原文，无需逐条确认',percent:null};

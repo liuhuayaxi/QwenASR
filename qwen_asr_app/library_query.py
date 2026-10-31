@@ -1,6 +1,7 @@
 """Small list DTOs, server-side filters and conditional responses."""
 import hashlib
 import json
+import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from fastapi.responses import Response
@@ -24,8 +25,9 @@ def day_key(record):
         return ''
 
 
-def listing(records, category='', date='', offset=0, limit=0):
-    counts = {};calendar={};selected=[]
+def listing(records, category='', date='', offset=0, limit=0, chapter=''):
+    from .chapters import labels_from_metadata
+    counts = {};calendar={};selected=[];chapter_counts={}
     for record in records:
         metadata = record if isinstance(record, dict) else record.metadata
         has_note = bool(metadata.get('has_note')) if isinstance(record, dict) else bool((metadata.get('ai_note_summary') or {}).get('summary'))
@@ -34,6 +36,12 @@ def listing(records, category='', date='', offset=0, limit=0):
         item['records'] += 1
         item['notes'] += has_note
         if category and metadata.get('category')!=category:continue
+        chapters = labels_from_metadata(metadata)
+        for label in chapters or ['__unassigned__']:
+            group = chapter_counts.setdefault(label, {'chapter': label, 'records': 0, 'notes': 0})
+            group['records'] += 1
+            group['notes'] += has_note
+        if chapter and (bool(chapters) if chapter == '__unassigned__' else chapter not in chapters):continue
         day = day_key(record)
         if day:
             item = calendar.setdefault(day, {'count': 0, 'duration': 0})
@@ -47,4 +55,7 @@ def listing(records, category='', date='', offset=0, limit=0):
     return {'records': [row[1] for row in page], 'total': total,
             'offset': offset, 'limit': limit, 'next_offset': offset + len(page) if offset + len(page) < total else None,
             'course_counts': counts, 'calendar': calendar,
+            'chapter_counts': sorted(chapter_counts.values(), key=lambda item: (
+                item['chapter']=='__unassigned__', tuple((0,int(part)) if part.isdigit() else (1,part.casefold())
+                    for part in re.split(r'(\d+)',item['chapter'])))),
             'note_count': sum(row[2] for row in selected)}

@@ -188,3 +188,4 @@ html:is(.note-reader-mode, .note-reader-open) body > :not(dialog):not(#toast) { 
   :is(.note-reader-mode, .note-reader-open) .markdown-toolbar > button { flex-shrink: 0; }
   :is(.note-reader-mode, .note-reader-open) .markdown-toolbar > span { display: none; }
 }
+.workspace-record-chapter{display:block;font-size:13px;line-height:1.6;color:var(--muted);overflow-wrap:anywhere}
