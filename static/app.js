@@ -1256,6 +1256,7 @@ async function generateLibrarySummary(record, card = null, promptOverrides = {})
         abstract_system_prompt: abstractPrompt,
         title_prompt: els.titlePrompt.value.trim(),
         custom_prompt: promptOverrides.customPrompt || "",
+        material_coverage: promptOverrides.completeMaterials ? 'selected_files' : 'lesson',
       }),
     });
     const accepted = await response.json();
@@ -1329,6 +1330,7 @@ function openRegenerateSummary(record) {
   els.summarySystemPrompt.value = els.summarySystemPrompt.value.trim() || DEFAULT_NOTE_SUMMARY_PROMPT;
   els.abstractPrompt.value = els.abstractPrompt.value.trim() || DEFAULT_NOTE_ABSTRACT_PROMPT;
   els.summaryCustomPrompt.value = "";
+  $('#summaryCompleteMaterials').checked = false;
   if (!els.regenerateSummaryDialog.open) els.regenerateSummaryDialog.showModal();
 }
 
@@ -2609,6 +2611,7 @@ els.confirmRegenerateSummary.addEventListener("click", async () => {
   const result = await generateLibrarySummary(record, null, {
     systemPrompt,
     customPrompt: els.summaryCustomPrompt.value.trim(),
+    completeMaterials: $('#summaryCompleteMaterials').checked,
     button: els.confirmRegenerateSummary,
   });
   if (result) {

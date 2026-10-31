@@ -1624,6 +1624,7 @@ async def ai_task_action(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
         summary_payload = {
             "config": config,
             "custom_prompt": (record.metadata.get('summary_job') or {}).get('custom_prompt', ''),
+            "material_coverage": (record.metadata.get('summary_job') or {}).get('material_coverage', 'lesson'),
             "_resume_abstract": resume_abstract,
             "_pdf_only": (record.metadata.get('summary_job') or {}).get('resume_stage') == 'pdf',
             "summary_system_prompt": config.get("_note_summary_system_prompt") or DEFAULT_NOTE_SUMMARY_PROMPT,
@@ -2150,6 +2151,12 @@ async def generate_library_summary(
     config["_note_summary_custom_prompt"] = str(
         payload.get("custom_prompt") or ""
     ).strip()[:20_000]
+    coverage = payload.get('material_coverage', 'lesson')
+    if coverage not in {'lesson', 'selected_files'}:
+        raise HTTPException(400, '课件覆盖范围无效')
+    if coverage == 'selected_files' and not record.metadata.get('review_material_ids'):
+        raise HTTPException(400, '请先通过“补选本节课件”选择需要完整覆盖的课件')
+    config['_note_material_coverage'] = coverage
     config["_note_abstract_system_prompt"] = str(
         config.get("_note_abstract_system_prompt") or DEFAULT_NOTE_ABSTRACT_PROMPT
     ).strip()[:20_000]
@@ -2274,6 +2281,7 @@ def start_summary_job(record: RecordingRecord, payload: dict[str, Any], *, autom
         "previous_error": previous_error,
         "checkpoint": copy.deepcopy(previous.get('checkpoint') or {}),
         "custom_prompt": str(payload.get('custom_prompt') or '')[:20_000],
+        "material_coverage": payload.get('material_coverage', 'lesson'),
         "waiting_for": "correction" if dependency else "",
     }
     record.save_metadata()

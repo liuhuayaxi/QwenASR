@@ -830,7 +830,7 @@
         <button id="closeRegenerateSummary" class="ghost-button" type="button">取消</button>
       </div>
       <div class="summary-prompt-body">
-
+        <label><input id="summaryCompleteMaterials" type="checkbox" />完整覆盖所选课件（用于补齐缺失录音；请先补选本节课件）</label>
         <label>
           <span>本次附加提示词 </span>
           <textarea class="ui-field" id="summaryCustomPrompt" rows="5" placeholder="例如：重点整理第三章公式，并补充容易混淆的概念对比。"></textarea>
@@ -939,6 +939,6 @@
     </dialog>
 
     <div id="toast" class="toast" role="status"></div>
-    <script src="/static/app.js?v=20261031-chapters-final-1" type="module"></script>
+    <script src="/static/app.js?v=20261031-complete-chapter-1" type="module"></script>
   </body>
 </html>

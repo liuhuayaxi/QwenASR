@@ -102,6 +102,14 @@ def ai_latex_enabled(config):
     return (config or {}).get('note_ai_latex_enabled') is True
 
 
+def edited_note_pdf_engine(note, config):
+    # The fast note pipeline intentionally produces a direct PDF. Exporting
+    # an edit must retain that layout instead of starting an AI rewrite.
+    if str(note.get('pipeline') or '').startswith('fast-one-turn-'):
+        return DIRECT_PDF_ENGINE
+    return AI_LATEX_ENGINE if ai_latex_enabled(config) else DIRECT_PDF_ENGINE
+
+
 async def export_note_pdf(markdown,folder,provenance,config,ledger,package,images,*,feedback=None):
     """((pdf, export), latex_manifest). Default: deterministic Markdown → HTML
     (vendored KaTeX, local figures, CJK fonts) → headless Chromium PDF, no AI.
@@ -1295,13 +1303,13 @@ async def upgrade_pdf(record, config):
     package['learning_scope']=scope
     if scope.get('enabled') and not note.get('material_version',{}).get('learning_scope',{}).get('enabled'):
         raise ValueError('此光电子学旧笔记尚未按原课件学习要求区分掌握与了解，请重新生成范围修订候选；原正文已保留')
-    note['material_version']={**(note.get('material_version') or {}),'layout_engine':AI_LATEX_ENGINE if ai_latex_enabled(config) else DIRECT_PDF_ENGINE}
+    note['material_version']={**(note.get('material_version') or {}),'layout_engine':edited_note_pdf_engine(note,config)}
     from .note_pdf import chapter_provenance
     note['material_version']=chapter_provenance(note['material_version'],record.metadata)
     images=json.loads((folder/'images.json').read_text()) if (folder/'images.json').exists() else []
     task_path=folder/'task.json';task=json.loads(task_path.read_text()) if task_path.exists() else None
     for repair_round in range(3):
-        if task:stage(record,task,folder,'LaTeX 排版' if ai_latex_enabled(config) else '生成 PDF',status='running')
+        if task:stage(record,task,folder,'LaTeX 排版' if note['material_version']['layout_engine']==AI_LATEX_ENGINE else '生成 PDF',status='running')
         (pdf,export),latex_manifest=await export_note_pdf(note['summary'],folder,note['material_version'],config,ledger,package,images)
         writers=latex_manifest.get('writer_session_ids') or ([latex_manifest['writer_session_id']] if latex_manifest.get('writer_session_id') else [])
         if config.get('note_review_enabled') is not True:

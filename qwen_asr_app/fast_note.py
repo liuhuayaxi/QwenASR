@@ -41,9 +41,9 @@ def abstract_from(markdown: str) -> str:
     return ''
 
 
-def _pages(package):
+def _pages(package, *, complete=False):
     out = []
-    pages = package.get('relevant_pages') or [
+    pages = ([] if complete else package.get('relevant_pages')) or [
         # Without a transcript nothing is ranked: offer the lesson's own course
         # pages so the writer can still pick figures.
         {'source_id': s['source_id'], **p} for s in package.get('sources', []) for p in s.get('pages', [])]
@@ -51,7 +51,7 @@ def _pages(package):
         if (page.get('yuketang') or {}).get('missing_slide'):
             continue
         text = re.sub(r'\[\[AI_TRANSCRIPT_PAGE:\d+\]\]|SOURCE_PDF_PAGE: \d+', '', str(page.get('text') or '')).strip()
-        out.append({'source_id': page['source_id'], 'page': int(page['page']), 'text': text[:MAX_PAGE_CHARS],
+        out.append({'source_id': page['source_id'], 'page': int(page['page']), 'text': text if complete else text[:MAX_PAGE_CHARS],
                     **({'page_kind':'exercise', 'answer_authority':'personal_selection_is_not_an_answer'}
                        if (page.get('yuketang') or {}).get('student_selection') else {})})
     return out
@@ -68,7 +68,8 @@ def generation_identity(record, blocks, questions, selection, corpus, config):
                        key=lambda s:s['id'])
     values = [VERSION, note_prompts.fingerprint(), scope_version, image_policy,
               record.id, blocks, questions, selection, materials,
-              config.get('_note_summary_system_prompt'), config.get('_note_summary_custom_prompt')]
+              config.get('_note_summary_system_prompt'), config.get('_note_summary_custom_prompt'),
+              config.get('_note_material_coverage', 'lesson')]
     return hashlib.sha256(json.dumps(values,sort_keys=True,ensure_ascii=False,default=str).encode()).hexdigest()[:24]
 
 
@@ -163,8 +164,17 @@ async def generate_fast(record, config):
         custom = '\n'.join(x for x in (saved if saved.strip() != DEFAULT_NOTE_SUMMARY_PROMPT.strip() else '',
                                         str(config.get('_note_summary_custom_prompt') or '')) if x.strip())
         instructions = note_prompts.compose(found, custom)
-        payload = {'transcript': source_blocks, 'source_pages': _pages(package),
+        complete_materials = config.get('_note_material_coverage') == 'selected_files'
+        if complete_materials:
+            instructions += ('\n本次用户明确要求完整覆盖所选课件，录音存在缺失。本次范围是所选课件的全部页面与整个章节；'
+                             '取消“只写本节录音讲到的内容、未讲到的后续不展开”的范围限制，仍按掌握/理解/了解控制深度。'
+                             '完整讲解所有课件小节并逐题回答课件末尾习题；以“课件补充·原课件第X页”标明录音缺失部分，'
+                             '只在真实转写支持时引用课堂时间和老师强调，不为课件补充编造时间或教师原话。')
+        payload = {'transcript': source_blocks, 'source_pages': _pages(package, complete=complete_materials),
                    'course': package.get('category'), 'lesson_title': (package.get('material_selection') or {}).get('lesson_title', '')}
+        task['material_coverage'] = 'selected_files' if complete_materials else 'lesson'
+        task['material_page_manifest'] = [{'source_id': p['source_id'], 'page': p['page']} for p in payload['source_pages']]
+        atomic_json(task_path, task)
         if found['learning_requirements']:
             payload['learning_requirements'] = note_prompts.requirement_items(scope)
         if questions:
@@ -233,6 +243,9 @@ async def generate_fast(record, config):
     provenance = {'layout_engine': 'chromium-markdown-katex-v1', 'pipeline': VERSION,
                   'course_files': {s['source_id']: s['sha256'] for s in package['sources']},
                   **({'learning_scope': {'enabled': True, 'sha256': review_scope.scope_hash(scope), 'version': review_scope.VERSION}} if scope.get('enabled') else {})}
+    from .note_pdf import chapter_provenance
+    provenance = chapter_provenance(provenance, record.metadata)
+    provenance['material_coverage'] = config.get('_note_material_coverage', 'lesson')
     try:
         pdf, export = await asyncio.to_thread(export_pdf, markdown, folder, provenance)
         report = disabled_review(pdf, export, folder)
