@@ -59,7 +59,7 @@ def format_clock(seconds: float) -> str:
 
 def safe_component(value: str, fallback: str) -> str:
     """Return a readable, filesystem-safe folder component without allowing traversal."""
-    cleaned = re.sub(r"[\x00-\x1f/:]", "-", str(value or "").strip())
+    cleaned = re.sub(r"[\x00-\x1f/:\\]", "-", str(value or "").strip())
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
     if not cleaned or cleaned in {".", ".."}:
         cleaned = fallback
