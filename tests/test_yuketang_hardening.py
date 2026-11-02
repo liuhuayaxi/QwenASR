@@ -173,6 +173,12 @@ class ImportAndClientTests(unittest.TestCase):
         self.assertEqual(session.download('https://a.yuketang.cn/image.png'), png())
         response.dispose.assert_called_once()
 
+    def test_stale_accepts_legacy_naive_timestamp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        runner = ClassroomSync(FakeSession(), BankStore(Path(temp.name)), '1')
+        self.assertTrue(runner._stale({'checked_at': '2026-10-01T12:00:00'}, hours=0.1))
+
     def test_incomplete_pagination_is_an_error(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)

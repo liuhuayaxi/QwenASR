@@ -155,6 +155,9 @@ class ClassroomSync:
             current = datetime.fromisoformat(str(now_iso()))
         except ValueError:
             return True
+        local_tz = datetime.now().astimezone().tzinfo
+        if checked.tzinfo is None:
+            checked = checked.replace(tzinfo=local_tz)
         if current.tzinfo is None:
             current = current.replace(tzinfo=checked.tzinfo)
         return current.astimezone(checked.tzinfo) - checked >= timedelta(hours=hours)
