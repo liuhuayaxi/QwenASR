@@ -302,6 +302,47 @@ class SyncTests(unittest.TestCase):
         with self.assertRaises(SyncAborted):
             self.run_sync(FakeSession(), should_stop=lambda: True)
 
+    def test_live_lesson_is_pending_instead_of_failed(self):
+        activity = {"id": "live", "type": 14, "courseware_id": "1800000000000000000",
+                    "title": "正在进行的课堂", "is_finished": False}
+
+        class LiveLesson(FakeSession):
+            def get_json(self, url, headers=None):
+                if url.endswith("/student/lesson-info?lesson_id=1800000000000000000"):
+                    return {"code": 50030, "msg": "LESSON_ON", "data": None}
+                if url.endswith("/student/detail?lesson_id=1800000000000000000"):
+                    raise RuntimeError("雨课堂接口 HTTP 500：/api/v3/classroom-report/student/detail")
+                return super().get_json(url, headers)
+
+        runner = ClassroomSync(LiveLesson(), self.store, "26260946")
+        status, count, extra = runner.import_lesson(activity)
+        self.assertEqual((status, count), ("pending", 0))
+        self.assertIn("正在进行", extra["reason"])
+        self.assertEqual(extra["retry_policy"], "lesson_end")
+        self.assertTrue(runner.needs_import({"parser_version": parsing.PARSER_VERSION,
+                                              "status": "pending", "retry_policy": "lesson_end",
+                                              "fingerprint": "same"}, "same"))
+        self.assertFalse(any("/student/detail" in url for url in runner.session.calls))
+
+    def test_subjective_question_survives_missing_answer_report_with_empty_answer(self):
+        activity = activities()["34996679"]
+
+        class MissingAnswer(FakeSession):
+            def get_json(self, url, headers=None):
+                if "/problem/student-answer" in url:
+                    raise RuntimeError("雨课堂接口 HTTP 500：/api/v3/classroom-report/problem/student-answer")
+                return super().get_json(url, headers)
+
+        runner = ClassroomSync(MissingAnswer(), self.store, "26549233")
+        status, count, extra = runner.import_lesson(activity)
+        self.assertEqual((status, count), ("ungraded", 2))
+        self.assertIn("空答案", extra["reason"])
+        questions = self.store.activity_questions("26549233", activity["id"])
+        self.assertEqual(len(questions), 2)
+        self.assertTrue(all(q["problem_type"] == "subjective" for q in questions))
+        self.assertTrue(all(q["answer"] == [] and not q["answer_known"] for q in questions))
+        self.assertTrue(all(q["student_answer"] for q in questions))
+
 
 class VisionTests(unittest.IsolatedAsyncioTestCase):
     async def test_transcription_is_cached_and_resumable(self):

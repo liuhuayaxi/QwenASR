@@ -133,6 +133,11 @@ class ClassroomSync:
     def needs_import(self, state: dict[str, Any], fingerprint: str) -> bool:
         if state.get('parser_version') != parsing.PARSER_VERSION:
             return True
+        # A live lesson has no report until it ends.  It is safe to retry this
+        # marker on every explicit sync, unlike ordinary unpublished answers
+        # which are deliberately rechecked at a low frequency.
+        if state.get("retry_policy") == "lesson_end":
+            return True
         if not state or state.get("fingerprint") != fingerprint or state.get("status") != "complete":
             if state.get("status") in {"pending", "ungraded"} and state.get("fingerprint") == fingerprint:
                 return self._stale(state)
@@ -335,23 +340,63 @@ class ClassroomSync:
     def import_lesson(self, activity: dict[str, Any]) -> tuple[str, int, dict[str, Any]]:
         aid, lesson_id = activity.get("id"), activity.get("courseware_id")
         info = self.get(f"/api/v3/classroom-report/student/lesson-info?lesson_id={lesson_id}")
-        detail = self.get(f"/api/v3/classroom-report/student/detail?lesson_id={lesson_id}")
         self.store.save_raw(self.cid, aid, "lesson_info", info)
+
+        # A lesson that is still live has no student report yet.  Yuketang
+        # reports this as the business response ``50030 / LESSON_ON`` and the
+        # detail endpoint follows it with a plain HTTP 500.  Treat it as a
+        # retryable pending activity instead of a broken sync; after the lesson
+        # ends the same read-only endpoints expose the full problem list.
+        info_code = info.get("code") if isinstance(info, dict) else None
+        info_message = (str((info or {}).get("msg") or (info or {}).get("errmsg") or "")
+                        if isinstance(info, dict) else "")
+        if str(info_code) == "50030" or info_message.upper().startswith("LESSON_ON"):
+            return "pending", 0, {"reason": "课堂正在进行，雨课堂报告尚未生成，结束后会自动重试",
+                                   "retry_policy": "lesson_end"}
+
+        try:
+            detail = self.get(f"/api/v3/classroom-report/student/detail?lesson_id={lesson_id}")
+        except (LoginRequired, SyncAborted):
+            raise
+        except RuntimeError as exc:
+            # Some deployments return code 0 from lesson-info for a short
+            # interval before the report is ready, then answer detail with a
+            # plain HTTP 500.  The activity flag lets us classify that same
+            # transient state without masking a finished-lesson failure.
+            if activity.get("is_finished") is False and "HTTP 500" in str(exc):
+                return "pending", 0, {"reason": "课堂正在进行，雨课堂报告尚未生成，结束后会自动重试",
+                                       "retry_policy": "lesson_end"}
+            raise
         self.store.save_raw(self.cid, aid, "student_detail", detail)
         identity = parsing.lesson_identity(info)
         if not identity and parsing.lesson_problems(detail):
             raise RuntimeError("课堂题目缺少读取身份，保留上次成功同步的题目")
         answers = {}
+        answer_errors = 0
+        answer_attempted = set()
         for item in parsing.lesson_problems(detail):
             pid = str(item.get("problemId") or "")
-            if not pid or pid in answers or not identity:
+            if not pid or pid in answer_attempted or not identity:
                 continue
+            answer_attempted.add(pid)
             self.check_stop()
-            payload = self.get(f"/api/v3/classroom-report/problem/student-answer?identityId={identity}"
-                               f"&problemId={pid}&lesson_id={lesson_id}")
-            self.store.save_raw(self.cid, aid, f"student_answer_{pid}", payload)
-            parsing.body_data(payload)
-            answers[pid] = payload
+            try:
+                payload = self.get(f"/api/v3/classroom-report/problem/student-answer?identityId={identity}"
+                                   f"&problemId={pid}&lesson_id={lesson_id}")
+                self.store.save_raw(self.cid, aid, f"student_answer_{pid}", payload)
+                parsing.body_data(payload)
+                answers[pid] = payload
+            except (LoginRequired, SyncAborted):
+                raise
+            except Exception as exc:
+                # The per-problem report is not available until a teacher has
+                # graded a subjective answer on some lesson variants.  The
+                # detail list still carries the problem id, type, score limit,
+                # student response and cover image, so keep that question and
+                # let the parser represent the official answer as empty.
+                answer_errors += 1
+                self.store.save_raw(self.cid, aid, f"student_answer_{pid}",
+                                    {"error": safe_error(exc), "available": False})
         questions = parsing.parse_lesson(activity, self.cid, detail, answers, info)
         count = self.save(activity, questions)
         ungraded = any(not q.get("graded") for q in questions)
@@ -361,7 +406,12 @@ class ClassroomSync:
         except (TypeError, ValueError):
             pass
         if ungraded and recent:
-            return "ungraded", count, {"reason": "主观题尚未批改，近期会再次核对得分"}
+            reason = "主观题尚未批改，近期会再次核对得分"
+            if answer_errors:
+                reason += f"；{answer_errors} 道题暂未返回答案，已先保存空答案"
+            return "ungraded", count, {"reason": reason}
+        if answer_errors:
+            return "pending", count, {"reason": f"{answer_errors} 道题暂未返回批改/答案，已先保存空答案"}
         return "complete", count, {}
 
     def import_cards(self, activity: dict[str, Any]) -> tuple[str, int, dict[str, Any]]:
