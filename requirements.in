@@ -14,3 +14,4 @@ cryptography>=50,<51
 pymupdf>=1.26,<2
 fonttools>=4.55,<5
 pillow>=11,<13
+psutil>=7,<8
