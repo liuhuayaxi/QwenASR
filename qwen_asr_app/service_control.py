@@ -4,6 +4,7 @@ import fcntl
 import json
 import os
 import signal
+import shlex
 import subprocess
 import sys
 import time
@@ -86,6 +87,46 @@ def process_snapshot():
     return rows
 
 
+def _owned_command(command):
+    """Match the service argv semantically across ps implementations."""
+    try:
+        argv = shlex.split(str(command or ""))
+    except ValueError:
+        return False
+    if not argv:
+        return False
+    expected_exec = os.path.realpath(sys.executable)
+    actual_exec = os.path.realpath(argv[0])
+    if actual_exec != expected_exec and os.path.basename(actual_exec) != os.path.basename(expected_exec):
+        return False
+    try:
+        module_index = argv.index("-m")
+        module = argv[module_index + 1]
+    except (ValueError, IndexError):
+        return False
+    if module not in {"uvicorn", "qwen_asr_app.server"}:
+        return False
+    if module_index + 2 >= len(argv) or argv[module_index + 2] != "app:app":
+        return False
+    options = {}
+    tail = argv[module_index + 3:]
+    index = 0
+    while index < len(tail):
+        item = tail[index]
+        if item in {"--host", "--port"}:
+            if index + 1 >= len(tail):
+                return False
+            options[item] = tail[index + 1]
+            index += 2
+            continue
+        if item.startswith("--host="):
+            options["--host"] = item.split("=", 1)[1]
+        elif item.startswith("--port="):
+            options["--port"] = item.split("=", 1)[1]
+        index += 1
+    return options.get("--host") == "127.0.0.1" and options.get("--port") == str(PORT)
+
+
 def owned_process(saved, snapshot):
     pid, token = saved.get('pid'), saved.get('token')
     row = snapshot.get(pid)
@@ -93,9 +134,7 @@ def owned_process(saved, snapshot):
         return False
     if not token or (saved.get('started') and saved['started'] != row['started']):
         raise RuntimeError('服务进程标识已变化，已拒绝停止其他程序')
-    expected = [f'{sys.executable} -m {module} app:app --host 127.0.0.1 --port {PORT}'
-                for module in ('uvicorn', 'qwen_asr_app.server')]
-    if not any(row['command'] == prefix or row['command'].startswith(prefix + ' ') for prefix in expected):
+    if not _owned_command(row['command']):
         raise RuntimeError('服务进程路径不匹配，已拒绝停止其他程序')
     # Check the launch token without printing environment variables or secrets.
     environment = subprocess.check_output(
@@ -103,7 +142,6 @@ def owned_process(saved, snapshot):
     if f'QWEN_ASR_INSTANCE={token}' not in environment.split():
         raise RuntimeError('服务启动标识不匹配，已拒绝停止未知进程')
     return True
-
 
 def terminate_processes(roots, snapshot, grace_seconds=2):
     """Stop owned roots and their children, including detached worker sessions."""
