@@ -261,12 +261,16 @@ def install(app):
         if len(raw)>20*1024*1024:raise HTTPException(413,'INPUT_TOO_LARGE')
         try:payload=json.loads(raw)
         except ValueError:raise HTTPException(400,'INVALID_JSON') from None
+        if not isinstance(payload,dict):raise HTTPException(400,'INVALID_JSON_OBJECT')
         if payload.get('kind') not in {'asr','embedding','rerank'}:raise HTTPException(400,'UNSUPPORTED_COMPUTE')
         return {'ok':True,'data':await compute().run(payload)}
 
     @app.post('/v1/classroom/end')
     async def end(request:Request):
-        raw=await request.body();payload=json.loads(raw) if raw else {}
+        raw=await request.body()
+        try:payload=json.loads(raw) if raw else {}
+        except ValueError:raise HTTPException(400,'INVALID_JSON') from None
+        if not isinstance(payload,dict):raise HTTPException(400,'INVALID_JSON_OBJECT')
         service=compute()
         if payload.get('session_id'):service.sessions.pop(payload['session_id'],None)
         if service.sessions:return {'ok':True,'data':{'released':False,'other_sessions':len(service.sessions)}}
@@ -293,7 +297,9 @@ def install(app):
         raw=await request.body()
         if len(raw)>16*1024*1024:raise HTTPException(413,'INPUT_TOO_LARGE')
         try:
-            payload=json.loads(raw);store=compute().replica
+            payload=json.loads(raw)
+            if not isinstance(payload,dict):raise ValueError('INVALID_VECTOR_REQUEST')
+            store=compute().replica
             if action=='manifest':value={'versions':await asyncio.to_thread(store.manifest,payload['course_id'],payload['contract'])}
             elif action=='sync':value=await asyncio.to_thread(store.sync,payload)
             elif action=='search':value=await asyncio.to_thread(store.search,payload)

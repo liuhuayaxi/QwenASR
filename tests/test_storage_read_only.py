@@ -55,6 +55,13 @@ class ReadOnlyStoreTests(unittest.TestCase):
         record.save_all()
         return record
 
+
+    def test_safe_component_rejects_windows_path_separators(self):
+        value = storage.safe_component(r"..\\secret", "fallback")
+        self.assertNotIn("\\", value)
+        self.assertNotIn("/", value)
+        self.assertNotEqual(value, "..")
+
     def test_constructor_and_list_queries_do_not_rewrite_running_records(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
