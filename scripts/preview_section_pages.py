@@ -52,11 +52,12 @@ PAGE = """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta na
 <body><main style="max-width:860px;margin:auto;padding:1rem"><p>只读预览：__TITLE__</p><nav id="toc" class="note-toc"></nav>
 <textarea id="source" hidden></textarea><div id="reader" class="note-summary-reader"></div></main>
 <script type="module">
-import { createMarkdownReader } from "/static/js/markdown-reader.js?v=20261108-ppt-1";
+import { createMarkdownReader } from "/static/js/markdown-reader.js?v=20261108-ppt-2";
 const id = __ID__;
 const source = document.getElementById("source");
 source.value = __MARKDOWN__;
 const reader = createMarkdownReader({ container: document.getElementById("reader"), source, toc: document.getElementById("toc"), onChange() {} });
+document.getElementById("reader").dataset.pptLinks = "pending";
 const links = await fetch(`/api/section-page-links/${id}`).then(r => r.json());
 reader.setPageLinks({ ...links, recording: id }); reader.render();
 window.__links = links;

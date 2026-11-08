@@ -5,34 +5,42 @@
 //    each page is one small image file (+ optional tiny preview), no PDF.js.
 // All pages are laid out as fixed-size placeholders; only pages near the
 // viewport get a canvas (IntersectionObserver), far ones are released again.
-// Loading is page-at-a-time: streaming is off (it would pull the whole file),
-// the target page renders first and neighbours wait in a one-at-a-time queue.
+// Loading is page-at-a-time for a PDF (streaming is off: it would pull the
+// whole file). Page images are different: the target page is requested from
+// the URL before this module loads, a viewport page starts immediately, and
+// only a short run of neighbours is fetched ahead so a later jump is not stuck
+// behind a deck-wide download.
 const MAX_PIXELS = 16e6;   // per-canvas backing-store cap
 const MAX_WIDTH = 960;     // CSS px of a page at "fit width" on large screens
 const GAP = 14;            // CSS px between pages
 const KEEP = '250% 0px';   // PDF: render/keep pages within ~2.5 screens of the viewport
-const KEEP_IMAGES = '600% 0px';   // images: "visible" (fetched first) within ~6 screens
-const IMAGE_LANES = 6;     // parallel image downloads
+const KEEP_IMAGES = '120% 0px';   // images: one small preview just beyond the viewport
 const ZOOMS = [0.5, 0.67, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
 
-export async function startViewer({ root, url, images = null, page = 1, end = 0, title = "", systemUrl = url, fallback = "", rangeText = "" }) {
+export async function startViewer({ root, url, images = null, page = 1, end = 0, title = "", systemUrl = url, fallback = "", rangeText = "", early = null }) {
   const $ = (name) => root.querySelector(`[data-pv="${name}"]`);
+  const titleText = () => typeof title === 'function' ? (title() || '') : (title || '');
+  const systemHref = () => typeof systemUrl === 'function' ? (systemUrl() || '') : (systemUrl || '');
   const status = (text) => { $('status').textContent = text; $('status').hidden = !text; };
-  document.title = (title ? title + ' · ' : '') + `第 ${page} 页`;
-  $('title').textContent = title || '课件';
+  document.title = (titleText() ? titleText() + ' · ' : '') + `第 ${page} 页`;
+  $('title').textContent = titleText() || '课件';
   if (rangeText || (end && end > page)) { $("range").textContent = rangeText || `本节对应 第 ${page}–${end} 页`; $("range").hidden = false; }
   let current = page, doc = null;
-  const system = () => { $('system').href = `${systemUrl}#page=${current}`; };
+  const system = () => {
+    const href = systemHref();
+    $('system').hidden = !href;
+    if (href) $('system').href = `${href}#page=${current}`;
+  };
   system();
   if (!url && !images) { status(fallback || '这份课件暂时无法在页内打开。'); return; }
-  status('正在加载课件…');
+  if (!(early?.box?.classList.contains('pv-rendered') || early?.box?.classList.contains('pv-preview'))) status('正在加载课件…');
   let pdfjs;
   if (!images) try {
     pdfjs = await import(new URL('../vendor/pdfjs/pdf.min.mjs', import.meta.url).href);
     pdfjs.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdfjs/pdf.worker.min.mjs', import.meta.url).href;
     doc = await pdfjs.getDocument({ url, isEvalSupported: false, disableAutoFetch: true, disableStream: true, rangeChunkSize: 65536, enableXfa: false }).promise;
   } catch (error) {
-    status((fallback ? fallback + ' ' : '') + `课件读取未完成（${error?.message || error}）。可用“系统查看器打开”。`);
+    status((fallback ? fallback + ' ' : '') + `课件读取未完成（${error?.message || error}）。可用“下载 PDF”。`);
     return;
   }
   const total = images ? images.count : doc.numPages;
@@ -62,13 +70,18 @@ export async function startViewer({ root, url, images = null, page = 1, end = 0,
   const cssWidth = () => Math.round(fitWidth() * zoom);
   const els = [null];
   const fragment = document.createDocumentFragment();
+  const earlyBox = early?.box || null;
   for (let n = 1; n <= total; n++) {
-    const el = document.createElement('div');
-    el.className = 'pv-page' + (n >= target && n <= (rangeEnd || target) && (rangeEnd || rangeText) ? ' pv-in-range' : '');
+    const el = n === target && earlyBox ? earlyBox : document.createElement('div');
+    el.classList.remove('pv-early');
+    el.classList.add('pv-page');
+    el.classList.toggle('pv-in-range', n >= target && n <= (rangeEnd || target) && !!(rangeEnd || rangeText));
     el.dataset.page = String(n);
     el.setAttribute('aria-label', `第 ${n} 页`);
-    const tag = document.createElement('span'); tag.className = 'pv-page-no'; tag.textContent = String(n);
-    el.append(tag);
+    if (!el.querySelector('.pv-page-no')) {
+      const tag = document.createElement('span'); tag.className = 'pv-page-no'; tag.textContent = String(n);
+      el.append(tag);
+    }
     els.push(el); fragment.append(el);
   }
   container.replaceChildren(fragment);
@@ -93,8 +106,8 @@ export async function startViewer({ root, url, images = null, page = 1, end = 0,
   const fresh = (n) => state.has(n) && (images || state.get(n).cssWidth === size(n).w);
   async function render(n) {
     const want = size(n).w;
-    if (fresh(n)) return;
     if (images) return renderImage(n);
+    if (fresh(n)) return;
     release(n);
     const canvas = document.createElement('canvas');
     canvas.setAttribute('aria-hidden', 'true');
@@ -124,64 +137,77 @@ export async function startViewer({ root, url, images = null, page = 1, end = 0,
       }
     }
   }
-  async function renderImage(n) {
-    const img = new Image();
-    img.alt = ''; img.decoding = 'async'; img.draggable = false;
+  const jobs = new Map();
+  async function renderImage(n, priority = 'high') {
+    const pending = jobs.get(n);
+    if (pending) {
+      const currentImage = state.get(n)?.canvas;
+      if (currentImage && priority === 'high') currentImage.fetchPriority = 'high';
+      return pending;
+    }
+    // The reader has moved on: don't spend the link on this page's full image.
+    if (!(early && n === target) && Math.abs(n - current) > 1) return Promise.resolve();
+    const adopted = early && n === target && early.full && !early.failed ? early.full : null;
+    const img = adopted || new Image();
+    img.alt = ''; img.decoding = 'async'; img.draggable = false; img.fetchPriority = priority;
+    if (adopted) img.classList.remove('pv-full');
     const entry = { canvas: img, task: null, cssWidth: 0 };
     state.set(n, entry);
-    img.src = images.src(n);
-    try {
-      await img.decode();
-      if (state.get(n) === entry) { els[n].append(img); els[n].classList.add('pv-rendered'); els[n].querySelector('.pv-thumb')?.remove(); }
-    } catch (error) {
-      if (state.get(n) === entry) { state.delete(n); started.delete(`f${n}`); els[n].dataset.error = `第 ${n} 页图片加载未完成`; }
-    }
+    if (!adopted) img.src = images.src(n);
+    const job = (async () => {
+      try {
+        if (adopted && !adopted.getAttribute('src')) {
+          await new Promise((resolve) => {
+            const finish = () => resolve();
+            adopted.addEventListener('load', finish, { once: true });
+            adopted.addEventListener('error', finish, { once: true });
+            if (adopted.getAttribute('src') && adopted.complete) finish();
+          });
+        }
+        if (!(img.complete && img.naturalWidth)) await img.decode();
+        if (state.get(n) !== entry) return;
+        if (!img.naturalWidth) throw new Error('empty');
+        if (!img.isConnected) els[n].append(img);
+        els[n].classList.add('pv-rendered');
+        els[n].querySelector('.pv-thumb')?.remove();
+      } catch (error) {
+        if (state.get(n) === entry) { state.delete(n); jobs.delete(n); els[n].dataset.error = `第 ${n} 页图片加载未完成`; }
+      }
+    })();
+    jobs.set(n, job);
+    return job;
   }
-  // one page at a time, the page nearest the current one first, so a
-  // neighbour never competes with the page being read for bandwidth
+  // PDF pages render one at a time, nearest the current page first. A page
+  // image shows its small preview as soon as it is near, and the full image
+  // only when it is about to enter the viewport, so a jump is not queued
+  // behind a download of the whole deck.
   const near = new Set();
   let busy = false;
-  // Image mode is different: pages are small and cheap to keep, so after the
-  // target page every page of the deck is fetched in the background, nearest
-  // first, IMAGE_LANES at a time; a tiny preview (``thumb``) of each page is
-  // fetched well ahead of the full image so fast scrolling never shows a blank
-  // page; loaded pages are never released.
-  const started = new Set();
-  let lanes = 0, targetDone = !images;
-  function nextImageTask() {
-    let best = null, score = Infinity;
-    for (let n = 1; n <= total; n++) {
-      const d = Math.abs(n - current);
-      const visible = near.has(n);
-      if (images.thumb && !started.has(`t${n}`) && !started.has(`f${n}`)) {
-        const s = visible ? d / 8 - 1000 : d / 4;           // previews: cheap, so far ahead
-        if (s < score) { score = s; best = ['t', n]; }
-      }
-      if (!started.has(`f${n}`)) {
-        const s = visible ? d - 500 : d;
-        if (s < score) { score = s; best = ['f', n]; }
-      }
-    }
-    return best;
+  const thumbsStarted = new Map();
+  function requestThumb(n, priority = 'low') {
+    if (!images?.thumb) return Promise.resolve();
+    if (thumbsStarted.has(n)) return thumbsStarted.get(n);
+    if (early && n === target && early.thumb?.isConnected) { const done = Promise.resolve(); thumbsStarted.set(n, done); return done; }
+    const job = loadThumb(n, priority);
+    thumbsStarted.set(n, job);
+    return job;
   }
-  function pumpImages() {
-    if (!targetDone) return;
-    while (lanes < IMAGE_LANES) {
-      const task = nextImageTask();
-      if (!task) return;
-      const [kind, n] = task;
-      started.add(kind + n); lanes++;
-      (kind === 't' ? loadThumb(n) : renderImage(n)).finally(() => { lanes--; pumpImages(); });
-    }
+  function requestPage(n, priority = 'high') {
+    const preview = requestThumb(n, priority);
+    // The opened page's full image is already scheduled by the bootstrap.
+    // Any other page waits until its preview is on the way, so the small
+    // file is not stuck behind that page's full image.
+    if (images?.thumb && !(early && n === target)) return preview.then(() => renderImage(n, priority));
+    return renderImage(n, priority);
   }
-  async function loadThumb(n) {
+  async function loadThumb(n, priority) {
     const img = new Image();
-    img.alt = ''; img.decoding = 'async'; img.draggable = false; img.className = 'pv-thumb';
+    img.alt = ''; img.decoding = 'async'; img.draggable = false; img.className = 'pv-thumb'; img.fetchPriority = priority;
     img.src = images.thumb(n);
-    try { await img.decode(); if (!state.has(n)) { els[n].prepend(img); els[n].classList.add('pv-preview'); } } catch { /* the full image still comes */ }
+    try { await img.decode(); if (!els[n].querySelector('img:not(.pv-thumb)')) { els[n].prepend(img); els[n].classList.add('pv-preview'); } } catch { /* the full image still comes */ }
   }
   async function pump() {
-    if (images) return pumpImages();
+    if (images) return;
     if (busy) return; busy = true;
     try {
       for (;;) {
@@ -197,7 +223,8 @@ export async function startViewer({ root, url, images = null, page = 1, end = 0,
       if (e.isIntersecting) near.add(n);
       else { near.delete(n); if (!images) { release(n); els[n].classList.remove('pv-rendered'); } }
     }
-    pump();
+    if (images) [...near].sort((a, b) => Math.abs(a - current) - Math.abs(b - current)).slice(0, 2).forEach((n) => requestThumb(n));
+    else pump();
   }, { rootMargin: images ? KEEP_IMAGES : KEEP });
 
   // ---- current page tracking
@@ -207,7 +234,7 @@ export async function startViewer({ root, url, images = null, page = 1, end = 0,
     current = n;
     if (document.activeElement !== $('input')) $('input').value = String(n);
     $('prev').disabled = n <= 1; $('next').disabled = n >= total;
-    document.title = (title ? title + ' · ' : '') + `第 ${n} 页`;
+    document.title = (titleText() ? titleText() + ' · ' : '') + `第 ${n} 页`;
     system();
     clearTimeout(urlTimer);
     urlTimer = setTimeout(() => { const u = new URL(location.href); u.searchParams.set('page', String(current)); history.replaceState(null, '', u); }, 250);
@@ -240,6 +267,7 @@ export async function startViewer({ root, url, images = null, page = 1, end = 0,
     scrollTarget = instant ? 0 : n;
     window.scrollTo({ top, behavior: instant ? 'auto' : 'smooth' });
     setCurrent(n);
+    if (images) requestPage(n, 'high');
     if (!instant) setTimeout(() => { if (scrollTarget === n) { scrollTarget = 0; setCurrent(visiblePage()); } }, 1200);   // browsers without scrollend
   }
   function setZoom(value) {
@@ -270,11 +298,22 @@ export async function startViewer({ root, url, images = null, page = 1, end = 0,
 
   status('');
   show(target, 'auto');
-  started.add(`f${target}`);
-  await render(target);                       // the target page alone first
-  targetDone = true;
-  for (let n = 1; n <= total; n++) observer.observe(els[n]);
-  pump();
+  if (images) {
+    // Finish the opened page before neighbouring downloads, so they cannot
+    // stretch its transfer. A later jump calls requestPage directly.
+    await requestPage(target, 'high');
+    const urgent = new IntersectionObserver((entries) => {
+      const visible = [];
+      for (const e of entries) if (e.isIntersecting) visible.push(Number(e.target.dataset.page));
+      visible.sort((a, b) => Math.abs(a - current) - Math.abs(b - current));
+      if (visible.length) requestPage(visible[0], 'high');
+    }, { rootMargin: '0px' });
+    for (let n = 1; n <= total; n++) { urgent.observe(els[n]); observer.observe(els[n]); }
+  } else {
+    await render(target);
+    for (let n = 1; n <= total; n++) observer.observe(els[n]);
+    pump();
+  }
   const api = { show, get page() { return current; }, get pages() { return total; }, get target() { return target; },
     get zoom() { return zoom; }, get rendered() { return [...state.keys()].sort((a, b) => a - b); },
     async text(number = current) {

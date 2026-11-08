@@ -13,7 +13,13 @@
 .pv-stage{padding:var(--pv-gap,14px) 16px 40vh}
 .pv-pages{overflow-anchor:none;display:flex;flex-direction:column;align-items:center;gap:var(--pv-gap,14px)}
 .pv-page{position:relative;flex:none;max-width:none;background:#fff;box-shadow:0 1px 10px rgba(0,0,0,.16);scroll-margin-top:4rem}
-.pv-page canvas,.pv-page img{display:block;width:100%;height:100%}.pv-page img.pv-thumb{position:absolute;inset:0;image-rendering:auto}
+.pv-early{width:min(960px,calc(100vw - 32px));aspect-ratio:var(--pv-ar,1280/960)}
+.pv-early > img{position:absolute;inset:0;object-fit:contain}
+.pv-page canvas,.pv-page img{display:block;width:100%;height:100%}
+.pv-page img.pv-thumb{position:absolute;inset:0;z-index:1;background:#fff;image-rendering:auto}
+/* The full image sits in the same box from the start. Keep it invisible until
+   its own decode finishes, otherwise its empty white layer hides the preview. */
+.pv-page:not(.pv-rendered) > img.pv-full{visibility:hidden}
 .pv-page-no{position:absolute;right:6px;bottom:4px;font-size:.72rem;color:#8a918c;pointer-events:none}
 .pv-page:not(.pv-rendered){background:#eceee9}
 .pv-page:not(.pv-rendered):not(.pv-preview)::after{content:attr(data-page);position:absolute;inset:0;display:grid;place-items:center;font-size:2.4rem;font-weight:600;color:rgba(0,0,0,.12)}

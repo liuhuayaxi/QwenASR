@@ -2,10 +2,62 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; worker-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-HluUpyxB2PNK8xOvfSnW+wZLsxXlfynwpUpqyKRVQH4='; style-src 'self'; img-src 'self' data: blob:; worker-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
 <title>课件 · QwenASR</title>
+<script>
+(function () {
+  var q = new URLSearchParams(location.search);
+  var sha = q.get('sha') || '';
+  var rec = q.get('rec') || '';
+  var src = q.get('src') || '';
+  var page = parseInt(q.get('page'), 10) || 1;
+  if (!/^[a-f0-9]{64}$/.test(sha) || !/^[A-Za-z0-9_-]{6,80}$/.test(rec) || !/^[a-f0-9]{32}$/.test(src) || page < 1) return;
+  var w = parseInt(q.get('w'), 10) || 0;
+  var h = parseInt(q.get('h'), 10) || 0;
+  var n = parseInt(q.get('n'), 10) || 0;
+  var root = '/api/section-page-links/' + encodeURIComponent(rec) + '/pages/' + encodeURIComponent(src) + '/';
+  var thumb = new Image();
+  var full = new Image();
+  thumb.className = 'pv-thumb';
+  full.className = 'pv-full';
+  thumb.alt = full.alt = '';
+  thumb.decoding = full.decoding = 'async';
+  thumb.draggable = full.draggable = false;
+  thumb.fetchPriority = 'high';
+  full.fetchPriority = 'high';
+  var box = document.createElement('div');
+  box.className = 'pv-page pv-in-range pv-early';
+  box.dataset.page = String(page);
+  box.setAttribute('aria-label', '第 ' + page + ' 页');
+  if (w > 0 && h > 0) box.style.setProperty('--pv-ar', w + ' / ' + h);
+  box.append(thumb);
+  function paint(img) {
+    var status = document.querySelector('[data-pv="status"]');
+    if (status) status.hidden = true;
+    if (img.naturalWidth) box.style.setProperty('--pv-ar', img.naturalWidth + ' / ' + img.naturalHeight);
+    var pages = document.querySelector('[data-pv="pages"]');
+    if (pages && !box.isConnected) pages.append(box);
+  }
+  thumb.addEventListener('load', function () {
+    box.classList.add('pv-preview');
+    paint(thumb);
+    if (!full.getAttribute('src')) full.src = root + page + '.webp';
+  });
+  full.addEventListener('load', function () { if (!full.isConnected) box.append(full); box.classList.add('pv-rendered'); paint(full); });
+  full.addEventListener('error', function () { window.__pvEarly.failed = true; });
+  thumb.addEventListener('error', function () { if (!full.getAttribute('src')) full.src = root + page + '.webp'; });
+  var manifest = fetch(root + 'manifest.json').then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; });
+  window.__pvEarly = { sha: sha, rec: rec, src: src, page: page, box: box, full: full, thumb: thumb, manifest: manifest, failed: false, at: performance.now() };
+  if (n > 0) document.addEventListener('DOMContentLoaded', function () {
+    var total = document.querySelector('[data-pv="total"]');
+    if (total && total.textContent === '?') total.textContent = String(n);
+  });
+  thumb.src = root + 't' + page + '.webp';
+})();
+</script>
 <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="/static/pdf-viewer.css?v=6">
+<link rel="stylesheet" href="/static/pdf-viewer.css?v=9">
+<link rel="modulepreload" href="/static/js/pdf-viewer-page.js?v=9" fetchpriority="low"><link rel="modulepreload" href="/static/js/pdf-page-viewer.js?v=9" fetchpriority="low">
 </head>
 <body>
 <div id="viewer">
@@ -19,11 +71,11 @@
       <button type="button" data-pv="next" aria-label="下一页">下一页 ›</button>
       <span class="pv-zoom"><button type="button" data-pv="zoom-out" aria-label="缩小">−</button><output data-pv="zoom">100%</output><button type="button" data-pv="zoom-in" aria-label="放大">+</button><button type="button" data-pv="zoom-fit" title="按窗口宽度适配">适合宽度</button></span>
     </form>
-    <a class="pv-system" data-pv="system" href="#" target="_blank" rel="noopener noreferrer">系统查看器打开</a>
+    <a class="pv-system" data-pv="system" href="#" target="_blank" rel="noopener noreferrer">下载 PDF</a>
   </header>
   <p class="pv-status" data-pv="status" role="status">正在加载课件…</p>
   <main class="pv-stage" data-pv="stage"><div class="pv-pages" data-pv="pages" aria-label="课件页面"></div></main>
 </div>
-<script type="module" src="/static/js/pdf-viewer-page.js?v=6"></script>
+<script type="module" src="/static/js/pdf-viewer-page.js?v=9" fetchpriority="low"></script>
 </body>
 </html>
