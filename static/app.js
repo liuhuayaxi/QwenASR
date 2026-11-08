@@ -4,7 +4,7 @@ import {cachedJson} from './js/cached-json.js';
 import {createVisiblePoll} from './js/visible-poll.js';
 import { createBatchView } from "./js/batch-view.js?v=20261015-reader-math-scope-8";
 import { createLibraryTools } from "./js/library-tools.js?v=20261031-browser-fixes-1";
-import { createMarkdownReader, renderMarkdown } from "./js/markdown-reader.js?v=20261108-ppt-3";
+import { createMarkdownReader, renderMarkdown } from "./js/markdown-reader.js?v=20261108-ppt-4";
 import { createNoteAutosave } from "./js/note-autosave.js?v=20260923-upgrade-1";
 import { downloadNotePdf } from "./js/note-download.js?v=20261031";
 import { chapterValue, chapterLabel, createChapterControls } from './js/recording-chapters.js?v=20261031-browser-fixes-2';

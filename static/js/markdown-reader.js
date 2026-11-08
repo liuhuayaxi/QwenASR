@@ -111,13 +111,15 @@ export function createMarkdownReader({ container, source, toc, onChange }) {
     if (target.viewer_pages) query.set("n", String(target.viewer_pages));
     return `/static/pdf-viewer.html?${query}`;
   };
-  // Visible buttons prefetch the shell and at most two tiny previews. Hovering
-  // prefetches that one slide at low priority, and only one full page at a time:
-  // a high-priority preload would outrank the new tab's own image request.
+  // Visible buttons prefetch the shell and at most two tiny previews. The full
+  // slide waits until the pointer has stayed for a moment: an immediate click
+  // also fires pointerenter, and prefetching the large image then joins the
+  // new tab's download and starves the preview. Only one full page is in flight.
   const warmed = new Set();
   const thumbLimit = 2;
+  const hoverDwellMs = 700;
   let fullWarm = "";
-  const viewerFiles = ["/static/pdf-viewer.html", "/static/pdf-viewer.css?v=10", "/static/js/pdf-viewer-page.js?v=10", "/static/js/pdf-page-viewer.js?v=10"];
+  const viewerFiles = ["/static/pdf-viewer.html", "/static/pdf-viewer.css?v=11", "/static/js/pdf-viewer-page.js?v=11", "/static/js/pdf-page-viewer.js?v=11"];
   const warm = (url) => {
     const key = "prefetch:" + url;
     if (warmed.has(key)) return false;
@@ -146,7 +148,6 @@ export function createMarkdownReader({ container, source, toc, onChange }) {
     const page = target.viewer_page_start || target.page_start;
     const base = `/api/section-page-links/${encodeURIComponent(recording)}/pages/${encodeURIComponent(target.source_id)}/`;
     const thumb = `${base}t${page}.webp`;
-    const full = `${base}${page}.webp`;
     warm(`${base}manifest.json`);
     if (!eager) {
       if (warmed.has(`prefetch:${thumb}`)) return;
@@ -156,6 +157,7 @@ export function createMarkdownReader({ container, source, toc, onChange }) {
       return;
     }
     warm(thumb);
+    const full = `${base}${page}.webp`;
     if (fullWarm && fullWarm !== full) return;
     fullWarm = full;
     warm(full);
@@ -172,8 +174,17 @@ export function createMarkdownReader({ container, source, toc, onChange }) {
     jump._pptTarget = target;
     watched.add(jump);
     jumpObserver?.observe(jump);
-    const full = () => warmTarget(target, true);
-    for (const name of ["pointerenter", "focusin", "touchstart"]) jump.addEventListener(name, full, { once: true, passive: true });
+    let timer = 0;
+    const start = () => {
+      if (timer) return;
+      timer = setTimeout(() => { timer = 0; warmTarget(target, true); }, hoverDwellMs);
+    };
+    const stop = () => { clearTimeout(timer); timer = 0; };
+    jump.addEventListener("pointerenter", start);
+    jump.addEventListener("pointerleave", stop);
+    jump.addEventListener("focusin", start);
+    jump.addEventListener("focusout", stop);
+    jump.addEventListener("click", stop, true);
   };
   const editedRaw = (input, original) => {
     const ending = original.match(/\n+$/)?.[0] || "";

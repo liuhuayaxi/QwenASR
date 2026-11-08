@@ -1,9 +1,9 @@
-import { startViewer } from './pdf-page-viewer.js?v=10';
+import { startViewer } from './pdf-page-viewer.js?v=11';
 // Local viewer for one linked courseware. The inline script in pdf-viewer.html
-// starts the target page's preview, the sharp image and the manifest while this
-// module is still downloading, so a published page image is not waiting on
-// PDF.js. PDF.js is imported only when that image set is absent; it then reads
-// the AI-friendly PDF from this app's own route.
+// starts the target page's preview and the manifest while this module is still
+// downloading. The sharp image starts after that preview finishes, so the two
+// do not share one transfer. PDF.js is imported only when that image set is
+// absent; it then reads the AI-friendly PDF from this app's own route.
 const params = new URLSearchParams(location.search);
 const recording = params.get('rec') || '', source = params.get('src') || '';
 const ok = /^[A-Za-z0-9_-]{6,80}$/.test(recording) && /^[a-f0-9]{32}$/.test(source);

@@ -52,7 +52,7 @@ PAGE = """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta na
 <body><main style="max-width:860px;margin:auto;padding:1rem"><p>只读预览：__TITLE__</p><nav id="toc" class="note-toc"></nav>
 <textarea id="source" hidden></textarea><div id="reader" class="note-summary-reader"></div></main>
 <script type="module">
-import { createMarkdownReader } from "/static/js/markdown-reader.js?v=20261108-ppt-3";
+import { createMarkdownReader } from "/static/js/markdown-reader.js?v=20261108-ppt-4";
 const id = __ID__;
 const source = document.getElementById("source");
 source.value = __MARKDOWN__;
