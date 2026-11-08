@@ -4283,6 +4283,8 @@ app.include_router(task_center_router(compact_ai_tasks, ai_task_action, course_f
 from qwen_asr_app.note_routes import note_router
 from qwen_asr_app.note_library import NoteLibrary, note_library_router
 app.include_router(note_router(recording_store, recording_operation))
+from qwen_asr_app.section_page_routes import section_page_router
+app.include_router(section_page_router(recording_store, course_file_api))
 from qwen_asr_app.chapter_routes import chapter_router
 app.include_router(chapter_router(recording_store, recording_operation))
 review_library = NoteLibrary(app_settings, recording_store)

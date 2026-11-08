@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; worker-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>课件 · QwenASR</title>
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/pdf-viewer.css?v=3">
+</head>
+<body>
+<div id="viewer">
+  <header class="pv-bar">
+    <span class="pv-title" data-pv="title">课件</span>
+    <span class="pv-range" data-pv="range" hidden></span>
+    <span class="pv-note" data-pv="note" hidden></span>
+    <form class="pv-controls" data-pv="form">
+      <button type="button" data-pv="prev" aria-label="上一页">‹ 上一页</button>
+      <input data-pv="input" type="number" min="1" inputmode="numeric" aria-label="页码"> / <span data-pv="total">?</span>
+      <button type="button" data-pv="next" aria-label="下一页">下一页 ›</button>
+      <span class="pv-zoom"><button type="button" data-pv="zoom-out" aria-label="缩小">−</button><output data-pv="zoom">100%</output><button type="button" data-pv="zoom-in" aria-label="放大">+</button><button type="button" data-pv="zoom-fit" title="按窗口宽度适配">适合宽度</button></span>
+    </form>
+    <a class="pv-system" data-pv="system" href="#" target="_blank" rel="noopener noreferrer">系统查看器打开</a>
+  </header>
+  <p class="pv-status" data-pv="status" role="status">正在加载课件…</p>
+  <main class="pv-stage" data-pv="stage"><div class="pv-pages" data-pv="pages" aria-label="课件页面"></div></main>
+</div>
+<script type="module" src="/static/js/pdf-viewer-page.js?v=3"></script>
+</body>
+</html>

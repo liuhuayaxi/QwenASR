@@ -5,3 +5,4 @@ Pinned local browser dependencies (no CDN at runtime).
 - KaTeX 0.18.7 — https://katex.org/docs/api.html
 
 Licenses are included beside each distribution. Installed from the npm registry.
+- pdfjs-dist 6.5.438 (legacy build: pdf.min.mjs, pdf.worker.min.mjs) — https://mozilla.github.io/pdf.js/ — loaded only by the PPT page viewer

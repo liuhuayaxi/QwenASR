@@ -1,5 +1,6 @@
 import { marked } from "../vendor/marked/marked.esm.js";
 import DOMPurify from "../vendor/dompurify/purify.es.mjs";
+import { pptJump } from "./ppt-jump.js?v=1";
 
 const escape = (value) => String(value).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 function canonicalMathExpression(value) {
@@ -99,6 +100,15 @@ export function renderMarkdown(markdown, assetBase = '') {
 export function createMarkdownReader({ container, source, toc, onChange }) {
   let active = null;
   let tokens = [];
+  // Section → courseware page links (feature-flagged, stored outside the note).
+  let pageLinks = null;
+  const viewerHref = (recording, target) => {
+    const query = new URLSearchParams({ rec: recording, src: target.source_id,
+      page: String(target.viewer_page_start || target.page_start), label: String(target.page_start),
+      labelEnd: String(target.page_end || target.page_start), title: target.source_name || "课件" });
+    if (target.viewer_page_end) query.set("end", String(target.viewer_page_end));
+    return `/static/pdf-viewer.html?${query}`;
+  };
   const editedRaw = (input, original) => {
     const ending = original.match(/\n+$/)?.[0] || "";
     return input.value.replace(/\n*$/, "") + ending;
@@ -161,8 +171,11 @@ export function createMarkdownReader({ container, source, toc, onChange }) {
       empty.textContent = "生成课后复习笔记后，在这里阅读完整课堂笔记。点击段落即可编辑。";
       fragment.append(empty);
     }
+    const linkByIndex = new Map((pageLinks?.sections || []).map((entry) => [entry.index, entry]));
+    let headingIndex = -1;
     for (const [index, token] of tokens.entries()) {
       if (token.type === "space" || token.type === "def") continue;
+      if (token.type === "heading") headingIndex += 1;
       const block = document.createElement("div");
       block.className = "markdown-block markdown-body";
       block.dataset.block = index;
@@ -188,6 +201,11 @@ export function createMarkdownReader({ container, source, toc, onChange }) {
         link.addEventListener("click", () => { finish(); container.querySelector(`[data-block="${index}"]`)?.scrollIntoView({ behavior: "smooth", block: "start" }); });
         toc.append(link);
       }
+      const entry = token.type === "heading" ? linkByIndex.get(headingIndex) : null;
+      if (entry && entry.heading === String(token.text || "").trim()) {
+        const jump = pptJump(document, entry, (target) => viewerHref(pageLinks.recording, target));
+        if (jump) block.querySelector("h1,h2,h3,h4,h5,h6")?.append(jump);
+      }
       fragment.append(block);
     }
     container.replaceChildren(fragment);
@@ -206,5 +224,6 @@ export function createMarkdownReader({ container, source, toc, onChange }) {
     const next = container.querySelector(`[data-block="${newIndex}"]`);
     if (next) begin(tokens[newIndex], next);
   });
-  return { render, finish, hasActive: () => Boolean(active) };
+  function setPageLinks(value) { pageLinks = value && value.enabled && value.sections?.length ? value : null; }
+  return { render, finish, hasActive: () => Boolean(active), setPageLinks };
 }

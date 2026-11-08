@@ -1,4 +1,4 @@
-import { renderMarkdown } from "./markdown-reader.js?v=20261015-reader-math-scope-8";
+import { renderMarkdown } from "./markdown-reader.js?v=20261108-ppt-1";
 import { createClassroomIntelligence } from "./classroom-intelligence.js?v=20261031-browser-fixes-1";
 import {createVisiblePoll, classroomPanelVisible} from './visible-poll.js';
 
