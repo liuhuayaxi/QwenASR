@@ -1,15 +1,19 @@
-// Continuous-scroll PDF viewer for "↗ PPT" links. Loaded only on the viewer
-// page; PDF.js is imported on demand and fetches the file with HTTP Range, so
-// opening page 70 of a 60 MB deck does not download the whole file first.
+// Continuous-scroll courseware viewer for "↗ PPT" links. Two sources:
+//  * a PDF: PDF.js is imported on demand and reads it with HTTP Range, so
+//    opening page 70 of a 60 MB deck does not download the whole file first;
+//  * pre-rendered page images (``images``: {count, sizes: [[w, h], ...], src(n)}):
+//    each page is one small image file, no PDF.js at all.
 // All pages are laid out as fixed-size placeholders; only pages near the
 // viewport get a canvas (IntersectionObserver), far ones are released again.
+// Loading is page-at-a-time: streaming is off (it would pull the whole file),
+// the target page renders first and neighbours wait in a one-at-a-time queue.
 const MAX_PIXELS = 16e6;   // per-canvas backing-store cap
 const MAX_WIDTH = 960;     // CSS px of a page at "fit width" on large screens
 const GAP = 14;            // CSS px between pages
 const KEEP = '250% 0px';   // render/keep pages within ~2.5 screens of the viewport
 const ZOOMS = [0.5, 0.67, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
 
-export async function startViewer({ root, url, page = 1, end = 0, title = "", systemUrl = url, fallback = "", rangeText = "" }) {
+export async function startViewer({ root, url, images = null, page = 1, end = 0, title = "", systemUrl = url, fallback = "", rangeText = "" }) {
   const $ = (name) => root.querySelector(`[data-pv="${name}"]`);
   const status = (text) => { $('status').textContent = text; $('status').hidden = !text; };
   document.title = (title ? title + ' · ' : '') + `第 ${page} 页`;
@@ -18,18 +22,18 @@ export async function startViewer({ root, url, page = 1, end = 0, title = "", sy
   let current = page, doc = null;
   const system = () => { $('system').href = `${systemUrl}#page=${current}`; };
   system();
-  if (!url) { status(fallback || '这份课件暂时无法在页内打开。'); return; }
+  if (!url && !images) { status(fallback || '这份课件暂时无法在页内打开。'); return; }
   status('正在加载课件…');
   let pdfjs;
-  try {
+  if (!images) try {
     pdfjs = await import(new URL('../vendor/pdfjs/pdf.min.mjs', import.meta.url).href);
     pdfjs.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdfjs/pdf.worker.min.mjs', import.meta.url).href;
-    doc = await pdfjs.getDocument({ url, isEvalSupported: false, disableAutoFetch: true, rangeChunkSize: 262144, enableXfa: false }).promise;
+    doc = await pdfjs.getDocument({ url, isEvalSupported: false, disableAutoFetch: true, disableStream: true, rangeChunkSize: 65536, enableXfa: false }).promise;
   } catch (error) {
     status((fallback ? fallback + ' ' : '') + `课件读取未完成（${error?.message || error}）。可用“系统查看器打开”。`);
     return;
   }
-  const total = doc.numPages;
+  const total = images ? images.count : doc.numPages;
   const target = Math.max(1, Math.min(total, Math.round(page)));
   const rangeEnd = end > target ? Math.min(end, total) : 0;
   $('total').textContent = String(total);
@@ -38,14 +42,11 @@ export async function startViewer({ root, url, page = 1, end = 0, title = "", sy
   container.style.setProperty('--pv-gap', `${GAP}px`);
 
   // ---- layout: one placeholder per page, sized from page 1 until rendered
-  let base;
-  try { base = (await doc.getPage(target)).getViewport({ scale: 1 }); }
-  catch (error) { status(`第 ${target} 页读取未完成（${error?.message || error}）。`); return; }
   const sizes = new Array(total + 1).fill(null);   // per-page base size once known
-  sizes[target] = { w: base.width, h: base.height };
-  // AI-friendly PDFs start with a differently sized cover page: size it up front
-  // so the pages above the target don't change height after the jump
-  if (target > 1) try { const v = (await doc.getPage(1)).getViewport({ scale: 1 }); sizes[1] = { w: v.width, h: v.height }; } catch { /* sized on render */ }
+  if (images) images.sizes.forEach(([w, h], i) => { sizes[i + 1] = { w, h }; });
+  else try { const v = (await doc.getPage(target)).getViewport({ scale: 1 }); sizes[target] = { w: v.width, h: v.height }; }
+  catch (error) { status(`第 ${target} 页读取未完成（${error?.message || error}）。`); return; }
+  const base = { width: sizes[target].w, height: sizes[target].h };
   let zoom = 1;
   const bar = () => root.querySelector('.pv-bar')?.offsetHeight || 0;
   function fitWidth() {
@@ -84,12 +85,14 @@ export async function startViewer({ root, url, page = 1, end = 0, title = "", sy
   const state = new Map();   // n -> { canvas, task, scale }
   function release(n) {
     const s = state.get(n); if (!s) return;
-    s.task?.cancel?.(); s.canvas.width = s.canvas.height = 0; s.canvas.remove(); state.delete(n);
+    s.task?.cancel?.(); if (s.canvas instanceof HTMLCanvasElement) s.canvas.width = s.canvas.height = 0; else s.canvas.removeAttribute('src'); s.canvas.remove(); state.delete(n);
   }
+  // an image scales with its box; a canvas is redrawn when the width changes
+  const fresh = (n) => state.has(n) && (images || state.get(n).cssWidth === size(n).w);
   async function render(n) {
     const want = size(n).w;
-    const old = state.get(n);
-    if (old && old.cssWidth === want) return;
+    if (fresh(n)) return;
+    if (images) return renderImage(n);
     release(n);
     const canvas = document.createElement('canvas');
     canvas.setAttribute('aria-hidden', 'true');
@@ -115,17 +118,44 @@ export async function startViewer({ root, url, page = 1, end = 0, title = "", sy
       if (state.get(n) === entry) { els[n].append(canvas); els[n].classList.add('pv-rendered'); }
     } catch (error) {
       if (error?.name !== 'RenderingCancelledException' && state.get(n) === entry) {
-        state.delete(n); els[n].dataset.error = `第 ${n} 页渲染未完成（${error?.message || error}）`;
+        els[n].dataset.error = `第 ${n} 页渲染未完成（${error?.message || error}）`;
       }
     }
   }
+  async function renderImage(n) {
+    const img = new Image();
+    img.alt = ''; img.decoding = 'async'; img.draggable = false;
+    const entry = { canvas: img, task: null, cssWidth: 0 };
+    state.set(n, entry);
+    img.src = images.src(n);
+    try {
+      await img.decode();
+      if (state.get(n) === entry) { els[n].append(img); els[n].classList.add('pv-rendered'); }
+    } catch (error) {
+      if (state.get(n) === entry) els[n].dataset.error = `第 ${n} 页图片加载未完成`;
+    }
+  }
+  // one page at a time, the page nearest the current one first, so a
+  // neighbour never competes with the page being read for bandwidth
   const near = new Set();
+  let busy = false;
+  async function pump() {
+    if (busy) return; busy = true;
+    try {
+      for (;;) {
+        const next = [...near].filter((n) => !fresh(n)).sort((a, b) => Math.abs(a - current) - Math.abs(b - current))[0];
+        if (!next) break;
+        await render(next);
+      }
+    } finally { busy = false; }
+  }
   const observer = new IntersectionObserver((entries) => {
     for (const e of entries) {
       const n = Number(e.target.dataset.page);
-      if (e.isIntersecting) { near.add(n); render(n); }
+      if (e.isIntersecting) near.add(n);
       else { near.delete(n); release(n); els[n].classList.remove('pv-rendered'); }
     }
+    pump();
   }, { rootMargin: KEEP });
 
   // ---- current page tracking
@@ -176,7 +206,7 @@ export async function startViewer({ root, url, page = 1, end = 0, title = "", sy
     zoom = Math.max(ZOOMS[0], Math.min(ZOOMS[ZOOMS.length - 1], value));
     layout();
     window.scrollTo({ top: els[keep].getBoundingClientRect().top + window.scrollY - bar() + offset * els[keep].offsetHeight });
-    for (const n of near) render(n);
+    pump();
   }
   $('prev').onclick = () => show(current - 1);
   $('next').onclick = () => show(current + 1);
@@ -198,11 +228,14 @@ export async function startViewer({ root, url, page = 1, end = 0, title = "", sy
 
   status('');
   show(target, 'auto');
+  await render(target);                       // the target page alone first
   for (let n = 1; n <= total; n++) observer.observe(els[n]);
-  await render(target);
   const api = { show, get page() { return current; }, get pages() { return total; }, get target() { return target; },
     get zoom() { return zoom; }, get rendered() { return [...state.keys()].sort((a, b) => a - b); },
-    async text(number = current) { const c = await (await doc.getPage(number)).getTextContent(); return c.items.map((i) => i.str).join(" "); } };
+    async text(number = current) {
+      if (images) return images.text ? images.text(number) : '';
+      const c = await (await doc.getPage(number)).getTextContent(); return c.items.map((i) => i.str).join(" ");
+    } };
   root.pdfViewer = Object.freeze(api);
   return api;
 }
