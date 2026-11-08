@@ -1,4 +1,4 @@
-import { renderMarkdown } from "./markdown-reader.js?v=20261108-ppt-2";
+import { renderMarkdown } from "./markdown-reader.js?v=20261108-ppt-3";
 
 export function createTranscriptView({
   els, state, toast, updateButtons, switchView, onSessionShown = () => {},

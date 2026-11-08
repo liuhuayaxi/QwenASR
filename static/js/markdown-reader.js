@@ -111,18 +111,20 @@ export function createMarkdownReader({ container, source, toc, onChange }) {
     if (target.viewer_pages) query.set("n", String(target.viewer_pages));
     return `/static/pdf-viewer.html?${query}`;
   };
-  // A visible button prefetches the viewer shell and at most two tiny previews.
-  // The full page image is fetched only for the button under the pointer.
+  // Visible buttons prefetch the shell and at most two tiny previews. Hovering
+  // prefetches that one slide at low priority, and only one full page at a time:
+  // a high-priority preload would outrank the new tab's own image request.
   const warmed = new Set();
   const thumbLimit = 2;
-  const viewerFiles = ["/static/pdf-viewer.html", "/static/pdf-viewer.css?v=9", "/static/js/pdf-viewer-page.js?v=9", "/static/js/pdf-page-viewer.js?v=9"];
-  const warm = (url, preload = false) => {
-    const key = (preload ? "preload:" : "prefetch:") + url;
+  let fullWarm = "";
+  const viewerFiles = ["/static/pdf-viewer.html", "/static/pdf-viewer.css?v=10", "/static/js/pdf-viewer-page.js?v=10", "/static/js/pdf-page-viewer.js?v=10"];
+  const warm = (url) => {
+    const key = "prefetch:" + url;
     if (warmed.has(key)) return false;
     warmed.add(key);
     const link = document.createElement("link");
-    link.rel = preload ? "preload" : "prefetch";
-    if (preload) { link.as = "image"; link.fetchPriority = "high"; }
+    link.rel = "prefetch";
+    if (/\.webp$/.test(url)) link.as = "image";
     link.href = url;
     document.head.append(link);
     return true;
@@ -143,13 +145,20 @@ export function createMarkdownReader({ container, source, toc, onChange }) {
     if (!/^[a-f0-9]{64}$/.test(target.viewer_sha256 || "")) return;
     const page = target.viewer_page_start || target.page_start;
     const base = `/api/section-page-links/${encodeURIComponent(recording)}/pages/${encodeURIComponent(target.source_id)}/`;
-    if (eager) { warm(`${base}${page}.webp`, true); return; }
     const thumb = `${base}t${page}.webp`;
-    if (warmed.has(`prefetch:${thumb}`)) return;
-    const thumbs = [...warmed].filter((key) => /^prefetch:\/api\/section-page-links\/[^/]+\/pages\/[^/]+\/t\d+\.webp$/.test(key)).length;
-    if (thumbs >= thumbLimit) return;
+    const full = `${base}${page}.webp`;
     warm(`${base}manifest.json`);
+    if (!eager) {
+      if (warmed.has(`prefetch:${thumb}`)) return;
+      const thumbs = [...warmed].filter((key) => /^prefetch:\/api\/section-page-links\/[^/]+\/pages\/[^/]+\/t\d+\.webp$/.test(key)).length;
+      if (thumbs >= thumbLimit) return;
+      warm(thumb);
+      return;
+    }
     warm(thumb);
+    if (fullWarm && fullWarm !== full) return;
+    fullWarm = full;
+    warm(full);
   };
   const watched = new Set();
   const jumpObserver = "IntersectionObserver" in window ? new IntersectionObserver((entries) => {

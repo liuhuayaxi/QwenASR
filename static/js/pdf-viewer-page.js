@@ -1,4 +1,4 @@
-import { startViewer } from './pdf-page-viewer.js?v=9';
+import { startViewer } from './pdf-page-viewer.js?v=10';
 // Local viewer for one linked courseware. The inline script in pdf-viewer.html
 // starts the target page's preview, the sharp image and the manifest while this
 // module is still downloading, so a published page image is not waiting on
