@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import re
 import logging
+from pathlib import Path
 from datetime import datetime
 from typing import Any, AsyncIterator
 
@@ -406,9 +407,12 @@ async def build_note_summary(
             # One AGY turn per lesson (see fast_note); the multi-stage
             # pipeline stays available with note_pipeline='full'.
             from .fast_note import generate_fast
-            return await generate_fast(record, config)
-        from .review_notes import generate
-        return await generate(record, config)
+            result = await generate_fast(record, config)
+        else:
+            from .review_notes import generate
+            result = await generate(record, config)
+        await _section_page_links(record, config)
+        return result
     result = await _build_text_note_summary(record, config)
     if config.get('note_review_enabled') is True:
         result['review_status'] = 'unreviewed'
@@ -419,7 +423,24 @@ async def build_note_summary(
     from .chapters import update_automatic_chapters
     update_automatic_chapters(record)
     record.save_metadata()
+    await _section_page_links(record, config)
     return result
+
+
+async def _section_page_links(record, config):
+    """Map headings to courseware pages and AI-review them; only reviewed links are shown.
+
+    Best effort: a failure never fails the note, and unreviewed headings simply
+    get no button (a later run reviews them).
+    """
+    from . import section_pages
+    if not section_pages.enabled() or not (record.metadata.get('ai_note_summary') or {}).get('review_package'): return
+    try:
+        from .section_page_review import refresh
+        storage_root = Path(record.directory).resolve().parents[2]
+        await refresh(Path(record.directory), {**record.metadata, 'id': record.id}, storage_root, config)
+    except Exception as exc:
+        logger.warning('section page links skipped for %s: %s', record.id, exc)
 
 
 async def _build_text_note_summary(

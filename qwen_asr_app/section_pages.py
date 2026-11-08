@@ -43,6 +43,8 @@ QUESTION = re.compile(r'雨课堂|随堂|自测|真题|考题练习|课堂练习
 MARKER = re.compile(r'\[\[AI_TRANSCRIPT_PAGE:(\d+)\]\]')
 EXPLICIT = re.compile(r'(?:课件|PPT|幻灯片|讲义)?\s*(?<![A-Za-z])[Pp]\.?\s*(\d{1,3})(?:\s*[-–~～]\s*[Pp]?\s*(\d{1,3}))?|第\s*(\d{1,3})\s*(?:[-–~～]\s*(\d{1,3})\s*)?页')
 BACKOFF = .6
+# Only checked links get a button; 'auto' (unreviewed high confidence) waits for review.
+SHOWN = {'verified', 'manual'}
 IMAGE = re.compile(r'!\[[^\]]*\]\((?:\./)?(assets/fig-[a-f0-9]{16}\.(?:png|jpe?g))\)')
 
 
@@ -525,7 +527,7 @@ def public_view(doc, markdown):
     current = {h['index']: h['text'] for h in headings(markdown)}
     sections = []
     for s in doc.get('sections', []):
-        if s.get('status') not in {'auto', 'verified', 'manual'} or not s.get('targets'): continue
+        if s.get('status') not in SHOWN or not s.get('targets'): continue
         if current.get(s['index']) != s['heading']: continue  # heading changed since mapping
         sections.append({'index': s['index'], 'heading': s['heading'], 'section_id': s['section_id'],
                          'targets': [{k: t.get(k) for k in ('source_id', 'source_name', 'page_start', 'page_end',
