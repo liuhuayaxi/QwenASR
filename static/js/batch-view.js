@@ -1,4 +1,4 @@
-import { renderMarkdown } from "./markdown-reader.js?v=20261108-ppt-3";
+import { renderMarkdown } from "./markdown-reader.js?v=20261108-ppt-4";
 
 // Uploaded files are submitted before observing their background jobs.
 export function createBatchView({els, state, formatDuration, escapeHtml, summaryView, showSession, updateButtons, toast, sessionConfig, selectedRecordCategory, loadLibrary}) {

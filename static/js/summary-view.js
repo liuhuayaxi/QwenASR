@@ -1,4 +1,4 @@
-import { renderMarkdown } from "./markdown-reader.js?v=20261108-ppt-3";
+import { renderMarkdown } from "./markdown-reader.js?v=20261108-ppt-4";
 
 export function createSummaryView({ els, escapeHtml, formatDuration }) {
   const cards = new Map();
