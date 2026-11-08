@@ -7,9 +7,10 @@ from pathlib import Path
 import re
 import shutil
 import sys
+import time
 import uuid
 
-from .agy_cli import executable, model, subprocess_environment, timeout_seconds, effort, _error_kind, _blocking_diagnostic, retry_model_start
+from .agy_cli import executable, model, subprocess_environment, timeout_seconds, effort, _error_kind, _blocking_diagnostic, retry_model_start, _failure_metadata
 from .durable import atomic_json
 from .ai_activity import track_ai_request, report_ai_activity, bind_ai_session
 
@@ -80,7 +81,7 @@ def _material_failure(detail, *, returncode=None):
         kind,retriable='provider_unavailable',True
     reason={
         'provider_auth':'登录状态不可用，请检查 AGY 登录',
-        'provider_region':'被 Google 拒绝：当前网络出口地区不受支持（User location is not supported，通常是 VPN/代理节点切到了不支持的地区，不是账号或程序故障；切换到受支持地区后点继续生成即可）',
+        'provider_region':'被 Google 拒绝：当前网络出口地区不受支持（User location is not supported for the API use）',
         'provider_quota':'额度不足',
         'rate_limit':'请求受限，稍后将重试',
         'provider_unavailable':'上游服务暂时不可用',
@@ -203,6 +204,7 @@ async def _request_materials(instructions, folder, provider, *, read_paths=(), r
     message=json.dumps({'event':'user','message':{'content':prompt}},ensure_ascii=False)+'\n'
     temporary=folder/'.tmp';temporary.mkdir(exist_ok=True)
     env={**subprocess_environment(),'TMPDIR':str(temporary)}
+    started=time.monotonic()
     process=await asyncio.create_subprocess_exec(*command,cwd=folder,env=env,
         stdin=asyncio.subprocess.PIPE,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.PIPE,limit=8*1024*1024)
     try:
@@ -250,10 +252,14 @@ async def _request_materials(instructions, folder, provider, *, read_paths=(), r
     from .agy_session import read_session,SessionEvidenceError,output_limit_before_failure
     continuation=bool(initial_session and output_limit_before_failure(initial_session,prompt))
     blocked=_blocking_diagnostic(stderr.decode(errors='replace')) if continuation else None
+    def material_facts(kind, detail):
+        # detail is inspected for one hostname and is not written.
+        return _failure_metadata(model_name=model(provider), path_category='materials', continued=False,
+            sandbox=True, started=started, error_kind=kind, exit_code=process.returncode, detail=detail)
     if blocked:
         atomic_json(folder/'sessions'/('failed-'+uuid.uuid4().hex+'.json'),{
-            'session_id':initial_session,'label':label,'status':'unreviewed',
-            'error_kind':blocked,'retriable':False,'exit_code':process.returncode})
+            'session_id':initial_session,'label':label,'status':'unreviewed','retriable':False,
+            **material_facts(blocked, stderr.decode(errors='replace'))})
         raise MaterialSessionError('AGY 续写伴随明确的登录、地区或启动配置错误，未采纳结果',kind=blocked)
     recoverable_limit=(continuation and (successful_result or _error_kind(initial_error)[0] in
         {'output_truncated','network_transport','network_read_timeout','agy_cli_error'}))
@@ -271,7 +277,8 @@ async def _request_materials(instructions, folder, provider, *, read_paths=(), r
                 kind='output_truncated'
             atomic_json(folder/'sessions'/('failed-'+uuid.uuid4().hex+'.json'),{
                 'session_id':initial_session,'label':label,'status':'unreviewed',
-                'error_kind':kind,'retriable':kind=='material_read_path'})
+                'retriable':kind=='material_read_path',
+                **material_facts(kind, str(exc))})
             raise MaterialSessionError(str(exc),kind=kind,retriable=kind=='material_read_path') from exc
         verified_continuation=continuation
         stdout='\n'.join(json.dumps(event,ensure_ascii=False) for event in recovered['events']).encode()
@@ -332,13 +339,14 @@ async def _request_materials(instructions, folder, provider, *, read_paths=(), r
         # Parse the result before checking exit code: an early auth/quota error
         # can be structured even when the process exits nonzero. stderr is only
         # used for classification, never copied into the task card or receipt.
-        failure_error=_material_failure(upstream_error or stderr.decode(errors='replace'),returncode=process.returncode)
+        provider_detail=upstream_error or stderr.decode(errors='replace')
+        failure_error=_material_failure(provider_detail,returncode=process.returncode)
         failure_error.session_id=session
-        failure={'session_id':session,'label':label,'status':'unreviewed','error_kind':failure_error.kind,
-                 'retriable':failure_error.retriable,'exit_code':process.returncode,
-                 'model':model(provider),'stderr_bytes':len(stderr),
+        failure={'session_id':session,'label':label,'status':'unreviewed',
+                 'retriable':failure_error.retriable,'stderr_bytes':len(stderr),
                  'request_sha256':hashlib.sha256(prompt.encode()).hexdigest(),
-                 'viewed_files':sorted(viewed),'required_images':sorted(images)}
+                 'viewed_files':sorted(viewed),'required_images':sorted(images),
+                 **material_facts(failure_error.kind, provider_detail)}
         atomic_json(folder/'sessions'/('failed-'+uuid.uuid4().hex+'.json'),failure)
         raise failure_error
     if finish_validation_errors and not (finish_recovered and recovered_result):

@@ -177,3 +177,205 @@ class ActivityTests(unittest.IsolatedAsyncioTestCase):
                 finally:
                     task.cancel()
                     await asyncio.gather(task, return_exceptions=True)
+
+
+REGION = 'AGY 资料会话被 Google 拒绝：当前网络出口地区不受支持（User location is not supported for the API use）'
+
+
+class TaskFailureSeparationTests(unittest.IsolatedAsyncioTestCase):
+    def record(self, raw, **metadata):
+        record = record_at(Path(raw), status='completed')
+        record.segments = [{'id': 1, 'raw': '课堂原文', 'start': 0, 'end': 10}]
+        record.metadata.update(metadata)
+        record.save_all()
+        return record
+
+    def feed(self, record, kind):
+        record.save_all()
+        with patch.object(app, 'recording_store', store_for(record)):
+            matches = [item for item in app.compact_ai_tasks() if item['type'] == kind]
+        self.assertEqual(len(matches), 1)
+        return matches[0]
+
+    async def live(self, record, kind='refinement'):
+        task = asyncio.create_task(asyncio.Event().wait())
+        app.background_ai_tasks[f'{kind}:{record.id}'] = task
+        self.addAsyncCleanup(self.stop, record, kind, task)
+
+    async def stop(self, record, kind, task):
+        app.background_ai_tasks.pop(f'{kind}:{record.id}', None)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    async def test_running_retry_keeps_every_stale_source_as_previous_error_only(self):
+        with tempfile.TemporaryDirectory() as raw:
+            record = self.record(raw)
+            record.metadata['ai_jobs'] = {'refinement': {
+                'status': 'running', 'error': '作业地区拒绝', 'error_kind': 'provider_region'}}
+            record.segments[0]['ai_error'] = '段落地区拒绝'
+            record.metadata['course_stream'] = {'correction_error': '流式地区拒绝'}
+            await self.live(record)
+            item = self.feed(record, 'refinement')
+            self.assertEqual(item['status'], 'running')
+            self.assertEqual(item['error'], '')
+            self.assertEqual(item['error_kind'], '')
+            self.assertIn('作业地区拒绝', item['previous_error'])
+            self.assertIn('段落地区拒绝', item['previous_error'])
+            self.assertIn('流式地区拒绝', item['previous_error'])
+
+            record.metadata['ai_jobs']['refinement']['error'] = REGION
+            record.metadata['ai_jobs']['refinement']['error_kind'] = 'provider_region'
+            record.segments[0]['ai_error'] = REGION
+            record.metadata['course_stream'] = {'correction_error': REGION}
+            item = self.feed(record, 'refinement')
+            self.assertEqual(item['error'], '')
+            self.assertEqual(item['error_kind'], '')
+            self.assertEqual(item['previous_error'], REGION)
+
+    async def test_each_single_source_is_previous_during_retry_and_current_when_it_fails_again(self):
+        with tempfile.TemporaryDirectory() as raw:
+            record = self.record(raw)
+            await self.live(record)
+            cases = (
+                ('job.error', {'ai_jobs': {'refinement': {'status': 'running', 'error': '作业失败', 'error_kind': 'provider_region'}}}, '作业失败'),
+                ('paragraph', {'segments_error': '段落失败'}, '段落失败'),
+                ('stream', {'course_stream': {'correction_error': '流式失败'}}, '流式失败'),
+            )
+            for name, update, text in cases:
+                record.metadata['ai_jobs'] = {'refinement': {'status': 'running', 'error': '', 'error_kind': 'provider_region'}}
+                record.segments[0]['ai_error'] = ''
+                record.metadata['course_stream'] = {}
+                if 'segments_error' in update:
+                    record.segments[0]['ai_error'] = update['segments_error']
+                else:
+                    record.metadata.update(update)
+                item = self.feed(record, 'refinement')
+                self.assertEqual(item['error'], '', name)
+                self.assertEqual(item['error_kind'], '', name)
+                self.assertEqual(item['previous_error'], text, name)
+            record.metadata['ai_jobs'] = {'refinement': {
+                'status': 'failed', 'error': '第二次实际失败', 'error_kind': 'network_transport'}}
+            record.segments[0]['ai_error'] = '更早的段落失败'
+            record.metadata['course_stream'] = {'correction_error': '更早的流式失败'}
+            item = self.feed(record, 'refinement')
+            self.assertEqual(item['status'], 'failed')
+            self.assertEqual(item['error'], '第二次实际失败')
+            self.assertEqual(item['error_kind'], 'network_transport')
+            self.assertNotIn('第二次实际失败', item['previous_error'])
+
+    async def test_success_clears_stale_stream_failure_and_control_states_stay_visible(self):
+        with tempfile.TemporaryDirectory() as raw:
+            record = self.record(raw)
+            record.metadata['ai_jobs'] = {'refinement': {'status': 'completed', 'error': '', 'error_kind': ''}}
+            record.metadata['course_stream'] = {'correction_error': REGION}
+            item = self.feed(record, 'refinement')
+            self.assertEqual(item['status'], 'pending')
+            self.assertEqual(item['error'], '')
+            self.assertEqual(item['previous_error'], '')
+            self.assertNotIn(REGION, json.dumps(item, ensure_ascii=False))
+            await self.live(record)
+            for status, message, kind in (
+                ('paused', '任务已暂停；已完成内容保留，可继续', 'paused'),
+                ('cancelled', '任务已取消；已完成内容仍然保留', 'cancelled'),
+                ('interrupted', '任务已中断；已完成内容保留，可继续', 'service_interrupted'),
+            ):
+                record.metadata['ai_jobs'] = {'refinement': {'status': status, 'error': message, 'error_kind': kind}}
+                record.segments[0]['ai_error'] = REGION
+                item = self.feed(record, 'refinement')
+                self.assertEqual(item['status'], status)
+                self.assertEqual(item['error'], message)
+                self.assertEqual(item['error_kind'], kind)
+                self.assertNotEqual(item['error'], REGION)
+
+    async def test_waiting_retry_keeps_its_current_reason(self):
+        with tempfile.TemporaryDirectory() as raw:
+            record = self.record(raw)
+            waiting = '网络出口地区被拒，3 分钟后自动重试（第 1 次）；已完成的步骤会保留'
+            record.metadata['ai_jobs'] = {'refinement': {
+                'status': 'waiting_retry', 'error': waiting, 'error_kind': 'provider_region', 'retry_in_seconds': 180}}
+            record.segments[0]['ai_error'] = REGION
+            await self.live(record)
+            item = self.feed(record, 'refinement')
+            self.assertEqual(item['status'], 'waiting_retry')
+            self.assertEqual(item['error'], waiting)
+            self.assertEqual(item['error_kind'], 'provider_region')
+            self.assertEqual(item['previous_error'], REGION)
+
+    async def test_live_summary_and_summary_follow_the_same_attempt_boundary(self):
+        with tempfile.TemporaryDirectory() as raw:
+            record = self.record(raw)
+            record.metadata['ai_summaries'] = [{'start': 0, 'end': 60, 'ai_error': REGION, 'error_kind': 'provider_region'}]
+            record.metadata['ai_jobs'] = {'live_summary': {
+                'status': 'running', 'error': '作业仍记着地区拒绝', 'error_kind': 'provider_region'}}
+            await self.live(record, 'live_summary')
+            item = self.feed(record, 'live_summary')
+            self.assertEqual(item['status'], 'running')
+            self.assertEqual(item['error'], '')
+            self.assertEqual(item['error_kind'], '')
+            self.assertIn(REGION, item['previous_error'])
+            self.assertIn('作业仍记着地区拒绝', item['previous_error'])
+            record.metadata['ai_jobs']['live_summary'] = {
+                'status': 'failed', 'error': '新的响应超时', 'error_kind': 'network_read_timeout'}
+            record.metadata['ai_summaries'] = [{'start': 0, 'end': 60, 'ai_error': '新的响应超时', 'error_kind': 'network_read_timeout'}]
+            item = self.feed(record, 'live_summary')
+            self.assertEqual(item['status'], 'failed')
+            self.assertEqual(item['error'], '新的响应超时')
+            self.assertEqual(item['error_kind'], 'network_read_timeout')
+            record.metadata['ai_jobs']['live_summary'] = {'status': 'completed', 'error': '', 'error_kind': ''}
+            record.metadata['ai_summaries'] = [{'start': 0, 'end': 60, 'summary': '提纲'}]
+            app.background_ai_tasks.pop(f'live_summary:{record.id}', None)
+            record.save_all()
+            with patch.object(app, 'recording_store', store_for(record)):
+                self.assertFalse(any(item['type'] == 'live_summary' for item in app.compact_ai_tasks()))
+
+            record.metadata['summary_job'] = {
+                'status': 'running', 'error': REGION, 'error_kind': 'provider_region', 'previous_error': '更早的失败'}
+            item = self.feed(record, 'summary')
+            self.assertEqual(item['error'], '')
+            self.assertEqual(item['error_kind'], '')
+            self.assertIn(REGION, item['previous_error'])
+            self.assertIn('更早的失败', item['previous_error'])
+            record.metadata['summary_job'] = {
+                'status': 'failed', 'error': '第二次笔记失败', 'error_kind': 'network_transport', 'previous_error': REGION}
+            item = self.feed(record, 'summary')
+            self.assertEqual(item['error'], '第二次笔记失败')
+            self.assertEqual(item['error_kind'], 'network_transport')
+            self.assertEqual(item['previous_error'], REGION)
+            waiting = '网络出口地区被拒，3 分钟后自动重试（第 2 次）；已完成的步骤会保留'
+            record.metadata['summary_job'] = {
+                'status': 'waiting_retry', 'error': waiting, 'error_kind': 'provider_region',
+                'previous_error': REGION, 'retry_in_seconds': 180}
+            item = self.feed(record, 'summary')
+            self.assertEqual(item['status'], 'waiting_retry')
+            self.assertEqual(item['error'], waiting)
+            self.assertEqual(item['error_kind'], 'provider_region')
+            self.assertEqual(item['previous_error'], REGION)
+            record.metadata['summary_job'] = {
+                'status': 'paused', 'error': '生成已暂停，已完成内容保留，可以继续',
+                'error_kind': 'paused', 'previous_error': REGION}
+            item = self.feed(record, 'summary')
+            self.assertEqual(item['status'], 'paused')
+            self.assertEqual(item['error'], '生成已暂停，已完成内容保留，可以继续')
+            self.assertEqual(item['error_kind'], 'paused')
+            record.metadata['summary_job'] = {
+                'status': 'interrupted', 'error': '生成已中断，已完成内容保留，可以重新生成',
+                'error_kind': 'service_interrupted', 'previous_error': REGION}
+            item = self.feed(record, 'summary')
+            self.assertEqual(item['status'], 'interrupted')
+            self.assertEqual(item['error'], '生成已中断，已完成内容保留，可以重新生成')
+            self.assertEqual(item['error_kind'], 'service_interrupted')
+            record.metadata['summary_job'] = {'status': 'completed', 'error': '', 'error_kind': '', 'previous_error': REGION}
+            record.save_all()
+            with patch.object(app, 'recording_store', store_for(record)):
+                self.assertFalse(any(item['type'] == 'summary' for item in app.compact_ai_tasks()))
+
+    async def test_active_count_remains_the_card_count_including_cancelled(self):
+        with tempfile.TemporaryDirectory() as raw:
+            record = self.record(raw)
+            record.metadata['ai_jobs'] = {'refinement': {
+                'status': 'cancelled', 'error': '任务已取消；已完成内容仍然保留', 'error_kind': 'cancelled'}}
+            record.save_all()
+            with patch.object(app, 'recording_store', store_for(record)):
+                payload = await app.ai_tasks()
+            self.assertEqual(payload['active_count'], len(payload['tasks']))
+            self.assertTrue(any(item['status'] == 'cancelled' for item in payload['tasks']))

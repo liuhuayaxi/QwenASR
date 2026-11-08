@@ -799,9 +799,9 @@ AUTO_RETRY_KINDS = {
     "network_connect_timeout", "network_read_timeout", "network_transport",
 }
 MAX_AUTOMATIC_RETRIES = 6
-# Google rejects the network exit region intermittently (VPN/TUN node
-# switches). Retry the note job every 3 minutes for at most 30 minutes; the
-# review-note task resumes from its saved steps on each attempt.
+# Google sometimes answers "User location is not supported". The note job
+# retries every 3 minutes for at most 30 minutes and resumes saved steps.
+# The retry does not diagnose why the upstream refused the region.
 REGION_RETRY_DELAY_SECONDS = 180
 REGION_RETRY_WINDOW_SECONDS = 1800
 
@@ -917,6 +917,91 @@ def compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any]]:
     return tasks
 
 
+_BUSY_STATUS_KEEP = {"waiting_retry", "paused", "cancelled", "interrupted", "failed"}
+
+
+def _unique_errors(*values: object) -> str:
+    seen: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in seen:
+            seen.append(text)
+    return "；".join(seen)
+
+
+def _first_error(*values: object) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _kind_for(error: str, saved_kind: object, use_saved: bool) -> str:
+    if not str(error or "").strip():
+        return ""
+    kind = str(saved_kind or "").strip()
+    if use_saved and kind:
+        return kind
+    return _task_error_kind(error)
+
+
+def _displayed_ai_status(saved_status: str, running: bool, fallback: str) -> str:
+    """A live worker does not hide a terminal pause, cancel, interrupt, or failure."""
+    if running and saved_status not in _BUSY_STATUS_KEEP:
+        return "running"
+    return saved_status or fallback
+
+
+def _task_error_view(*, saved_status: str, running: bool, job_error: object, job_kind: object,
+                     stream_error: object = "", historical_error: object = "", historical_kind: object = "") -> tuple[str, str, str]:
+    """Keep an in-progress attempt from displaying the previous failure as current.
+
+    Queued and running work retains old job, stream, and paragraph failures
+    only as previous_error. A later failed attempt stays visible. Pause,
+    cancel, and interrupt messages stay the current error. A completed attempt
+    does not revive a stale stream receipt.
+    """
+    job_text = str(job_error or "").strip()
+    stream_text = str(stream_error or "").strip()
+    historical_text = str(historical_error or "").strip()
+    if saved_status in {"paused", "cancelled", "interrupted"}:
+        previous = _unique_errors(
+            *[item for item in (stream_text, historical_text) if item and item != job_text]
+        )
+        return job_text, previous, _kind_for(job_text, job_kind, True)
+    live_attempt = running and saved_status not in _BUSY_STATUS_KEEP
+    if live_attempt:
+        return "", _unique_errors(job_text, stream_text, historical_text), ""
+    if saved_status == "waiting_retry":
+        previous = _unique_errors(*[item for item in (stream_text, historical_text) if item and item != job_text])
+        return job_text, previous, _kind_for(job_text, job_kind, True)
+    if saved_status == "completed" and not job_text:
+        return historical_text, "", _kind_for(historical_text, historical_kind, bool(historical_text))
+    current = _first_error(job_text, stream_text, historical_text)
+    if current and current == job_text:
+        kind = _kind_for(current, job_kind, True)
+    elif current and current == historical_text and not job_text and not stream_text:
+        kind = _kind_for(current, historical_kind, True)
+    else:
+        kind = _kind_for(current, "", False)
+    return current, "", kind
+
+
+def _summary_error_view(summary: dict[str, Any], status: str) -> tuple[str, str, str]:
+    current = str(summary.get("error") or "").strip()
+    prior = str(summary.get("previous_error") or "").strip()
+    if status in {"queued", "running"}:
+        shown, previous = "", _unique_errors(current, prior)
+    else:
+        shown, previous = current, prior if prior and prior != current else ""
+    if not shown:
+        return shown, previous, ""
+    inferred = _task_error_kind(shown)
+    kind = inferred if inferred != "upstream" else str(summary.get("error_kind") or "upstream")
+    return shown, previous, kind
+
+
 def _build_compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any]]:
     tasks: list[dict[str, Any]] = []
     try:
@@ -967,7 +1052,7 @@ def _build_compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any
             abstract_pending = _summary_abstract_pending(record)
             if abstract_pending and status in {"failed", "interrupted"}:
                 status = "completed_with_errors"
-            inferred_error_kind = _task_error_kind(str(summary.get("error") or ""))
+            summary_error, summary_previous, summary_kind = _summary_error_view(summary, status)
             tasks.append({
                 **base,
                 **ai_provider_snapshot("summary"),
@@ -975,9 +1060,9 @@ def _build_compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any
                 "type": "summary",
                 "label": AI_TASK_LABELS["summary"],
                 "status": status,
-                "error": str(summary.get("error") or ""),
-                "error_kind": (inferred_error_kind if inferred_error_kind != "upstream"
-                               else summary.get("error_kind") or "upstream") if summary.get("error") else "",
+                "error": summary_error,
+                "error_kind": summary_kind,
+                "previous_error": summary_previous,
                 "completed": summary_progress['completed_parts'],
                 "total": int(summary_progress['total_parts'] or 0),
                 "progress_unit": summary_progress.get('unit', '批'),
@@ -1022,8 +1107,8 @@ def _build_compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any
                 if isinstance(item, dict) and item.get("ai_error")
             ]
             saved_status = str(refinement_job.get("status") or "")
-            status = saved_status if refinement_running and saved_status == "waiting_retry" else (
-                "running" if refinement_running else saved_status or ("failed" if failed_errors else "pending")
+            status = _displayed_ai_status(
+                saved_status, refinement_running, "failed" if failed_errors else "pending",
             )
             if status == "completed" and missing_blocks:
                 status = "pending"
@@ -1031,10 +1116,17 @@ def _build_compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any
                 status='pending'
             if status != "completed":
                 historical_error = failed_errors[-1] if failed_errors else ""
-                retrying = refinement_running and saved_status in {"queued", "running"}
                 stream_error = (record.metadata.get('course_stream') or {}).get('correction_error') or ''
-                task_error = '' if stream_job and stream_job.pipeline else str(refinement_job.get("error") or stream_error or ("" if retrying else historical_error))
-                if review_blocks and not unprocessed_blocks and not refinement_running and status=='pending':task_error=''
+                # An active course pipeline is still this attempt. Its saved
+                # text belongs to the previous failure until the attempt ends.
+                attempt_running = refinement_running or bool(stream_job and stream_job.pipeline)
+                task_error, previous_error, error_kind = _task_error_view(
+                    saved_status=saved_status, running=attempt_running,
+                    job_error=refinement_job.get("error"), job_kind=refinement_job.get("error_kind"),
+                    stream_error=stream_error, historical_error=historical_error,
+                )
+                if review_blocks and not unprocessed_blocks and not refinement_running and status=='pending':
+                    task_error, error_kind, previous_error = '', '', ''
                 review_only = bool(review_blocks and not unprocessed_blocks and not task_error
                                    and not refinement_running and status == "pending")
                 tasks.append({
@@ -1045,8 +1137,8 @@ def _build_compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any
                     "label": "AI 自动复核" if review_only else AI_TASK_LABELS["refinement"],
                     "status": status,
                     "error": task_error,
-                    "error_kind": str(refinement_job.get("error_kind") or _task_error_kind(task_error)) if task_error else "",
-                    "previous_error": historical_error if retrying else "",
+                    "error_kind": error_kind,
+                    "previous_error": previous_error,
                     "ai_activity": task_ai_activity(f"refinement:{record.id}"),
                     "completed": refinement_progress['saved_segments'],
                     "total": refinement_progress['total_segments'],
@@ -1077,13 +1169,14 @@ def _build_compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any
         live_cancelled = live_job.get("status") == "cancelled" and not live_running
         if not live_cancelled and (failed or live_running or live_job.get("status") in {"queued", "running", "waiting_retry", "paused", "failed", "interrupted"}):
             saved_status = str(live_job.get("status") or "")
-            status = saved_status if live_running and saved_status == "waiting_retry" else (
-                "running" if live_running else saved_status or "failed"
-            )
+            status = _displayed_ai_status(saved_status, live_running, "failed")
             if status != "completed":
                 historical_error = str((failed or {}).get("ai_error") or "")
-                retrying = live_running and saved_status in {"queued", "running"}
-                error = str(live_job.get("error") or ("" if retrying else historical_error))
+                error, previous_error, error_kind = _task_error_view(
+                    saved_status=saved_status, running=live_running,
+                    job_error=live_job.get("error"), job_kind=live_job.get("error_kind"),
+                    historical_error=historical_error, historical_kind=(failed or {}).get("error_kind"),
+                )
                 failed_end = int(round(float((failed or {}).get("end", 0))))
                 tasks.append({
                     **base,
@@ -1093,9 +1186,9 @@ def _build_compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any
                     "label": AI_TASK_LABELS["live_summary"],
                     "status": status,
                     "error": error,
-                    "previous_error": historical_error if retrying else "",
+                    "previous_error": previous_error,
                     "ai_activity": task_ai_activity(f"live_summary:{record.id}"),
-                    "error_kind": str(live_job.get("error_kind") or (failed or {}).get("error_kind") or _task_error_kind(error)) if error else "",
+                    "error_kind": error_kind,
                     "completed": int(live_job.get("completed") or len([item for item in summaries if item.get("summary") and not item.get("ai_error")])),
                     "total": int(live_job.get("total") or len(summaries)),
                     "range_start": float((failed or {}).get("start", 0)),
@@ -1130,6 +1223,8 @@ async def ai_tasks() -> dict[str, Any]:
     tasks = compact_ai_tasks()
     return {
         "tasks": tasks,
+        # Card count, including failed, pending, and cancelled rows. Callers
+        # that need in-progress work use each task's status.
         "active_count": len(tasks),
         "attention_count": sum(
             item["status"] in {"failed", "interrupted", "paused", "pending"} for item in tasks

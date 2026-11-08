@@ -222,7 +222,101 @@ class SessionRecoveryTests(unittest.TestCase):
             with self.assertRaises(AIRequestError) as caught:_finish_output(stream,'ordinary warning',self.root,message,0)
             self.assertEqual(caught.exception.kind,'output_truncated')
             self.assertTrue(caught.exception.retriable)
-            self.assertNotIn('ordinary warning',next((self.root/'diagnostics').glob('*.json')).read_text())
+            diagnostic = json.loads(next((self.root/'diagnostics').glob('*.json')).read_text())
+            self.assertNotIn('ordinary warning', json.dumps(diagnostic))
+            self.assertTrue(set(diagnostic) <= {
+                'time', 'model', 'path_category', 'continued', 'sandbox', 'error_kind',
+                'exit_code', 'duration_seconds', 'hostname', 'session_id', 'retriable',
+            })
+
+    def test_failure_diagnostic_keeps_one_hostname_and_drops_the_payload(self):
+        from qwen_asr_app.agy_cli import _call_facts, _diagnostic_hostname, _failure_metadata
+        self.assertEqual(_diagnostic_hostname('User location is not supported for the API use.'), 'unknown')
+        self.assertEqual(_diagnostic_hostname('dial tcp 10.1.2.3:443: connection reset'), 'unknown')
+        self.assertEqual(_diagnostic_hostname('https://user:secret-token@daily-cloudcode-pa.googleapis.com/path?q=1'), 'unknown')
+        self.assertEqual(
+            _diagnostic_hostname('Post "https://a.example/x": Post "https://b.example/y"'),
+            'unknown',
+        )
+        self.assertEqual(
+            _diagnostic_hostname('Post "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse"'),
+            'daily-cloudcode-pa.googleapis.com',
+        )
+        stderr = (
+            'ordinary warning\n'
+            'Post "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse&key=secret-token": '
+            'FAILED_PRECONDITION: User location is not supported for the API use.\n'
+            '/Users/private/lecture.pdf secret-conversation-id'
+        )
+        stdout = json.dumps({'event': 'result', 'result': {
+            'status': 'FAILED', 'error': 'User location is not supported for the API use.',
+            'conversation_id': SESSION}})
+        message = json.dumps({'event': 'user', 'message': {'content': PROMPT + ' private lecture text'}})
+        _call_facts.set({
+            'model': 'gemini-3.8-flash-high', 'path_category': 'text', 'continued': False,
+            'sandbox': False, 'started': __import__('time').monotonic() - 10.2,
+        })
+        with self.assertRaises(AIRequestError):
+            _finish_output(stdout, stderr, self.root, message, 3)
+        saved = json.loads(next((self.root / 'diagnostics').glob('failed-*.json')).read_text())
+        text = json.dumps(saved, ensure_ascii=False)
+        self.assertEqual(saved['model'], 'gemini-3.8-flash-high')
+        self.assertEqual(saved['path_category'], 'text')
+        self.assertIs(saved['continued'], False)
+        self.assertIs(saved['sandbox'], False)
+        self.assertEqual(saved['error_kind'], 'provider_region')
+        self.assertEqual(saved['exit_code'], 3)
+        self.assertEqual(saved['hostname'], 'daily-cloudcode-pa.googleapis.com')
+        self.assertGreaterEqual(saved['duration_seconds'], 10)
+        self.assertRegex(saved['time'], r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$')
+        self.assertTrue(set(saved) <= set(_failure_metadata(
+            model_name='m', path_category='text', continued=False, sandbox=False,
+            started=None, error_kind='provider_region', exit_code=1, detail='',
+        )) | {'session_id', 'retriable'})
+        for hidden in ('ordinary warning', 'secret-token', 'alt=sse', 'streamGenerateContent', 'https://',
+                       '/Users/private', 'lecture.pdf', 'private lecture text', PROMPT, 'secret-conversation-id',
+                       'User location is not supported'):
+            self.assertNotIn(hidden, text)
+        ambiguous = 'Post "https://oauth2.googleapis.com/token": lookup daily-cloudcode-pa.googleapis.com'
+        _call_facts.set({'model': '../secret', 'path_category': 'not-a-path', 'continued': True, 'sandbox': True, 'started': None})
+        before = {path.name for path in (self.root / 'diagnostics').glob('failed-*.json')}
+        with self.assertRaises(AIRequestError):
+            _finish_output(stdout, ambiguous, self.root, message, 3)
+        created = [path for path in (self.root / 'diagnostics').glob('failed-*.json') if path.name not in before]
+        self.assertEqual(len(created), 1)
+        again = json.loads(created[0].read_text())
+        self.assertEqual(again['hostname'], 'unknown')
+        self.assertEqual(again['model'], 'unknown')
+        self.assertEqual(again['path_category'], 'unknown')
+        self.assertIsNone(again['duration_seconds'])
+        blob = json.dumps(again)
+        self.assertNotIn('oauth2.googleapis.com', blob)
+        self.assertNotIn('daily-cloudcode-pa.googleapis.com', blob)
+        self.assertNotIn('../secret', blob)
+
+    def test_request_arguments_record_model_path_and_sandbox_without_the_prompt(self):
+        from qwen_asr_app.agy_cli import _call_facts, _request_arguments
+        provider = {'cli_model': 'gemini-3.8-flash-high', 'context_window': 1_000_000}
+        with tempfile.TemporaryDirectory() as raw, \
+             patch('qwen_asr_app.agy_cli.PRIVATE_ROOT', Path(raw)), \
+             patch('qwen_asr_app.agy_cli.executable', return_value='/bin/echo'):
+            _request_arguments('short instruction', {'text': 'private'}, provider, conversation='secret-conversation-id')
+            facts = dict(_call_facts.get())
+            self.assertEqual(facts['model'], 'gemini-3.8-flash-high')
+            self.assertEqual(facts['path_category'], 'text')
+            self.assertIs(facts['continued'], True)
+            self.assertIs(facts['sandbox'], False)
+            self.assertNotIn('secret-conversation-id', json.dumps({key: value for key, value in facts.items() if key != 'started'}))
+            self.assertNotIn('private', json.dumps({key: value for key, value in facts.items() if key != 'started'}))
+            with patch('qwen_asr_app.agy_cli.sys.platform', 'darwin'), \
+                 patch('qwen_asr_app.agy_cli.shutil.which', return_value='/usr/bin/sandbox-exec'):
+                _request_arguments('甲' * 60000, {'text': 'private lecture'}, provider, conversation='')
+            sandboxed = _call_facts.get()
+            self.assertEqual(sandboxed['path_category'], 'text_files')
+            self.assertIs(sandboxed['sandbox'], True)
+            self.assertIs(sandboxed['continued'], False)
+            self.assertNotIn('private lecture', json.dumps({key: value for key, value in sandboxed.items() if key != 'started'}))
+            self.assertNotIn(raw, json.dumps({key: value for key, value in sandboxed.items() if key != 'started'}))
 
     def test_limit_probe_requires_exact_request_not_a_matching_substring(self):
         self.save([self.user('other prefix '+PROMPT),

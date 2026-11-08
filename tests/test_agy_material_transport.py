@@ -380,3 +380,43 @@ class RegionFailureMessageTests(unittest.TestCase):
         self.assertIn('网络出口地区', str(error))
         self.assertIn('User location is not supported', str(error))
         self.assertIn('既有成果', str(error))
+        self.assertNotIn('VPN', str(error))
+        self.assertNotIn('通常', str(error))
+        self.assertNotIn('不是账号', str(error))
+
+
+class RegionReceiptTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.enterContext(available_material_sandbox())
+
+    async def test_region_receipt_records_one_host_and_not_the_request(self):
+        secret = 'secret-token'
+        detail = (
+            'E1022 session.go:273] FAILED_PRECONDITION (code 400): User location is not supported for the API use. '
+            f'Post "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse&key={secret}" '
+            '/Users/private/lecture.pdf'
+        )
+        process = child([{'event': 'result', 'result': {'status': 'FAILED', 'error': detail}}],
+                        stderr=detail.encode(), exit_code=3)
+        with tempfile.TemporaryDirectory() as raw, \
+             patch('qwen_asr_app.agy_materials.executable', return_value='/usr/bin/true'), \
+             patch('qwen_asr_app.agy_materials.asyncio.create_subprocess_exec', return_value=process):
+            folder = Path(raw)
+            with self.assertRaises(MaterialSessionError) as caught:
+                await request_materials('synthetic private prompt', folder, PROVIDER)
+            self.assertEqual(caught.exception.kind, 'provider_region')
+            self.assertNotIn('VPN', str(caught.exception))
+            receipt = json.loads(next((folder / 'sessions').glob('failed-*.json')).read_text())
+        text = json.dumps(receipt, ensure_ascii=False)
+        self.assertEqual(receipt['hostname'], 'daily-cloudcode-pa.googleapis.com')
+        self.assertEqual(receipt['path_category'], 'materials')
+        self.assertEqual(receipt['model'], PROVIDER['cli_model'])
+        self.assertIs(receipt['continued'], False)
+        self.assertIs(receipt['sandbox'], True)
+        self.assertEqual(receipt['error_kind'], 'provider_region')
+        self.assertEqual(receipt['exit_code'], 3)
+        self.assertIsInstance(receipt['duration_seconds'], float)
+        self.assertRegex(receipt['time'], r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$')
+        for hidden in (secret, 'alt=sse', 'streamGenerateContent', 'https://', '/Users/private',
+                       'lecture.pdf', 'session.go', 'synthetic private prompt', 'User location is not supported'):
+            self.assertNotIn(hidden, text)

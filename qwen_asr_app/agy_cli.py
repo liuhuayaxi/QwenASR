@@ -10,6 +10,9 @@ from contextvars import ContextVar
 
 last_session_id = ContextVar('agy_last_session_id', default='')
 last_prompt = ContextVar('agy_last_prompt', default='')
+# Facts for the request about to be sent. Failure diagnostics read this and
+# never the prompt, response, stderr, or account material.
+_call_facts = ContextVar('agy_call_facts', default=None)
 
 import json
 import asyncio
@@ -172,6 +175,56 @@ def _error_kind(message: str) -> tuple[str, bool]:
     return "agy_cli_error", False
 
 
+_DIAGNOSTIC_CATEGORIES = {'text', 'text_files', 'materials'}
+_HOSTNAME_URL = re.compile(r'https?://([A-Za-z0-9.-]{1,253})(?::\d+)?(?:[/?#\s"]|$)', re.I)
+_HOSTNAME_DIAL = re.compile(r'\b(?:dial tcp|lookup)\s+([A-Za-z0-9.-]{1,253})(?::\d+)?\b', re.I)
+_SAFE_HOSTNAME = re.compile(
+    r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+'
+)
+_SAFE_MODEL = re.compile(r'[A-Za-z0-9._-]{1,80}')
+_SAFE_KIND = re.compile(r'[a-z0-9_]{1,48}')
+
+
+def _diagnostic_hostname(detail: str) -> str:
+    """Return one DNS hostname, or unknown.
+
+    Only an explicit URL or dial/lookup token counts. File paths, addresses,
+    queries, and ambiguous multi-host errors stay unknown.
+    """
+    hosts: list[str] = []
+    for pattern in (_HOSTNAME_URL, _HOSTNAME_DIAL):
+        hosts.extend(pattern.findall(str(detail or '')))
+    unique: list[str] = []
+    for host in hosts:
+        value = host.strip('.').lower()
+        if value in unique or not _SAFE_HOSTNAME.fullmatch(value) or not re.search(r'[a-z]', value):
+            continue
+        unique.append(value)
+    return unique[0] if len(unique) == 1 else 'unknown'
+
+
+def _failure_metadata(*, model_name, path_category, continued, sandbox, started, error_kind, exit_code, detail) -> dict[str, Any]:
+    """Allowlisted failure facts. ``detail`` is used only to read a hostname."""
+    model_text = str(model_name or '')
+    kind = str(error_kind or '')
+    if isinstance(started, (int, float)) and not isinstance(started, bool):
+        duration = round(max(0.0, time.monotonic() - float(started)), 1)
+    else:
+        duration = None
+    code = exit_code if isinstance(exit_code, int) and not isinstance(exit_code, bool) else None
+    return {
+        'time': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+        'model': model_text if _SAFE_MODEL.fullmatch(model_text) else 'unknown',
+        'path_category': path_category if path_category in _DIAGNOSTIC_CATEGORIES else 'unknown',
+        'continued': bool(continued),
+        'sandbox': bool(sandbox),
+        'error_kind': kind if _SAFE_KIND.fullmatch(kind) else 'unknown',
+        'exit_code': code,
+        'duration_seconds': duration,
+        'hostname': _diagnostic_hostname(detail),
+    }
+
+
 def _blocking_diagnostic(stderr):
     """Only explicit terminal rejections can override a verified continuation.
 
@@ -329,11 +382,26 @@ def _finish_output(stdout, stderr, working, message, returncode=0, prior_prompts
     except AIRequestError as exc:
         from .durable import atomic_json
         exc.session_id=last_session_id.get()
-        # Store correlation and classifications, never raw prompts, responses,
-        # stderr, credentials or account details. Native session remains intact.
-        failure={'session_id':exc.session_id,'error_kind':exc.kind,'retriable':exc.retriable,
-                 'exit_code':returncode,'stderr_bytes':len(stderr.encode()),
-                 'request_sha256':hashlib.sha256(message.encode()).hexdigest()}
+        # Correlation and classifications only. The raw provider text is read
+        # for a single hostname and is not stored.
+        facts = _call_facts.get() or {}
+        session_id = str(exc.session_id or '')
+        if '/' in session_id or '\\' in session_id or len(session_id) > 80:
+            session_id = ''
+        failure={
+            'session_id': session_id,
+            'retriable': bool(exc.retriable),
+            **_failure_metadata(
+                model_name=facts.get('model') or '',
+                path_category=facts.get('path_category') or '',
+                continued=facts.get('continued') if facts else bool(conversation),
+                sandbox=bool(facts.get('sandbox')),
+                started=facts.get('started'),
+                error_kind=exc.kind,
+                exit_code=returncode,
+                detail='\n'.join(part for part in (str(exc), stderr) if part),
+            ),
+        }
         atomic_json(Path(working)/'diagnostics'/f'failed-{uuid.uuid4().hex}.json',failure)
         raise
 
@@ -463,8 +531,17 @@ def _request_arguments(instructions: str, payload: dict[str, Any], provider: dic
         temporary = working/'.tmp'
         temporary.mkdir(mode=0o700)
         env['TMPDIR'] = str(temporary)
+        sandbox = True
     else:
         env = subprocess_environment()
+        sandbox = False
+    _call_facts.set({
+        'model': selected_model,
+        'path_category': 'text_files' if file_transport else 'text',
+        'continued': bool(conversation),
+        'sandbox': sandbox,
+        'started': time.monotonic(),
+    })
     return command, message, working, env, timeout
 
 
