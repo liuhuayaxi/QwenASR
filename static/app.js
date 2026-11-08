@@ -4,7 +4,7 @@ import {cachedJson} from './js/cached-json.js';
 import {createVisiblePoll} from './js/visible-poll.js';
 import { createBatchView } from "./js/batch-view.js?v=20261015-reader-math-scope-8";
 import { createLibraryTools } from "./js/library-tools.js?v=20261031-browser-fixes-1";
-import { createMarkdownReader, renderMarkdown } from "./js/markdown-reader.js?v=20261108-ppt-1";
+import { createMarkdownReader, renderMarkdown } from "./js/markdown-reader.js?v=20261108-ppt-3";
 import { createNoteAutosave } from "./js/note-autosave.js?v=20260923-upgrade-1";
 import { downloadNotePdf } from "./js/note-download.js?v=20261031";
 import { chapterValue, chapterLabel, createChapterControls } from './js/recording-chapters.js?v=20261031-browser-fixes-2';
@@ -1511,6 +1511,7 @@ function renderNoteTranscript(session) {
 // "↗ PPT 第N页" links: fetched separately; the note text itself is unchanged.
 const sectionPageLinks = new Map();
 async function loadSectionPageLinks(id) {
+  if (els.noteSummaryEditor.dataset.noteId === id) $("#noteSummaryReader").dataset.pptLinks = "pending";
   if (!sectionPageLinks.has(id)) {
     sectionPageLinks.set(id, fetch(`/api/section-page-links/${encodeURIComponent(id)}`, { cache: "no-store" })
       .then((response) => response.ok ? response.json() : null).catch(() => null));
@@ -1533,9 +1534,11 @@ function renderNoteSummary(session) {
   const preserveEditor = els.noteSummaryEditor.dataset.noteId === session.id
     && (noteReader.hasActive() || doc.pending || noteAutosave.isDirty(session.id));
   if (!preserveEditor) {
+    if (els.noteSummaryEditor.dataset.noteId !== session.id) noteReader.setPageLinks(null);
     els.noteSummaryEditor.value = doc.text;
     els.noteSummaryEditor.dataset.savedValue = doc.savedInput;
     els.noteSummaryEditor.dataset.noteId = session.id;
+    $("#noteSummaryReader").dataset.pptLinks = "pending";
     noteReader.render();
   }
   void loadSectionPageLinks(session.id);

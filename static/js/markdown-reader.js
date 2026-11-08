@@ -1,6 +1,6 @@
 import { marked } from "../vendor/marked/marked.esm.js";
 import DOMPurify from "../vendor/dompurify/purify.es.mjs";
-import { pptJump } from "./ppt-jump.js?v=1";
+import { headingTexts, pptJump } from "./ppt-jump.js?v=1";
 
 const escape = (value) => String(value).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 function canonicalMathExpression(value) {
@@ -107,7 +107,73 @@ export function createMarkdownReader({ container, source, toc, onChange }) {
       page: String(target.viewer_page_start || target.page_start), label: String(target.page_start),
       labelEnd: String(target.page_end || target.page_start), title: target.source_name || "课件" });
     if (target.viewer_page_end) query.set("end", String(target.viewer_page_end));
+    if (/^[a-f0-9]{64}$/.test(target.viewer_sha256 || "")) query.set("sha", target.viewer_sha256);
+    if (target.viewer_pages) query.set("n", String(target.viewer_pages));
     return `/static/pdf-viewer.html?${query}`;
+  };
+  // Visible buttons prefetch the shell and at most two tiny previews. Hovering
+  // prefetches that one slide at low priority, and only one full page at a time:
+  // a high-priority preload would outrank the new tab's own image request.
+  const warmed = new Set();
+  const thumbLimit = 2;
+  let fullWarm = "";
+  const viewerFiles = ["/static/pdf-viewer.html", "/static/pdf-viewer.css?v=10", "/static/js/pdf-viewer-page.js?v=10", "/static/js/pdf-page-viewer.js?v=10"];
+  const warm = (url) => {
+    const key = "prefetch:" + url;
+    if (warmed.has(key)) return false;
+    warmed.add(key);
+    const link = document.createElement("link");
+    link.rel = "prefetch";
+    if (/\.webp$/.test(url)) link.as = "image";
+    link.href = url;
+    document.head.append(link);
+    return true;
+  };
+  const preconnect = () => {
+    if (warmed.has("preconnect")) return;
+    warmed.add("preconnect");
+    const link = document.createElement("link");
+    link.rel = "preconnect";
+    link.href = location.origin;
+    document.head.append(link);
+  };
+  const warmTarget = (target, eager) => {
+    const recording = pageLinks?.recording || "";
+    if (!recording || !target?.source_id) return;
+    preconnect();
+    for (const file of viewerFiles) warm(file);
+    if (!/^[a-f0-9]{64}$/.test(target.viewer_sha256 || "")) return;
+    const page = target.viewer_page_start || target.page_start;
+    const base = `/api/section-page-links/${encodeURIComponent(recording)}/pages/${encodeURIComponent(target.source_id)}/`;
+    const thumb = `${base}t${page}.webp`;
+    const full = `${base}${page}.webp`;
+    warm(`${base}manifest.json`);
+    if (!eager) {
+      if (warmed.has(`prefetch:${thumb}`)) return;
+      const thumbs = [...warmed].filter((key) => /^prefetch:\/api\/section-page-links\/[^/]+\/pages\/[^/]+\/t\d+\.webp$/.test(key)).length;
+      if (thumbs >= thumbLimit) return;
+      warm(thumb);
+      return;
+    }
+    warm(thumb);
+    if (fullWarm && fullWarm !== full) return;
+    fullWarm = full;
+    warm(full);
+  };
+  const watched = new Set();
+  const jumpObserver = "IntersectionObserver" in window ? new IntersectionObserver((entries) => {
+    for (const entry of entries) if (entry.isIntersecting) {
+      jumpObserver.unobserve(entry.target);
+      watched.delete(entry.target);
+      warmTarget(entry.target._pptTarget, false);
+    }
+  }, { rootMargin: "200px 0px" }) : null;
+  const watchJump = (jump, target) => {
+    jump._pptTarget = target;
+    watched.add(jump);
+    jumpObserver?.observe(jump);
+    const full = () => warmTarget(target, true);
+    for (const name of ["pointerenter", "focusin", "touchstart"]) jump.addEventListener(name, full, { once: true, passive: true });
   };
   const editedRaw = (input, original) => {
     const ending = original.match(/\n+$/)?.[0] || "";
@@ -160,6 +226,8 @@ export function createMarkdownReader({ container, source, toc, onChange }) {
   }
   function render() {
     active = null;
+    for (const jump of watched) jumpObserver?.unobserve(jump);
+    watched.clear();
     const markdown = source.value.replace(/\r\n?/g, "\n");
     tokens = marked.lexer(markdown);
     // Lexer raws preserve source, including structural whitespace and links.
@@ -172,6 +240,7 @@ export function createMarkdownReader({ container, source, toc, onChange }) {
       fragment.append(empty);
     }
     const linkByIndex = new Map((pageLinks?.sections || []).map((entry) => [entry.index, entry]));
+    const headings = [];
     let headingIndex = -1;
     for (const [index, token] of tokens.entries()) {
       if (token.type === "space" || token.type === "def") continue;
@@ -201,13 +270,27 @@ export function createMarkdownReader({ container, source, toc, onChange }) {
         link.addEventListener("click", () => { finish(); container.querySelector(`[data-block="${index}"]`)?.scrollIntoView({ behavior: "smooth", block: "start" }); });
         toc.append(link);
       }
-      const entry = token.type === "heading" ? linkByIndex.get(headingIndex) : null;
-      if (entry && entry.heading === String(token.text || "").trim()) {
-        const jump = pptJump(document, entry, (target) => viewerHref(pageLinks.recording, target));
-        if (jump) block.querySelector("h1,h2,h3,h4,h5,h6")?.append(jump);
-      }
+      if (token.type === "heading") headings.push({ headingIndex, block, token });
       fragment.append(block);
     }
+    // Buttons are only attached when the rendered headings and the lexer agree,
+    // so a late page-links payload cannot land on the wrong title.
+    const aligned = !pageLinks || headingTexts(tokens).length === fragment.querySelectorAll("h1,h2,h3,h4,h5,h6").length;
+    if (pageLinks && aligned) {
+      for (const item of headings) {
+        const entry = linkByIndex.get(item.headingIndex);
+        if (!entry || entry.heading !== String(item.token.text || "").trim()) continue;
+        const jump = pptJump(document, entry, (target) => viewerHref(pageLinks.recording, target));
+        const target = (entry.targets || []).find((candidate) => candidate.viewer_page_start || candidate.page_start);
+        if (jump && target) {
+          item.block.querySelector("h1,h2,h3,h4,h5,h6")?.append(jump);
+          watchJump(jump, target);
+        }
+      }
+    }
+    if (!pageLinks) {
+      if (container.dataset.pptLinks !== "pending") container.dataset.pptLinks = "off";
+    } else container.dataset.pptLinks = aligned ? "ready" : "mismatch";
     container.replaceChildren(fragment);
   }
   container.addEventListener("pointerdown", (event) => {
@@ -224,6 +307,9 @@ export function createMarkdownReader({ container, source, toc, onChange }) {
     const next = container.querySelector(`[data-block="${newIndex}"]`);
     if (next) begin(tokens[newIndex], next);
   });
-  function setPageLinks(value) { pageLinks = value && value.enabled && value.sections?.length ? value : null; }
+  function setPageLinks(value) {
+    pageLinks = value && value.enabled && value.sections?.length ? value : null;
+    if (!pageLinks) container.dataset.pptLinks = "off";
+  }
   return { render, finish, hasActive: () => Boolean(active), setPageLinks };
 }

@@ -37,6 +37,11 @@ ROOT = PRIVATE_ROOT / 'section-page-links'
 SETTINGS = ROOT / 'settings.json'
 LINKS = ROOT / 'links'
 PAGE_MAPS = ROOT / 'page-maps'
+# Optional pre-rendered page images (sharingnotes docs/data/pages/<sha>/).
+# Absent folders keep the viewer on the local PDF. This directory is never
+# written by the request path.
+PAGES = ROOT / 'pages'
+PAGE_FILE = re.compile(r'(?:manifest\.json|t?[1-9]\d{0,3}\.(?:webp|png))\Z')
 
 SUMMARY = re.compile(r'^(?:\d+(?:\.\d+)*\.?\s*)?(?:本节要点|本章学习要求|学习要求|学习目标|掌握|理解|了解|公式与结论汇总|核心公式(?:汇总表|速查表)?|关键结论|核心结论速查表|结论速查|复习清单|本节小结|小结|总结|课后作业)\s*$')
 QUESTION = re.compile(r'雨课堂|随堂|自测|真题|考题练习|课堂练习题')
@@ -58,6 +63,34 @@ def enabled():
 def set_enabled(value: bool):
     ROOT.mkdir(parents=True, exist_ok=True)
     atomic_json(SETTINGS, {'enabled': bool(value)})
+
+
+def page_image_manifest(sha_hex: str):
+    """Published viewer manifest, or None when this PDF still uses PDF.js."""
+    if not re.fullmatch(r'[a-f0-9]{64}', sha_hex or ''):
+        return None
+    try:
+        value = json.loads((PAGES / sha_hex / 'manifest.json').read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return None
+    pages = value.get('pages')
+    sizes = value.get('sizes')
+    if value.get('pdf_sha256') != sha_hex or isinstance(pages, bool) or not isinstance(pages, int) or pages <= 0:
+        return None
+    if not isinstance(sizes, list) or len(sizes) != pages:
+        return None
+    return value
+
+
+def page_image_file(sha_hex: str, name: str):
+    """One manifest or page image inside that PDF's folder, or None."""
+    if page_image_manifest(sha_hex) is None or not PAGE_FILE.fullmatch(name or ''):
+        return None
+    folder = (PAGES / sha_hex).resolve()
+    path = (folder / name).resolve()
+    if not path.is_relative_to(folder) or not path.is_file():
+        return None
+    return path
 
 
 def sha(text: str) -> str:
