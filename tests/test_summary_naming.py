@@ -87,6 +87,16 @@ class SummaryNamingTests(unittest.IsolatedAsyncioTestCase):
         await app.generate_library_summary(self.record.id, self.payload)
         self.assertEqual(self.title.await_args.args[1], app.DEFAULT_AI_TITLE_PROMPT)
 
+    async def test_text_provider_note_assigns_chapter_from_saved_lesson_selection(self):
+        self.record.metadata['material_selection'] = {'files': [
+            {'source_id': 'slides', 'name': '第二章 光纤导光原理.pdf', 'chosen': True},
+            {'source_id': 'other', 'name': '第三章 光纤损耗.pdf', 'chosen': False},
+        ]}
+        self.record.save_metadata()
+        result = await app.generate_library_summary(self.record.id, self.payload)
+        self.assertEqual(result['session']['chapters'], ['第2章 光纤导光原理'])
+        self.assertEqual(self.store.find(self.record.id).metadata['chapter_info']['source'], 'materials')
+
     async def test_title_failure_preserves_note_and_manual_retry_clears_error(self):
         self.title.side_effect = RuntimeError("取名服务暂时失败")
         saved = await self.run_job()

@@ -894,6 +894,7 @@ async def _visual_review_owned(pdf, export, folder, provider, ledger, evidence, 
 
 
 async def generate(record, config):
+    from .chapters import update_automatic_chapters, labels_from_metadata
     blocks=transcript_blocks(record)
     if not blocks:raise ValueError('录音还没有可用于生成笔记的转写')
     initial=body_hash(record.metadata.get('ai_note_summary'))
@@ -927,6 +928,7 @@ async def generate(record, config):
     _resume_revision_checkpoint(folder,task)
     existing=record.metadata.get('ai_note_summary') or {}
     if task.get('status')=='completed' and existing.get('review_package')==relative and (folder/'note.md').is_file() and body_hash(existing)==hashlib.sha256((folder/'note.md').read_bytes()).hexdigest():
+        update_automatic_chapters(record)
         return existing
     provider=provider_for_mode(config.get('ai',{}),'summary')
     if 'generation_config' in task:
@@ -939,12 +941,7 @@ async def generate(record, config):
     try:
         stage(record,task,folder,'匹配课件',status='running')
         package=await owned_thread(collect,record,folder,selection)
-        from .chapters import infer_chapters, labels_from_metadata
-        if (record.metadata.get('chapter_info') or {}).get('source') != 'manual':
-            chapter_fields = infer_chapters(package, record.metadata)
-            if chapter_fields['chapters']:
-                record.metadata.update(chapter_fields)
-                record.save_metadata()
+        update_automatic_chapters(record, package)
         if package.get('material_selection'):
             task['material_selection']=package['material_selection']
             stage(record,task,folder,'匹配课件')

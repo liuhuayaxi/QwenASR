@@ -416,6 +416,8 @@ async def build_note_summary(
     else:
         result.update(review_status='skipped',review_enabled=False,review_policy='disabled_by_settings')
         result.pop('review_warning',None)
+    from .chapters import update_automatic_chapters
+    update_automatic_chapters(record)
     record.save_metadata()
     return result
 

@@ -1,4 +1,4 @@
-"""Conservative, read-only chapter suggestions from lesson-scoped materials.
+"""Conservative chapter metadata from lesson-scoped materials.
 
 This module does not render PDFs, convert documents, call AI, or scan other
 lessons. A missing chapter heading remains unknown instead of being invented.
@@ -410,12 +410,8 @@ def _native_suggestion(record, metadata):
     return chapter_fields([row['label'] for row in chosen[:8]], 'materials', chosen[:8])
 
 
-def suggestion_for_record(record) -> dict:
-    """Reuse this note's package, then read current-course native originals.
-
-    The fallback has no filesystem writes. It never visits other lessons,
-    converted AI PDFs, external services, or any PDF rendering/conversion path.
-    """
+def _package_for_record(record) -> dict:
+    """Read only the saved lesson package or its material-selection metadata."""
     metadata = getattr(record, 'metadata', {})
     metadata = metadata if isinstance(metadata, dict) else {}
     note = metadata.get('ai_note_summary') or {}
@@ -436,6 +432,42 @@ def suggestion_for_record(record) -> dict:
         selection = metadata.get('material_selection') or note.get('material_selection')
         if isinstance(selection, dict):
             package = {'material_selection': selection}
+    return package
+
+
+def update_automatic_chapters(record, package=None) -> bool:
+    """Persist supported chapters without changing a manual choice or note body.
+
+    Generation already owns the lesson package; completed-task reuse can read
+    its cached package. Neither path scans or converts additional course files.
+    """
+    metadata = record.metadata
+    info = metadata.get('chapter_info')
+    if isinstance(info, dict) and info.get('source') == 'manual':
+        return False
+    fields = infer_chapters(_package_for_record(record) if package is None else package, metadata)
+    if not fields['chapters'] or all(metadata.get(key) == value for key, value in fields.items()):
+        return False
+    previous = labels_from_metadata(metadata)
+    metadata.update(fields)
+    from .storage import local_now
+    metadata['updated_at'] = local_now()
+    sync = metadata.get('ideashell_sync')
+    if isinstance(sync, dict) and sync.get('note_id') and previous != fields['chapters']:
+        sync['status'] = 'local_changes'
+    record.save_metadata()
+    return True
+
+
+def suggestion_for_record(record) -> dict:
+    """Reuse this note's package, then read current-course native originals.
+
+    The fallback has no filesystem writes. It never visits other lessons,
+    converted AI PDFs, external services, or any PDF rendering/conversion path.
+    """
+    metadata = getattr(record, 'metadata', {})
+    metadata = metadata if isinstance(metadata, dict) else {}
+    package = _package_for_record(record)
     result = infer_chapters(package, metadata)
     if result['chapters']:
         return result

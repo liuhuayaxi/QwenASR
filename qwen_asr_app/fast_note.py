@@ -106,6 +106,7 @@ async def generate_fast(record, config):
     from .review_notes import TEACHING, note_runtime_config, stage, body_hash, timestamp_references, disabled_review, pdf_failed_review
     from .batch_ai import _yuketang_questions
     from .note_pdf import export_pdf
+    from .chapters import update_automatic_chapters
     started = time.monotonic()
     from . import note_prompts
     blocks = note_prompts.speech_blocks(transcript_blocks(record))
@@ -131,6 +132,7 @@ async def generate_fast(record, config):
     existing = record.metadata.get('ai_note_summary') or {}
     if (task.get('status') == 'completed' and existing.get('review_package') == relative
             and (folder/'note.md').is_file() and body_hash(existing) == hashlib.sha256((folder/'note.md').read_bytes()).hexdigest()):
+        update_automatic_chapters(record)
         return existing
 
     def mark(name):
@@ -140,6 +142,9 @@ async def generate_fast(record, config):
     stage(record, task, folder, '匹配课件', status='running')
     from .async_tasks import await_owned_task
     package = await await_owned_task(asyncio.create_task(asyncio.to_thread(collect, record, folder, selection)))
+    # Bind the lesson's chapters before PDF provenance is built. The default
+    # fast pipeline must keep the same automatic metadata as the full pipeline.
+    update_automatic_chapters(record, package)
     if package.get('material_selection'):
         task['material_selection'] = package['material_selection']
     if not blocks and not package.get('sources'):
