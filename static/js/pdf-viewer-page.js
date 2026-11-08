@@ -1,4 +1,4 @@
-import { startViewer } from './pdf-page-viewer.js?v=5';
+import { startViewer } from './pdf-page-viewer.js?v=6';
 const params = new URLSearchParams(location.search);
 const recording = params.get('rec') || '', source = params.get('src') || '';
 const ok = /^[A-Za-z0-9_-]{6,80}$/.test(recording) && /^[a-f0-9]{32}$/.test(source);

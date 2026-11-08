@@ -2,7 +2,7 @@
 //  * a PDF: PDF.js is imported on demand and reads it with HTTP Range, so
 //    opening page 70 of a 60 MB deck does not download the whole file first;
 //  * pre-rendered page images (``images``: {count, sizes: [[w, h], ...], src(n)}):
-//    each page is one small image file, no PDF.js at all.
+//    each page is one small image file (+ optional tiny preview), no PDF.js.
 // All pages are laid out as fixed-size placeholders; only pages near the
 // viewport get a canvas (IntersectionObserver), far ones are released again.
 // Loading is page-at-a-time: streaming is off (it would pull the whole file),
@@ -10,7 +10,9 @@
 const MAX_PIXELS = 16e6;   // per-canvas backing-store cap
 const MAX_WIDTH = 960;     // CSS px of a page at "fit width" on large screens
 const GAP = 14;            // CSS px between pages
-const KEEP = '250% 0px';   // render/keep pages within ~2.5 screens of the viewport
+const KEEP = '250% 0px';   // PDF: render/keep pages within ~2.5 screens of the viewport
+const KEEP_IMAGES = '600% 0px';   // images: "visible" (fetched first) within ~6 screens
+const IMAGE_LANES = 6;     // parallel image downloads
 const ZOOMS = [0.5, 0.67, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
 
 export async function startViewer({ root, url, images = null, page = 1, end = 0, title = "", systemUrl = url, fallback = "", rangeText = "" }) {
@@ -130,16 +132,56 @@ export async function startViewer({ root, url, images = null, page = 1, end = 0,
     img.src = images.src(n);
     try {
       await img.decode();
-      if (state.get(n) === entry) { els[n].append(img); els[n].classList.add('pv-rendered'); }
+      if (state.get(n) === entry) { els[n].append(img); els[n].classList.add('pv-rendered'); els[n].querySelector('.pv-thumb')?.remove(); }
     } catch (error) {
-      if (state.get(n) === entry) els[n].dataset.error = `第 ${n} 页图片加载未完成`;
+      if (state.get(n) === entry) { state.delete(n); started.delete(`f${n}`); els[n].dataset.error = `第 ${n} 页图片加载未完成`; }
     }
   }
   // one page at a time, the page nearest the current one first, so a
   // neighbour never competes with the page being read for bandwidth
   const near = new Set();
   let busy = false;
+  // Image mode is different: pages are small and cheap to keep, so after the
+  // target page every page of the deck is fetched in the background, nearest
+  // first, IMAGE_LANES at a time; a tiny preview (``thumb``) of each page is
+  // fetched well ahead of the full image so fast scrolling never shows a blank
+  // page; loaded pages are never released.
+  const started = new Set();
+  let lanes = 0, targetDone = !images;
+  function nextImageTask() {
+    let best = null, score = Infinity;
+    for (let n = 1; n <= total; n++) {
+      const d = Math.abs(n - current);
+      const visible = near.has(n);
+      if (images.thumb && !started.has(`t${n}`) && !started.has(`f${n}`)) {
+        const s = visible ? d / 8 - 1000 : d / 4;           // previews: cheap, so far ahead
+        if (s < score) { score = s; best = ['t', n]; }
+      }
+      if (!started.has(`f${n}`)) {
+        const s = visible ? d - 500 : d;
+        if (s < score) { score = s; best = ['f', n]; }
+      }
+    }
+    return best;
+  }
+  function pumpImages() {
+    if (!targetDone) return;
+    while (lanes < IMAGE_LANES) {
+      const task = nextImageTask();
+      if (!task) return;
+      const [kind, n] = task;
+      started.add(kind + n); lanes++;
+      (kind === 't' ? loadThumb(n) : renderImage(n)).finally(() => { lanes--; pumpImages(); });
+    }
+  }
+  async function loadThumb(n) {
+    const img = new Image();
+    img.alt = ''; img.decoding = 'async'; img.draggable = false; img.className = 'pv-thumb';
+    img.src = images.thumb(n);
+    try { await img.decode(); if (!state.has(n)) { els[n].prepend(img); els[n].classList.add('pv-preview'); } } catch { /* the full image still comes */ }
+  }
   async function pump() {
+    if (images) return pumpImages();
     if (busy) return; busy = true;
     try {
       for (;;) {
@@ -153,10 +195,10 @@ export async function startViewer({ root, url, images = null, page = 1, end = 0,
     for (const e of entries) {
       const n = Number(e.target.dataset.page);
       if (e.isIntersecting) near.add(n);
-      else { near.delete(n); release(n); els[n].classList.remove('pv-rendered'); }
+      else { near.delete(n); if (!images) { release(n); els[n].classList.remove('pv-rendered'); } }
     }
     pump();
-  }, { rootMargin: KEEP });
+  }, { rootMargin: images ? KEEP_IMAGES : KEEP });
 
   // ---- current page tracking
   let urlTimer = 0;
@@ -228,8 +270,11 @@ export async function startViewer({ root, url, images = null, page = 1, end = 0,
 
   status('');
   show(target, 'auto');
+  started.add(`f${target}`);
   await render(target);                       // the target page alone first
+  targetDone = true;
   for (let n = 1; n <= total; n++) observer.observe(els[n]);
+  pump();
   const api = { show, get page() { return current; }, get pages() { return total; }, get target() { return target; },
     get zoom() { return zoom; }, get rendered() { return [...state.keys()].sort((a, b) => a - b); },
     async text(number = current) {

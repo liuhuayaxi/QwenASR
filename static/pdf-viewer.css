@@ -13,8 +13,10 @@
 .pv-stage{padding:var(--pv-gap,14px) 16px 40vh}
 .pv-pages{overflow-anchor:none;display:flex;flex-direction:column;align-items:center;gap:var(--pv-gap,14px)}
 .pv-page{position:relative;flex:none;max-width:none;background:#fff;box-shadow:0 1px 10px rgba(0,0,0,.16);scroll-margin-top:4rem}
-.pv-page canvas,.pv-page img{display:block;width:100%;height:100%}
+.pv-page canvas,.pv-page img{display:block;width:100%;height:100%}.pv-page img.pv-thumb{position:absolute;inset:0;image-rendering:auto}
 .pv-page-no{position:absolute;right:6px;bottom:4px;font-size:.72rem;color:#8a918c;pointer-events:none}
+.pv-page:not(.pv-rendered){background:#eceee9}
+.pv-page:not(.pv-rendered):not(.pv-preview)::after{content:attr(data-page);position:absolute;inset:0;display:grid;place-items:center;font-size:2.4rem;font-weight:600;color:rgba(0,0,0,.12)}
 .pv-page:not(.pv-rendered)::before{content:"";position:absolute;inset:0;background:repeating-linear-gradient(-45deg,transparent 0 12px,rgba(0,0,0,.025) 12px 24px)}
 .pv-page.pv-in-range{outline:3px solid var(--range);outline-offset:3px}
 .pv-page.pv-in-range .pv-page-no{color:var(--accent);font-weight:600}
