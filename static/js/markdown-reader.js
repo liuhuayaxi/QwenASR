@@ -119,7 +119,7 @@ export function createMarkdownReader({ container, source, toc, onChange }) {
   const thumbLimit = 2;
   const hoverDwellMs = 700;
   let fullWarm = "";
-  const viewerFiles = ["/static/pdf-viewer.html", "/static/pdf-viewer.css?v=11", "/static/js/pdf-viewer-page.js?v=11", "/static/js/pdf-page-viewer.js?v=11"];
+  const viewerFiles = ["/static/pdf-viewer.html", "/static/pdf-viewer.css?v=12", "/static/js/pdf-viewer-page.js?v=12", "/static/js/pdf-page-viewer.js?v=12"];
   const warm = (url) => {
     const key = "prefetch:" + url;
     if (warmed.has(key)) return false;

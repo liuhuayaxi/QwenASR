@@ -87,6 +87,22 @@ class PublishTests(unittest.TestCase):
         resources = (self.data / 'resources.json').read_text(encoding='utf-8')
         self.assertIn('releases/download/course-media/pdf-' + SHA, resources)
 
+    def test_export_hides_reviews_from_an_older_note_body(self):
+        note = self.notes / 'note.json'
+        payload = json.loads(note.read_text())
+        payload['sourceBodySha256'] = 'b' * 64
+        note.write_text(json.dumps(payload), encoding='utf-8')
+        path = sp.LINKS / 'rec12345.json'
+        doc = json.loads(path.read_text())
+        doc['note_body_sha'] = 'a' * 64
+        path.write_text(json.dumps(doc), encoding='utf-8')
+        result, _ = pub.export_page_links(sp.LINKS, self.data)
+        self.assertEqual(result['notes'][self.ident]['sections'], [])
+        doc['note_body_sha'] = payload['sourceBodySha256']
+        path.write_text(json.dumps(doc), encoding='utf-8')
+        result, _ = pub.export_page_links(sp.LINKS, self.data)
+        self.assertEqual(len(result['notes'][self.ident]['sections']), 1)
+
     def test_sync_renders_only_missing_decks_and_drops_orphans(self):
         pages = self.data / 'pages'
         ready = pages / OTHER

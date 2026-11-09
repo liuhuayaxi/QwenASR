@@ -84,11 +84,15 @@ def export_page_links(links_dir: Path, data: Path, enabled=True):
         note = json.loads((data / meta['file']).read_text(encoding='utf-8'))
         published = published_headings(note.get('markdown') or '')
         sections, skipped = [], 0
+        stale = bool(note.get('sourceBodySha256') and note['sourceBodySha256'] != doc.get('note_body_sha'))
         for section in doc.get('sections', []):
             if section.get('status') not in SHOWN or not section.get('targets'):
                 continue
+            if stale:
+                skipped += 1
+                continue
             index = section.get('index')
-            if not isinstance(index, int) or index >= len(published) or heading_plain(published[index]) != heading_plain(section.get('heading')):
+            if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(published) or heading_plain(published[index]) != heading_plain(section.get('heading')):
                 skipped += 1
                 continue
             targets = []

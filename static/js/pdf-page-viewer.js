@@ -70,7 +70,8 @@ export async function startViewer({ root, url, images = null, page = 1, end = 0,
   const cssWidth = () => Math.round(fitWidth() * zoom);
   const els = [null];
   const fragment = document.createDocumentFragment();
-  const earlyBox = early?.box || null;
+  const earlyBox = early?.page === target ? early.box : null;
+  if (early && !earlyBox) { early.cancel?.(); early.box?.remove(); }
   for (let n = 1; n <= total; n++) {
     const el = n === target && earlyBox ? earlyBox : document.createElement('div');
     el.classList.remove('pv-early');
@@ -98,9 +99,49 @@ export async function startViewer({ root, url, images = null, page = 1, end = 0,
 
   // ---- rendering
   const state = new Map();   // n -> { canvas, task, scale }
+  const jobs = new Map(), thumbsStarted = new Map();
+  let earlyAvailable = Boolean(earlyBox);
+  function releaseThumb(n) {
+    const entry = thumbsStarted.get(n);
+    thumbsStarted.delete(n); entry?.controller.abort(); entry?.img.removeAttribute('src'); entry?.img.remove();
+    els[n].querySelector('.pv-thumb')?.remove();
+    els[n].classList.remove('pv-preview');
+  }
   function release(n) {
-    const s = state.get(n); if (!s) return;
-    s.task?.cancel?.(); if (s.canvas instanceof HTMLCanvasElement) s.canvas.width = s.canvas.height = 0; else s.canvas.removeAttribute('src'); s.canvas.remove(); state.delete(n);
+    const entry = state.get(n);
+    state.delete(n); jobs.delete(n);
+    if (entry) {
+      entry.controller?.abort(); entry.task?.cancel?.();
+      if (entry.early) early.cancel?.();
+      if (entry.canvas instanceof HTMLCanvasElement) entry.canvas.width = entry.canvas.height = 0;
+      else entry.canvas.removeAttribute('src');
+      entry.canvas.remove();
+    }
+    els[n].classList.remove('pv-rendered');
+    delete els[n].dataset.error;
+  }
+  function trimImages() {
+    if (!images) return;
+    // Bound decoded full images even after many distant jumps. The image URL
+    // stays in HTTP cache; clearing a job lets a released page load on return.
+    for (const n of state.keys()) if (Math.abs(n - current) > 2) release(n);
+    for (const n of thumbsStarted.keys()) if (Math.abs(n - current) > 2 && !near.has(n)) releaseThumb(n);
+  }
+  function decoded(img, signal) {
+    return new Promise(resolve => {
+      let finished = false;
+      const finish = ok => {
+        if (finished) return; finished = true;
+        img.removeEventListener('load', loaded); img.removeEventListener('error', failed);
+        signal.removeEventListener('abort', failed); resolve(ok);
+      };
+      const failed = () => finish(false);
+      const loaded = () => img.decode().then(() => finish(Boolean(img.naturalWidth)), failed);
+      img.addEventListener('load', loaded); img.addEventListener('error', failed);
+      signal.addEventListener('abort', failed, {once:true});
+      if (signal.aborted) failed();
+      else if (img.getAttribute('src') && img.complete) img.naturalWidth ? loaded() : failed();
+    });
   }
   // an image scales with its box; a canvas is redrawn when the width changes
   const fresh = (n) => state.has(n) && (images || state.get(n).cssWidth === size(n).w);
@@ -137,43 +178,30 @@ export async function startViewer({ root, url, images = null, page = 1, end = 0,
       }
     }
   }
-  const jobs = new Map();
-  async function renderImage(n, priority = 'high') {
-    const pending = jobs.get(n);
-    if (pending) {
-      const currentImage = state.get(n)?.canvas;
-      if (currentImage && priority === 'high') currentImage.fetchPriority = 'high';
-      return pending;
-    }
-    // The reader has moved on: don't spend the link on this page's full image.
-    if (!(early && n === target) && Math.abs(n - current) > 1) return Promise.resolve();
-    const adopted = early && n === target && early.full && !early.failed ? early.full : null;
+  function renderImage(n, priority = 'high') {
+    if (jobs.has(n)) return jobs.get(n);
+    if (state.get(n)?.ready) return Promise.resolve();
+    if (Math.abs(n - current) > 1) return Promise.resolve();
+    const adopted = earlyAvailable && n === target && early.full && !early.failed ? early.full : null;
+    if (n === target) earlyAvailable = false;
     const img = adopted || new Image();
     img.alt = ''; img.decoding = 'async'; img.draggable = false; img.fetchPriority = priority;
     if (adopted) img.classList.remove('pv-full');
-    const entry = { canvas: img, task: null, cssWidth: 0 };
+    const entry = {canvas: img, controller: new AbortController(), early: Boolean(adopted), ready: false};
     state.set(n, entry);
+    delete els[n].dataset.error;
     if (!adopted) img.src = images.src(n);
-    const job = (async () => {
-      try {
-        if (adopted && !adopted.getAttribute('src')) {
-          await new Promise((resolve) => {
-            const finish = () => resolve();
-            adopted.addEventListener('load', finish, { once: true });
-            adopted.addEventListener('error', finish, { once: true });
-            if (adopted.getAttribute('src') && adopted.complete) finish();
-          });
-        }
-        if (!(img.complete && img.naturalWidth)) await img.decode();
-        if (state.get(n) !== entry) return;
-        if (!img.naturalWidth) throw new Error('empty');
-        if (!img.isConnected) els[n].append(img);
-        els[n].classList.add('pv-rendered');
-        els[n].querySelector('.pv-thumb')?.remove();
-      } catch (error) {
-        if (state.get(n) === entry) { state.delete(n); jobs.delete(n); els[n].dataset.error = `第 ${n} 页图片加载未完成`; }
+    const job = decoded(img, entry.controller.signal).then(ok => {
+      if (state.get(n) !== entry) return;
+      if (!ok) {
+        release(n); els[n].dataset.error = `第 ${n} 页图片加载未完成`;
+        return;
       }
-    })();
+      entry.ready = true;
+      if (!img.isConnected) els[n].append(img);
+      els[n].classList.add('pv-rendered');
+      releaseThumb(n);
+    }).finally(() => { if (jobs.get(n) === job) jobs.delete(n); });
     jobs.set(n, job);
     return job;
   }
@@ -183,28 +211,32 @@ export async function startViewer({ root, url, images = null, page = 1, end = 0,
   // behind a download of the whole deck.
   const near = new Set();
   let busy = false;
-  const thumbsStarted = new Map();
   function requestThumb(n, priority = 'low') {
-    if (!images?.thumb) return Promise.resolve();
-    if (thumbsStarted.has(n)) return thumbsStarted.get(n);
-    if (early && n === target && early.thumb?.isConnected) { const done = Promise.resolve(); thumbsStarted.set(n, done); return done; }
-    const job = loadThumb(n, priority);
-    thumbsStarted.set(n, job);
-    return job;
-  }
-  function requestPage(n, priority = 'high') {
-    const preview = requestThumb(n, priority);
-    // The opened page's full image is already scheduled by the bootstrap.
-    // Any other page waits until its preview is on the way, so the small
-    // file is not stuck behind that page's full image.
-    if (images?.thumb && !(early && n === target)) return preview.then(() => renderImage(n, priority));
-    return renderImage(n, priority);
-  }
-  async function loadThumb(n, priority) {
+    if (!images?.thumb || state.get(n)?.ready || jobs.has(n)) return Promise.resolve();
+    if (thumbsStarted.has(n)) return thumbsStarted.get(n).promise;
+    if (n === target && early?.thumb?.isConnected) return Promise.resolve();
     const img = new Image();
     img.alt = ''; img.decoding = 'async'; img.draggable = false; img.className = 'pv-thumb'; img.fetchPriority = priority;
+    const entry = {img, controller: new AbortController()};
+    thumbsStarted.set(n, entry);
     img.src = images.thumb(n);
-    try { await img.decode(); if (!els[n].querySelector('img:not(.pv-thumb)')) { els[n].prepend(img); els[n].classList.add('pv-preview'); } } catch { /* the full image still comes */ }
+    entry.promise = decoded(img, entry.controller.signal).then(ok => {
+      if (thumbsStarted.get(n) !== entry) return;
+      if (!ok) { thumbsStarted.delete(n); return; }
+      if (!state.get(n)?.ready && (Math.abs(n - current) <= 2 || near.has(n))) {
+        els[n].prepend(img); els[n].classList.add('pv-preview');
+      }
+    });
+    return entry.promise;
+  }
+  function requestPage(n, priority = 'high') {
+    if (state.get(n)?.ready || jobs.has(n)) return jobs.get(n) || Promise.resolve();
+    if (earlyAvailable && n === target && early.full && !early.failed) return renderImage(n, priority);
+    const preview = requestThumb(n, priority);
+    // The bootstrap already starts the opened page's full image after its
+    // preview. Other pages keep the same preview-first order.
+    if (images?.thumb) return preview.then(() => renderImage(n, priority));
+    return renderImage(n, priority);
   }
   async function pump() {
     if (images) return;
@@ -223,7 +255,7 @@ export async function startViewer({ root, url, images = null, page = 1, end = 0,
       if (e.isIntersecting) near.add(n);
       else { near.delete(n); if (!images) { release(n); els[n].classList.remove('pv-rendered'); } }
     }
-    if (images) [...near].sort((a, b) => Math.abs(a - current) - Math.abs(b - current)).slice(0, 2).forEach((n) => requestThumb(n));
+    if (images) { trimImages(); [...near].sort((a, b) => Math.abs(a - current) - Math.abs(b - current)).slice(0, 2).forEach((n) => requestThumb(n)); }
     else pump();
   }, { rootMargin: images ? KEEP_IMAGES : KEEP });
 
@@ -232,6 +264,7 @@ export async function startViewer({ root, url, images = null, page = 1, end = 0,
   function setCurrent(n) {
     if (n === current && $('input').value) return;
     current = n;
+    if (images) { trimImages(); requestPage(n, 'high'); }
     if (document.activeElement !== $('input')) $('input').value = String(n);
     $('prev').disabled = n <= 1; $('next').disabled = n >= total;
     document.title = (titleText() ? titleText() + ' · ' : '') + `第 ${n} 页`;
@@ -299,9 +332,8 @@ export async function startViewer({ root, url, images = null, page = 1, end = 0,
   status('');
   show(target, 'auto');
   if (images) {
-    // Finish the opened page before neighbouring downloads, so they cannot
-    // stretch its transfer. A later jump calls requestPage directly.
-    await requestPage(target, 'high');
+    // Observe immediately: a slow opened page must not block a later scroll.
+    // Only the current visible page requests its full image.
     const urgent = new IntersectionObserver((entries) => {
       const visible = [];
       for (const e of entries) if (e.isIntersecting) visible.push(Number(e.target.dataset.page));

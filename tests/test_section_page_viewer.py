@@ -143,7 +143,7 @@ class ViewerSourceTests(unittest.TestCase):
         self.assertIn(f"'sha256-{digest}'", html)
         self.assertIn(".pv-page.pv-rendered > img.pv-full{position:relative;z-index:2}", css)
         self.assertIn(".pv-page:not(.pv-rendered) > img.pv-full{visibility:hidden}", css)
-        self.assertIn("function startFull() { if (!full.getAttribute('src')) full.src = root + page + '.webp'; }", html)
+        self.assertIn("function startFull() { if (!abandoned && !full.getAttribute('src')) full.src = root + page + '.webp'; }", html)
         self.assertIn("thumb.addEventListener('error', startFull);", html)
         self.assertNotIn("thumb.src = root + 't' + page + '.webp';\n  full.src", html)
         self.assertIn(".pv-page.pv-in-range{outline:3px solid var(--range)", css)

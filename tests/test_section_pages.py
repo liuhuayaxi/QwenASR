@@ -1,6 +1,7 @@
 from tests import isolation  # noqa: F401
 
 import unittest
+from copy import deepcopy
 
 from qwen_asr_app import section_pages as sp
 
@@ -64,6 +65,71 @@ class SectionPageTests(unittest.TestCase):
         self.assertEqual([s['heading'] for s in view['sections']], ['A 节'])
         view = sp.public_view(doc, md.replace('A 节', 'A 节（改）'))
         self.assertEqual(view['sections'], [])
+
+
+class ReviewCacheTests(unittest.TestCase):
+    markdown = '# T\n\n## 主题 P3\n原来的讲解\n\n## 其他 P4\n别的内容\n'
+
+    def document(self, markdown=None, source_sha='a' * 64, viewer_sha='b' * 64):
+        markdown = self.markdown if markdown is None else markdown
+        sources = [{'source_id': 's', 'name': 'deck.pdf', 'sha256': source_sha,
+                    'viewer_sha256': viewer_sha, 'page_mapping_method': 'identity', 'pages': ['slide'] * 6}]
+        maps = {'s': {'method': 'identity', 'sha256': viewer_sha}}
+        return sp.document('rec12345', markdown, sp.build_links(markdown, sources, [], maps), sources)
+
+    def checked(self):
+        doc = self.document()
+        section = doc['sections'][1]
+        section.update(status='verified', review={'by': 'ai-review-v1'})
+        section['targets'][0]['viewer_page_start'] = 4
+        return doc
+
+    def test_unchanged_section_keeps_its_review_when_another_section_changes(self):
+        old = self.checked()
+        new = self.document(self.markdown.replace('别的内容', '重新写的其他小节'))
+        section = sp.merge_verified(new, old)['sections'][1]
+        self.assertEqual(section['status'], 'verified')
+        self.assertEqual(section['targets'][0]['viewer_page_start'], 4)
+
+    def test_changed_section_body_invalidates_review_even_with_the_same_heading(self):
+        new = self.document(self.markdown.replace('原来的讲解', '完全不同的讲解'))
+        section = sp.merge_verified(new, self.checked())['sections'][1]
+        self.assertNotEqual(section['status'], 'verified')
+        self.assertNotIn('review', section)
+        self.assertEqual(section['targets'][0]['viewer_page_start'], 3)
+
+    def test_changed_original_or_viewer_pdf_invalidates_review(self):
+        for kwargs in [{'source_sha': 'c' * 64}, {'viewer_sha': 'd' * 64}]:
+            with self.subTest(**kwargs):
+                section = sp.merge_verified(self.document(**kwargs), self.checked())['sections'][1]
+                self.assertNotEqual(section['status'], 'verified')
+                self.assertNotIn('review', section)
+
+    def test_legacy_reviews_require_the_whole_note_to_be_unchanged(self):
+        old = self.checked()
+        for section in old['sections']: section.pop('content_sha')
+        self.assertEqual(sp.merge_verified(self.document(), old)['sections'][1]['status'], 'verified')
+        changed = self.document(self.markdown.replace('别的内容', '新内容'))
+        self.assertNotEqual(sp.merge_verified(changed, old)['sections'][1]['status'], 'verified')
+
+    def test_a_stale_target_hash_is_not_reused_even_if_the_resource_list_matches(self):
+        old = self.checked()
+        old['sections'][1]['targets'][0]['viewer_sha256'] = 'c' * 64
+        self.assertNotEqual(sp.merge_verified(self.document(), old)['sections'][1]['status'], 'verified')
+
+    def test_descendant_edits_invalidate_the_parent_fingerprint(self):
+        first = sp.headings('# T\n## Parent\nintro\n### Child\nold\n')
+        second = sp.headings('# T\n## Parent\nintro\n### Child\nnew\n')
+        self.assertNotEqual(first[1]['content_sha'], second[1]['content_sha'])
+
+    def test_changed_live_body_hides_the_previously_verified_button(self):
+        doc = self.checked()
+        self.assertEqual(len(sp.public_view(doc, self.markdown)['sections']), 1)
+        changed = self.markdown.replace('原来的讲解', '新讲解')
+        self.assertEqual(sp.public_view(doc, changed)['sections'], [])
+        legacy = deepcopy(doc)
+        for section in legacy['sections']: section.pop('content_sha')
+        self.assertEqual(sp.public_view(legacy, changed)['sections'], [])
 
 
 if __name__ == '__main__':

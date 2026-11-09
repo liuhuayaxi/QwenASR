@@ -139,6 +139,9 @@ def headings(markdown: str):
         for following in result[position + 1:]:
             if following['level'] <= item['level']: subtree_end = following['line']; break
         item['subtree_end'] = subtree_end
+        # Include descendants: editing a child can also change the page range
+        # represented by its parent heading.
+        item['content_sha'] = sha('\n'.join(lines[item['line']:subtree_end]))
     stack = []
     for item in result:
         while stack and stack[-1]['level'] >= item['level']: stack.pop()
@@ -356,7 +359,7 @@ def build_links(markdown: str, sources: list[dict], images: list[dict], viewer_m
     results, located = {}, []
     for item in items:
         entry = {'section_id': section_id(item), 'index': item['index'], 'level': item['level'],
-                 'heading': item['text'], 'path': item['path']}
+                 'heading': item['text'], 'path': item['path'], 'content_sha': item['content_sha']}
         reason = exclusion(item, by_index)
         if reason:
             results[item['index']] = {**entry, 'excluded': reason}; continue
@@ -476,7 +479,7 @@ def build_links(markdown: str, sources: list[dict], images: list[dict], viewer_m
     output, source_by_id = [], {s['source_id']: s for s in sources}
     for item in items:
         r = results[item['index']]
-        entry = {k: r[k] for k in ('section_id', 'index', 'level', 'heading', 'path')}
+        entry = {k: r[k] for k in ('section_id', 'index', 'level', 'heading', 'path', 'content_sha')}
         if 'excluded' in r:
             output.append({**entry, 'status': 'excluded', 'reason': r['excluded'], 'targets': []}); continue
         if 'start' not in r:
@@ -512,13 +515,33 @@ def load(recording_id):
 
 
 def merge_verified(new, old):
-    """Keep manual verdicts (verified / rejected / manual pages) across reruns."""
+    """Reuse verdicts only for unchanged content and unchanged courseware."""
     if not old: return new
+    def resources(doc):
+        items = doc.get('resources') or []
+        if not items or any(not r.get('source_sha256') or not r.get('viewer_sha256') for r in items):
+            return None
+        return sorted((r['source_id'], r['source_sha256'], r['viewer_sha256'], r.get('page_mapping') or '') for r in items)
+    identity = resources(new)
+    if identity is None or identity != resources(old) or new.get('mapping_version') != old.get('mapping_version'):
+        return new
+    by_source = {r['source_id']: r for r in new['resources']}
+    same_note = bool(new.get('note_body_sha') and new['note_body_sha'] == old.get('note_body_sha'))
     previous = {s['section_id']: s for s in old.get('sections', [])}
     for section in new['sections']:
+        if section.get('status') == 'excluded': continue
         before = previous.get(section['section_id'])
-        if before and (before.get('status') in {'verified', 'rejected', 'manual'} or before.get('review')):
-            section.update({k: before[k] for k in ('status', 'targets', 'confidence', 'method', 'review') if k in before})
+        if not before or not (before.get('status') in {'verified', 'rejected', 'manual'} or before.get('review')):
+            continue
+        unchanged = (before['content_sha'] == section.get('content_sha')) if before.get('content_sha') else same_note
+        if not unchanged: continue
+        targets = before.get('targets') or []
+        if any(t.get('source_id') not in by_source or
+               t.get('viewer_sha256') != by_source[t['source_id']]['viewer_sha256'] or
+               (t.get('source_sha256') and t['source_sha256'] != by_source[t['source_id']]['source_sha256'])
+               for t in targets):
+            continue
+        section.update({k: before[k] for k in ('status', 'targets', 'confidence', 'method', 'review') if k in before})
     return new
 
 
@@ -566,15 +589,21 @@ def save(doc):
 def public_view(doc, markdown):
     """What readers get: only shown links, each checked against the live heading."""
     if not doc: return None
-    current = {h['index']: h['text'] for h in headings(markdown)}
+    current = {h['index']: h for h in headings(markdown)}
+    stale = doc.get('note_body_sha') != sha(markdown)
     sections = []
     for s in doc.get('sections', []):
         if s.get('status') not in SHOWN or not s.get('targets'): continue
-        if current.get(s['index']) != s['heading']: continue  # heading changed since mapping
+        heading = current.get(s['index'])
+        if not heading or heading['text'] != s['heading']: continue
+        if s.get('content_sha'):
+            if s['content_sha'] != heading['content_sha']: continue
+        elif stale and doc.get('note_body_sha'):
+            continue  # legacy reviews have no per-section content fingerprint
         sections.append({'index': s['index'], 'heading': s['heading'], 'section_id': s['section_id'],
                          'targets': [{k: t.get(k) for k in ('source_id', 'source_name', 'page_start', 'page_end',
                                      'viewer_page_start', 'viewer_page_end')} for t in s['targets']]})
-    return {'mapping_version': doc.get('mapping_version'), 'stale': doc.get('note_body_sha') != sha(markdown),
+    return {'mapping_version': doc.get('mapping_version'), 'stale': stale,
             'sections': sections}
 
 
