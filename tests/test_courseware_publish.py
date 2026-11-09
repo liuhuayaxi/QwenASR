@@ -123,11 +123,15 @@ class PublishTests(unittest.TestCase):
         names = subprocess.run(['git', 'show', '--name-only', '--format=', 'HEAD'], cwd=self.sharing, check=True, text=True, stdout=subprocess.PIPE, env=env).stdout
         self.assertNotIn(str(self.pdf), names)
         self.assertTrue(all(line.startswith('docs/data/') for line in names.splitlines() if line))
+        commits = subprocess.run(['git', 'rev-list', '--count', 'HEAD'], cwd=self.sharing, check=True, text=True, stdout=subprocess.PIPE, env=env).stdout.strip()
         again = pub.publish_courseware_view(
             self.sharing, assets_path=self.assets, links_dir=sp.LINKS, push=False, env=env, render=self.render,
         )
         self.assertEqual(again['commit'], 'unchanged')
         self.assertEqual(again['pages']['rendered'], [])
+        self.assertFalse(again['links_changed'])
+        again_commits = subprocess.run(['git', 'rev-list', '--count', 'HEAD'], cwd=self.sharing, check=True, text=True, stdout=subprocess.PIPE, env=env).stdout.strip()
+        self.assertEqual(again_commits, commits)
 
     def test_real_render_reads_the_page_marker_and_leaves_the_pdf_bytes(self):
         try:
@@ -146,6 +150,63 @@ class PublishTests(unittest.TestCase):
         self.assertEqual(manifest['source_pages'], [7])
         self.assertEqual(manifest['sizes'], [[1280, 720]])
         self.assertTrue(pub.pages_current(self.base / 'rendered' / SHA, SHA))
+
+    def test_page_links_stay_byte_for_byte_when_sections_are_reordered(self):
+        pub.write_page_links(sp.LINKS, self.data, True)
+        first = (self.data / 'page-links.json').read_bytes()
+        path = sp.LINKS / 'rec12345.json'
+        doc = json.loads(path.read_text(encoding='utf-8'))
+        doc['sections'] = list(reversed(doc['sections']))
+        for section in doc['sections']:
+            section['targets'] = list(reversed(section.get('targets') or []))
+        path.write_text(json.dumps(doc), encoding='utf-8')
+        _result, _report, changed = pub.write_page_links(sp.LINKS, self.data, True)
+        second = (self.data / 'page-links.json').read_bytes()
+        self.assertEqual(first, second)
+        self.assertFalse(changed)
+        self.assertNotIn(b'publishedAt', first)
+        self.assertNotIn(b'timestamp', first)
+
+    def test_sync_site_flags_write_the_stage_and_do_not_commit(self):
+        try:
+            import pymupdf
+        except ImportError:
+            self.skipTest('pymupdf is not installed')
+        document = pymupdf.open()
+        page = document.new_page(width=320, height=180)
+        page.insert_text((20, 20), '[[AI_TRANSCRIPT_PAGE:1]]')
+        document.save(self.pdf)
+        document.close()
+        env = {**__import__('os').environ,
+               'GIT_AUTHOR_NAME': 'Publish Test', 'GIT_AUTHOR_EMAIL': 'publish@example.com',
+               'GIT_COMMITTER_NAME': 'Publish Test', 'GIT_COMMITTER_EMAIL': 'publish@example.com'}
+        git(self.sharing, 'init', '-b', 'main', env=env)
+        git(self.sharing, 'add', 'docs', env=env)
+        git(self.sharing, 'commit', '-m', 'base', env=env)
+        stage = self.base / 'stage'
+        import shutil
+        shutil.copytree(self.data, stage)
+        script = Path(__file__).resolve().parents[1] / 'scripts' / 'publish_courseware_view.py'
+        args = [__import__('sys').executable, str(script), '--sharingnotes', str(self.sharing),
+                '--stage', str(stage), '--no-commit', '--assets', str(self.assets)]
+        subprocess.run(args, check=True, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        first = (stage / 'page-links.json').read_bytes()
+        commits = subprocess.run(['git', 'rev-list', '--count', 'HEAD'], cwd=self.sharing, check=True, text=True, stdout=subprocess.PIPE, env=env).stdout.strip()
+        subprocess.run(args, check=True, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertEqual((stage / 'page-links.json').read_bytes(), first)
+        self.assertEqual(subprocess.run(['git', 'rev-list', '--count', 'HEAD'], cwd=self.sharing, check=True, text=True, stdout=subprocess.PIPE, env=env).stdout.strip(), commits)
+        self.assertTrue((stage / 'pages' / SHA / 't1.webp').is_file())
+        self.assertFalse((self.data / 'pages' / OLD).exists())
+
+    def test_hook_detection_matches_the_sync_site_flags(self):
+        repo = self.base / 'checkout'
+        script = repo / 'scripts' / 'sync_site.py'
+        script.parent.mkdir(parents=True)
+        self.assertFalse(pub.sync_site_publishes_courseware(repo))
+        script.write_text("subprocess.run([sys.executable, str(hook), '--sharingnotes', str(ROOT), '--stage', str(stage), '--no-commit'])\n")
+        self.assertFalse(pub.sync_site_publishes_courseware(repo))
+        script.write_text(script.read_text(encoding='utf-8') + 'publish_courseware_view.py\n')
+        self.assertTrue(pub.sync_site_publishes_courseware(repo))
 
     def test_a_missing_pdf_does_not_delete_existing_images(self):
         self.assets.write_text('[]', encoding='utf-8')

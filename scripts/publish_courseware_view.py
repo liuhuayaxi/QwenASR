@@ -10,9 +10,11 @@ Decks that published buttons no longer reference lose their image folder.
   .venv/bin/python scripts/publish_courseware_view.py --dry-run
   .venv/bin/python scripts/publish_courseware_view.py --no-push
 
-``--stage`` writes the snapshot sync_site is about to copy, and does not commit.
-The usual Mac publish (``scripts/ideashell_push_queue.py``) runs this after
-sync_site succeeds, which makes a second docs/data commit and pushes it.
+``--stage`` writes the snapshot sync_site is about to copy. Together with
+``--no-commit`` this is what ``sharingnotes/scripts/sync_site.py`` runs after
+upload, so the images land in that same docs/data commit. A rerun that finds
+every referenced deck already rendered leaves ``page-links.json`` byte-for-byte
+unchanged and does not commit.
 """
 import argparse
 import json

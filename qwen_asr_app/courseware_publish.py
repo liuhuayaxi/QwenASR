@@ -111,15 +111,47 @@ def export_page_links(links_dir: Path, data: Path, enabled=True):
     return result, report
 
 
+def page_links_text(result) -> str:
+    """Stable JSON: sorted notes, sections and targets, no timestamps."""
+    notes = {}
+    for ident in sorted(result.get('notes') or {}):
+        note = result['notes'][ident]
+        sections = []
+        ordered = sorted(note.get('sections') or [], key=lambda section: (section.get('index'), section.get('heading') or ''))
+        for section in ordered:
+            targets = sorted(section.get('targets') or [], key=lambda target: (
+                str(target.get('pdf') or ''), int(target.get('viewer_page_start') or 0),
+                int(target.get('page_start') or 0), str(target.get('sha256') or '')))
+            sections.append({'heading': section.get('heading'), 'index': section.get('index'), 'targets': [{
+                'page_end': target.get('page_end'), 'page_start': target.get('page_start'), 'pdf': target.get('pdf'),
+                'sha256': target.get('sha256'), 'title': target.get('title'),
+                'viewer_page_end': target.get('viewer_page_end'), 'viewer_page_start': target.get('viewer_page_start'),
+            } for target in targets]})
+        notes[ident] = {'mapping_version': note.get('mapping_version'), 'sections': sections, 'version': note.get('version')}
+    payload = {'enabled': bool(result.get('enabled')), 'notes': notes, 'version': 1}
+    return json.dumps(payload, ensure_ascii=False, separators=(',', ':'), sort_keys=True)
+
+
 def write_page_links(links_dir: Path, data: Path, enabled=True):
     result, report = export_page_links(links_dir, data, enabled)
-    body = json.dumps(result, ensure_ascii=False, separators=(',', ':'))
+    body = page_links_text(result)
     target = Path(data) / 'page-links.json'
     changed = not target.is_file() or target.read_text(encoding='utf-8') != body
     if changed:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(body, encoding='utf-8')
     return result, report, changed
+
+
+def sync_site_publishes_courseware(sharing: Path) -> bool:
+    """True when this sharingnotes checkout already runs the page-image hook."""
+    script = Path(sharing) / 'scripts' / 'sync_site.py'
+    try:
+        text = script.read_text(encoding='utf-8')
+    except OSError:
+        return False
+    return ('publish_courseware_view.py' in text and '--sharingnotes' in text
+            and '--stage' in text and '--no-commit' in text)
 
 
 def referenced_decks(data: Path) -> set[str]:
