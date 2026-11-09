@@ -75,6 +75,7 @@ async function main(){
       else if(p==='/api/knowledge/status')data={sources:state.knowledgeSources,active_sources_count:state.knowledgeSources.length,active_chunks_count:0};
       else if(p==='/api/knowledge/jobs')data={jobs:state.knowledgeJobs};
       else if(p==='/api/intelligence/related')data={results:state.related};
+      else if(/^\/api\/section-page-links\/[^/]+$/.test(p))data={};
       else if(p==='/api/ideashell/status')data={status:'disconnected'};
       else if(p==='/api/library/drive')data={options:{pdf:true,transcripts:true,notes:true,automatic:false,interval_minutes:60},connected:false,configured:false,busy:false,authorizing:false,account:{},job:null};
       else if(p==='/api/library/backup')data={backup:null};

@@ -255,10 +255,21 @@ def sync_viewer_pages(live: Path, dest: Path, decks: dict[str, Path], render=ren
         removed.append(entry.name)
     rendered, skipped = [], []
     for sha in sorted(wanted):
-        if pages_current(live / sha, sha) or (dest != live and pages_current(dest / sha, sha)):
+        live_folder = live / sha
+        dest_folder = dest / sha
+        if pages_current(dest_folder, sha):
             skipped.append(sha)
             continue
-        render(Path(decks[sha]), dest / sha, sha)
+        if dest != live and pages_current(live_folder, sha):
+            # A fresh sync snapshot may not contain the already-rendered deck.
+            # Copy it into the stage so the same publish commit carries the
+            # complete viewer data instead of silently omitting the pages.
+            if dest_folder.exists():
+                shutil.rmtree(dest_folder)
+            shutil.copytree(live_folder, dest_folder)
+            skipped.append(sha)
+            continue
+        render(Path(decks[sha]), dest_folder, sha)
         rendered.append(sha)
     return {'rendered': rendered, 'skipped': skipped, 'removed': sorted(removed)}
 
