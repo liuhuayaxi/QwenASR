@@ -54,10 +54,19 @@ IMAGE = re.compile(r'!\[[^\]]*\]\((?:\./)?(assets/fig-[a-f0-9]{16}\.(?:png|jpe?g
 
 
 def enabled():
+    """On unless the owner explicitly turned the feature off.
+
+    A missing settings file is the normal state of a new install, so new notes
+    get buttons without a separate ``--enable`` step. ``--disable`` writes
+    ``enabled: false`` and is the only opt-out.
+    """
     try:
-        return bool(json.loads(SETTINGS.read_text(encoding='utf-8')).get('enabled'))
+        value = json.loads(SETTINGS.read_text(encoding='utf-8'))
     except (OSError, ValueError):
-        return False
+        return True
+    if not isinstance(value, dict) or 'enabled' not in value:
+        return True
+    return bool(value.get('enabled'))
 
 
 def set_enabled(value: bool):

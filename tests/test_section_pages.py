@@ -22,6 +22,15 @@ class SectionPageTests(unittest.TestCase):
         self.assertTrue(sp.exclusion(items[1], by_index))
         self.assertFalse(sp.exclusion(items[3], by_index))
 
+    def test_page_links_are_on_until_explicitly_disabled(self):
+        if sp.SETTINGS.exists():
+            sp.SETTINGS.unlink()
+        self.assertTrue(sp.enabled())
+        sp.set_enabled(False)
+        self.assertFalse(sp.enabled())
+        sp.set_enabled(True)
+        self.assertTrue(sp.enabled())
+
     def test_viewer_page_uses_marker_map(self):
         page_map = {'method': 'ai-transcript-markers', 'source_to_viewer': {'1': 2, '82': 83}}
         self.assertEqual(sp.to_viewer(page_map, 82), 83)

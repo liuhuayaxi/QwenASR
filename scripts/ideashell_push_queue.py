@@ -230,6 +230,18 @@ def finish(state):
                              text=True, timeout=7200)
         tail = (run.stdout + run.stderr).strip().splitlines()[-1:] or ['']
         state['sharingnotes'] = {'exit': run.returncode, 'result': tail[0][:400]}
+        if run.returncode == 0:
+            # Page images and page-links are not part of sync_site. Render any
+            # newly referenced deck and commit docs/data. PDFs are not modified
+            # and the release upload above is left as it is.
+            try:
+                view = subprocess.run([sys.executable, str(ROOT / 'scripts' / 'publish_courseware_view.py'),
+                                       '--sharingnotes', str(sharing)], cwd=ROOT, capture_output=True, text=True, timeout=7200)
+                view_tail = (view.stdout + view.stderr).strip().splitlines()[-1:] or ['']
+                state['courseware_view'] = {'exit': view.returncode, 'result': view_tail[0][:400]}
+            except Exception as exc:
+                state['courseware_view'] = {'error': str(exc)[:400]}
+            log(f'courseware view: {state["courseware_view"]}')
     except Exception as exc:
         state['sharingnotes'] = {'error': str(exc)[:400]}
     log(f'sharingnotes: {state["sharingnotes"]}')

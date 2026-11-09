@@ -434,6 +434,8 @@ async def _section_page_links(record, config):
     get no button (a later run reviews them).
     """
     from . import section_pages
+    # Runs for every generated note unless the owner explicitly disabled it.
+    # Unreviewed headings stay hidden; a failure here never fails the note.
     if not section_pages.enabled() or not (record.metadata.get('ai_note_summary') or {}).get('review_package'): return
     try:
         from .section_page_review import refresh
