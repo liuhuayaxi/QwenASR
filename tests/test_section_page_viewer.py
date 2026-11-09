@@ -90,7 +90,6 @@ class PageImageTests(unittest.IsolatedAsyncioTestCase):
             missing = await api.get(f"/api/section-page-links/{RECORDING}/pages/{SOURCE}/9.webp")
             escaped = await api.get(f"/api/section-page-links/{RECORDING}/pages/{SOURCE}/t0.webp")
             other = await api.get(f"/api/section-page-links/{RECORDING}/pages/{'c' * 32}/1.webp")
-            disabled = sp.SETTINGS
         self.assertEqual(thumb.content, b"thumb")
         self.assertEqual(thumb.headers["content-type"].split(";")[0], "image/webp")
         self.assertEqual(full.content, b"full")
@@ -98,7 +97,7 @@ class PageImageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(missing.status_code, 404)
         self.assertEqual(escaped.status_code, 404)
         self.assertEqual(other.status_code, 404)
-        disabled.unlink()
+        sp.set_enabled(False)
         async with client() as api:
             hidden = await api.get(f"/api/section-page-links/{RECORDING}/pages/{SOURCE}/1.webp")
         self.assertEqual(hidden.status_code, 404)

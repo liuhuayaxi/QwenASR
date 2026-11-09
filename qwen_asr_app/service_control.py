@@ -3,6 +3,7 @@ import argparse
 import fcntl
 import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -86,6 +87,20 @@ def process_snapshot():
     return rows
 
 
+def _same_python_runtime(command_path):
+    """Accept macOS's Python.app launcher for the same framework install."""
+    actual = os.path.realpath(command_path)
+    expected = os.path.realpath(sys.executable)
+    if actual == expected:
+        return True
+    marker = '/Python.framework/Versions/'
+    if marker not in actual or marker not in expected:
+        return False
+    actual_root, actual_version = actual.split(marker, 1)
+    expected_root, expected_version = expected.split(marker, 1)
+    return (actual_root, actual_version.split('/', 1)[0]) == (expected_root, expected_version.split('/', 1)[0])
+
+
 def owned_process(saved, snapshot):
     pid, token = saved.get('pid'), saved.get('token')
     row = snapshot.get(pid)
@@ -93,9 +108,21 @@ def owned_process(saved, snapshot):
         return False
     if not token or (saved.get('started') and saved['started'] != row['started']):
         raise RuntimeError('服务进程标识已变化，已拒绝停止其他程序')
-    expected = [f'{sys.executable} -m {module} app:app --host 127.0.0.1 --port {PORT}'
-                for module in ('uvicorn', 'qwen_asr_app.server')]
-    if not any(row['command'] == prefix or row['command'].startswith(prefix + ' ') for prefix in expected):
+    try:
+        command = shlex.split(row['command'])
+    except ValueError:
+        command = []
+    expected_tails = {
+        tuple(['-m', module, 'app:app', '--host', '127.0.0.1', '--port', str(PORT)])
+        for module in ('uvicorn', 'qwen_asr_app.server')
+    }
+    executable_matches = False
+    if len(command) >= 8 and tuple(command[1:8]) in expected_tails:
+        try:
+            executable_matches = _same_python_runtime(command[0])
+        except (OSError, TypeError):
+            executable_matches = command[0] == sys.executable
+    if not executable_matches:
         raise RuntimeError('服务进程路径不匹配，已拒绝停止其他程序')
     # Check the launch token without printing environment variables or secrets.
     environment = subprocess.check_output(

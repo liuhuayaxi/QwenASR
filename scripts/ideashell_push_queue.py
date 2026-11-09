@@ -220,6 +220,13 @@ def push_one(state, rid):
     save(state)
 
 
+def _courseware_hook_in_sync(sharing):
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from qwen_asr_app.courseware_publish import sync_site_publishes_courseware
+    return sync_site_publishes_courseware(sharing)
+
+
 def finish(state):
     sharing = ROOT.parent / 'sharingnotes'
     state['sharingnotes'] = 'running'
@@ -230,6 +237,19 @@ def finish(state):
                              text=True, timeout=7200)
         tail = (run.stdout + run.stderr).strip().splitlines()[-1:] or ['']
         state['sharingnotes'] = {'exit': run.returncode, 'result': tail[0][:400]}
+        if run.returncode == 0 and not _courseware_hook_in_sync(sharing):
+            # Older sharingnotes checkouts never call the page-image hook, so
+            # this queue is the only publish path. The script commits docs/data
+            # only when the tree actually differs. A current sync_site already
+            # ran the hook with --no-commit and committed those files itself.
+            try:
+                view = subprocess.run([sys.executable, str(ROOT / 'scripts' / 'publish_courseware_view.py'),
+                                       '--sharingnotes', str(sharing)], cwd=ROOT, capture_output=True, text=True, timeout=7200)
+                view_tail = (view.stdout + view.stderr).strip().splitlines()[-1:] or ['']
+                state['courseware_view'] = {'exit': view.returncode, 'result': view_tail[0][:400]}
+            except Exception as exc:
+                state['courseware_view'] = {'error': str(exc)[:400]}
+            log(f'courseware view: {state["courseware_view"]}')
     except Exception as exc:
         state['sharingnotes'] = {'error': str(exc)[:400]}
     log(f'sharingnotes: {state["sharingnotes"]}')
