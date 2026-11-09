@@ -31,18 +31,20 @@ def main():
     parser.add_argument('--sharingnotes', default=str(ROOT.parent / 'sharingnotes'))
     parser.add_argument('--stage', default='', help='sync_site snapshot directory; skips the git commit')
     parser.add_argument('--assets', default='', help='prepared-assets.json from sync_site')
+    parser.add_argument('--links', default='', help='section-page-links directory; defaults to QwenASR private data')
     parser.add_argument('--no-commit', action='store_true')
     parser.add_argument('--no-push', action='store_true')
     parser.add_argument('--dry-run', action='store_true')
     args = parser.parse_args()
     sharing = Path(args.sharingnotes)
+    links_dir = Path(args.links) if args.links else None
     if not (sharing / 'docs' / 'data').is_dir():
         raise SystemExit(f'没有找到 sharingnotes 数据目录：{sharing / "docs" / "data"}')
     if args.dry_run:
         from qwen_asr_app import section_pages as sp
         from qwen_asr_app.courseware_publish import export_page_links
         data = Path(args.stage) if args.stage else sharing / 'docs' / 'data'
-        result, report = export_page_links(sp.LINKS, data, sp.enabled())
+        result, report = export_page_links(links_dir or sp.LINKS, data, sp.enabled())
         for row in report:
             print(*row)
         decks = {t['sha256'] for note in result['notes'].values() for section in note['sections'] for t in section['targets']}
@@ -51,7 +53,7 @@ def main():
     result = publish_courseware_view(
         sharing, stage=Path(args.stage) if args.stage else None,
         assets_path=Path(args.assets) if args.assets else None,
-        commit=not args.no_commit and not args.stage, push=not args.no_push,
+        links_dir=links_dir, commit=not args.no_commit and not args.stage, push=not args.no_push,
     )
     print(json.dumps({k: result[k] for k in ('links_changed', 'notes', 'pages', 'commit')}, ensure_ascii=False))
 

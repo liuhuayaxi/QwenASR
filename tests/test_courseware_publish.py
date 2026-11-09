@@ -186,9 +186,12 @@ class PublishTests(unittest.TestCase):
         stage = self.base / 'stage'
         import shutil
         shutil.copytree(self.data, stage)
+        links = self.base / 'links'
+        links.mkdir()
+        shutil.copyfile(sp.LINKS / 'rec12345.json', links / 'rec12345.json')
         script = Path(__file__).resolve().parents[1] / 'scripts' / 'publish_courseware_view.py'
         args = [__import__('sys').executable, str(script), '--sharingnotes', str(self.sharing),
-                '--stage', str(stage), '--no-commit', '--assets', str(self.assets)]
+                '--stage', str(stage), '--no-commit', '--assets', str(self.assets), '--links', str(links)]
         subprocess.run(args, check=True, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         first = (stage / 'page-links.json').read_bytes()
         commits = subprocess.run(['git', 'rev-list', '--count', 'HEAD'], cwd=self.sharing, check=True, text=True, stdout=subprocess.PIPE, env=env).stdout.strip()

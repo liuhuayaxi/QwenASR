@@ -5,6 +5,7 @@ import importlib.util
 import json
 from pathlib import Path
 import plistlib
+import psutil
 import threading
 import time
 from types import SimpleNamespace
