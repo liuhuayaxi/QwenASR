@@ -19,6 +19,15 @@ from tests.test_live_recovery import store_for
 
 
 class CheckpointRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    def test_postprocessing_phase_takes_precedence_over_completed_writer_checkpoint(self):
+        with tempfile.TemporaryDirectory() as raw:
+            record=RecordingRecord(Path(raw),{'id':'postprocessing','summary_job':{'checkpoint':{'review_task':'a'*24}}})
+            folder=record.directory/'.review-notes'/('a'*24);folder.mkdir(parents=True)
+            atomic_json(folder/'task.json',{'id':'a'*24,'stage':'完成 · 未审核','status':'completed'})
+            for phase in ['核对课件跳转','AI 取名']:
+                record.metadata['ai_note_summary_draft']={'phase':phase,'parts':{},'total_parts':0}
+                self.assertEqual(app._summary_phase_progress(record,{})['phase'],phase)
+
     async def test_continue_preserves_saved_custom_prompt_without_accepting_browser_provider(self):
         with tempfile.TemporaryDirectory() as raw:
             record = RecordingRecord(Path(raw), {

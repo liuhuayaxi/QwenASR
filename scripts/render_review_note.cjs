@@ -21,7 +21,9 @@ async function main(){
     .note-chapter-subtitle{font-size:13pt;line-height:1.6;color:#415b70;margin-top:-7pt;margin-bottom:16pt;break-after:avoid}
     </style><script src="/static/vendor/katex/katex.min.js"></script><main id="note"></main><script type="module">import {renderMarkdown} from '/static/js/markdown-reader.js';window.renderNote=renderMarkdown;</script></html>`});
    const rel=decodeURIComponent(url.pathname).slice(1);
-   if(!rel.startsWith('static/vendor/')&&rel!=='static/js/markdown-reader.js')return route.abort();
+   // markdown-reader imports ppt-jump.js for courseware page links. Keep the
+   // offline renderer self-contained while allowing that same local module.
+   if(!rel.startsWith('static/vendor/')&&!['static/js/markdown-reader.js','static/js/ppt-jump.js'].includes(rel))return route.abort();
    const local=path.resolve(request.repo_root,rel);
    if(!local.startsWith(path.resolve(request.repo_root,'static')+path.sep))return route.abort();
    return route.fulfill({path:local,contentType:local.endsWith('.js')?'text/javascript':undefined});

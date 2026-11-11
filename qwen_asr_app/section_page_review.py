@@ -86,10 +86,13 @@ def _apply(section, page, why, verdict):
     section['review'] = {'by': REVIEWER, 'verdict': verdict, 'why': why, 'auto_pages': was}
 
 
-async def review(doc, markdown, sources, config, *, mode='summary', concurrency=4, force=False, log=None):
-    from .ai import request_ai_json
+async def review(doc, markdown, sources, config, *, mode='summary', concurrency=None, force=False, log=None):
+    from .ai import request_ai_json, uses_agy_gemini, context_window_for, concurrency_for, AIRequestError
+    from .context_budget import estimate_tokens
+    long_context = uses_agy_gemini(config, mode)
+    if concurrency is None:
+        concurrency = concurrency_for(config, mode) if long_context else 4
     items = _items(doc, markdown, sources, force)
-    by_id = {i['payload']['id']: i for i in items}
     gate = asyncio.Semaphore(concurrency)
     stats = {'checked': 0, 'verified': 0, 'moved': 0, 'hidden': 0, 'errors': 0}
 
@@ -102,28 +105,38 @@ async def review(doc, markdown, sources, config, *, mode='summary', concurrency=
 
     async def batch(group):
         payload = {'items': [{**i['payload'], 'pages': [{'page': p, 'text': x} for p, x in i['window'].items()]} for i in group]}
+        if (long_context and len(group)>1 and estimate_tokens(INSTRUCTIONS)+estimate_tokens(json.dumps(payload,ensure_ascii=False))+32768+16000 > context_window_for(config,mode)):
+            middle=len(group)//2
+            await asyncio.gather(batch(group[:middle]),batch(group[middle:]))
+            return
         try:
             async with gate:
                 r = await request_ai_json(instructions=INSTRUCTIONS, payload=payload, config=config, mode=mode, max_output_tokens=200 + 120 * len(group))
         except Exception as exc:  # leave unreviewed; a rerun retries
+            if long_context and isinstance(exc,AIRequestError) and exc.kind=='output_truncated' and len(group)>1:
+                middle=len(group)//2
+                await asyncio.gather(batch(group[:middle]),batch(group[middle:]))
+                return
             logger.warning('section page review failed: %s', exc); stats['errors'] += len(group); return
         answers = {a.get('id'): a for a in (r.get('items') or []) if isinstance(a, dict)}
-        for item in group:
+        async def apply_answer(item):
             s, a = item['section'], answers.get(item['payload']['id'])
             stats['checked'] += 1
-            if not a: stats['errors'] += 1; continue
+            if not a: stats['errors'] += 1; return
             page, why = a.get('page'), str(a.get('why') or '')[:60]
             if not (a.get('sure') is True and isinstance(page, int) and page in item['window']):
-                _apply(s, None, why, 'not_sure' if page is not None else 'no_page'); stats['hidden'] += 1; continue
+                _apply(s, None, why, 'not_sure' if page is not None else 'no_page'); stats['hidden'] += 1; return
             if page != s['targets'][0]['page_start']:
                 try: ok, why2 = await confirm(item, page)
-                except Exception: stats['errors'] += 1; continue
-                if not ok: _apply(s, None, why + '；复核：' + why2, 'move_rejected'); stats['hidden'] += 1; continue
-                _apply(s, page, why + '；复核：' + why2, 'moved'); stats['moved'] += 1; stats['verified'] += 1; continue
+                except Exception: stats['errors'] += 1; return
+                if not ok: _apply(s, None, why + '；复核：' + why2, 'move_rejected'); stats['hidden'] += 1; return
+                _apply(s, page, why + '；复核：' + why2, 'moved'); stats['moved'] += 1; stats['verified'] += 1; return
             _apply(s, page, why, 'checked'); stats['verified'] += 1
+        await asyncio.gather(*(apply_answer(item) for item in group))
         if log: log(stats)
 
-    await asyncio.gather(*(batch(items[k:k + BATCH]) for k in range(0, len(items), BATCH)))
+    groups = ([items] if items else []) if long_context else [items[k:k+BATCH] for k in range(0,len(items),BATCH)]
+    await asyncio.gather(*(batch(group) for group in groups))
     return stats
 
 

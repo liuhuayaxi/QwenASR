@@ -1,5 +1,6 @@
 from tests import isolation  # noqa: F401
 import copy
+import asyncio
 import hashlib
 import json
 from pathlib import Path
@@ -201,6 +202,33 @@ class ScopeLatexBodyTests(unittest.TestCase):
 
 
 class ScopeCacheTests(unittest.IsolatedAsyncioTestCase):
+    async def test_whole_source_objectives_share_one_turn_and_sources_overlap_after_serial_rendering(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root=Path(raw);sources=[];candidates=[];render_order=[];calls=[];both=asyncio.Event()
+            for number in range(2):
+                original=root/f'original-{number}.pdf';original.write_bytes(str(number).encode())
+                source={'source_id':str(number),'course_id':'course','sha256':hashlib.sha256(original.read_bytes()).hexdigest(),
+                    'path':original.name,'name':original.name,'pages':[{} for _ in range(5)]}
+                sources.append(source)
+                candidates.extend({'source_id':str(number),'page':p} for p in range(1,6))
+            package={'category':'通信原理 C','course_id':'course','sources':sources,'learning_scope_candidates':candidates}
+            def render(folder, supplied, request):
+                self.assertIs(supplied,package)
+                render_order.append(request['source_id'])
+                image=root/f"{request['source_id']}-{request['page']}.png";image.write_bytes(b'image')
+                return {'path':image.name,'page':request['page'],'sha256':hashlib.sha256(image.read_bytes()).hexdigest()}
+            async def request(prompt,folder,provider,**kwargs):
+                calls.append(len(kwargs['require_images']))
+                if len(calls)==2:both.set()
+                await asyncio.wait_for(both.wait(),1)
+                return json.dumps({'items':[],'read_pages':[1,2,3,4,5]}),{'session_id':'verified'}
+            with patch.object(scope,'PRIVATE_ROOT',root/'private'),patch.object(scope,'extract_image',side_effect=render), \
+                 patch.object(scope,'request_materials',side_effect=request):
+                result=await scope.prepare(package,root,{'context_window':1048576,'concurrency':6})
+            self.assertFalse(result['enabled']);self.assertEqual(calls,[5,5])
+            self.assertEqual(render_order,['0']*5+['1']*5)
+            self.assertEqual(len(list((root/'private/review-materials-cache'/scope.VERSION).glob('*.json'))),2)
+
     async def test_every_course_reads_ppt_requirements_but_no_sources_means_no_call(self):
         # Regression: 学习要求 used to be read only for 光电子学.
         for category in ('通信原理 C', '微型计算机原理与接口技术', '光电子器件（全英文）'):

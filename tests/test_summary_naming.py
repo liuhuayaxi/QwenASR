@@ -48,6 +48,39 @@ class SummaryNamingTests(unittest.IsolatedAsyncioTestCase):
         await app.background_summary_tasks[self.record.id]
         return self.store.find(self.record.id)
 
+    async def test_legacy_manual_post_with_existing_note_requests_fresh_generation(self):
+        self.record.metadata['ai_note_summary']={'summary':'旧版正文'}
+        self.record.save_metadata()
+        with patch.object(app,'start_summary_job') as start:
+            await app.create_summary_job(self.record.id,{'config':{}})
+            self.assertTrue(start.call_args.args[1]['regenerate'])
+            await app.create_summary_job(self.record.id,{'config':{},'regenerate':False})
+            self.assertFalse(start.call_args.args[1]['regenerate'])
+
+    async def test_generation_round_survives_auto_retry_and_continue_but_manual_regenerate_changes_it(self):
+        from qwen_asr_app.ai import AIRequestError
+        seen=[]
+        self.record.metadata['summary_job']={'status':'completed','checkpoint':{'review_task':'a'*24}}
+        self.record.save_metadata()
+        async def generation(ident,payload):
+            seen.append(payload['_note_generation_id'])
+            if len(seen)==1:
+                raise AIRequestError('temporary upstream failure',kind='provider_unavailable',retriable=True)
+            return {'summary':{'summary':'完整新版正文','abstract':'摘要'}}
+        with patch.object(app,'generate_library_summary',side_effect=generation), \
+             patch.object(app.asyncio,'sleep',new=AsyncMock()):
+            app.start_summary_job(self.store.find(self.record.id),{'config':{},'regenerate':True})
+            first=app.background_summary_tasks[self.record.id]
+            self.assertEqual(self.store.find(self.record.id).metadata['summary_job']['checkpoint'],{})
+            await first
+            self.assertEqual(len(seen),2);self.assertEqual(seen[0],seen[1]);self.assertTrue(seen[0])
+            app.start_summary_job(self.store.find(self.record.id),{'config':{}})
+            await app.background_summary_tasks[self.record.id]
+            self.assertEqual(seen[2],seen[0])
+            app.start_summary_job(self.store.find(self.record.id),{'config':{},'regenerate':True})
+            await app.background_summary_tasks[self.record.id]
+            self.assertNotEqual(seen[3],seen[0])
+
     async def test_background_job_saves_name_after_note_and_moves_record_safely(self):
         self.payload["title_prompt"] = "按本次设置取名"
         async def title(summary, prompt, config, **context):

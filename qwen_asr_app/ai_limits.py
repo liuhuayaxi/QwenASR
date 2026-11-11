@@ -43,9 +43,9 @@ def shared_gate(identity, limit):
 
 def service_concurrency():
     try:
-        return max(1, min(32, int(os.getenv('QWEN_ASR_AI_TOTAL_CONCURRENCY', '4'))))
+        return max(1, min(32, int(os.getenv('QWEN_ASR_AI_TOTAL_CONCURRENCY', '8'))))
     except ValueError:
-        return 4
+        return 8
 
 
 def account_gate(base_url, key):

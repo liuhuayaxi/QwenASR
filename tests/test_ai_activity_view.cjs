@@ -7,6 +7,13 @@ const source = fs.readFileSync(path.join(__dirname, '../static/js/ai-activity-vi
 const modulePromise = import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 const task = activity => ({family: 'ai', status: 'running', ai_activity: activity});
 
+test('capacity errors show the upstream reason and native retry count', async () => {
+  const {aiActivityView}=await modulePromise;
+  const view=aiActivityView(task({phase:'provider_busy',request_activity:[{phase:'provider_busy',upstream_errors:5}]}));
+  assert.match(view.label,/上游模型暂无容量/);
+  assert.match(view.detail,/上游已出现 5 次失败/);
+});
+
 test('a new request separates earlier intermediate output from current text', async () => {
   const {aiActivityView} = await modulePromise;
   const view = aiActivityView(task({phase:'processing',elapsed_seconds:1800,idle_seconds:20,

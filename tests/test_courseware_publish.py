@@ -238,16 +238,19 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
     async def test_new_note_is_linked_without_a_prior_enable_step(self):
         if sp.SETTINGS.exists():
             sp.SETTINGS.unlink()
-        from unittest.mock import AsyncMock, patch
+        from unittest.mock import AsyncMock, Mock, patch
         record = type('Record', (), {})()
         record.id = 'rec12345'
         record.directory = sp.ROOT / 'course' / '上课录音' / 'rec12345'
         record.directory.mkdir(parents=True)
         record.metadata = {'ai_note_summary': {'review_package': '.review-notes/pkg'}}
+        record.save_metadata = Mock()
         try:
             with patch('qwen_asr_app.section_page_review.refresh', new=AsyncMock(return_value={'verified': 1})) as refresh:
                 await _section_page_links(record, {'ai': {}})
             refresh.assert_awaited()
+            self.assertEqual(record.save_metadata.call_count, 2)
+            self.assertNotIn('ai_note_summary_draft', record.metadata)
             sp.set_enabled(False)
             with patch('qwen_asr_app.section_page_review.refresh', new=AsyncMock()) as skipped:
                 await _section_page_links(record, {'ai': {}})

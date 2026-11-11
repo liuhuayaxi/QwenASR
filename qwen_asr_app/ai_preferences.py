@@ -9,7 +9,7 @@ from .paths import PRIVATE_ROOT
 
 PROVIDER_FIELDS = {'base_url', 'model', 'api_mode', 'context_window', 'max_output_tokens',
                    'concurrency', 'extra_params', 'system_prompt', 'transport',
-                   'cli_path', 'cli_model', 'cli_effort', 'cli_timeout_seconds'}
+                   'cli_path', 'cli_model', 'cli_effort', 'cli_timeout_seconds', 'cli_proxy_url'}
 SETTINGS_FIELDS = {'base_url', 'model', 'context_window', 'summary_interval', 'summary_enabled',
                    'extra_params', 'ai_correction', 'api_mode', 'history_chars', 'translation',
                    'title_prompt', 'detailed_summary_prompt', 'abstract_prompt',
@@ -85,6 +85,8 @@ class AIPreferences:
             if mode not in PROVIDER_MODES or not isinstance(provider, dict):
                 raise ValueError('AI 功能配置无效')
             transport = str(provider.get('transport') or 'api').strip().lower()
+            if 'cli_proxy_url' not in provider and providers.get(mode, {}).get('cli_proxy_url'):
+                provider = {**provider, 'cli_proxy_url':providers[mode]['cli_proxy_url']}
             if transport not in {'api', 'agy_cli'}:
                 raise ValueError(f'{mode} AI 整理通道无效')
             if transport == 'api':

@@ -6,6 +6,10 @@ from qwen_asr_app.yuketang.retrieval import resolve_markers
 
 
 class FastNoteFigureInputs(unittest.TestCase):
+    def test_lesson_pages_preserve_the_complete_text_in_the_long_context(self):
+        text='完整课件文字'*1000+'页末关键条件'
+        self.assertEqual(_pages({'sources':[{'source_id':'a'*32,'pages':[{'page':1,'text':text}]}]})[0]['text'],text)
+
     def test_replacing_courseware_changes_identity_before_a_completed_task_can_reuse(self):
         record = SimpleNamespace(id='lesson')
         original = [{'id':'file','name':'题目.pdf','sha256':'old','conversion':{'status':'completed','sha256':'ocr1'}}]

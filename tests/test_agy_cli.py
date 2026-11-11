@@ -14,6 +14,27 @@ from qwen_asr_app.ai import AIRequestError
 
 
 class AGYCLITests(unittest.TestCase):
+    def test_blocked_keychain_lookup_is_local_and_never_a_network_retry(self):
+        detail='OS credential manager unavailable (fork/exec /usr/bin/security: operation not permitted); falling back to file-based secret storage'
+        failures=['',json.dumps({'event':'result','result':{'status':'FAILED','error':'Authentication failed or timed out'}})]
+        for output in failures:
+            with self.subTest(output=bool(output)),self.assertRaises(AIRequestError) as error:
+                _decode_output(output,detail)
+            self.assertEqual(error.exception.kind,'material_sandbox_auth')
+            self.assertFalse(error.exception.retriable)
+            self.assertIn('钥匙串',str(error.exception))
+
+    def test_saved_cli_proxy_is_shared_by_text_and_materials_without_changing_parent_environment(self):
+        import os
+        from qwen_asr_app.agy_cli import subprocess_environment
+        with patch.dict(os.environ, {'HTTPS_PROXY':'http://old.invalid:8000'}):
+            env=subprocess_environment({'cli_proxy_url':'http://127.0.0.1:7897'})
+            self.assertEqual(env['HTTPS_PROXY'],'http://127.0.0.1:7897')
+            self.assertEqual(env['HTTP_PROXY'],env['HTTPS_PROXY'])
+            self.assertEqual(os.environ['HTTPS_PROXY'],'http://old.invalid:8000')
+        for proxy in ['file:///private/config','http://user:secret@localhost:7897','http://localhost','http://localhost:invalid']:
+            with self.assertRaises(AIRequestError):subprocess_environment({'cli_proxy_url':proxy})
+
     def test_zero_timeout_waits_for_completion_without_a_wall_clock_deadline(self):
         from qwen_asr_app.agy_cli import timeout_seconds
         self.assertIsNone(timeout_seconds({'cli_timeout_seconds':0}))

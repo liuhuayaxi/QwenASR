@@ -1257,6 +1257,7 @@ async function generateLibrarySummary(record, card = null, promptOverrides = {})
         title_prompt: els.titlePrompt.value.trim(),
         custom_prompt: promptOverrides.customPrompt || "",
         material_coverage: promptOverrides.completeMaterials ? 'selected_files' : 'lesson',
+        regenerate: Boolean(promptOverrides.regenerate || record.has_ai_summary || record.ai_note_summary?.summary),
       }),
     });
     const accepted = await response.json();
@@ -2629,6 +2630,7 @@ els.confirmRegenerateSummary.addEventListener("click", async () => {
     systemPrompt,
     customPrompt: els.summaryCustomPrompt.value.trim(),
     completeMaterials: $('#summaryCompleteMaterials').checked,
+    regenerate: true,
     button: els.confirmRegenerateSummary,
   });
   if (result) {

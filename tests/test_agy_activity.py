@@ -8,6 +8,17 @@ from qwen_asr_app.ai_activity import track_ai_activity,track_ai_request,bind_ai_
 SID='12345678-1234-1234-1234-123456789abc'
 
 class SessionActivityTests(unittest.TestCase):
+    def test_native_capacity_error_is_visible_without_exposing_raw_diagnostics(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root=Path(raw);path=root/SID/'.system_generated/logs/transcript_full.jsonl';path.parent.mkdir(parents=True)
+            path.write_text(json.dumps({'step_index':1,'type':'ERROR_MESSAGE','status':'DONE',
+                'error':'UNAVAILABLE (code 503): No capacity available for model private-model account-private'})+'\n')
+            state=SessionActivity(SID,root).snapshot()
+            self.assertEqual(state['phase'],'provider_busy')
+            self.assertEqual(state['upstream_error_kind'],'provider_unavailable')
+            self.assertEqual(state['upstream_errors'],1)
+            self.assertNotIn('private',json.dumps(state))
+
     def test_native_read_file_is_reported_as_actual_reading(self):
         with tempfile.TemporaryDirectory() as raw:
             root=Path(raw);path=root/SID/'.system_generated/logs/transcript_full.jsonl';path.parent.mkdir(parents=True)

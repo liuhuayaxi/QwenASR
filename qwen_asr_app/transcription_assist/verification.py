@@ -13,7 +13,7 @@ from pathlib import Path
 import uuid
 import weakref
 
-from ..ai import AIRequestError, context_window_for, output_limit_for, provider_for_mode, provider_transport, request_ai_json
+from ..ai import AIRequestError, concurrency_for, context_window_for, output_limit_for, provider_for_mode, provider_transport, request_ai_json
 from ..context_budget import estimate_tokens
 from ..durable import atomic_json
 from ..refinement import source_hash
@@ -242,22 +242,40 @@ async def _verify_corrections(record, config, on_progress=None):
     capacity = min(32768,context_window_for(config,'correction')//2) if is_cli else output_limit_for(config, 'correction', 32768)
     if capacity < 856:
         raise AIRequestError('校对输出上限过小，无法完整保存独立复核；请提高到至少 856 tokens',kind='configuration')
-    # CLI High models spend output on thinking as well as JSON and do not
-    # expose a hard max_output_tokens flag. Start small and split on actual
-    # output exhaustion; keep every candidate and all retrieved evidence.
-    maximum = min(8 if is_cli else 54, max(1, (capacity-256)//(2400 if is_cli else 600)))
+    # AGY accepts the complete lesson in its saved long context. Eight-item
+    # serial requests repeatedly paid for model startup, evidence and thinking.
+    # Try the entire remaining set; split only for an actual input/output
+    # limit. API providers still honor their explicit output-token cap.
+    maximum = len(remaining) if is_cli else min(54, max(1, (capacity-256)//600))
+    slots = asyncio.Semaphore(concurrency_for(config, 'correction'))
+
+    async def children(group, evidence):
+        middle = len(group)//2
+        if not is_cli:
+            await process(group[:middle], evidence)
+            await process(group[middle:], evidence)
+            return
+        workers = [asyncio.create_task(process(part, evidence)) for part in (group[:middle], group[middle:])]
+        try:
+            results = await asyncio.gather(*workers, return_exceptions=True)
+            for result in results:
+                if isinstance(result, BaseException):
+                    raise result
+        finally:
+            for worker in workers:
+                if not worker.done():
+                    worker.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
 
     async def process(group, evidence):
         nonlocal checked, uncertain, maximum
         payload = _payload(record,group,evidence)
-        reserve = min(capacity, 256+(2400 if is_cli else 600)*len(group))
+        reserve = min(capacity, 256+600*len(group))
         cost = estimate_tokens(INSTRUCTIONS)+estimate_tokens(json.dumps(payload,ensure_ascii=False))+reserve+(16000 if is_cli else 512)
         if cost > context_window_for(config,'correction'):
             if len(group)==1:
                 raise AIRequestError('单条复核的来源超出上下文窗口，原文保留；请增大校对窗口',kind='context_length')
-            middle=len(group)//2
-            await process(group[:middle],evidence)
-            await process(group[middle:],evidence)
+            await children(group, evidence)
             return
         bindings = {c['candidate_id']:_binding(record,c) for c in group}
         from ..agy_cli import last_session_id
@@ -265,18 +283,18 @@ async def _verify_corrections(record, config, on_progress=None):
         for attempt in range(2):
             instructions = INSTRUCTIONS + ('\n上次结论缺少有效的逐项映射或依据，请严格按协议重新复核。' if attempt else '')
             try:
-                response = await request_ai_json(instructions=instructions,payload=payload,config=config,
-                                                 mode='correction',max_output_tokens=reserve)
+                async with slots:
+                    response = await request_ai_json(instructions=instructions,payload=payload,config=config,
+                                                     mode='correction',max_output_tokens=reserve)
             except AIRequestError as exc:
                 atomic_json(folder/('failed-'+uuid.uuid4().hex+'.json'), {
                     'policy':POLICY,'payload':payload,'source_bindings':bindings,
                     'provider_session_id':last_session_id.get(),'error_kind':exc.kind,'created_at':local_now()})
                 if exc.kind not in {'output_truncated','input_too_long','context_length'} or len(group)==1:
                     raise
-                middle=len(group)//2
-                maximum=min(maximum,middle)
-                await process(group[:middle],evidence)
-                await process(group[middle:],evidence)
+                if not is_cli:
+                    maximum=min(maximum,len(group)//2)
+                await children(group, evidence)
                 return
             try:
                 decisions = _validate(response,payload)

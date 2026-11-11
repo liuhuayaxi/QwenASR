@@ -109,6 +109,27 @@ class SessionRecoveryTests(unittest.TestCase):
         with self.assertRaises(SessionEvidenceError):
             self.recover()
 
+    def test_successful_turn_can_recover_internal_transient_retry_only(self):
+        busy={'type':'ERROR_MESSAGE','status':'DONE','error':'UNAVAILABLE (code 503): No capacity available for model'}
+        self.save([self.user(),busy,self.answer()])
+        with self.assertRaises(SessionEvidenceError):self.recover()
+        self.assertEqual(self.recover(allow_recovered_transients=True)['response'],'完整最终答案')
+        for error in [busy, {**busy,'error':'FAILED_PRECONDITION: User location is not supported'},
+                      {**busy,'error':'401 invalid credentials'}]:
+            self.save([self.user(),self.answer(),error])
+            with self.assertRaises(SessionEvidenceError):self.recover(allow_recovered_transients=True)
+        for error in ['401 invalid credentials','User location is not supported','unrecognized terminal failure']:
+            self.save([self.user(),{**busy,'error':error},self.answer()])
+            with self.assertRaises(SessionEvidenceError):self.recover(allow_recovered_transients=True)
+
+    def test_native_error_field_recovers_a_complete_output_limit_continuation(self):
+        self.save([self.user(),self.answer(content='{"answer":"'),
+            {'type':'ERROR_MESSAGE','status':'DONE','error':'Your previous response exceeded the output token limit'},
+            self.answer(content='完整正文"}')])
+        self.assertTrue(output_limit_before_failure(SESSION,PROMPT,root=self.root))
+        result=self.recover(require_output_continuation=True)
+        self.assertEqual(json.loads(result['response']),{'answer':'完整正文'})
+
     def test_adapter_recovers_only_successful_empty_results(self):
         self.save([self.user(),self.answer()])
         message=json.dumps({'event':'user','message':{'content':PROMPT}})
