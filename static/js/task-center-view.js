@@ -102,7 +102,7 @@ export function taskProgressView(task) {
     const latex=task.note_ai_latex_enabled===true || /LaTeX/.test(stage);
     const steps=['核对资料','梳理知识','编写图文',...(latex?[reviewing?'排版':'排版（PDF）']:[]),...(reviewing?['逐页审查']:[]),'保存'];
     const save=steps.length-1,latexAt=latex?3:-1,reviewAt=reviewing?(latex?4:3):-1;
-    const index=/识别本节/.test(stage)?1:/准备配图|编写笔记/.test(stage)?2:/LaTeX|排版/.test(stage)&&latex?latexAt:/独立审查|修订/.test(stage)&&reviewing?reviewAt:/生成 PDF|摘要|取名|完成/.test(stage)?save:0;
+    const index=/识别本节/.test(stage)?1:/准备配图|编写笔记/.test(stage)?2:/LaTeX|排版/.test(stage)&&latex?latexAt:/独立审查|修订/.test(stage)&&reviewing?reviewAt:/生成 PDF|核对课件跳转|摘要|取名|完成/.test(stage)?save:0;
     const measured=/识别本节|LaTeX|排版|独立审查/.test(stage) && Number(task.total)>0;
     const count=measured?`本阶段 ${task.completed || 0}/${task.total} ${task.progress_unit==='页'?'页':'批'}`:'';
     return {label:(stage.split(' · ')[0] || '准备开始')+(task.review_round>1?` · 第 ${task.review_round} 轮`:''),count,detail:'',steps,index,percent:measured?Math.min(100,Math.round((task.completed||0)/task.total*100)):null};

@@ -11,6 +11,16 @@ from qwen_asr_app.ai_secrets import AISecretStore
 
 
 class PreferencesTests(unittest.TestCase):
+    def test_saved_cli_route_survives_browser_saves_and_explicit_clear(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root=Path(raw);preferences=AIPreferences(root/'settings.json');secrets=AISecretStore(root/'keys.json')
+            provider={'transport':'agy_cli','cli_model':'gemini-3.8-flash-high','cli_proxy_url':'http://127.0.0.1:7897'}
+            preferences.save({'function_providers':{'summary':provider}},secrets)
+            preferences.save({'function_providers':{'summary':{'transport':'agy_cli','cli_model':'gemini-3.8-flash-high'}}},secrets)
+            self.assertEqual(preferences.task_config(required_modes=('summary',))['ai']['summary_provider']['cli_proxy_url'],'http://127.0.0.1:7897')
+            preferences.save({'function_providers':{'summary':{**provider,'cli_proxy_url':''}}},secrets)
+            self.assertEqual(preferences.read()['function_providers']['summary']['cli_proxy_url'],'')
+
     def test_preferences_survive_restart_and_keep_keys_out_of_settings(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

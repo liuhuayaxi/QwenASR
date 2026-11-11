@@ -188,7 +188,7 @@ class AutomaticVerificationTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(verify,'request_ai_json',side_effect=finish):await verify.verify_corrections(reloaded,CONFIG)
             self.assertFalse(active_candidates(reloaded))
 
-    async def test_cli_high_starts_with_at_most_eight_and_single_limit_is_finite(self):
+    async def test_cli_high_tries_the_whole_lesson_and_actual_output_limit_is_finite(self):
         with tempfile.TemporaryDirectory() as directory:
             record=self.record(directory);attempts=[]
             for i in range(4,21):
@@ -201,8 +201,43 @@ class AutomaticVerificationTests(unittest.IsolatedAsyncioTestCase):
                 raise AIRequestError('output limit',kind='output_truncated')
             with patch.object(verify,'request_ai_json',side_effect=upstream):
                 with self.assertRaises(AIRequestError):await verify.verify_corrections(record,config)
-            self.assertEqual(attempts,[8,4,2,1])
+            self.assertEqual(attempts[0],20)
+            self.assertEqual(attempts.count(1),20)
+            self.assertEqual(len(attempts),39)
             self.assertEqual(len(active_candidates(record)),20)
+
+    async def test_cli_full_lesson_uses_one_request_and_preserves_every_decision(self):
+        with tempfile.TemporaryDirectory() as directory:
+            record=self.record(directory)
+            for i in range(4,54):
+                segment=copy.deepcopy(record.segments[0]);segment.update(id=i,start=i*10,end=i*10+9)
+                holder=copy.deepcopy(record.metadata['ai_reviews'][0]);holder.update(id=i,segment_ids=[i],start=i*10,end=i*10+9)
+                record.segments.append(segment);record.metadata['ai_reviews'].append(holder)
+            config={'ai':{'correction_provider':{'transport':'agy_cli','cli_model':'gemini-3.8-flash-high','context_window':1048576,'concurrency':6}}}
+            async def upstream(**request):return self.reply(request['payload'])
+            with patch.object(verify,'request_ai_json',side_effect=upstream) as request:
+                result=await verify.verify_corrections(record,config)
+            request.assert_awaited_once()
+            self.assertEqual(len(request.call_args.kwargs['payload']['candidates']),53)
+            self.assertEqual(result['checked'],53)
+            self.assertFalse(active_candidates(record))
+
+    async def test_cli_required_split_runs_independent_children_concurrently(self):
+        with tempfile.TemporaryDirectory() as directory:
+            record=self.record(directory);active=peak=0
+            config={'ai':{'correction_provider':{'transport':'agy_cli','cli_model':'gemini-3.8-flash-high','context_window':1048576,'concurrency':2}}}
+            async def upstream(**request):
+                nonlocal active,peak
+                if len(request['payload']['candidates'])==3:
+                    raise AIRequestError('actual output limit',kind='output_truncated')
+                active+=1;peak=max(peak,active)
+                await asyncio.sleep(.01)
+                active-=1
+                return self.reply(request['payload'])
+            with patch.object(verify,'request_ai_json',side_effect=upstream):
+                await verify.verify_corrections(record,config)
+            self.assertEqual(peak,2)
+            self.assertFalse(active_candidates(record))
 
     async def test_completed_refinement_with_only_candidates_runs_verifier(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -47,6 +47,10 @@ def native_read_range(path, arguments, output, *, media=None):
 FINISH_REMINDER = "You did not call any tools. You should continue calling tools until you've completed your task. If you have completed your task call the finish tool."
 
 
+def _error_text(entry):
+    return str(entry.get('error') or entry.get('content') or '')
+
+
 def _request_text(entry):
     text=str(entry.get('content') or '')
     match=re.search(r'<USER_REQUEST>\s*(.*?)\s*(?:</USER_REQUEST>|\Z)',text,re.S)
@@ -83,7 +87,7 @@ def output_limit_before_failure(session_id, prompt, *, root=None, prior_prompts=
     user_text=str(users[0].get('content',''))
     match=re.search(r'<USER_REQUEST>\s*(.*?)\s*(?:</USER_REQUEST>|\Z)',user_text,re.S)
     if (match[1].strip() if match else user_text.strip())!=prompt.strip():return False
-    return any(e.get('type')=='ERROR_MESSAGE' and 'exceeded the output token limit' in str(e.get('content','')) for e in entries)
+    return any(e.get('type')=='ERROR_MESSAGE' and 'exceeded the output token limit' in _error_text(e) for e in entries)
 
 
 def _continued_response(entries, responses, limits):
@@ -128,7 +132,7 @@ def _continued_response(entries, responses, limits):
     for left,right in zip(fragments,fragments[1:]):
         between=entries[positions[id(left)]+1:positions[id(right)]]
         if not between or any(e.get('type')!='ERROR_MESSAGE' or
-                'exceeded the output token limit' not in str(e.get('content','')) for e in between):
+                'exceeded the output token limit' not in _error_text(e) for e in between):
             raise SessionEvidenceError('AGY 超限续写片段不连续',kind='output_truncated')
     combined=''.join(str(e['content']) for e in fragments).strip()
     if not complete_json(combined):
@@ -149,7 +153,7 @@ def _arguments(call):
 
 
 def read_session(session_id, prompt, *, root=None, allowed_files=None, required_files=None, schema=None,
-                 require_output_continuation=False, prior_prompts=()):
+                 require_output_continuation=False, prior_prompts=(), allow_recovered_transients=False):
     """Return only a verified completed turn and its successful read receipts."""
     if not re.fullmatch(r'[0-9a-fA-F-]{36}', str(session_id or '')):
         raise SessionEvidenceError('AGY 没有返回有效会话编号')
@@ -178,20 +182,26 @@ def read_session(session_id, prompt, *, root=None, allowed_files=None, required_
     if (request_match[1].strip() if request_match else user_text.strip()) != prompt.strip():
         raise SessionEvidenceError('AGY 会话输入与本次请求不一致')
     limits = [i for i,e in enumerate(entries) if e.get('type') == 'ERROR_MESSAGE'
-              and e.get('status') == 'DONE' and 'exceeded the output token limit' in str(e.get('content',''))]
+              and e.get('status') == 'DONE' and 'exceeded the output token limit' in _error_text(e)]
     other_errors=[e for i,e in enumerate(entries) if e.get('type')=='ERROR_MESSAGE' and i not in limits]
     if other_errors:
         from .agy_cli import _error_kind
-        kinds=[_error_kind(str(e.get('content','')))[0] for e in other_errors]
+        kinds=[_error_kind(_error_text(e))[0] for e in other_errors]
         kind=next((k for k in kinds if k in {'provider_auth','provider_region','agy_cli_config'}),'agy_cli_error')
-        if limits and all(k in {'network_transport','network_read_timeout','network_connect_timeout','provider_unavailable'} for k in kinds):
+        transient=all(k in {'network_transport','network_read_timeout','network_connect_timeout','provider_unavailable','rate_limit'} for k in kinds)
+        if limits and transient:
             kind='output_truncated'
-        raise SessionEvidenceError('AGY 续写包含其他失败，未采纳结果',kind=kind)
+        # AGY may retry a 503 inside the same turn and finally return SUCCESS.
+        # Only that explicit terminal success enables recovery. Final-body,
+        # tool, path, source-hash and finish checks below still apply in full.
+        if not (allow_recovered_transients and transient):
+            raise SessionEvidenceError('AGY 续写包含其他失败，未采纳结果',kind=kind)
     if require_output_continuation:
         if not limits:
             raise SessionEvidenceError('AGY 缺少本次输出超限及完整资料证据')
-        # Only this known internal continuation is recoverable. An auth/network
-        # error or another user turn must not be hidden by a later answer.
+        # Only this known internal continuation is recoverable. A separate
+        # caller-verified SUCCESS is needed to tolerate transient retries;
+        # auth errors and another user turn always remain fatal.
     allowed = {str(Path(p).resolve()): spec for p, spec in (allowed_files or {}).items()}
     required = set(allowed) if required_files is None else {str(Path(p).resolve()) for p in required_files}
     intervals = {p: [] for p in allowed}
@@ -286,6 +296,10 @@ def read_session(session_id, prompt, *, root=None, allowed_files=None, required_
                     **({'media':entry['media']} if entry.get('media') else {})}}})
     if pending or (structured is None and (not responses or entries[-1] is not responses[-1])):
         raise SessionEvidenceError('AGY 未保存完整最终正文')
+    if other_errors:
+        last_error=max(i for i,e in enumerate(entries) if e in other_errors)
+        if max(response_index,structured_index)<=last_error:
+            raise SessionEvidenceError('AGY 上游失败后尚未保存完整最终结果')
     if limits and ((structured is None and (not responses or response_index <= limits[-1]))
                    or (structured is not None and structured_index<=limits[-1])):
         raise SessionEvidenceError('AGY 超限后尚未完成续写',kind='output_truncated')

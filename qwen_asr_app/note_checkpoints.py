@@ -9,6 +9,8 @@ import re
 def checkpoint_draft(record):
     """Project disk receipts for display; this never authorizes source reuse."""
     draft = record.metadata.get('ai_note_summary_draft') or {}
+    if draft.get('phase') in {'核对课件跳转', 'AI 取名'}:
+        return draft
     saved = (record.metadata.get('summary_job') or {}).get('checkpoint') or {}
     ident = draft.get('review_task') or saved.get('review_task')
     if not re.fullmatch(r'[a-f0-9]{24}', str(ident or '')):

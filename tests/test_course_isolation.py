@@ -21,6 +21,49 @@ def runtime(transcribe=None):
 
 
 class CourseIsolationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_manual_correction_checkpoints_preserve_queued_note_and_explicit_pause(self):
+        for pause in (False, True):
+            with self.subTest(pause=pause), tempfile.TemporaryDirectory() as raw, ExitStack() as stack:
+                record=make_record(Path(raw));record.metadata.update(status='completed',summary_job={'status':'paused'})
+                record.save_all()
+                store=SimpleNamespace(find=lambda ident:RecordingRecord.load(record.directory))
+                for name,value in [('recording_store',store),('background_ai_tasks',{}),('background_ai_records',{}),
+                    ('background_summary_tasks',{}),('summary_jobs',{}),('record_operations',set()),
+                    ('running_batch_ids',set()),('finalization_tasks',{}),('summary_queue_order',[])]:
+                    stack.enter_context(patch.object(app,name,value))
+                stack.enter_context(patch.object(app.course_stream_manager,'jobs',{}))
+                stack.enter_context(patch.object(app.ai_preferences,'task_config',side_effect=lambda config,**kwargs:config or {}))
+                generated=stack.enter_context(patch.object(app,'generate_library_summary',AsyncMock(return_value={'summary':{'summary':'完整笔记'}})))
+                entered,release=asyncio.Event(),asyncio.Event()
+                async def correct():
+                    entered.set();await release.wait()
+                    record.save_all()
+                app._start_aux_ai_job(record,'refinement',correct)
+                correction=app.background_ai_tasks['refinement:'+record.id]
+                await entered.wait()
+                app.start_summary_job(store.find(record.id),{'config':{}})
+                note=app.background_summary_tasks[record.id]
+                try:
+                    record.save_all()
+                    self.assertEqual(store.find(record.id).metadata['summary_job']['status'],'queued')
+                    if pause:
+                        await app.ai_task_action({'recording_id':record.id,'type':'summary','action':'pause'})
+                        await asyncio.gather(note,return_exceptions=True)
+                        record.save_all()
+                        self.assertEqual(store.find(record.id).metadata['summary_job']['status'],'paused')
+                        self.assertFalse(correction.done())
+                    release.set();await correction
+                    if not pause:
+                        await note
+                        self.assertEqual(store.find(record.id).metadata['summary_job']['status'],'completed')
+                        generated.assert_awaited_once()
+                    self.assertFalse(app.background_ai_records)
+                finally:
+                    release.set()
+                    for task in (note,correction):
+                        if not task.done():task.cancel()
+                    await asyncio.gather(note,correction,return_exceptions=True)
+
     async def test_paused_correction_stays_paused_across_asr_resume(self):
         with tempfile.TemporaryDirectory() as raw:
             record = make_record(Path(raw))

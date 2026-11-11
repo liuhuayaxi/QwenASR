@@ -25,7 +25,7 @@ class Activity:
         now = time.monotonic()
         active = [request for request in self.requests if request.active]
         for request in active:request.refresh_session()
-        priority = {"waiting": 0, "connecting": 1, "processing": 2,'reading':2,'thinking':2, "receiving": 3, "checking": 4}
+        priority = {"waiting": 0, "connecting": 1, "processing": 2,'reading':2,'thinking':2,'provider_busy':2,'upstream_retry':2, "receiving": 3, "checking": 4}
         latest = max(active, key=lambda request: (priority.get(request.phase, 0), request.updated), default=None)
         # Age the request whose phase is displayed. A newly queued sibling
         # must not make an old, silent output stream appear active again.

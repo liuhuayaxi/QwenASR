@@ -912,6 +912,8 @@ async def generate(record, config):
     from .material_scope import VERSION as MATERIAL_SCOPE_VERSION
     identity_inputs=[pipeline_version,record.id,blocks,selection,corpus,historical_versions,saved_notes_markdown(record),
         {'material_scope':MATERIAL_SCOPE_VERSION}]
+    if config.get('_note_generation_id'):
+        identity_inputs.append({'generation_id':config['_note_generation_id']})
     if yuketang_questions:
         # A completed task is reused only for the same 雨课堂 question set;
         # newly bound or newly published questions start a fresh note task.

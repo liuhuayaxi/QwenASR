@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import re
 
-VERSION = "lesson-scope-v2"
+VERSION = "lesson-scope-v3"
 MAX_SOURCES = 4          # sensible cap on files per lesson
 FALLBACK_TOP_K = 2       # retrieval-only fallback
 RECAP_SHARE = 0.5        # extra file kept beside a chapter match when its retrieval share is this strong
@@ -157,6 +157,16 @@ def choose(sources: list[dict], retrieval: dict[str, float], lesson_title: str =
         mode = "coverage"
         order = sorted(rows, key=lambda r: (-r["coverage"], not r["previous_lesson"], -r["retrieval_share"]))
         chosen = [r for r in order if r["coverage"] >= COVERAGE_KEEP][:FALLBACK_TOP_K]
+        if chosen:
+            # With diffuse votes, a 30% winner must not exclude a strongly
+            # supported 22% runner-up (e.g. I/O beside shared bus vocabulary).
+            # Preserve the existing sequence-prior fallback for weak signals.
+            for row in order:
+                if (row not in chosen and row['votes'] >= COVERAGE_MIN_VOTES
+                        and row['coverage'] >= order[0]['coverage'] * COVERAGE_STALE):
+                    row['reasons'].append('转写覆盖接近首选课件，保留本节同时涉及的资料')
+                    chosen.append(row)
+            chosen=chosen[:FALLBACK_TOP_K]
         if not chosen:
             top = order[0]
             # Lesson-order prior as tiebreak: a near-tie goes to the file the

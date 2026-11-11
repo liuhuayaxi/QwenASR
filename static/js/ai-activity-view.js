@@ -2,6 +2,7 @@ const phases = {
   waiting: '等待 AI 调用', connecting: '正在连接模型', processing: '等待模型返回',
   receiving: '正在接收 AI 输出', checking: '正在校验并保存结果',
   reading:'模型正在读取资料',thinking:'已收到模型思考活动',
+  provider_busy:'上游模型暂无容量，AGY 正在重试',upstream_retry:'AGY 正在恢复上游请求',
 };
 
 function duration(seconds) {
@@ -17,6 +18,7 @@ export function aiActivityView(task) {
     const pages=request.pages || [],prefix=pages.length?`第 ${pages[0]}${pages.length>1?`–${pages.at(-1)}`:''} 页：`:'';
     const opened=(request.opened_pages || []).filter(n=>!pages.length || pages.includes(n));
     const parts=[`${prefix}${phases[request.phase] || '等待模型返回'}`];
+    if(request.upstream_errors) parts.push(`上游已出现 ${request.upstream_errors} 次失败`);
     if(request.read_files) parts.push(`已读取 ${request.read_files} 个资料文件`);
     if(opened.length) parts.push(`已打开 ${opened.length}/${pages.length || opened.length} 页（待核对结果）`);
     if(request.image_reads) parts.push(`已查看 ${request.image_reads} 张图`);

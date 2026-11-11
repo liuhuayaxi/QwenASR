@@ -141,6 +141,11 @@ class CoverageTests(unittest.TestCase):
         self.assertEqual(ids, ["p2"])
         self.assertTrue(any("上一节课" in x for x in rows[1]["reasons"]))
 
+    def test_diffuse_votes_keep_a_well_supported_second_lesson_source(self):
+        ids, rows=ms.choose(self.PLAIN, {'p1':.38,'p2':.76,'p3':1.0}, '',
+            coverage=cov(p1=(.2963,16),p2=(.2222,12),p3=(.1481,8)))
+        self.assertEqual(ids,['p1','p2'])
+
     def test_few_votes_fall_back_to_retrieval(self):
         _, rows = ms.choose(self.PLAIN, {"p1": 1.0, "p2": 0.1}, "", coverage=cov(p2=(1.0, 1)))
         self.assertEqual(rows[0]["mode"], "retrieval_top_k")

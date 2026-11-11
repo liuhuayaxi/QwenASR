@@ -17,6 +17,7 @@ class SessionActivity:
         self.read_files=set();self.images=set();self.pages=set()
         self.thinking_chars=0;self.output_chars=0;self.model_turns=0;self.tools=0
         self.phase='processing';self.last_event_at=0
+        self.upstream_errors=0;self.upstream_error_kind=''
 
     def refresh(self):
         now=time.monotonic()
@@ -37,6 +38,7 @@ class SessionActivity:
                 self.seen.add(key)
                 kind=event.get('type')
                 if kind=='PLANNER_RESPONSE':
+                    self.upstream_error_kind=''
                     self.model_turns+=1
                     self.thinking_chars+=len(event.get('thinking') or '')
                     self.output_chars+=len(event.get('content') or '')
@@ -55,6 +57,11 @@ class SessionActivity:
                             match=re.search(r'/pages/[^/]+/page-(\d+)\.png$',path)
                             if match:self.pages.add(int(match[1]))
                     self.phase='processing'
+                elif kind=='ERROR_MESSAGE':
+                    from .agy_cli import _error_kind
+                    self.upstream_errors+=1
+                    self.upstream_error_kind=_error_kind(str(event.get('error') or event.get('content') or ''))[0]
+                    self.phase='provider_busy' if self.upstream_error_kind=='provider_unavailable' else 'upstream_retry'
                 # The file's last modification is evidence of a real event,
                 # including thinking-only turns. No text is returned to the UI.
                 self.last_event_at=stat.st_mtime
@@ -64,4 +71,5 @@ class SessionActivity:
         self.refresh()
         return {'phase':self.phase,'thinking_chars':self.thinking_chars,'session_output_chars':self.output_chars,
             'model_turns':self.model_turns,'tool_calls':self.tools,'read_files':len(self.read_files),
-            'image_reads':len(self.images),'opened_pages':sorted(self.pages),'last_event_at':self.last_event_at}
+            'image_reads':len(self.images),'opened_pages':sorted(self.pages),'last_event_at':self.last_event_at,
+            'upstream_errors':self.upstream_errors,'upstream_error_kind':self.upstream_error_kind}

@@ -184,6 +184,7 @@ record_operations: set[str] = set()
 summary_jobs: dict[str, dict[str, Any]] = {}
 background_summary_tasks: dict[str, asyncio.Task[Any]] = {}
 background_ai_tasks: dict[str, asyncio.Task[Any]] = {}
+background_ai_records: dict[str, RecordingRecord] = {}
 finalization_tasks: dict[str, asyncio.Task[Any]] = {}
 live_sessions: dict[str, TranscriptionSession] = {}
 classroom_chat_running: set[str] = set()
@@ -1291,6 +1292,7 @@ def _start_aux_ai_job(record: RecordingRecord, kind: str, runner: Any) -> bool:
             raise
         finally:
             background_ai_tasks.pop(task_id, None)
+            background_ai_records.pop(task_id, None)
             schedule_memory_cleanup()
 
     async def run() -> None:
@@ -1299,12 +1301,14 @@ def _start_aux_ai_job(record: RecordingRecord, kind: str, runner: Any) -> bool:
 
     task = asyncio.create_task(run())
     background_ai_tasks[task_id] = task
+    background_ai_records[task_id] = record
 
     def cleanup(done: asyncio.Task[Any]) -> None:
         # A task cancelled before its first turn never enters run()'s finally.
         if background_ai_tasks.get(task_id) is not done:
             return
         background_ai_tasks.pop(task_id, None)
+        background_ai_records.pop(task_id, None)
         if done.cancelled():
             current_record = recording_store.find(record.id)
             paused = task_id in pause_requested_tasks
@@ -1540,6 +1544,12 @@ async def ai_task_action(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
     record = recording_store.find(record_id)
     if record is None:
         raise HTTPException(status_code=404, detail="没有找到这条录音")
+    # A queued note and its correction owner must share metadata. Otherwise a
+    # later correction checkpoint can restore the old paused summary snapshot.
+    owner_id = f'refinement:{record_id}'
+    owner = background_ai_tasks.get(owner_id)
+    if owner is not None and not owner.done():
+        record = background_ai_records.get(owner_id, record)
     stream = course_stream_manager.jobs.get(record_id)
     if stream and stream.task and not stream.task.done():
         record = stream.record
@@ -1718,10 +1728,11 @@ async def ai_task_action(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
     if kind == "summary":
         summary_payload = {
             "config": config,
+            "regenerate": action == 'regenerate',
             "custom_prompt": (record.metadata.get('summary_job') or {}).get('custom_prompt', ''),
             "material_coverage": (record.metadata.get('summary_job') or {}).get('material_coverage', 'lesson'),
             "_resume_abstract": resume_abstract,
-            "_pdf_only": (record.metadata.get('summary_job') or {}).get('resume_stage') == 'pdf',
+            "_pdf_only": action != 'regenerate' and (record.metadata.get('summary_job') or {}).get('resume_stage') == 'pdf',
             "summary_system_prompt": config.get("_note_summary_system_prompt") or DEFAULT_NOTE_SUMMARY_PROMPT,
             "abstract_system_prompt": config.get("_note_abstract_system_prompt") or DEFAULT_NOTE_ABSTRACT_PROMPT,
         }
@@ -2253,6 +2264,9 @@ async def generate_library_summary(
     if coverage == 'selected_files' and not record.metadata.get('review_material_ids'):
         raise HTTPException(400, '请先通过“补选本节课件”选择需要完整覆盖的课件')
     config['_note_material_coverage'] = coverage
+    generation_id = str(payload.get('_note_generation_id') or (record.metadata.get('summary_job') or {}).get('generation_id') or '')
+    if generation_id:
+        config['_note_generation_id'] = generation_id
     config["_note_abstract_system_prompt"] = str(
         config.get("_note_abstract_system_prompt") or DEFAULT_NOTE_ABSTRACT_PROMPT
     ).strip()[:20_000]
@@ -2351,6 +2365,8 @@ def start_summary_job(record: RecordingRecord, payload: dict[str, Any], *, autom
         # note against that exact object and wait before taking a note slot.
         if stream is not None and dependency is stream.task:
             record = stream.record
+        else:
+            record = background_ai_records.get(f'refinement:{session_id}', record)
     else:
         require_recording_available(session_id, owner=asyncio.current_task())
     try:
@@ -2369,13 +2385,19 @@ def start_summary_job(record: RecordingRecord, payload: dict[str, Any], *, autom
     resume_abstract = bool(payload.get("_resume_abstract")) and _summary_abstract_pending(record)
     # Only progress is persisted; credentials remain in this task's memory.
     previous = record.metadata.get("summary_job") or {}
+    regenerate = payload.get('regenerate') is True
+    generation_id = uuid.uuid4().hex if regenerate else str(previous.get('generation_id') or '')
+    payload = {**payload, '_note_generation_id': generation_id}
+    if regenerate:
+        record.metadata.pop('ai_note_summary_draft', None)
     previous_error = previous.get("error") or previous.get("previous_error") or ""
     record.metadata["summary_job"] = {
         "status": "queued", "automatic": automatic, "started_at": local_now(), "error": "",
         "auto_retry_count": 0, "retry_in_seconds": 0, "pause_requested": False,
         "resume_stage": "pdf" if payload.get('_pdf_only') else "abstract" if resume_abstract else "",
         "previous_error": previous_error,
-        "checkpoint": copy.deepcopy(previous.get('checkpoint') or {}),
+        "checkpoint": {} if regenerate else copy.deepcopy(previous.get('checkpoint') or {}),
+        "generation_id": generation_id,
         "custom_prompt": str(payload.get('custom_prompt') or '')[:20_000],
         "material_coverage": payload.get('material_coverage', 'lesson'),
         "waiting_for": "correction" if dependency else "",
@@ -2500,7 +2522,7 @@ def start_summary_job(record: RecordingRecord, payload: dict[str, Any], *, autom
         if background_summary_tasks.get(session_id) is done:
             background_summary_tasks.pop(session_id, None)
             if done.cancelled():
-                current = stream.record if dependency and not dependency.done() else recording_store.find(session_id)
+                current = record if dependency and not dependency.done() else recording_store.find(session_id)
                 if current is not None:
                     job = current.metadata.setdefault("summary_job", {})
                     task_id = f"summary:{session_id}"
@@ -2527,6 +2549,12 @@ async def create_summary_job(session_id: str, payload: dict[str, Any] = Body(...
         raise HTTPException(status_code=409, detail="请先结束并保存录音")
     if not isinstance(payload.get("config"), dict):
         raise HTTPException(status_code=400, detail="AI 配置格式无效")
+    if 'regenerate' in payload and type(payload['regenerate']) is not bool:
+        raise HTTPException(status_code=400, detail='重新生成标记必须是布尔值')
+    # This endpoint starts a user-requested note. Older clients do not send an
+    # explicit flag, so an existing body means a fresh generation. Task-center
+    # continue/retry uses start_summary_job directly and keeps its saved round.
+    payload = {**payload, 'regenerate': payload.get('regenerate', bool((record.metadata.get('ai_note_summary') or {}).get('summary')))}
     start_summary_job(record, payload)
     return {"accepted": True, "session_id": session_id}
 

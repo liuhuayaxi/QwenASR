@@ -117,6 +117,19 @@ class FastNoteChapterTests(unittest.IsolatedAsyncioTestCase):
                                  if p.is_file() and p != self.record.meta_path})
         self.writer.assert_not_awaited(); self.collect.assert_not_called(); self.export.assert_not_called()
 
+    async def test_explicit_regeneration_writes_a_new_package_but_resume_reuses_that_round(self):
+        old=await fast_note.generate_fast(self.record,{})
+        new=await fast_note.generate_fast(self.record,{'_note_generation_id':'explicit-user-round-1'})
+        self.assertNotEqual(old['review_package'],new['review_package'])
+        self.assertTrue((self.record.directory/old['review_package']/'writer.md').is_file())
+        self.assertEqual(self.writer.await_count,2)
+        resumed=await fast_note.generate_fast(self.record,{'_note_generation_id':'explicit-user-round-1'})
+        self.assertEqual(resumed['review_package'],new['review_package'])
+        self.assertEqual(self.writer.await_count,2)
+        again=await fast_note.generate_fast(self.record,{'_note_generation_id':'explicit-user-round-2'})
+        self.assertNotEqual(again['review_package'],new['review_package'])
+        self.assertEqual(self.writer.await_count,3)
+
 
 if __name__ == '__main__':
     unittest.main()

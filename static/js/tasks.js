@@ -1,10 +1,10 @@
-import {taskGroups, filterTaskGroups, groupCounts, actionableTasks, completedTasks, taskMatchesType, activeStatuses, errorStatuses, leadingTask, taskProgressView, progressGroups} from './task-center-view.js?v=20261031-browser-fixes-1';
+import {taskGroups, filterTaskGroups, groupCounts, actionableTasks, completedTasks, taskMatchesType, activeStatuses, errorStatuses, leadingTask, taskProgressView, progressGroups} from './task-center-view.js?v=20261111-note-stages';
 import {createTaskPdfDialog} from './task-pdf-dialog.js?v=20261018-recovery-1';
 import {aiTaskPayload} from './task-config.js?v=20260913-tasks-1';
 import {mergeLiveCourseProgress} from './course-progress.js?v=20261018-recovery-1';
 import {mineruEstimateLabel, legacyMineruProgress} from './mineru-progress-view.js?v=20261013-time-2';
 import {resourceStatus} from './resource-status.js?v=20261013-1';
-import {aiActivityView} from './ai-activity-view.js?v=20261019-live-model-activity';
+import {aiActivityView} from './ai-activity-view.js?v=20261111-upstream-status';
 import {asrResourceView} from './asr-resource-view.js?v=20261022-local-main-1';
 
 const $ = id => document.getElementById(id);

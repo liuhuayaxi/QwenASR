@@ -5,6 +5,13 @@ const path = require('node:path');
 const code = fs.readFileSync(path.join(__dirname, '../static/js/task-center-view.js'), 'utf8');
 const modulePromise = import(`data:text/javascript;base64,${Buffer.from(code).toString('base64')}`);
 const task = (id, status, extra = {}) => ({id, status, title: '同名课堂', label: '课后笔记', actions: ['continue'], ...extra});
+test('courseware link checking remains in the final stage after the note PDF is saved',async()=>{
+ const {taskProgressView}=await modulePromise;
+ for(const stage of ['核对课件跳转','AI 取名']) {
+  const view=taskProgressView({type:'summary',status:'running',stage,note_review_enabled:false,note_ai_latex_enabled:true});
+  assert.equal(view.index,view.steps.length-1);assert.equal(view.label,stage);
+ }
+});
 test('automatic correction verification never asks for individual human approval',async()=>{
  const {taskGroups,groupCounts,taskProgressView}=await modulePromise;
  const item=task('auto','pending',{type:'refinement',attention_kind:'auto_review',review_required_blocks:42,stage:'AI 自动复核 · 42 段改动待检查'});

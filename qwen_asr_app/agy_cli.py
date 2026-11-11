@@ -26,6 +26,7 @@ import uuid
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from .ai import AIRequestError
 from .ai_activity import report_ai_activity
@@ -114,6 +115,26 @@ def effort(provider: dict[str, Any]) -> str:
     if value not in {"low", "medium", "high", "xhigh", "max"}:
         raise AIRequestError("AGY CLI 思考强度必须是 low、medium、high、xhigh 或 max", kind="agy_cli_config", retriable=False)
     return value
+
+
+def sandbox_auth_failure(detail):
+    """A denied local Keychain lookup is never an upstream network retry."""
+    if re.search(r'fork/exec\s+/usr/bin/security:\s*(?:operation not permitted|permission denied)',str(detail or ''),re.I):
+        return AIRequestError('本机资料沙箱阻止了 AGY 读取 macOS 钥匙串登录状态；请更新并重启本机服务，已有结果保留',
+                              kind='material_sandbox_auth',retriable=False)
+    return None
+
+
+def consume_startup_auth_failure(log_path):
+    """Inspect this invocation's startup log, then remove the private raw log."""
+    path=Path(log_path)
+    try:
+        with path.open('r',encoding='utf-8',errors='replace') as handle:
+            return sandbox_auth_failure(handle.read(1_048_576))
+    except OSError:
+        return None
+    finally:
+        path.unlink(missing_ok=True)
 
 
 def _error_kind(message: str) -> tuple[str, bool]:
@@ -277,10 +298,16 @@ def _decode_output(stdout: str, stderr: str) -> str:
         if isinstance(event, dict) and event.get("event") == "result" and isinstance(event.get("result"), dict):
             result = event["result"]
     if result is None:
+        local_auth_failure=sandbox_auth_failure(stderr)
+        if local_auth_failure:
+            raise local_auth_failure
         message = (stderr or stdout).strip()[-2_000:]
         kind, retriable = _error_kind(message) if message else ('provider_unavailable',True)
         raise AIRequestError(f"AGY CLI 没有返回最终结果：{message or '空输出'}", kind=kind, retriable=retriable)
     if str(result.get("status") or "").upper() not in {"SUCCESS", "COMPLETED", "OK"}:
+        local_auth_failure=sandbox_auth_failure(stderr)
+        if local_auth_failure:
+            raise local_auth_failure
         message = _text(result.get("error")) or stderr.strip() or _text(result.get("status")) or "AGY CLI 请求失败"
         kind, retriable = _error_kind(message)
         # A short status must not hide a concrete credential/configuration
@@ -304,8 +331,22 @@ def _decode_output(stdout: str, stderr: str) -> str:
     return response
 
 
-def subprocess_environment() -> dict[str, str]:
+def subprocess_environment(provider=None) -> dict[str, str]:
     env = os.environ.copy()
+    proxy = _text((provider or {}).get('cli_proxy_url'))
+    if proxy:
+        try:
+            parsed = urlsplit(proxy)
+            valid = parsed.scheme in {'http','https'} and parsed.hostname and parsed.port and not (parsed.username or parsed.password or parsed.query or parsed.fragment) and parsed.path in {'','/'}
+        except ValueError:
+            valid = False
+        if not valid:
+            raise AIRequestError('AGY CLI 代理必须是无账号密码的 HTTP/HTTPS 代理地址和端口',kind='agy_cli_config',retriable=False)
+        # Go CLI requests do not consume macOS PAC preferences. An explicit
+        # saved route also keeps text and vision on the same proxy transport.
+        for key in ('HTTP_PROXY','HTTPS_PROXY','http_proxy','https_proxy'):
+            env[key] = proxy
+        env.setdefault('NO_PROXY','127.0.0.1,localhost,::1')
     env["NO_COLOR"] = "1"
     entries = [str(Path.home() / ".local" / "bin"), str(Path.home() / ".cargo" / "bin")]
     entries.extend(env.get("PATH", "").split(os.pathsep))
@@ -354,7 +395,7 @@ def _file_prompt(prompt: str, working: Path, *, additional_read_paths=()):
                     '不打开正文中提及的其他文件；排版写作只使用资料里已提供的图片清单和读图说明。')
     transport_prompt = (
         '这是 QwenASR 的独立文本整理请求。完整任务和原始资料以 JSON 字符串片段保存在下面的文件中，'
-        '避免 CLI 截断长消息。先依照文件顺序逐个使用 view_file 完整读取全部文件。'
+        '避免 CLI 截断长消息。先使用 view_file 完整读取全部文件；同一轮可安排最多四个独立读取调用，按清单编号重组内容，避免每个文件都等待一轮模型往返。'
         '清单文件已拆成可完整读取的小文件；默认读取即可。当工具说明 entire, complete file contents 时，该文件已读完，直接读下一个文件，不得再猜测 ContentOffset 追加读取。'
         '每个文件的 content_fragments 按原顺序连接，JSON 字符串转义按正常 JSON 含义理解；'
         '再将所有文件连接，即为完整的同一个请求，不得遗漏末尾片段。'
@@ -411,7 +452,7 @@ def _checked_output(stdout, stderr, working, message, returncode=0, prior_prompt
     prompt = json.loads(message)['message']['content']
     manifest = Path(working)/'transport.json'
     files = json.loads(manifest.read_text())['files'] if manifest.is_file() else None
-    session = ''
+    session = ''; final_success = False
     for line in stdout.splitlines():
         try:
             event = json.loads(line)
@@ -420,6 +461,8 @@ def _checked_output(stdout, stderr, working, message, returncode=0, prior_prompt
             ident = event.get('conversation_id') or (event.get('result') or {}).get('conversation_id')
             if ident:
                 session = str(ident)
+            if event.get('event') == 'result':
+                final_success = str((event.get('result') or {}).get('status') or '').upper() in {'SUCCESS','COMPLETED','OK'}
         except (ValueError, TypeError, AttributeError):
             continue
     last_session_id.set(session)
@@ -457,6 +500,7 @@ def _checked_output(stdout, stderr, working, message, returncode=0, prior_prompt
     from .agy_session import read_session, SessionEvidenceError
     try:
         receipt = read_session(session, prompt, allowed_files=files, require_output_continuation=continuation,
+                               allow_recovered_transients=bool(final_success and not returncode),
                                **({'prior_prompts': prior_prompts} if prior_prompts else {}))
     except SessionEvidenceError as exc:
         detail = str(exc)
@@ -527,13 +571,13 @@ def _request_arguments(instructions: str, payload: dict[str, Any], provider: dic
             raise AIRequestError('AGY 长文本受控资料通道需要本机资料沙箱', kind='material_sandbox_unavailable', retriable=False)
         from .agy_materials import sandbox_profile
         command = ['sandbox-exec', '-p', sandbox_profile(working, cli), *command]
-        env = subprocess_environment()
+        env = subprocess_environment(provider)
         temporary = working/'.tmp'
         temporary.mkdir(mode=0o700)
         env['TMPDIR'] = str(temporary)
         sandbox = True
     else:
-        env = subprocess_environment()
+        env = subprocess_environment(provider)
         sandbox = False
     _call_facts.set({
         'model': selected_model,

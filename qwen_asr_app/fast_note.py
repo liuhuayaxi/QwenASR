@@ -27,8 +27,7 @@ from .review_materials import collect, extract_image, bind_markdown_images
 from .storage import local_now
 from . import review_scope
 
-VERSION = 'fast-one-turn-v6'
-MAX_PAGE_CHARS = 1800
+VERSION = 'fast-one-turn-v7'
 LOCATOR = re.compile(r'!\[[^\]]*\]\(\.?/?figures/([a-f0-9]{32})_p(\d+)\.png\)')
 
 def abstract_from(markdown: str) -> str:
@@ -51,7 +50,7 @@ def _pages(package, *, complete=False):
         if (page.get('yuketang') or {}).get('missing_slide'):
             continue
         text = re.sub(r'\[\[AI_TRANSCRIPT_PAGE:\d+\]\]|SOURCE_PDF_PAGE: \d+', '', str(page.get('text') or '')).strip()
-        out.append({'source_id': page['source_id'], 'page': int(page['page']), 'text': text if complete else text[:MAX_PAGE_CHARS],
+        out.append({'source_id': page['source_id'], 'page': int(page['page']), 'text': text,
                     **({'page_kind':'exercise', 'answer_authority':'personal_selection_is_not_an_answer'}
                        if (page.get('yuketang') or {}).get('student_selection') else {})})
     return out
@@ -70,6 +69,8 @@ def generation_identity(record, blocks, questions, selection, corpus, config):
               record.id, blocks, questions, selection, materials,
               config.get('_note_summary_system_prompt'), config.get('_note_summary_custom_prompt'),
               config.get('_note_material_coverage', 'lesson')]
+    if config.get('_note_generation_id'):
+        values.append({'generation_id': config['_note_generation_id']})
     return hashlib.sha256(json.dumps(values,sort_keys=True,ensure_ascii=False,default=str).encode()).hexdigest()[:24]
 
 

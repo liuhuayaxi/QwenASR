@@ -437,12 +437,18 @@ async def _section_page_links(record, config):
     # Runs for every generated note unless the owner explicitly disabled it.
     # Unreviewed headings stay hidden; a failure here never fails the note.
     if not section_pages.enabled() or not (record.metadata.get('ai_note_summary') or {}).get('review_package'): return
+    record.metadata['ai_note_summary_draft']={'phase':'核对课件跳转','parts':{},'total_parts':0}
+    record.save_metadata()
     try:
         from .section_page_review import refresh
         storage_root = Path(record.directory).resolve().parents[2]
         await refresh(Path(record.directory), {**record.metadata, 'id': record.id}, storage_root, config)
     except Exception as exc:
         logger.warning('section page links skipped for %s: %s', record.id, exc)
+    finally:
+        if (record.metadata.get('ai_note_summary_draft') or {}).get('phase')=='核对课件跳转':
+            record.metadata.pop('ai_note_summary_draft',None)
+            record.save_metadata()
 
 
 async def _build_text_note_summary(

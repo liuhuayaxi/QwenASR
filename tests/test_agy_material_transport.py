@@ -37,6 +37,44 @@ class MaterialTransportTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.enterContext(available_material_sandbox())
 
+    def test_auth_helper_is_allowed_without_allowing_a_shell_or_all_system_commands(self):
+        profile=sandbox_profile(Path('/private/test-materials'),'/private/test-agy')
+        self.assertIn('(allow process-exec (literal "/usr/bin/security"))',profile)
+        self.assertIn('(allow file-read* (subpath '+json.dumps(str(Path.home()/'Library/Keychains'),ensure_ascii=False)+'))',profile)
+        self.assertNotIn('(allow file-read* file-write* (subpath '+json.dumps(str(Path.home()/'Library/Keychains'),ensure_ascii=False)+'))',profile)
+        self.assertIn('(deny process-exec)',profile)
+        self.assertNotIn('(allow process-exec (literal "/bin/sh"))',profile)
+        self.assertNotIn('(allow process-exec (subpath "/usr/bin"))',profile)
+
+    async def test_keychain_denial_is_preserved_even_when_final_error_says_timeout(self):
+        events=[{'event':'result','result':{'status':'FAILED','error':'Authentication failed or timed out'}}]
+        stderr=b'fork/exec /usr/bin/security: operation not permitted'
+        with tempfile.TemporaryDirectory() as raw, \
+             patch('qwen_asr_app.agy_materials.executable',return_value='/usr/bin/true'), \
+             patch('qwen_asr_app.agy_materials.asyncio.create_subprocess_exec',return_value=child(events,stderr=stderr,exit_code=1)):
+            with self.assertRaises(MaterialSessionError) as error:
+                await request_materials('synthetic',Path(raw),PROVIDER)
+            self.assertEqual(error.exception.kind,'material_sandbox_auth')
+            self.assertFalse(error.exception.retriable)
+
+    async def test_native_startup_log_is_correlated_and_removed_without_storing_raw_auth_data(self):
+        events=[{'event':'result','result':{'status':'FAILED','error':'Authentication failed or timed out'}}]
+        logs=[]
+        async def launch(*command,**kwargs):
+            path=Path(command[command.index('--log-file')+1]);logs.append(path)
+            path.write_text('synthetic-private-auth-data\nfork/exec /usr/bin/security: operation not permitted')
+            return child(events,exit_code=1)
+        with tempfile.TemporaryDirectory() as raw, \
+             patch('qwen_asr_app.agy_materials.executable',return_value='/usr/bin/true'), \
+             patch('qwen_asr_app.agy_materials.asyncio.create_subprocess_exec',side_effect=launch):
+            with self.assertRaises(MaterialSessionError) as error:
+                await request_materials('synthetic',Path(raw),PROVIDER)
+            self.assertEqual(error.exception.kind,'material_sandbox_auth')
+            self.assertFalse(error.exception.retriable)
+            self.assertFalse(logs[0].exists())
+            saved=''.join(p.read_text() for p in (Path(raw)/'sessions').glob('*.json'))
+            self.assertNotIn('synthetic-private-auth-data',saved)
+
     async def test_model_start_failure_retries_without_switching_model_or_approving_images(self):
         failure='model gemini-3.8-flash-high is not recognized as a known model or custom model in settings'
         with tempfile.TemporaryDirectory() as raw:
