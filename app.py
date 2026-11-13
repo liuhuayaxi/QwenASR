@@ -54,6 +54,7 @@ from qwen_asr_app.ai import (
     provider_transport,
     uses_agy_gemini,
     agy_rewrite_source_budget,
+    is_recoverable_structured_error,
     polish_and_translate,
     polish_timestamped_segments,
     polish_timestamped_segments_resilient,
@@ -1437,11 +1438,7 @@ async def _run_refinement_job_unlocked(record: RecordingRecord, config: dict[str
                 mapped = await polish_timestamped_segments_resilient(
                     group,str(group[0].get('language') or ''),group_config,mode='correction',on_checkpoint=checkpoint)
             except (AIRequestError, ValueError) as exc:
-                kind = str(getattr(exc, 'kind', 'invalid_json'))
-                recoverable = kind in {'invalid_json', 'invalid_segment_mapping',
-                                       'output_truncated', 'output_incomplete',
-                                       'input_too_long'}
-                if not recoverable:
+                if not is_recoverable_structured_error(exc):
                     raise
                 # A malformed/empty response for one leaf must not fail the
                 # entire lecture group. Retry the still-missing segments one
@@ -1457,6 +1454,8 @@ async def _run_refinement_job_unlocked(record: RecordingRecord, config: dict[str
                         checkpoint(result)
                         return result
                     except Exception as part_exc:
+                        if not is_recoverable_structured_error(part_exc):
+                            raise
                         if len(parts) == 1:
                             current = next((item for item in record.segments if int(item.get('id', 0)) == int(parts[0]['id'])), None)
                             if current is not None:

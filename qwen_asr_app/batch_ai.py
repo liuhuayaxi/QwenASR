@@ -16,6 +16,7 @@ from .ai import (
     output_limit_for,
     uses_agy_gemini,
     agy_rewrite_source_budget,
+    is_recoverable_structured_error,
     polish_and_translate,
     polish_timestamped_segments_resilient,
     retry_transient_ai,
@@ -128,10 +129,7 @@ async def correct_batch_segments(
                     # resilient helper may already have checkpointed some
                     # halves before reaching the bad leaf, so retry only the
                     # still-uninstalled segments individually.
-                    kind = str(getattr(exc, 'kind', 'invalid_json'))
-                    if kind not in {'invalid_json', 'invalid_segment_mapping',
-                                    'output_truncated', 'output_incomplete',
-                                    'input_too_long'}:
+                    if not is_recoverable_structured_error(exc):
                         raise
                     for segment in remaining:
                         ident = int(segment['id'])
@@ -145,6 +143,8 @@ async def correct_batch_segments(
                                 raise AIRequestError('单段精修编号不完整，原文保留', kind='invalid_segment_mapping')
                             checkpoint(one)
                         except Exception as segment_exc:
+                            if not is_recoverable_structured_error(segment_exc):
+                                raise
                             segment_errors[ident] = str(segment_exc)
                     result = [saved_blocks[ident] for ident in
                               (int(s['id']) for s in remaining)
@@ -167,6 +167,8 @@ async def correct_batch_segments(
         candidate_by_id = {int(block['segment_ids'][0]):{**block['correction_review'],'segment_ids':block['segment_ids']} for block in blocks if block.get('correction_review')}
         provenance_by_id = {int(block['segment_ids'][0]):block['correction_provenance'] for block in blocks if block.get('correction_provenance')}
     except Exception as exc:
+        if not is_recoverable_structured_error(exc):
+            raise
         error = str(exc)
     source_by_id = {int(segment["id"]): segment for segment in segments}
     updated = []
