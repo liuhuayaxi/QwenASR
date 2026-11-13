@@ -174,6 +174,30 @@ class GroupedCorrectionTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(all(not part.get('corrected') for part in result))
             self.assertEqual([part['raw'] for part in result], ['原文1', '原文2'])
 
+    async def test_invalid_batch_result_falls_back_per_segment_without_blocking_siblings(self):
+        with tempfile.TemporaryDirectory() as raw:
+            record = record_at(Path(raw))
+            parts = [segment(1), segment(2), segment(3)]
+            for part in parts:
+                record.upsert_segment(part)
+
+            async def flaky(items, *args, **kwargs):
+                if len(items) > 1:
+                    raise AIRequestError('malformed JSON', kind='invalid_json')
+                if items[0]['id'] == 2:
+                    raise AIRequestError('empty response', kind='invalid_json')
+                return [{'segment_ids': [items[0]['id']], 'corrected': '精修' + items[0]['raw']}]
+
+            with patch('qwen_asr_app.batch_ai.polish_timestamped_segments_resilient', side_effect=flaky):
+                result = await correct_batch_segments(record, parts, high_config())
+
+            by_id = {part['id']: part for part in result}
+            self.assertEqual(by_id[1]['corrected'], '精修原文1')
+            self.assertEqual(by_id[3]['corrected'], '精修原文3')
+            self.assertEqual(by_id[2]['ai_error'], 'empty response')
+            self.assertFalse(by_id[1].get('ai_error'))
+            self.assertFalse(by_id[3].get('ai_error'))
+
     async def test_successful_half_survives_cancel_and_resubmit_skips_it(self):
         from qwen_asr_app import ai
         waiting=asyncio.Event()

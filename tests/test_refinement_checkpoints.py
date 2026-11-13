@@ -41,6 +41,23 @@ class RefinementCheckpointTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(reloaded.metadata['ai_reviews'][:2],json.loads(before))
             self.assertFalse(pending_ids(reloaded))
 
+    async def test_malformed_single_segment_does_not_fail_the_whole_refinement_group(self):
+        with tempfile.TemporaryDirectory() as raw:
+            record=self.record(raw)
+            async def flaky(segments,*args,**kwargs):
+                if len(segments)>1:
+                    raise ai.AIRequestError('malformed JSON',kind='invalid_json')
+                if segments[0]['id']==3:
+                    raise ai.AIRequestError('empty response',kind='invalid_json')
+                return [{'segment_ids':[segments[0]['id']], 'corrected':'校对'+str(segments[0]['id'])}]
+            with patch.object(app,'polish_timestamped_segments_resilient',new=AsyncMock(side_effect=flaky)):
+                await app._run_refinement_job_unlocked(record,CONFIG)
+            blocks = {block['segment_ids'][0]: block for block in record.metadata['ai_reviews']}
+            self.assertEqual(blocks[1]['corrected'],'校对1')
+            self.assertEqual(blocks[2]['corrected'],'校对2')
+            self.assertEqual(record.segments[2].get('ai_error'),'empty response')
+            self.assertEqual(blocks[4]['corrected'],'校对4')
+
     async def test_cancel_after_valid_half_keeps_checkpoint_and_visible_text(self):
         with tempfile.TemporaryDirectory() as raw:
             record=self.record(raw);waiting=asyncio.Event()
@@ -108,7 +125,11 @@ class RefinementCheckpointTests(unittest.IsolatedAsyncioTestCase):
             async def finish(segments,*args,**kwargs):
                 return [{'segment_ids':[s['id']],'corrected':s['raw']} for s in segments]
             with patch.object(app,'polish_timestamped_segments_resilient',new=AsyncMock(side_effect=finish)) as call:
-                await app._run_refinement_job_unlocked(record,CONFIG);call.assert_awaited_once()
+                await app._run_refinement_job_unlocked(record,CONFIG)
+                self.assertEqual(call.await_count,5)
+                self.assertTrue(all(len(item.args[0]) <= app.REFINEMENT_MAX_GROUP_SEGMENTS for item in call.await_args_list))
+                self.assertTrue(all(item.args[2]['ai']['correction_provider']['cli_timeout_seconds'] == app.REFINEMENT_MAX_REQUEST_SECONDS
+                                    for item in call.await_args_list))
             context=context_for(record,record.segments[25:35],1048576)
             self.assertIn('前文',context);self.assertIn('后文',context)
             self.assertGreater(len(context),2000)
