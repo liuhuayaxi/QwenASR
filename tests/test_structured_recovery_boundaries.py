@@ -84,6 +84,7 @@ class StructuredRecoveryBoundaryTests(unittest.IsolatedAsyncioTestCase):
             attempts = 0
 
             async def respond(items, *args, **kwargs):
+                nonlocal attempts
                 if len(items) > 1:
                     attempts += 1
                     if attempts == 1:
