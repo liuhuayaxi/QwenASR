@@ -8,7 +8,7 @@ import time
 from threading import Event
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from fastapi import FastAPI
 import httpx
@@ -125,6 +125,34 @@ class VGAJobRoutes(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(job['status'], 'failed')
         self.assertIn('过滤后没有', job['error'])
         self.assertEqual(self.api.store.list('课程'), [])
+
+    async def test_emphasis_switch_audio_and_failure_warning(self):
+        segments = [{'start': 1, 'end': 2, 'raw': '这是考试重点'}]
+        with patch('qwen_asr_app.vga_emphasis.find_audio', return_value=self.video) as find, \
+             patch('qwen_asr_app.vga_emphasis.transcribe_audio', new_callable=AsyncMock) as transcribe:
+            transcribe.return_value = (segments, 'recording-test')
+            response = await self.start(audio_path='/录音.aac')
+            self.assertTrue(response.json()['emphasis_enabled'])
+            job = await self.finish(response.json()['id'])
+            self.assertEqual(job['recording_id'], 'recording-test')
+            find.assert_called_with(str(self.video), '/录音.aac')
+            self.assertEqual(transcribe.call_args.args[1], '课程')
+            manifest = json.loads((self.api.vga_jobs.root / (job['asset_id'] + '.json')).read_text())
+            self.assertTrue(manifest['pages'][0]['important'])
+            self.assertEqual(manifest['pages'][0]['transcript_text'], '这是考试重点')
+            transcribe.reset_mock()
+            response = await self.start(emphasis_enabled=False)
+            job = await self.finish(response.json()['id'])
+            self.assertEqual(job['status'], 'completed')
+            transcribe.assert_not_called()
+            transcribe.side_effect = RuntimeError('语音识别暂不可用')
+            response = await self.start()
+            job = await self.finish(response.json()['id'])
+            self.assertEqual(job['status'], 'completed')
+            self.assertEqual(job['pages'], 3)
+            self.assertIn('重点标记失败', job['warnings'][0])
+        for options in ({'emphasis_enabled': 1}, {'audio_path': 1}):
+            self.assertEqual((await self.start(**options)).status_code, 400)
 
     async def test_blank_video_fails_without_import(self):
         synthetic_video(self.video, [(Image.new('RGB', (160, 120), 'black'), 2)])

@@ -41,7 +41,7 @@ def extract_slides(video_path, *, sample_interval=0.5, min_stable_sec=1.0,
                    stable_threshold=0.01, animation_threshold=0.3,
                    retention_threshold=0.1, duplicate_threshold=0.01,
                    blank_std=3.0, black_threshold=12,
-                   skip_revisited=True, progress=None, cancel=None) -> list[Slide]:
+                   skip_revisited=True, deduplicate=True, progress=None, cancel=None) -> list[Slide]:
     """Return disk-backed slides. Temporary images live as long as the Slides.
 
     progress(elapsed_seconds, total_seconds_or_None) runs for each sample;
@@ -80,7 +80,7 @@ def extract_slides(video_path, *, sample_interval=0.5, min_stable_sec=1.0,
             old = np.load(path).astype(np.int16)
             return candidate.shape == old.shape and changed(candidate, old) <= duplicate_threshold
 
-        if not any(duplicate(old) for old in references):
+        if not deduplicate or not any(duplicate(old) for old in references):
             path = folder / f'{len(slides) + 1:04d}.png'
             shutil.copyfile(candidate_path, path)
             slides.append(Slide(len(slides) + 1, candidate_start, candidate_end,

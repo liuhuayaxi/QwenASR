@@ -1,7 +1,7 @@
 """Visual classification and section-local deduplication of emitted VGA pages."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import tempfile
 
@@ -86,6 +86,9 @@ class Page:
     kind: str
     position: int
     occurrences: list[dict]
+    important: bool = False
+    matched_snippets: list[dict] = field(default_factory=list)
+    transcript_text: str = ''
 
 
 @dataclass
@@ -93,15 +96,20 @@ class FilterResult:
     pages: list[Page]
     decisions: list[dict]
     enabled: bool
+    warnings: list[str] = field(default_factory=list)
+    recording_id: str | None = None
 
     def manifest(self):
         pages = []
         for index, page in enumerate(self.pages, 1):
             entry = page.slide.manifest()
             entry.update(index=index, source_index=page.slide.index, position_index=page.position + 1,
-                         kind=page.kind, section=SECTIONS[page.kind], occurrences=page.occurrences)
+                         kind=page.kind, section=SECTIONS[page.kind], occurrences=page.occurrences,
+                         important=page.important, matched_snippets=page.matched_snippets,
+                         transcript_text=page.transcript_text)
             pages.append(entry)
-        return {'pages': pages, 'dropped': [dict(d) for d in self.decisions if not d['kept']]}
+        return {'pages': pages, 'dropped': [dict(d) for d in self.decisions if not d['kept']],
+                'warnings': list(self.warnings), 'recording_id': self.recording_id}
 
 
 def filter_slides(slides, *, enabled=True, keep_homework=True, cancel=None):
@@ -178,7 +186,7 @@ def _filter_slides(slides, enabled, keep_homework, cancel, cache):
 def write_filtered_pdf(result, out_pdf, *, cancel=None):
     if not result.pages:
         raise ValueError('过滤后没有可保存的课件画面，请检查录屏内容或关闭过滤')
-    if not result.enabled:
+    if not result.enabled and not any(page.important for page in result.pages):
         write_slides_pdf([page.slide for page in result.pages], out_pdf)
         return result.manifest()
     destination = Path(out_pdf)
@@ -196,6 +204,13 @@ def write_filtered_pdf(result, out_pdf, *, cancel=None):
                 if item.kind != previous:
                     toc.append([1, SECTIONS[item.kind], index])
                     previous = item.kind
+                if item.important:
+                    toc.append([2, f'★ 第 {index} 页', index])
+                    size = max(8, min(width, height) * .018)
+                    box = pymupdf.Rect(5, 5, size * 3.5 + 5, size * 1.9 + 5)
+                    page.draw_rect(box, color=None, fill=(1, 1, 1), fill_opacity=.9, overlay=True)
+                    page.insert_text((box.x0 + size * .3, box.y0 + size * 1.3), '重点',
+                                     fontname='china-s', fontsize=size, color=(.85, 0, 0), overlay=True)
                 if item.kind == 'document':
                     size = max(8, min(width, height) * .018)
                     box = pymupdf.Rect(width - size * 5.5, 5, width - 5, size * 1.9 + 5)
