@@ -55,21 +55,35 @@ def load_transcript(path):
 
 def mark_emphasis(result, segments):
     segments = normalize_segments(segments)
+    windows = [(i, w['start_sec'], w['end_sec'])
+               for i, page in enumerate(result.pages) for w in page.occurrences]
+    page_hits = [[] for page in result.pages]
+    for segment in segments:
+        raw = segment['raw']
+        for match in EMPHASIS_PATTERN.finditer(raw):
+            if not windows:
+                continue
+            fraction = (match.start() + match.end()) / (2 * len(raw))
+            hit_sec = segment['start'] + (segment['end'] - segment['start']) * fraction
+            index, _, _ = min(windows, key=lambda w: (
+                max(w[1] - hit_sec, 0, hit_sec - w[2]),
+                not (w[1] <= hit_sec < w[2]), w[0]))
+            page_hits[index].append({
+                'start': segment['start'], 'end': segment['end'], 'hit_sec': hit_sec,
+                'text': raw[max(0, match.start() - 40):match.end() + 40]})
     candidates = []
-    for page in result.pages:
+    for page, hits in zip(result.pages, page_hits):
         overlapping = [s for s in segments if any(
             s['start'] < window['end_sec'] and s['end'] > window['start_sec']
             for window in page.occurrences)]
         page.transcript_text = '\n'.join(s['raw'] for s in overlapping)
-        hits = [s for s in overlapping if EMPHASIS_PATTERN.search(s['raw'])]
-        count = sum(len(EMPHASIS_PATTERN.findall(s['raw'])) for s in hits)
+        count = len(hits)
         minutes = sum(max(0, w['end_sec'] - w['start_sec']) for w in page.occurrences) / 60
         page.emphasis_score = count / max(EMPHASIS_MIN_MINUTES, minutes)
         page.important = False
         if count:
             candidates.append(page)
-        page.matched_snippets = [{'start': s['start'], 'end': s['end'], 'text': s['raw'][:300]}
-                                 for s in hits[:3]]
+        page.matched_snippets = hits[:3]
     limit = max(1, math.floor(len(result.pages) * .2 + .5))
     for page in sorted(candidates, key=lambda page: -page.emphasis_score)[:limit]:
         page.important = True

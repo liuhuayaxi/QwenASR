@@ -39,7 +39,7 @@ class VGAEmphasisTests(unittest.IsolatedAsyncioTestCase):
     def test_overlap_duplicate_windows_keywords_and_overlay(self):
         result = self.result()
         self.assertEqual(len(result.pages), 1)
-        segments = [{'start': 10, 'end': 99, 'raw': '重点但不重叠'},
+        segments = [{'start': 10, 'end': 99, 'raw': '普通但不重叠'},
                     {'start': 1, 'end': 2, 'raw': '普通说明'},
                     *[{'start': 101 + i, 'end': 102 + i, 'raw': '考试重点，一定要记住'}
                       for i in range(4)]]
@@ -102,6 +102,31 @@ class VGAEmphasisTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pages[0].emphasis_score, .5)
         self.assertEqual(pages[1].emphasis_score, 2)
         self.assertEqual(len(pages), 8)
+
+    def test_long_segment_assigns_hit_once_and_centers_snippet(self):
+        pages = [SimpleNamespace(occurrences=[{'start_sec': i, 'end_sec': i + 1}])
+                 for i in range(90)]
+        raw = '前' * 100 + '考试' + '后' * 100
+        mark_emphasis(SimpleNamespace(pages=pages), [{'start': 0, 'end': 90, 'raw': raw}])
+        self.assertEqual([i for i, p in enumerate(pages) if p.important], [45])
+        self.assertEqual(sum(p.emphasis_score for p in pages), 1)
+        snippet = pages[45].matched_snippets[0]
+        self.assertEqual(snippet['hit_sec'], 45)
+        self.assertEqual(snippet['text'], '前' * 40 + '考试' + '后' * 40)
+
+    def test_hit_uses_nearest_page_and_revisit_without_double_counting(self):
+        pages = [SimpleNamespace(occurrences=[{'start_sec': 0, 'end_sec': 10},
+                                              {'start_sec': 80, 'end_sec': 90}]),
+                 SimpleNamespace(occurrences=[{'start_sec': 40, 'end_sec': 50}])]
+        result = SimpleNamespace(pages=pages)
+        mark_emphasis(result, [{'start': 70, 'end': 72, 'raw': '重点'},
+                               {'start': 84, 'end': 86, 'raw': '考试'}])
+        self.assertEqual(pages[0].emphasis_score, 2)
+        self.assertEqual(pages[1].emphasis_score, 0)
+        self.assertEqual(len(pages[0].matched_snippets), 2)
+        pages[1].occurrences = [{'start_sec': 80, 'end_sec': 90}]
+        mark_emphasis(result, [{'start': 84, 'end': 86, 'raw': '考试'}])
+        self.assertEqual(sum(p.emphasis_score for p in pages), 1)
 
     def test_weak_words_no_hits_empty_and_explicit_emphasis(self):
         result = self.result()
