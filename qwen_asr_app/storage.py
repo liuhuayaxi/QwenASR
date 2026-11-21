@@ -1142,24 +1142,24 @@ class RecordingStore:
         return list(found.values())
 
     def refresh(self, mark_interrupted: bool = False) -> None:
-        if not hasattr(self, "_read_cache"):
-            self._read_cache = {}
+        read_cache = getattr(self, "_read_cache", {}).copy()
+        paths = {}
         active_records: list[RecordingRecord] = []
         def trim_cache():
+            nonlocal read_cache
             retained={};size=0
-            for path,cached in sorted(self._read_cache.items(),key=lambda pair:str(pair[1][1].metadata.get('updated_at') or ''),reverse=True):
+            for path,cached in sorted(read_cache.items(),key=lambda pair:str(pair[1][1].metadata.get('updated_at') or ''),reverse=True):
                 cost=sum(stamp[1] for stamp in cached[0] if stamp is not None)
                 if cached[1] is self.active or (len(retained)<4 and size+cost<=8*1024*1024):
                     retained[path]=cached;size+=cost
-            self._read_cache=retained
-        self.paths = {}
+            read_cache=retained
         for meta_path in self._metadata_paths():
             try:
                 stamp = tuple((p.stat().st_mtime_ns, p.stat().st_size) if p.exists() else None for p in (meta_path, meta_path.parent / "transcript.json"))
-                cached = self._read_cache.get(meta_path)
+                cached = read_cache.get(meta_path)
                 record = cached[1] if cached and cached[0] == stamp else RecordingRecord.load(meta_path.parent)
                 record.complete_material_only_note()
-                self._read_cache[meta_path] = (stamp, record)
+                read_cache[meta_path] = (stamp, record)
                 # Bound the peak as well as the final cache. Keeping every
                 # decoded transcript until the sweep ends inflated idle RSS.
                 trim_cache()
@@ -1186,7 +1186,7 @@ class RecordingStore:
                     }
                     record.metadata["updated_at"] = local_now()
                     record.save_all()
-                self.paths[record.id] = meta_path.parent
+                paths[record.id] = meta_path.parent
                 if record.metadata.get("status") == "active" and record.metadata.get("kind") == "microphone":
                     active_records.append(record)
                 if mark_interrupted:
@@ -1221,11 +1221,13 @@ class RecordingStore:
                         record.save_metadata()
             except Exception as exc:
                 print(f"忽略无法读取的录音会话 {meta_path}: {exc}", flush=True)
-        live_paths = set(self.paths.values())
-        self._read_cache = {path: cached for path, cached in tuple(self._read_cache.items()) if path.parent in live_paths}
+        live_paths = set(paths.values())
+        read_cache = {path: cached for path, cached in read_cache.items() if path.parent in live_paths}
         # Retain only a small recent read window. Complete transcripts include
         # retrieval evidence and must not grow into an unbounded service cache.
         trim_cache()
+        self.paths = paths
+        self._read_cache = read_cache
         if active_records:
             active_records.sort(key=lambda item: str(item.metadata.get("started_at", "")))
             latest = active_records[-1]

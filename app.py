@@ -528,6 +528,11 @@ async def test_provider(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def _saved_note_summary(record: RecordingRecord) -> dict[str, Any]:
+    summary = record.metadata.get("ai_note_summary")
+    return summary if isinstance(summary, dict) else {}
+
+
 @app.get("/api/recordings/{session_id}/summary-status")
 async def summary_status(session_id: str) -> dict[str, Any]:
     job = summary_jobs.get(session_id)
@@ -537,6 +542,7 @@ async def summary_status(session_id: str) -> dict[str, Any]:
     draft = record.metadata.get("ai_note_summary_draft") or {}
     progress = _summary_phase_progress(record, draft)
     saved_job = record.metadata.get("summary_job") or {}
+    summary = _saved_note_summary(record)
     return {"running": bool(job) or session_id in background_summary_tasks,
             "status": saved_job.get("status", ""), "error": saved_job.get("error", ""),
             "completed_parts": progress['completed_parts'],
@@ -544,8 +550,8 @@ async def summary_status(session_id: str) -> dict[str, Any]:
             "phase": (job or {}).get("phase") or progress['phase'],
             "material_selection": str(draft.get("material_selection") or ""),
             "elapsed_seconds": round(time.monotonic() - job["started"]) if job else 0,
-            "has_summary": bool(record.metadata.get("ai_note_summary", {}).get("summary")),
-            "review_status": (record.metadata.get('ai_note_summary') or {}).get('review_status','unreviewed')}
+            "has_summary": bool(summary.get("summary")),
+            "review_status": summary.get('review_status','unreviewed')}
 
 
 @app.post('/api/recordings/{session_id}/review-pdf')
@@ -576,7 +582,7 @@ async def get_note_proposal(session_id: str):
     path=safe_path(record.directory,f'.review-notes/{ident}/proposed-note.json')
     if not path.is_file():raise HTTPException(404,'候选版本不存在')
     note=json.loads(path.read_text())
-    return {'note':note,'task_id':ident,'current_summary':(record.metadata.get('ai_note_summary') or {}).get('summary','')}
+    return {'note':note,'task_id':ident,'current_summary':_saved_note_summary(record).get('summary','')}
 
 
 @app.post('/api/recordings/{session_id}/note-proposal/adopt')
@@ -869,7 +875,7 @@ def _deduplicated_live_summaries(record: RecordingRecord) -> tuple[list[dict[str
 
 def _summary_abstract_pending(record: RecordingRecord) -> bool:
     """Only resume an abstract when this generation saved its detailed note."""
-    note = record.metadata.get("ai_note_summary") or {}
+    note = _saved_note_summary(record)
     job = record.metadata.get("summary_job") or {}
     draft = record.metadata.get("ai_note_summary_draft") or {}
     if not note.get("summary") or str(note.get("abstract") or "").strip():
@@ -2305,7 +2311,7 @@ async def generate_library_summary(
             record = recording_store.find(session_id) or record
             record.metadata.pop('ai_note_summary_draft', None)
             record.save_metadata()
-            return {"summary": {**(record.metadata.get("ai_note_summary") or {}), "proposal_kept": True},
+            return {"summary": {**_saved_note_summary(record), "proposal_kept": True},
                     "session": record.public(include_segments=False)}
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except (RuntimeError, json.JSONDecodeError) as exc:
@@ -2554,7 +2560,7 @@ async def create_summary_job(session_id: str, payload: dict[str, Any] = Body(...
     # This endpoint starts a user-requested note. Older clients do not send an
     # explicit flag, so an existing body means a fresh generation. Task-center
     # continue/retry uses start_summary_job directly and keeps its saved round.
-    payload = {**payload, 'regenerate': payload.get('regenerate', bool((record.metadata.get('ai_note_summary') or {}).get('summary')))}
+    payload = {**payload, 'regenerate': payload.get('regenerate', bool(_saved_note_summary(record).get('summary')))}
     start_summary_job(record, payload)
     return {"accepted": True, "session_id": session_id}
 
@@ -2715,7 +2721,7 @@ async def save_recording_summary(
         raise HTTPException(status_code=404, detail="没有找到这条录音")
     if record.metadata.get("summary_job", {}).get("status") in {"queued", "running"}:
         raise HTTPException(status_code=409, detail="AI 总结仍在生成，草稿已保留，请生成完成后重试保存")
-    current = str((record.metadata.get("ai_note_summary") or {}).get("summary") or "")
+    current = str(_saved_note_summary(record).get("summary") or "")
     if "expected_summary" in payload and str(payload["expected_summary"]).strip() != current.strip():
         # An acknowledged request may have lost its response; the same content is safe.
         if str(payload.get("summary") or "").strip() != current.strip():
@@ -3613,7 +3619,7 @@ async def download_recording(session_id: str, kind: str) -> FileResponse:
         try:
             path = await asyncio.to_thread(reviewed_pdf, record)
         except (ValueError, RuntimeError) as exc:
-            if (record.metadata.get('ai_note_summary') or {}).get('summary'):
+            if _saved_note_summary(record).get('summary'):
                 async def prepare_requested_pdf():
                     await asyncio.sleep(0)  # release this download's record guard first
                     current=recording_store.find(session_id)

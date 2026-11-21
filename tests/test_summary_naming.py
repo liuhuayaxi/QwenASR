@@ -11,6 +11,34 @@ from qwen_asr_app.storage import RecordingRecord, RecordingStore
 
 
 class SummaryNamingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_status_treats_non_mapping_summary_as_missing_without_rewriting_it(self):
+        for saved in [{'summary': 'previous valid note'}, 'legacy summary', '', None, [], ['invalid'], 42, {},
+                      {'summary': 'saved note', 'review_status': 'approved'}]:
+            with self.subTest(saved=saved):
+                self.record.metadata['ai_note_summary'] = saved
+                self.record.save_metadata()
+                result = await app.summary_status(self.record.id)
+                valid = saved if isinstance(saved, dict) else {}
+                self.assertEqual(result['has_summary'], bool(valid.get('summary')))
+                self.assertEqual(result['review_status'], valid.get('review_status', 'unreviewed'))
+                self.assertEqual(self.store.find(self.record.id).metadata['ai_note_summary'], saved)
+                self.assertFalse(app._summary_abstract_pending(self.store.find(self.record.id)))
+
+    async def test_create_summary_handles_non_mapping_saved_note(self):
+        self.record.metadata['ai_note_summary'] = 'legacy summary'
+        self.record.save_metadata()
+        with patch.object(app, 'start_summary_job') as start:
+            result = await app.create_summary_job(self.record.id, {'config': {}})
+        self.assertTrue(result['accepted'])
+        self.assertFalse(start.call_args.args[1]['regenerate'])
+
+    async def test_edit_replaces_non_mapping_saved_note(self):
+        self.record.metadata['ai_note_summary'] = 'legacy summary'
+        self.record.save_metadata()
+        result = await app.save_recording_summary(self.record.id,
+            {'summary': 'Replacement note', 'expected_summary': ''})
+        self.assertEqual(result['summary']['summary'], 'Replacement note')
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
