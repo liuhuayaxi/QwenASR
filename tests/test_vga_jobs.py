@@ -26,7 +26,7 @@ class VGAJobRoutes(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = Path(temporary.name).resolve()
         self.settings = SimpleNamespace(storage_root=self.root / 'library', categories=['课程'],
                                         library_layout='shared-courses-v1')
         private = patch('qwen_asr_app.vga_jobs.PRIVATE_ROOT', self.root / 'private')

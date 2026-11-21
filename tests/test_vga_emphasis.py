@@ -28,7 +28,7 @@ class VGAEmphasisTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = Path(temporary.name).resolve()
         self.image = self.root / 'page.png'
         fixture('document').save(self.image)
 
@@ -96,6 +96,9 @@ class VGAEmphasisTests(unittest.IsolatedAsyncioTestCase):
             sibling = video.with_suffix(extension)
             sibling.touch()
             self.assertEqual(find_audio(video), sibling)
+        alias = self.root / 'alias'
+        alias.symlink_to(self.root, target_is_directory=True)
+        self.assertEqual(find_audio(alias / video.name), video.with_suffix('.aac'))
         explicit = self.root / 'separate.wav'
         explicit.touch()
         self.assertEqual(find_audio(video, explicit), explicit)
