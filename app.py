@@ -4426,6 +4426,7 @@ app.include_router(backup_router(backup_manager,
 # routes remain unchanged, so the old course service can still be tested in
 # isolation while the desktop launcher exposes it at http://127.0.0.1:8765/course/.
 smartclass_service.app.state.recording_store = recording_store
+smartclass_service.app.state.course_stream_manager = course_stream_manager
 app.mount("/course", smartclass_service.app)
 
 

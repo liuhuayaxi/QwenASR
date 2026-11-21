@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import httpx
 
@@ -85,6 +85,33 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(parse_index('var Info={"Video1":{"Src":"Video1.mp4"}};')["Video1"]["Src"], "Video1.mp4")
         with self.assertRaises(ValueError):
             parse_index('var Info=(function(){return {}})()')
+
+    def test_vga_index_selection(self):
+        from qwen_asr_app.smartclass import vga_track
+        for key in ('VGA', 'vga', 'Vga', 'ScreenVGA'):
+            self.assertEqual(vga_track({'Video1': {'Src': 'Video1.mp4'}, key: {'Src': 'VGA.mp4'}}), {'Src': 'VGA.mp4'})
+        for index in ({}, {'Video1': {'Src': 'Video1.mp4'}}, {'VGA': None}, {'VGA': {}}):
+            self.assertEqual(vga_track(index), {})
+
+    def test_vga_sources_share_index_resolution_and_url_safety(self):
+        client = SmartClassClient()
+        self.addCleanup(client.close)
+        segments = [{'ID': str(i), 'Index': i, 'IsProcessSuccess': True, 'Duration': 10,
+                     'IndexJsonFileUri': f'https://njuptvod7.smartclass.cn/{i}/Index.json'} for i in (2, 1)]
+        group = {'videos': [video('id', '2026-09-03 13:45:00', '2026-09-03 14:30:00', 6)]}
+        response = Mock(status_code=200, text=json.dumps({'VgA': {'Src': 'VGA.mp4'}}))
+        with patch.object(client, 'api', return_value={'VideoSegmentInfo': segments}), \
+             patch('qwen_asr_app.smartclass.httpx.get', return_value=response) as get:
+            sources = client.vga_sources(group)
+            self.assertEqual([s['segment_id'] for s in sources], ['1', '2'])
+            self.assertEqual(sources[0]['url'], 'https://njuptvod7.smartclass.cn/1/VGA.mp4')
+            self.assertFalse(get.call_args.kwargs['follow_redirects'])
+            response.text = json.dumps({'Video1': {'Src': 'Video1.mp4', 'Width': 1920}})
+            self.assertEqual(client.vga_sources(group), [])
+            self.assertEqual(len(client.audio_sources(group)), 2)
+            response.text = json.dumps({'VGA': {'Src': 'https://evil.test/VGA.mp4'}})
+            with self.assertRaises(SmartClassError):
+                client.vga_sources(group)
 
     def test_media_domain_and_tls_restricted(self):
         self.assertEqual(media_url("https://njuptvod7.smartclass.cn:8010/a/Video1.mp4"), "https://njuptvod7.smartclass.cn:8010/a/Video1.mp4")

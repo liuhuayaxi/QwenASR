@@ -122,6 +122,11 @@ def media_url(url: str) -> str:
     return url
 
 
+def vga_track(index: dict) -> dict:
+    return next((track for key, track in index.items()
+                 if 'vga' in key.lower() and isinstance(track, dict) and track.get('Src')), {})
+
+
 def parse_index(text: str) -> dict:
     # Index.json is a JS assignment containing JSON. Parse data; never execute JS.
     raw = re.sub(r"^\s*(?:var|let|const)\s+\w+\s*=\s*", "", text.lstrip("\ufeff"))
@@ -504,6 +509,12 @@ class SmartClassClient:
         raise SmartClassError("回放分页超出预期")
 
     def audio_sources(self, group: dict) -> list[dict]:
+        return self.media_sources(group)
+
+    def vga_sources(self, group: dict) -> list[dict]:
+        return self.media_sources(group, screen=True)
+
+    def media_sources(self, group: dict, *, screen=False) -> list[dict]:
         sources = []
         for video in group["videos"]:
             info = self.api("/Video/GetVideoInfoDtoByID", {
@@ -521,8 +532,10 @@ class SmartClassClient:
                 if response.status_code != 200:
                     raise SmartClassError("无法读取回放索引，请刷新登录状态后重试")
                 index = parse_index(response.text)
-                track = index.get("Video1") or {}
-                if not track.get("Src") or not track.get("Width"):
+                track = vga_track(index) if screen else index.get("Video1") or {}
+                if screen and not track:
+                    return []
+                if not track.get("Src") or (not screen and not track.get("Width")):
                     raise SmartClassError("这节回放未提供可访问的 video1")
                 if str(index.get("File", "mp4")).lower() != "mp4":
                     raise SmartClassError("当前只适配平台 MP4 回放")
