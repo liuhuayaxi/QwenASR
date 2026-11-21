@@ -8,6 +8,7 @@ upsert is replayed. Contract: sharingnotes-code ``contract/README.md``.
 Configuration (environment wins over ``<PRIVATE_ROOT>/sharingnotes-publish/config.json``):
 ``SHARINGNOTES_PUBLISH_URL``, ``SHARINGNOTES_PUBLISH_TOKEN`` and
 ``SHARINGNOTES_PUBLISH_COURSES`` (comma separated; empty publishes nothing).
+For the official site on macOS, a missing token is read from the shared Keychain item.
 """
 from __future__ import annotations
 
@@ -16,6 +17,8 @@ import contextlib
 import hashlib
 import json
 import os
+import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -31,6 +34,9 @@ from .sharingnotes_export import export_note
 
 CONTRACT_VERSION = 1
 STATE_DIR = PRIVATE_ROOT / 'sharingnotes-publish'
+OFFICIAL_PUBLISH_URL = 'https://coursenote.dczxyy.uk'
+KEYCHAIN_SERVICE = 'uk.dczxyy.coursenote.publish'
+KEYCHAIN_ACCOUNT = 'sharingnotes'
 NOTES_PATH = '/api/publish/v1/notes'
 DELETE_PATH = '/api/publish/v1/notes/delete'
 BLOBS_PATH = '/api/publish/v1/blobs'
@@ -49,10 +55,26 @@ def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _read_keychain_token():
+    if sys.platform != 'darwin':
+        return ''
+    try:
+        result = subprocess.run(
+            ['/usr/bin/security', 'find-generic-password',
+             '-s', KEYCHAIN_SERVICE, '-a', KEYCHAIN_ACCOUNT, '-w'],
+            capture_output=True, text=True, check=False, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired, UnicodeError):
+        return ''
+    token = result.stdout.rstrip('\r\n')
+    return token if result.returncode == 0 and token and not any(c.isspace() for c in token) else ''
+
+
 class PublishConfig:
     def __init__(self, url='', token='', courses=()):
         self.url = str(url or '').strip().rstrip('/')
         self.token = str(token or '').strip()
+        self._uses_keychain = False
         self.courses = [c for c in (str(v).strip() for v in courses) if c]
         if self.url:
             parsed = urlsplit(self.url)
@@ -75,22 +97,36 @@ class PublishConfig:
             saved = {}
         courses = os.environ.get('SHARINGNOTES_PUBLISH_COURSES')
         courses = [c for c in courses.split(',')] if courses is not None else saved.get('courses') or []
-        return cls(os.environ.get('SHARINGNOTES_PUBLISH_URL') or saved.get('url'),
-                   os.environ.get('SHARINGNOTES_PUBLISH_TOKEN') or saved.get('token'), courses)
+        token = (os.environ.get('SHARINGNOTES_PUBLISH_TOKEN') or '').strip() or saved.get('token')
+        config = cls(os.environ.get('SHARINGNOTES_PUBLISH_URL') or saved.get('url'), token, courses)
+        if not config.token and config.url == OFFICIAL_PUBLISH_URL:
+            config.token = _read_keychain_token()
+            config._uses_keychain = bool(config.token)
+        return config
+
+    def transport(self):
+        return HttpTransport(self.url, self.token, allow_redirects=not self._uses_keychain)
+
+
+class _NoPublishRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
 
 
 class HttpTransport:
     """``request(method, path, body, content_type) -> (status, json)`` over HTTPS."""
 
-    def __init__(self, base_url, token, timeout=60):
+    def __init__(self, base_url, token, timeout=60, *, allow_redirects=True):
         self.base_url, self.token, self.timeout = base_url.rstrip('/'), token, timeout
+        self._opener = None if allow_redirects else urllib.request.build_opener(_NoPublishRedirect())
 
     def request(self, method, path, body=b'', content_type='application/json'):
         request = urllib.request.Request(self.base_url + path, data=body, method=method, headers={
             'Authorization': 'Bearer ' + self.token, 'Content-Type': content_type,
             'Accept': 'application/json', 'User-Agent': 'QwenASR-sharingnotes-publisher/1'})
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            open_request = self._opener.open if self._opener else urllib.request.urlopen
+            with open_request(request, timeout=self.timeout) as response:
                 return response.status, json.loads(response.read() or b'{}')
         except urllib.error.HTTPError as exc:
             raw = exc.read()
@@ -513,7 +549,7 @@ class AutoPublisher:
         config = self.config or PublishConfig.load()
         if not config.configured or self.task:
             return False
-        self.publisher = Publisher(self.transport or HttpTransport(config.url, config.token),
+        self.publisher = Publisher(self.transport or config.transport(),
                                    config.courses, self.state or PublishState(state_path(config.url)),
                                    courseware=self.courseware)
         library_changes.callbacks.add(self.mark)

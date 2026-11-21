@@ -12,7 +12,9 @@ import tempfile
 import unittest
 import zlib
 from pathlib import Path
+from unittest.mock import patch
 
+from qwen_asr_app import sharingnotes_publish
 from qwen_asr_app.sharingnotes_export import export_note
 from qwen_asr_app.sharingnotes_mock_api import MockPublishAPI
 from qwen_asr_app.sharingnotes_publish import (
@@ -320,6 +322,59 @@ class ParityTests(Harness):
                                         exported['note']['images'])
             note = {**note, 'sources': original.published_sources(note['id'], note['sources'])}
             self.assertEqual(json.dumps(note, ensure_ascii=False, separators=(',', ':')).encode(), exported['body'])
+
+
+class KeychainConfigTests(Harness):
+    def test_official_site_reads_shared_item_when_explicit_token_is_absent(self):
+        path = self.tmp / 'config.json'
+        path.write_text(json.dumps({'url': 'https://coursenote.dczxyy.uk/', 'courses': [COURSE]}))
+        command = ['/usr/bin/security', 'find-generic-password',
+                   '-s', 'uk.dczxyy.coursenote.publish', '-a', 'sharingnotes', '-w']
+        with (patch.dict(os.environ, {}, clear=True), patch.object(sys, 'platform', 'darwin'),
+              patch.object(sharingnotes_publish.subprocess, 'run', return_value=subprocess.CompletedProcess(
+                  command, 0, 'synthetic-keychain-token\n', '')) as run):
+            config = PublishConfig.load(path)
+        self.assertTrue(config.configured)
+        self.assertEqual(config.token, 'synthetic-keychain-token')
+        run.assert_called_once_with(command, capture_output=True, text=True, check=False, timeout=30)
+        transport = config.transport()
+        handler = next(h for h in transport._opener.handlers
+                       if isinstance(h, sharingnotes_publish.urllib.request.HTTPRedirectHandler))
+        request = sharingnotes_publish.urllib.request.Request(config.url, data=b'{}',
+                                                             headers={'Authorization': 'Bearer synthetic-keychain-token'})
+        self.assertIsNone(handler.redirect_request(request, None, 302, 'Found', {}, 'https://other.example/'))
+
+    def test_explicit_token_precedence_does_not_access_keychain(self):
+        path = self.tmp / 'config.json'
+        path.write_text(json.dumps({'url': 'https://coursenote.dczxyy.uk', 'token': 'fixture-file', 'courses': [COURSE]}))
+        with (patch.dict(os.environ, {}, clear=True), patch.object(sys, 'platform', 'darwin'),
+              patch.object(sharingnotes_publish.subprocess, 'run') as run):
+            self.assertEqual(PublishConfig.load(path).token, 'fixture-file')
+            os.environ['SHARINGNOTES_PUBLISH_TOKEN'] = 'fixture-environment'
+            self.assertEqual(PublishConfig.load(path).token, 'fixture-environment')
+        run.assert_not_called()
+
+    def test_other_destinations_and_non_mac_do_not_access_keychain(self):
+        for platform, url in (
+            ('darwin', 'https://coursenote.dczxyy.uk.other.example'),
+            ('darwin', 'https://coursenote.dczxyy.uk/unrelated'),
+            ('darwin', 'http://127.0.0.1:8799'),
+            ('linux', 'https://coursenote.dczxyy.uk'),
+        ):
+            with (self.subTest(platform=platform, url=url),
+                  patch.dict(os.environ, {'SHARINGNOTES_PUBLISH_URL': url, 'SHARINGNOTES_PUBLISH_COURSES': COURSE}, clear=True),
+                  patch.object(sys, 'platform', platform), patch.object(sharingnotes_publish.subprocess, 'run') as run):
+                self.assertFalse(PublishConfig.load(self.tmp / 'config.json').configured)
+                run.assert_not_called()
+
+    def test_missing_command_or_keychain_item_leaves_publishing_unconfigured(self):
+        env = {'SHARINGNOTES_PUBLISH_URL': 'https://coursenote.dczxyy.uk', 'SHARINGNOTES_PUBLISH_COURSES': COURSE}
+        with (patch.dict(os.environ, env, clear=True), patch.object(sys, 'platform', 'darwin'),
+              patch.object(sharingnotes_publish.subprocess, 'run', side_effect=[
+                  FileNotFoundError(), subprocess.CompletedProcess([], 44, '', 'missing'),
+              ])):
+            for _ in range(2):
+                self.assertFalse(PublishConfig.load(self.tmp / 'config.json').configured)
 
 
 class TriggerTests(Harness):
