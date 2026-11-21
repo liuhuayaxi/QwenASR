@@ -1,4 +1,5 @@
 import json
+from fractions import Fraction
 from pathlib import Path
 import tempfile
 import unittest
@@ -80,6 +81,39 @@ class VGASlideTests(unittest.TestCase):
             extract_slides(video, progress=lambda *args: samples.append(args),
                            cancel=lambda: len(samples) >= 3)
         self.assertEqual(len(samples), 3)
+
+    def test_resolution_switch_starts_new_slide(self):
+        sizes = [(160, 120), (192, 108), (128, 96)]
+        video = self.root / 'resolution-switch.ts'
+        segments = []
+        for index, size in enumerate(sizes):
+            segment = self.root / f'segment-{index}.ts'
+            image = Image.new('RGB', size, 'white')
+            ImageDraw.Draw(image).rectangle((10, 10, 65, 70), fill='black')
+            with av.open(str(segment), 'w') as output:
+                stream = output.add_stream('mpeg2video', rate=10)
+                stream.width, stream.height = size
+                stream.pix_fmt = 'yuv420p'
+                for number in range(20):
+                    frame = av.VideoFrame.from_image(image)
+                    frame.pts = index * 20 + number
+                    frame.time_base = Fraction(1, 10)
+                    for packet in stream.encode(frame):
+                        output.mux(packet)
+                for packet in stream.encode():
+                    output.mux(packet)
+            segments.append(segment.read_bytes())
+        video.write_bytes(b''.join(segments))
+        with av.open(str(video)) as container:
+            decoded_sizes = {(frame.width, frame.height) for frame in container.decode(video=0)}
+        self.assertEqual(decoded_sizes, set(sizes))
+        slides = extract_slides(video, animation_threshold=1, duplicate_threshold=1)
+        self.assertEqual(len(slides), 3)
+        for slide, size in zip(slides, sizes):
+            with Image.open(slide.image_path) as image:
+                self.assertEqual(image.size, size)
+            self.assertLess(slide.start_sec, slide.captured_sec)
+        self.assertTrue(all(a.captured_sec < b.start_sec for a, b in zip(slides, slides[1:])))
 
     def test_blank_short_empty_and_errors(self):
         video = self.root / 'blank.mp4'

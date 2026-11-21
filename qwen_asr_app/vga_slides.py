@@ -67,6 +67,8 @@ def extract_slides(video_path, *, sample_interval=0.5, min_stable_sec=1.0,
     last_time = -1.0
 
     def changed(a, b):
+        if a.shape != b.shape:
+            return 1.0
         return float(np.mean(np.abs(a - b) > pixel_threshold))
 
     def emit():
@@ -74,7 +76,11 @@ def extract_slides(video_path, *, sample_interval=0.5, min_stable_sec=1.0,
         if candidate is None:
             return
         references = emitted if skip_revisited else emitted[-1:]
-        if not any(changed(candidate, np.load(old).astype(np.int16)) <= duplicate_threshold for old in references):
+        def duplicate(path):
+            old = np.load(path).astype(np.int16)
+            return candidate.shape == old.shape and changed(candidate, old) <= duplicate_threshold
+
+        if not any(duplicate(old) for old in references):
             path = folder / f'{len(slides) + 1:04d}.png'
             shutil.copyfile(candidate_path, path)
             slides.append(Slide(len(slides) + 1, candidate_start, candidate_end,
@@ -89,7 +95,7 @@ def extract_slides(video_path, *, sample_interval=0.5, min_stable_sec=1.0,
         if segment_last is None or segment_end - segment_start + 1e-6 < min_stable_sec:
             return
         merge = False
-        if candidate is not None:
+        if candidate is not None and candidate.shape == segment_last.shape:
             background = float(np.median(candidate))
             ink = np.abs(candidate - background) > pixel_threshold
             erased = ink & (np.abs(segment_last - background) <= pixel_threshold)
