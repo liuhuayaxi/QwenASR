@@ -7,7 +7,8 @@ import unittest
 import tempfile
 from pathlib import Path
 from contextlib import ExitStack
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
+from types import SimpleNamespace
 import httpx
 
 from fastapi import HTTPException
@@ -25,6 +26,91 @@ async def until(predicate):
 
 
 class PipelineTests(unittest.IsolatedAsyncioTestCase):
+    async def test_vga_download_concatenates_and_extracts_using_existing_transcript(self):
+        import av
+        from qwen_asr_app import smartclass_vga
+        from tests.test_vga_slides import synthetic_video
+        from qwen_asr_app.course_files import CourseFiles
+        from contextlib import contextmanager
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / 'source.mp4'
+            synthetic_video(source)
+            @contextmanager
+            def media(*args):
+                with source.open('rb') as handle:
+                    yield handle
+            sources = [{'url': 'https://njuptvod7.smartclass.cn/VGA.mp4'}] * 2
+            with patch.object(smartclass_vga, 'parallel_media', media):
+                smartclass_vga.download_video(sources, root / 'joined.mp4', threading.Event())
+                with av.open(str(root / 'joined.mp4')) as video:
+                    self.assertAlmostEqual(float(video.duration / av.time_base), 27, delta=.2)
+                record = SimpleNamespace(directory=root, metadata={'title': '课堂'}, segments=[{'start': 0, 'end': 1, 'raw': '重点'}])
+                def emphasis(result, video, **kwargs):
+                    self.assertEqual(json.loads(kwargs['transcript'].read_text())['segments'], record.segments)
+                    return result
+                with patch('qwen_asr_app.vga_emphasis.apply_emphasis', AsyncMock(side_effect=emphasis)), \
+                     patch.object(CourseFiles, 'import_file', return_value=({'id': 'asset'}, False)) as imported:
+                    asset = await smartclass_vga.extract_courseware(sources, record, '课程', threading.Event())
+                    self.assertEqual(asset, 'asset')
+                    self.assertEqual(imported.call_args.args[-1], '课件')
+                self.assertFalse(list(root.glob('.smartclass-vga-*')))
+
+    async def test_vga_option_persists_and_snapshots(self):
+        with tempfile.TemporaryDirectory() as raw, patch.object(service, 'STATE_DIR', Path(raw)):
+            await service.set_options(SimpleNamespace(json=AsyncMock(return_value={'vga_extract': True})))
+            self.assertTrue(json.loads((Path(raw) / 'options.json').read_text())['vga_extract'])
+            with patch.object(service, 'run_queue', AsyncMock()):
+                await service.start_import(service.Selection(ids=['A']))
+                await service.job
+            service.options['vga_extract'] = False
+            self.assertTrue(service.queue_state['items'][0]['options']['vga_extract'])
+            with self.assertRaises(HTTPException):
+                await service.set_options(SimpleNamespace(json=AsyncMock(return_value={'vga_extract': 'true'})))
+
+    async def test_vga_binding_precedes_notes_and_resume_reuses_asset(self):
+        for enabled, failure in ((True, False), (True, True), (False, False)):
+            with self.subTest(enabled=enabled, failure=failure), tempfile.TemporaryDirectory() as raw:
+                group = {'id': 'A', 'title': 'A', 'videos': [{'NewID': 'A'}], 'course_name': '测试',
+                         'duration': 600, 'start': '2026-10-15 13:45', 'stop': '2026-10-15 15:20', 'periods': []}
+                record = SimpleNamespace(metadata={}, segments=[], directory=Path(raw), save_metadata=Mock())
+                complete = {'id': 'lesson', 'status': 'completed', 'directory': raw}
+                def handler(request):
+                    if request.url.path == '/api/library':
+                        return httpx.Response(200, json={'records': [], 'category_profiles': {}})
+                    if request.url.path.endswith('/summary-jobs'):
+                        self.assertEqual(record.metadata.get('review_material_ids'), ['asset'] if enabled and not failure else None)
+                        return httpx.Response(200, json={'accepted': True})
+                    self.fail(str(request.url))
+                local = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+                extractor = AsyncMock(side_effect=ValueError('failed')) if failure else AsyncMock(return_value='asset')
+                with patch.object(service.httpx, 'AsyncClient', return_value=local), \
+                     patch.object(service, 'import_stream', AsyncMock(return_value=complete)), \
+                     patch.object(service.app.state, 'recording_store', SimpleNamespace(find=lambda _: record), create=True), \
+                     patch.object(service.client, 'vga_sources', return_value=[{'url': 'screen'}]) as sources, \
+                     patch.object(service, 'extract_courseware', extractor):
+                    await service.import_group(group, {'vga_extract': enabled, 'summary_provider': {'model': 'test'}})
+                    self.assertEqual(service.imports['A']['state'], 'completed')
+                    if enabled and not failure:
+                        await service.import_vga(group, complete, '测试', service.imports['A'])
+                        extractor.assert_awaited_once()
+                        sources.assert_called_once()
+                    elif failure:
+                        self.assertIn('本地资料库', service.imports['A']['warnings'][-1])
+                    else:
+                        sources.assert_not_called()
+                        extractor.assert_not_awaited()
+
+    async def test_missing_vga_falls_back_without_extraction(self):
+        with tempfile.TemporaryDirectory() as raw, \
+             patch.object(service.app.state, 'recording_store', SimpleNamespace(find=lambda _: Mock(metadata={})), create=True), \
+             patch.object(service.client, 'vga_sources', return_value=[]), \
+             patch.object(service, 'extract_courseware', AsyncMock()) as extract:
+            entry = {}
+            await service.import_vga({'id': 'A'}, {'id': 'lesson', 'directory': raw}, '测试', entry)
+            self.assertEqual(entry['vga']['status'], 'fallback')
+            extract.assert_not_awaited()
+
     def setUp(self):
         self.groups = {ident: {'id': ident, 'title': ident, 'videos': [{'NewID': ident}]}
                        for ident in 'ABCDE'}

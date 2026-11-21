@@ -178,12 +178,13 @@ function renderCourseState(s) {
     catalogRevision = s.course_revision;
     if ($('courses').value && !loadingCourse) loadLessons();
   }
-  if (!optionsLoaded && s.options.summary_provider) {
-    const p = s.options.summary_provider;
+  if (!optionsLoaded && s.options) {
+    const p = s.options.summary_provider || {};
     $('summaryBase').value = p.base_url || '';
     $('summaryModel').value = p.model || '';
     $('generateSummary').checked = s.options.generate_summary !== false;
     $('aiCorrection').checked = s.options.ai_correction !== false;
+    $('vgaExtract').checked = s.options.vga_extract === true;
     const correction = s.options.correction_provider || p;
     $('correctionBase').value = correction.base_url || '';
     $('correctionModel').value = correction.model || '';
@@ -204,6 +205,7 @@ function renderCourseState(s) {
       const title = document.createElement('strong'), badge = document.createElement('span'), message = document.createElement('p');
       title.textContent = j.title; badge.className = 'job-percent'; badge.textContent = j.state === 'queued' ? '排队中' : Math.round(Number(j.progress) || 0) + '%';
       message.textContent = j.message; head.append(title, badge); box.append(head, message);
+      if (j.warnings?.length) { const warning = document.createElement('p'); warning.textContent = j.warnings.join('；'); box.append(warning); }
       if (j.metrics?.first_text_seconds != null) {
         const timing = document.createElement('p'); timing.textContent = courseTimingText(j.metrics);
         timing.title = '累计时间仅包含已保存的转写片段，不代表整个任务耗时；当前片段和失败重试不计入。';
@@ -328,7 +330,7 @@ function selectedOptions() {
   const existing = window.courseStatus?.options || {};
   const summary = {...(existing.summary_provider || {}), base_url:$('summaryBase').value.trim(), model:$('summaryModel').value.trim()};
   const correction = {...(existing.correction_provider || summary), base_url:$('correctionBase').value.trim() || summary.base_url, model:$('correctionModel').value.trim() || summary.model};
-  return {generate_summary:$('generateSummary').checked, ai_correction:$('aiCorrection').checked,
+  return {generate_summary:$('generateSummary').checked, ai_correction:$('aiCorrection').checked, vga_extract:$('vgaExtract').checked,
     summary_provider:summary, correction_provider:correction};
 }
 async function saveOptions() {
@@ -344,7 +346,7 @@ async function saveOptions() {
     }
   } catch (error) { $('optionsStatus').textContent = `尚未保存：${error.message}`; throw error; }
 }
-for (const id of ['summaryBase','summaryModel','correctionBase','correctionModel','generateSummary','aiCorrection']) {
+for (const id of ['summaryBase','summaryModel','correctionBase','correctionModel','generateSummary','aiCorrection','vgaExtract']) {
   $(id).addEventListener('input', () => {
     optionsDirty = true;
     clearTimeout(optionsSaveTimer);

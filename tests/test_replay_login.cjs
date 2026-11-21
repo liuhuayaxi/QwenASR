@@ -25,6 +25,11 @@ function environment(returnTo) {
 }
 
 async function main() {
+  const optionsEnv = environment('');
+  assert.equal(vm.runInContext('selectedOptions().vga_extract', optionsEnv.context), false);
+  optionsEnv.element('vgaExtract').checked = true;
+  assert.equal(vm.runInContext('selectedOptions().vga_extract', optionsEnv.context), true);
+  assert.equal(typeof optionsEnv.element('vgaExtract').input, 'function');
   const target = 'http://127.0.0.1:8765/course/replay?recording=lesson&seconds=2820';
   for (const action of ['submit','reconnect']) {
     const env=environment(target);

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import shutil
@@ -25,6 +26,7 @@ from .course_download import stream_audio
 from .replay_bridge import replay_bridge_router
 from .course_import_status import lesson_import_statuses, recording_inventory, video_ids
 from .ai_preferences import ai_preferences, PROVIDER_FIELDS
+from .smartclass_vga import extract_courseware
 
 ROOT = Path(__file__).resolve().parent.parent
 status = {"state": "idle", "message": "请配置统一身份认证账号", "identity": None, "authenticated": False}
@@ -84,6 +86,7 @@ def read_json(path, default):
 
 imports = read_json(STATE_DIR / "imports.json", {})
 options = read_json(STATE_DIR / "options.json", {})
+options.setdefault('vga_extract', False)
 queue_state = read_json(STATE_DIR / "queue.json", {"items": [], "paused": False})
 for item in queue_state["items"]:
     if item.get("state") == "running":
@@ -521,7 +524,9 @@ async def set_options(request: Request):
         provider = data.get(name) or {}
         if provider:
             options[name] = {k: v for k, v in provider.items() if k in PROVIDER_FIELDS}
-    for key in ("summary_system_prompt", "abstract_system_prompt", "generate_summary", "ai_correction"):
+    if 'vga_extract' in data and not isinstance(data['vga_extract'], bool):
+        raise HTTPException(400, 'VGA 提取选项必须为布尔值')
+    for key in ("summary_system_prompt", "abstract_system_prompt", "generate_summary", "ai_correction", "vga_extract"):
         if key in data:
             options[key] = data[key]
     private_json(STATE_DIR / "options.json", options)
@@ -770,6 +775,41 @@ async def import_stream(local, group, config, entry):
                 pass
 
 
+async def import_vga(group, complete, category, entry):
+    store = getattr(app.state, 'recording_store', None)
+    record = store.find(complete['id']) if store else None
+    path = Path(complete['directory']) / '课程来源.json'
+    manifest = read_json(path, {})
+    saved = manifest.get('vga', {})
+    try:
+        if record is None:
+            raise SmartClassError('无法读取课堂转写')
+        asset = saved.get('asset_id')
+        if not asset:
+            async with platform_lock:
+                sources = await asyncio.to_thread(client.vga_sources, group)
+            if not sources:
+                raise SmartClassError('此回放没有 VGA 轨道')
+            entry['message'] = '正在从 VGA 提取课堂课件'
+            save_imports()
+            asset = await extract_courseware(sources, record, category, stop_event)
+        record.metadata['review_material_ids'] = [asset]
+        record.save_metadata()
+        saved = {'status': 'completed', 'asset_id': asset}
+        entry['vga'] = saved
+    except Exception as exc:
+        logging.warning('SmartClass VGA extraction failed for %s: %s', group['id'], type(exc).__name__)
+        warning = 'VGA 提取不可用，已回退到本地资料库课件'
+        entry.setdefault('warnings', []).append(warning)
+        saved = {'status': 'fallback', 'warning': warning}
+        entry['vga'] = saved
+    try:
+        private_json(path, {**manifest, 'vga': saved})
+    except OSError:
+        logging.warning('Cannot save SmartClass VGA checkpoint for %s', group['id'])
+    save_imports()
+
+
 async def import_group(group: dict, run_options: dict | None = None):
     options = run_options if run_options is not None else globals()["options"]
     ident = group["id"]
@@ -788,7 +828,7 @@ async def import_group(group: dict, run_options: dict | None = None):
         library = library_response.json()
         records = library.get("records", [])
         record = next((r for r in records if r.get("id") == entry.get("record_id") or r.get("source_filename") == filename), None)
-        if record and record.get("status") == "completed" and (entry.get("summary_generated") or not options.get("generate_summary", True)):
+        if record and record.get("status") == "completed" and (entry.get("summary_generated") or not options.get("generate_summary", True)) and not options.get('vga_extract'):
             complete_import_progress(entry)
             entry.update(state="completed", message="课次已经归档，已跳过重复处理", progress=100)
             save_imports()
@@ -869,7 +909,10 @@ async def import_group(group: dict, run_options: dict | None = None):
         entry.update(state="completed", message="转写已归档，AI 精修在后台继续" if correction_deferred else "音频与转写已归档")
         save_imports()
         if manifest_path.exists():
-            private_json(Path(complete["directory"]) / "课程来源.json", read_json(manifest_path, {}))
+            target = Path(complete["directory"]) / "课程来源.json"
+            private_json(target, {**read_json(target, {}), **read_json(manifest_path, {})})
+        if options.get('vga_extract'):
+            await import_vga(group, complete, category, entry)
         if options.get("generate_summary", True):
             update_import_phase(entry, "summary", 1, "正在提交课堂笔记任务")
             entry.update(message="正在生成整堂课笔记")
