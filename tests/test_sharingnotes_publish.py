@@ -6,6 +6,8 @@ import importlib.util
 import json
 import os
 import struct
+import subprocess
+import sys
 import tempfile
 import unittest
 import zlib
@@ -165,6 +167,27 @@ class IncrementalPublishTests(Harness):
         self.assertEqual(self.publisher.delete_note(result['id'], result['version'])['status'], 'deleted')
         self.assertTrue(self.state.notes[result['id']]['deleted'])
 
+    def test_cli_exit_status_distinguishes_success_from_conflicts_and_errors(self):
+        directory = self.tmp / 'mock'
+        publisher = Publisher(MockPublishAPI(directory), [COURSE], self.state)
+        published = publisher.publish_session(session(), self.read)
+        base = [sys.executable, str(ROOT / 'scripts' / 'publish_sharingnotes.py'),
+                '--mock', str(directory), '--courses', COURSE, '--state', str(self.state.path)]
+
+        def cli(*args):
+            return subprocess.run([*base, *args], capture_output=True, text=True, check=False, timeout=20)
+
+        for version, status, code in [('0' * 64, 'conflict', 1), ('not-a-hash', 'rejected', 1),
+                                      (published['version'], 'deleted', 0), (published['version'], 'deleted', 0)]:
+            with self.subTest(status=status, version=version):
+                result = cli('--delete', published['id'], '--expected-version', version)
+                self.assertEqual(result.returncode, code, result.stderr)
+                self.assertEqual(json.loads(result.stdout)['status'], status)
+
+        missing = cli('--session', 'missing-recording')
+        self.assertEqual(missing.returncode, 1, missing.stderr)
+        self.assertEqual(json.loads(missing.stdout.splitlines()[-1]), {'missing': 1})
+
     def test_deleted_note_is_not_republished_by_reconcile(self):
         result = self.publish()
         self.publisher.delete_note(result['id'], result['version'])
@@ -173,6 +196,17 @@ class IncrementalPublishTests(Harness):
         forced = self.publisher.publish_session(session(), self.read, force=True)
         self.assertEqual(forced['status'], 'accepted')
         self.assertEqual(self.api.visible(result['id'])['version'], result['version'])
+
+    def test_mock_rejects_a_delete_replay_after_same_version_recreation(self):
+        directory = self.tmp / 'mock'
+        publisher = Publisher(MockPublishAPI(directory), [COURSE], self.state)
+        note = publisher.publish_session(session(), self.read)
+        self.assertEqual(publisher.delete_note(note['id'], note['version'])['status'], 'deleted')
+        self.assertEqual(publisher.publish_session(session(), self.read, force=True)['status'], 'accepted')
+        api = MockPublishAPI(directory)
+        restarted = Publisher(api, [COURSE], self.state)
+        self.assertEqual(restarted.delete_note(note['id'], note['version'])['status'], 'conflict')
+        self.assertEqual(api.visible(note['id'])['version'], note['version'])
 
     def test_save_during_publication_stays_pending(self):
         self.state.mark(['rec-1'])

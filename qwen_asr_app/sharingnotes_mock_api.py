@@ -38,6 +38,7 @@ class MockPublishAPI:
         self.directory = Path(directory) if directory else None
         self.token = token
         self.notes, self.descriptors, self.tombstones = {}, {}, {}
+        self.deleted_versions = {}
         self.stored = set()
         self.calls = []
         self.drop_next_response = False
@@ -45,6 +46,7 @@ class MockPublishAPI:
             data = json.loads((self.directory / 'state.json').read_text(encoding='utf-8'))
             self.notes, self.descriptors = data['notes'], data['descriptors']
             self.tombstones, self.stored = data['tombstones'], set(data['stored'])
+            self.deleted_versions = data.get('deletedVersions', {k: [v] for k, v in self.tombstones.items()})
 
     def _persist(self, kind=None, sha=None, payload=None):
         if not self.directory:
@@ -52,7 +54,8 @@ class MockPublishAPI:
         if payload is not None:
             atomic_bytes(self.directory / 'blobs' / kind / sha, payload)
         atomic_json(self.directory / 'state.json', {'notes': self.notes, 'descriptors': self.descriptors,
-                                                    'tombstones': self.tombstones, 'stored': sorted(self.stored)})
+                                                    'tombstones': self.tombstones, 'stored': sorted(self.stored),
+                                                    'deletedVersions': self.deleted_versions})
 
     def visible(self, note_id):
         return (self.notes.get(note_id) or {}).get('note')
@@ -172,10 +175,13 @@ class MockPublishAPI:
         current = (self.notes.get(ident) or {}).get('note')
         if not current and self.tombstones.get(ident) == expected:
             return 200, _response('deleted', **op)
+        if current and expected in self.deleted_versions.get(ident, ()):
+            return 409, _response('conflict', error='Delete predates the current incarnation', **op)
         if not current or current['version'] != expected:
             return 409, _response('conflict', error='expectedVersion does not match the current version', **op)
         self.notes.pop(ident)
         self.tombstones[ident] = expected
+        self.deleted_versions.setdefault(ident, []).append(expected)
         self._persist()
         return 200, _response('deleted', **op)
 

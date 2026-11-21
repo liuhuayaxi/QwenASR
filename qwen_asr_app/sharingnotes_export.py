@@ -13,7 +13,6 @@ import struct
 import zlib
 from pathlib import Path
 
-COURSES = ['光电子学', '物理光学', '微型计算机原理与接口技术', '光电子器件（全英文）', '通信原理 C']
 NOTE_IMAGE = re.compile(r'!\[([^\]]*)\]\(([^\n)]*)\)')
 _PATH_PLACEHOLDER = '〔本机路径未公开〕'
 # Account homes only. /usr, /tmp, /opt, /var and /etc are course content.
@@ -99,13 +98,6 @@ def transcript_cipher(text, note_id, section, part):
     mixed = (int.from_bytes(data, 'little') ^ int.from_bytes(stream, 'little')).to_bytes(len(data), 'little')
     return base64.b64encode(mixed).decode('ascii')
 
-def transcript_plain(cipher, note_id, section, part):
-    data = base64.b64decode(cipher) if cipher else b''
-    if not data: return ''
-    stream = transcript_keystream(transcript_seed(note_id, section, part), len(data))
-    packed = (int.from_bytes(data, 'little') ^ int.from_bytes(stream, 'little')).to_bytes(len(data), 'little')
-    return zlib.decompress(packed, -15).decode()
-
 def published_sources(note_id, sources):
     """Public note JSON keeps passage ids and times; the text is obfuscated."""
     result = []
@@ -114,14 +106,6 @@ def published_sources(note_id, sources):
         item['cipher'] = transcript_cipher(source['text'], note_id, 'source-' + source['id'], 'note')
         result.append(item)
     return result
-
-def source_index_chunks(note_id, sources):
-    """Search entries for classroom text, obfuscated per 1000-character part."""
-    for source in sources:
-        text, section = source['text'], 'source-' + source['id']
-        for part, at in enumerate(range(0, len(text), 1000)):
-            yield {'note': note_id, 'kind': 'source', 'section': section, 'heading': '课堂原文 S' + source['id'], 'part': part,
-                   'cipher': transcript_cipher(text[at:at+1000], note_id, section, part)}
 
 def png_dimensions(payload):
     if not payload.startswith(b'\x89PNG\r\n\x1a\n') or payload[12:16] != b'IHDR': raise ValueError('Image is not PNG')
@@ -165,21 +149,6 @@ def unlink_unresolved_citations(markdown, source_ids):
     plain, non-clickable label text. Real citations are left untouched."""
     ids = {str(i) for i in source_ids}
     return SOURCE_LINK.sub(lambda m: m.group(0) if m.group(2) in ids else m.group(1), markdown)
-
-def search_chunks(markdown):
-    heading, number, fenced, block = '', 0, False, []
-    def emit():
-        text = '\n'.join(block).strip()
-        return [{'section': f'section-{number}', 'heading': heading, 'text': text[i:i+1000]} for i in range(0, len(text), 1000) if text[i:i+1000].strip()]
-    for line in markdown.splitlines():
-        if re.match(r'^\s*(```|~~~)', line): fenced = not fenced
-        match = re.match(r'^ {0,3}(#{1,6})\s+(.+)', line) if not fenced else None
-        if match:
-            yield from emit(); block = []; number += 1; heading = re.sub(r'[*`]', '', match[2]).strip()
-        if not line.strip() and block:
-            yield from emit(); block = []
-        else: block.append(line)
-    yield from emit()
 
 def public_note(session, published_images=None, images=None):
     note = session.get('ai_note_summary') or {}

@@ -28,6 +28,8 @@ from qwen_asr_app.sharingnotes_export import export_note  # noqa: E402
 from qwen_asr_app.sharingnotes_publish import (  # noqa: E402
     HttpTransport, PublishConfig, PublishState, Publisher, build_upsert, state_path, store_loader)
 
+SKIPPED_STATUSES = {'unchanged', 'skipped_course', 'skipped_unpublishable', 'skipped_deleted'}
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -88,19 +90,19 @@ def main():
     if args.delete:
         if not args.expected_version:
             raise SystemExit('删除需要 --expected-version（当前线上版本）')
-        print(json.dumps(publisher.delete_note(args.delete, args.expected_version), ensure_ascii=False))
-        return
+        result = publisher.delete_note(args.delete, args.expected_version)
+        print(json.dumps(result, ensure_ascii=False))
+        return 0 if result.get('status') == 'deleted' else 1
     if not courses:
         raise SystemExit('没有要发布的课程：设置 SHARINGNOTES_PUBLISH_COURSES 或 --courses')
     results = publisher.sync([(ident, store_loader(recording_store, ident)) for ident in ids], force=args.force,
                              loader=lambda ident: store_loader(recording_store, ident))
     for item in results:
-        if item['status'] not in {'unchanged', 'skipped_course', 'skipped_unpublishable', 'skipped_deleted'}:
+        if item['status'] not in SKIPPED_STATUSES:
             print(json.dumps(item, ensure_ascii=False))
     print(json.dumps(dict(Counter(item['status'] for item in results)), ensure_ascii=False))
-    if any(item['status'] in {'retry', 'conflict', 'rejected', 'invalid'} for item in results):
-        sys.exit(1)
+    return int(any(item['status'] not in SKIPPED_STATUSES | {'accepted'} for item in results))
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())
