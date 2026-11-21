@@ -19,6 +19,7 @@ from qwen_asr_app.native_pdf import pdf_operation
 from qwen_asr_app.vga_jobs import VGAJobs
 from qwen_asr_app.vga_slides import ExtractionCancelled
 from tests.test_vga_slides import synthetic_video
+from tests.test_vga_filter import fixture
 
 
 class VGAJobRoutes(unittest.IsolatedAsyncioTestCase):
@@ -88,6 +89,41 @@ class VGAJobRoutes(unittest.IsolatedAsyncioTestCase):
         denied = await self.client.post('/api/course-files/from-vga', json={}, headers={'X-QwenASR-Client': 'other'})
         self.assertEqual(denied.status_code, 403)
         self.assertEqual((await self.client.get('/api/course-files/from-vga/missing')).status_code, 404)
+        self.assertEqual(self.api.store.list('课程'), [])
+
+    async def test_filter_switches(self):
+        from qwen_asr_app.vga_slides import Slide
+
+        slides = []
+        for index, kind in enumerate(('slide', 'document', 'junk'), 1):
+            path = self.root / f'page-{index}.png'
+            fixture(kind).save(path)
+            slides.append(Slide(index, index * 3, index * 3 + 2, index * 3 + 2, path))
+        for options, count in (({}, 2), ({'keep_homework': False}, 1),
+                               ({'filter_enabled': False, 'keep_homework': False}, 3)):
+            with patch('qwen_asr_app.vga_slides.extract_slides', return_value=slides):
+                response = await self.start(display_name=str(count), **options)
+                self.assertEqual(response.status_code, 200, response.text)
+                job = await self.finish(response.json()['id'])
+            self.assertEqual(job['status'], 'completed', job)
+            self.assertEqual(job['pages'], count)
+            self.assertEqual(job['filter_enabled'], options.get('filter_enabled', True))
+            manifest = json.loads((self.api.vga_jobs.root / (job['asset_id'] + '.json')).read_text())
+            self.assertEqual(len(manifest['pages']), count)
+            self.assertTrue(all('kind' in page and 'section' in page for page in manifest['pages']))
+        self.assertEqual((await self.start(filter_enabled='false')).status_code, 400)
+        self.assertEqual((await self.start(keep_homework=0)).status_code, 400)
+
+    async def test_filtered_junk_fails_without_import(self):
+        from qwen_asr_app.vga_slides import Slide
+
+        path = self.root / 'desktop.png'
+        fixture('junk').save(path)
+        with patch('qwen_asr_app.vga_slides.extract_slides', return_value=[Slide(1, 0, 2, 2, path)]):
+            response = await self.start()
+            job = await self.finish(response.json()['id'])
+        self.assertEqual(job['status'], 'failed')
+        self.assertIn('过滤后没有', job['error'])
         self.assertEqual(self.api.store.list('课程'), [])
 
     async def test_blank_video_fails_without_import(self):

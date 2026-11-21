@@ -64,6 +64,9 @@ class VGAJobs:
                     raise ValueError('请先选择有效课程')
                 if not raw:
                     raise ValueError('请输入本机 VGA 录屏视频的完整路径')
+                for key in ('filter_enabled', 'keep_homework'):
+                    if key in payload and not isinstance(payload[key], bool):
+                        raise ValueError('过滤和作业讲解选项必须为布尔值')
                 path = Path(raw).expanduser().resolve()
                 if not path.is_file():
                     raise ValueError('视频文件不存在或不是文件，请检查本机路径')
@@ -74,7 +77,9 @@ class VGAJobs:
                     name = safe_component(str(payload.get('display_name') or path.stem), '录屏')
                     job = {'id': uuid.uuid4().hex, 'category': category, 'video_path': str(path),
                            'name': name + '(VGA课件).pdf', 'status': 'queued', 'progress': 0,
-                           'stage': '等待提取 VGA 课件', 'created_at': time.time()}
+                           'stage': '等待提取 VGA 课件', 'created_at': time.time(),
+                           'filter_enabled': payload.get('filter_enabled', True),
+                           'keep_homework': payload.get('keep_homework', True)}
                     self.jobs[job['id']] = job
                     stop = Event()
                     self.controls[job['id']] = stop
@@ -125,12 +130,15 @@ class VGAJobs:
             job.update(status='running', progress=percent, stage=stage)
 
         def extract(output):
-            from .vga_slides import extract_slides, write_slides_pdf
+            from .vga_slides import extract_slides
+            from .vga_filter import filter_slides, write_filtered_pdf
             slides = extract_slides(job['video_path'], cancel=stop.is_set,
                 progress=lambda elapsed, total: loop.call_soon_threadsafe(update, elapsed, total))
             if not slides:
                 raise ValueError('未找到稳定课件画面，请检查录屏内容或使用更长的视频')
-            return write_slides_pdf(slides, output)
+            result = filter_slides(slides, enabled=job.get('filter_enabled', True),
+                                   keep_homework=job.get('keep_homework', True), cancel=stop.is_set)
+            return write_filtered_pdf(result, output, cancel=stop.is_set)
 
         worker = None
         try:

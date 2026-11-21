@@ -55,6 +55,10 @@
         <label for="vgaName">课件名称（可选）</label><input id="vgaName" class="ui-field" placeholder="默认使用视频文件名">
         <button id="startVga" class="ui-button primary" type="submit">开始提取</button>
         <button id="cancelVga" class="ui-button" type="button" hidden>取消提取</button>
+        <div class="vga-options">
+          <label><input id="vgaFilter" type="checkbox" checked>过滤桌面和重复画面</label>
+          <label><input id="vgaHomework" type="checkbox" checked>保留作业讲解部分</label>
+        </div>
       </form>
       <progress id="vgaProgress" class="file-progress" max="100" value="0" aria-label="VGA 提取进度" hidden></progress>
       <p id="vgaStatus" class="notice" role="status" hidden></p>
