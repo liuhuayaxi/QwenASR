@@ -178,8 +178,9 @@ function renderCourseState(s) {
     catalogRevision = s.course_revision;
     if ($('courses').value && !loadingCourse) loadLessons();
   }
-  if (!optionsLoaded && s.options) {
-    const p = s.options.summary_provider || {};
+  if (!optionsLoaded && s.options) $('vgaExtract').checked = s.options.vga_extract === true;
+  if (!optionsLoaded && s.options.summary_provider) {
+    const p = s.options.summary_provider;
     $('summaryBase').value = p.base_url || '';
     $('summaryModel').value = p.model || '';
     $('generateSummary').checked = s.options.generate_summary !== false;
