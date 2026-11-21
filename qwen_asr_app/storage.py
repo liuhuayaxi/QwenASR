@@ -426,8 +426,9 @@ class RecordingRecord:
         material-only decision and a completed material-derived note are needed.
         """
         choice=self.metadata.get('material_only_note') or {}
-        note=self.metadata.get('ai_note_summary') or {}
+        note=self.metadata.get('ai_note_summary')
         if (choice.get('transcript_policy')!='empty' or self.segments
+                or not isinstance(note, dict)
                 or note.get('source')!='course_material_only' or not note.get('summary')
                 or self.metadata.get('status') not in {'interrupted','failed'}):return False
         stream=self.metadata.get('course_stream') or {}
@@ -1013,10 +1014,11 @@ class RecordingRecord:
         from .chapters import labels_from_metadata
         chapters = labels_from_metadata(self.metadata)
         result.update(chapter='；'.join(chapters), chapters=chapters)
-        note = self.metadata.get('ai_note_summary') or {}
+        note = self.metadata.get('ai_note_summary')
+        has_note = isinstance(note, dict) and bool(note.get('summary'))
         summary, source = self.library_summary()
-        result.update(duration=round(self.duration, 1), has_note=bool(note.get('summary')),
-                      has_ai_summary=bool(note.get('summary')), has_transcript=bool(self.segments),
+        result.update(duration=round(self.duration, 1), has_note=has_note,
+                      has_ai_summary=has_note, has_transcript=bool(self.segments),
                       library_summary=summary[:240], summary_source=source,
                       library_summary_error=self.library_summary_error()[:500],
                       course_replay_sources=replay_sources(self),

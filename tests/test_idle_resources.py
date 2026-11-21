@@ -87,6 +87,24 @@ class CatalogTests(unittest.TestCase):
 
 
 class IdleBackgroundTests(unittest.IsolatedAsyncioTestCase):
+    async def test_recording_library_lists_legacy_note_without_rewriting_it(self):
+        import app
+        with tempfile.TemporaryDirectory() as raw:
+            store, paths = fixture(Path(raw), 2)
+            metadata = json.loads(paths[0].read_text())
+            metadata['ai_note_summary'] = '旧版笔记'
+            atomic_json(paths[0], metadata)
+            before = paths[0].read_bytes()
+            with patch.object(app, 'recording_store', store), patch.object(app, 'discover_courses'):
+                response = await app.recording_library(include_settings=False)
+
+            rows = {row['id']: row for row in response['records']}
+            self.assertEqual(len(rows), 2)
+            self.assertFalse(rows[metadata['id']]['has_note'])
+            self.assertFalse(rows[metadata['id']]['has_ai_summary'])
+            self.assertTrue(rows[paths[1].parent.name]['has_note'])
+            self.assertEqual(paths[0].read_bytes(), before)
+
     async def test_discard_receipts_do_not_reload_missing_recordings_and_restored_rows_are_current(self):
         import app
         from qwen_asr_app.recording_discard import RecordingDiscard
