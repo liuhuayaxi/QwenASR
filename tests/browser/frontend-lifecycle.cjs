@@ -318,12 +318,14 @@ async function main(){
       await page.locator('#courseTitle').filter({hasText:'合成课程'}).waitFor();
       await page.locator('#openVga').click();
       await until(()=>s.requests.some(r=>r.p==='/api/course-files/from-vga'),'VGA recovery request missing');
+      assert.equal(await page.locator('#vgaProgress').isHidden(),true);
       await page.locator('#vgaPath').fill('/missing.mp4');
       await page.locator('#startVga').click();
       await page.locator('#vgaStatus').filter({hasText:'视频文件不存在'}).waitFor();
       await page.locator('#vgaPath').fill('/synthetic/lecture.mp4');
       await page.locator('#startVga').click();
       await page.locator('#vgaStatus').filter({hasText:'25%'}).waitFor();
+      assert.equal(await page.locator('#vgaProgress').evaluate(e=>e.position),0.25);
       assert.equal(await page.locator('#startVga').isDisabled(),true);
       await page.locator('#cancelVga').click();
       await page.locator('#vgaStatus').filter({hasText:'已取消'}).waitFor();
@@ -332,9 +334,16 @@ async function main(){
       s.files=[{id:'vga-pdf',name:'lecture(VGA课件).pdf',kind:'课件',size:1024,created_at:'2026-10-10',conversion:{status:'none'},sync:[]}];
       s.vga={...s.vga,status:'completed',progress:100,stage:'课件已保存，可用于笔记与复习'};
       await page.locator('#vgaStatus').filter({hasText:'100%'}).waitFor();
+      const progressGeometry=await page.locator('#vgaProgress').evaluate(e=>{
+        const panel=e.parentElement,style=getComputedStyle(panel);
+        return {position:e.position,width:e.getBoundingClientRect().width,
+          available:panel.clientWidth-parseFloat(style.paddingLeft)-parseFloat(style.paddingRight)};
+      });
+      assert.equal(progressGeometry.position,1);
+      assert.ok(Math.abs(progressGeometry.width-progressGeometry.available)<2,'Completed VGA progress must span the panel content width');
       await page.locator('.file-card[data-id="vga-pdf"]').waitFor();
       assert.equal(await page.locator('#cancelVga').isHidden(),true);
-      s.proof={invalidPathShown:true,progressShown:true,cancelWorks:true,completedPdfRefreshed:true};
+      s.proof={invalidPathShown:true,progressShown:true,cancelWorks:true,completedPdfRefreshed:true,idleProgressHidden:true,completedProgressFullWidth:true};
     });
     await scenario('12-drive-settings-are-lazy-and-poll-only-while-visible',async(page,s,context,origin)=>{
       await page.goto(origin);await page.waitForFunction(()=>!document.getElementById('recordButton').disabled);
