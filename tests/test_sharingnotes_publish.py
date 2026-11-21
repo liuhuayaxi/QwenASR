@@ -151,6 +151,13 @@ class IncrementalPublishTests(Harness):
         restarted = Publisher(self.api, [COURSE], PublishState(self.tmp / 'state.json'))
         self.assertEqual(restarted.publish_session(session(), self.read)['status'], 'unchanged')
 
+    def test_create_only_replay_must_match_the_accepted_request(self):
+        result = self.publish()
+        message = build_upsert(export_note(session() | {'title': '别的标题'}, self.read), None)
+        status, response = self.api.request('POST', '/api/publish/v1/notes', json.dumps(message).encode())
+        self.assertEqual((status, response['status']), (409, 'conflict'))
+        self.assertEqual(self.api.visible(result['id'])['version'], result['version'])
+
     def test_explicit_delete_with_tombstone_replay(self):
         result = self.publish()
         self.assertEqual(self.publisher.delete_note(result['id'], result['version'])['status'], 'deleted')

@@ -2,7 +2,7 @@
 
 Implements the semantics in sharingnotes-code ``contract/README.md``: blob
 registration and verified upload, missing_blobs before switching a note,
-idempotent replay of ``id + version`` before the ``expectedVersion`` check,
+idempotent replay of an accepted identical request before the ``expectedVersion`` check,
 conditional delete with tombstones. Optionally persisted to a directory.
 """
 from __future__ import annotations
@@ -145,14 +145,20 @@ class MockPublishAPI:
         if missing:
             return 409, _response('missing_blobs', missing=missing, **op)
         note = message['note']
-        current = (self.notes.get(note['id']) or {}).get('note')
-        # Replay of the accepted id+version first, then the condition.
-        if not (current and current['version'] == note['version']):
+        entry = self.notes.get(note['id']) or {}
+        current = entry.get('note')
+        request = hashlib.sha256(json.dumps(message, ensure_ascii=False, sort_keys=True,
+                                            separators=(',', ':')).encode()).hexdigest()
+        # Replay of an accepted identical request first, then the condition (as the Worker does).
+        replay = current and current['version'] == note['version'] and request in entry.get('requests', ())
+        if not replay:
             expected = message.get('expectedVersion')
             if (expected is None and current) or (expected is not None and (not current or current['version'] != expected)):
                 return 409, _response('conflict', error='expectedVersion does not match the current version', **op)
-        self.notes[note['id']] = {k: message[k] for k in ('note', 'catalogEntry', 'references', 'materials',
-                                                          'pageLinks', 'pageSets')}
+        requests = entry.get('requests', []) if current and current['version'] == note['version'] else []
+        self.notes[note['id']] = {**{k: message[k] for k in ('note', 'catalogEntry', 'references', 'materials',
+                                                             'pageLinks', 'pageSets')},
+                                  'requests': list(dict.fromkeys([*requests, request]))}
         self.tombstones.pop(note['id'], None)
         self._persist()
         return 200, _response('accepted', accepted=note['version'], **op)
