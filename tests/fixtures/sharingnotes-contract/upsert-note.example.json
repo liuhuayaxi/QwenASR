@@ -1,0 +1,141 @@
+{
+  "contractVersion": 1,
+  "operation": "upsert_note",
+  "expectedVersion": null,
+  "note": {
+    "id": "18b4a6cb86f3e7ca3993",
+    "course": "合成课程",
+    "title": "合成笔记",
+    "date": "2026-01-01",
+    "chapter": "第一章",
+    "chapters": [
+      "第一章"
+    ],
+    "chapter_sections": {
+      "第一章": "合成小节"
+    },
+    "abstract": "仅供契约测试。",
+    "markdown": "## 合成小节\n合成正文。[课堂 S1](#source-1)\n![合成图](data/images/c47dd9465c00e9a0c8b85e9ea58d3034a0d23b9cf926113602f3460752a4eb96.png)",
+    "sources": [
+      {
+        "id": "1",
+        "start": 0,
+        "end": 5,
+        "corrected": true,
+        "cipher": "smxz1U7mc9B9SKLCRBb3lm4yZoV/7lH2wEc="
+      }
+    ],
+    "sourceBodySha256": "f4616e7c50fb87c3cb4d4b80d650d1968b194e3e1e264479b1b30b409bbb3d15",
+    "version": "6b5913e9124b4cefda3dc26ea3c1b55ede9d2940d250f4855026b750b44cf39c",
+    "wordCount": 116,
+    "images": [
+      {
+        "src": "data/images/c47dd9465c00e9a0c8b85e9ea58d3034a0d23b9cf926113602f3460752a4eb96.png",
+        "sha256": "c47dd9465c00e9a0c8b85e9ea58d3034a0d23b9cf926113602f3460752a4eb96",
+        "width": 1,
+        "height": 1
+      }
+    ],
+    "imageCount": 1
+  },
+  "catalogEntry": {
+    "id": "18b4a6cb86f3e7ca3993",
+    "course": "合成课程",
+    "title": "合成笔记",
+    "chapter": "第一章",
+    "chapters": [
+      "第一章"
+    ],
+    "date": "2026-01-01",
+    "abstract": "仅供契约测试。",
+    "version": "6b5913e9124b4cefda3dc26ea3c1b55ede9d2940d250f4855026b750b44cf39c",
+    "wordCount": 116,
+    "imageCount": 1,
+    "file": "notes/18b4a6cb86f3e7ca3993-6b5913e9124b.json",
+    "sourceCount": 1,
+    "lessonAt": "2026-01-01T09:00:00+08:00"
+  },
+  "references": {
+    "images": [
+      "c47dd9465c00e9a0c8b85e9ea58d3034a0d23b9cf926113602f3460752a4eb96"
+    ],
+    "pages": [
+      "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    ],
+    "pdfs": [
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    ]
+  },
+  "materials": [
+    {
+      "id": "ffffffffffffffffffff",
+      "course": "合成课程",
+      "title": "合成课件",
+      "kind": "课程资料",
+      "pages": 1,
+      "updatedAt": "2026-01-01T09:00:00+08:00",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "bytes": 128,
+      "url": "/media/pdf-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.pdf",
+      "source_pages": 1,
+      "pageImages": true
+    }
+  ],
+  "pageLinks": {
+    "version": "6b5913e9124b4cefda3dc26ea3c1b55ede9d2940d250f4855026b750b44cf39c",
+    "mapping_version": "section-pages-v1",
+    "materials": [
+      "ffffffffffffffffffff"
+    ],
+    "sections": [
+      {
+        "index": 0,
+        "heading": "合成小节",
+        "content_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "targets": [
+          {
+            "pdf": "ffffffffffffffffffff",
+            "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "title": "合成课件",
+            "page_start": 1,
+            "page_end": 1,
+            "viewer_page_start": 1,
+            "viewer_page_end": 1
+          }
+        ]
+      }
+    ]
+  },
+  "pageSets": [
+    {
+      "manifest": {
+        "version": 2,
+        "pdf_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "pages": 1,
+        "format": "webp",
+        "width": 1280,
+        "quality": 70,
+        "thumb_width": 320,
+        "sizes": [
+          [
+            1280,
+            960
+          ]
+        ],
+        "source_pages": [
+          null
+        ],
+        "bytes": 64
+      },
+      "manifestSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "files": [
+        {
+          "page": 1,
+          "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "thumbnailSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      ]
+    }
+  ]
+}

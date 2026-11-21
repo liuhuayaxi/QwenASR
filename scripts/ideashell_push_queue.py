@@ -227,8 +227,24 @@ def _courseware_hook_in_sync(sharing):
     return sync_site_publishes_courseware(sharing)
 
 
+def _incremental_publish_configured():
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from qwen_asr_app.sharingnotes_publish import PublishConfig
+    try:
+        return PublishConfig.load().configured
+    except ValueError:
+        return False
+
+
 def finish(state):
-    sharing = ROOT.parent / 'sharingnotes'
+    sharing = Path(os.environ.get('SHARINGNOTES_DIR') or ROOT.parent / 'sharingnotes')
+    if _incremental_publish_configured():
+        # The running app publishes each saved note through the publish API;
+        # the full static sync and its git checkout are not needed.
+        state['sharingnotes'] = {'mode': 'incremental', 'result': '由应用内增量发布处理'}
+        save(state)
+        return drive_backup(state)
     state['sharingnotes'] = 'running'
     save(state)
     try:
@@ -254,6 +270,10 @@ def finish(state):
         state['sharingnotes'] = {'error': str(exc)[:400]}
     log(f'sharingnotes: {state["sharingnotes"]}')
     save(state)
+    return drive_backup(state)
+
+
+def drive_backup(state):
     headers = {'X-QwenASR-Client': 'drive-backup', 'Origin': API}
     for _ in range(120):
         code, body, _ = call('POST', '/api/library/drive/start', {}, timeout=60, headers=headers)

@@ -1,0 +1,190 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sharingnotes.invalid/contract/upsert-note.schema.json",
+  "title": "Sharing Notes upsert-note (planned API v1)",
+  "type": "object",
+  "properties": {
+    "expectedVersion": {"anyOf": [{"$ref": "common.schema.json#/$defs/hash"}, {"type": "null"}]},
+    "contractVersion": {
+      "const": 1
+    },
+    "operation": {
+      "const": "upsert_note"
+    },
+    "note": {
+      "$ref": "note.schema.json"
+    },
+    "catalogEntry": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{20}$"
+        },
+        "course": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "chapter": {
+          "type": "string"
+        },
+        "chapters": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "date": {
+          "type": "string"
+        },
+        "abstract": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "wordCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "imageCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "file": {
+          "type": "string",
+          "pattern": "^notes/[a-f0-9]{20}-[a-f0-9]{12}\\.json$"
+        },
+        "sourceCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "lessonAt": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "course",
+        "title",
+        "chapter",
+        "chapters",
+        "date",
+        "abstract",
+        "version",
+        "wordCount",
+        "imageCount",
+        "file",
+        "sourceCount",
+        "lessonAt"
+      ],
+      "additionalProperties": true
+    },
+    "references": {
+      "type": "object",
+      "properties": {
+        "images": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "uniqueItems": true
+        },
+        "pages": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "uniqueItems": true
+        },
+        "pdfs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "images",
+        "pages",
+        "pdfs"
+      ],
+      "additionalProperties": false
+    },
+    "materials": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/pdf"
+      }
+    },
+    "pageLinks": {
+      "$ref": "common.schema.json#/$defs/pageLinkEntry"
+    },
+    "pageSets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "manifest": {
+            "$ref": "pages-manifest.schema.json"
+          },
+          "manifestSha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "page": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "sha256": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                },
+                "thumbnailSha256": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                }
+              },
+              "required": [
+                "page",
+                "sha256",
+                "thumbnailSha256"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "manifest",
+          "manifestSha256",
+          "files"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "expectedVersion",
+    "contractVersion",
+    "operation",
+    "note",
+    "catalogEntry",
+    "references",
+    "materials",
+    "pageLinks",
+    "pageSets"
+  ],
+  "additionalProperties": false
+}
