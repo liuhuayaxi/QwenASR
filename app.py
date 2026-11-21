@@ -54,6 +54,7 @@ from qwen_asr_app.ai import (
     provider_transport,
     uses_agy_gemini,
     agy_rewrite_source_budget,
+    is_recoverable_structured_error,
     polish_and_translate,
     polish_timestamped_segments,
     polish_timestamped_segments_resilient,
@@ -806,6 +807,13 @@ AUTO_RETRY_KINDS = {
     "network_connect_timeout", "network_read_timeout", "network_transport",
 }
 MAX_AUTOMATIC_RETRIES = 6
+# AGY reports an ambiguous authentication handshake timeout as a transient
+# network error. Six retries make a failed note look hung for over 12 minutes
+# (15+30+60+120+300+300 seconds), so give this startup failure only two chances
+# before surfacing it for user action.
+AUTOMATIC_RETRY_LIMITS = {
+    "network_connect_timeout": 2,
+}
 # Google sometimes answers "User location is not supported". The note job
 # retries every 3 minutes for at most 30 minutes and resumes saved steps.
 # The retry does not diagnose why the upstream refused the region.
@@ -849,6 +857,11 @@ def _may_auto_retry(exc: BaseException) -> bool:
             return False
         current = current.__cause__
     return _error_kind(exc) in AUTO_RETRY_KINDS
+
+
+def _automatic_retry_limit(exc: BaseException) -> int:
+    """Return the bounded retry count for this typed upstream failure."""
+    return AUTOMATIC_RETRY_LIMITS.get(_error_kind(exc), MAX_AUTOMATIC_RETRIES)
 
 
 def _automatic_retry_delay(attempt: int) -> int:
@@ -1269,7 +1282,7 @@ def _start_aux_ai_job(record: RecordingRecord, kind: str, runner: Any) -> bool:
                 except Exception as exc:
                     error_kind = _error_kind(exc)
                     automatic_attempt += 1
-                    if _may_auto_retry(exc) and automatic_attempt <= MAX_AUTOMATIC_RETRIES:
+                    if _may_auto_retry(exc) and automatic_attempt <= _automatic_retry_limit(exc):
                         delay = _automatic_retry_delay(automatic_attempt)
                         _update_ai_job(
                             record, kind, status="waiting_retry", error=str(exc),
@@ -1339,6 +1352,7 @@ def _unrefined_segments(record: RecordingRecord) -> list[dict[str, Any]]:
 
 
 _EMPTY_SPEECH_RE = re.compile(r"^[\s，。！？,.!?、]*(?:啊|哎|诶|嗯|呃|额|唔|那个|就是说)[\s，。！？,.!?、]*$")
+REFINEMENT_MAX_REQUEST_SECONDS = 420
 
 
 async def _run_refinement_job_unlocked(record: RecordingRecord, config: dict[str, Any]) -> None:
@@ -1379,9 +1393,7 @@ async def _run_refinement_job_unlocked(record: RecordingRecord, config: dict[str
     current_tokens = 0
     for segment in targets:
         cost = estimate_tokens(str(segment.get("raw") or "")) + 24
-        if current and (
-            current_tokens + cost > token_budget
-        ):
+        if current and current_tokens + cost > token_budget:
             groups.append(current)
             current, current_tokens = [], 0
         current.append(segment)
@@ -1403,6 +1415,18 @@ async def _run_refinement_job_unlocked(record: RecordingRecord, config: dict[str
             group_config = json.loads(json.dumps(config))
             group_config['_preserve_segment_boundaries']=True
             group_config['_transcript_context']=context_for(record,group,context_window)
+            correction_provider = provider_for_mode(group_config.get('ai') or {}, 'correction')
+            if provider_transport(correction_provider) == 'agy_cli':
+                saved_provider = (group_config.get('ai') or {}).get('correction_provider')
+                if isinstance(saved_provider, dict):
+                    try:
+                        configured_timeout = int(saved_provider.get('cli_timeout_seconds') or REFINEMENT_MAX_REQUEST_SECONDS)
+                    except (TypeError, ValueError):
+                        configured_timeout = REFINEMENT_MAX_REQUEST_SECONDS
+                    saved_provider['cli_timeout_seconds'] = min(
+                        configured_timeout or REFINEMENT_MAX_REQUEST_SECONDS,
+                        REFINEMENT_MAX_REQUEST_SECONDS,
+                    )
             from qwen_asr_app.transcription_assist.service import evidence_config
             group_config = await evidence_config(record,group_config,'\n'.join(str(s.get('raw') or '') for s in group),limit=12)
             installed=set()
@@ -1412,8 +1436,41 @@ async def _run_refinement_job_unlocked(record: RecordingRecord, config: dict[str
                 commit_blocks(record,fresh)
                 installed.update(i for b in fresh for i in b['segment_ids'])
                 update_progress()
-            mapped = await polish_timestamped_segments_resilient(
-                group,str(group[0].get('language') or ''),group_config,mode='correction',on_checkpoint=checkpoint)
+            try:
+                mapped = await polish_timestamped_segments_resilient(
+                    group,str(group[0].get('language') or ''),group_config,mode='correction',on_checkpoint=checkpoint)
+            except (AIRequestError, ValueError) as exc:
+                if not is_recoverable_structured_error(exc):
+                    raise
+                # A malformed/empty response for one leaf must not fail the
+                # entire lecture group. Retry the still-missing segments one
+                # irrecoverable leaf marked for the next explicit retry.
+                async def recover_parts(parts):
+                    parts = [part for part in parts if int(part['id']) not in installed]
+                    if not parts:
+                        return []
+                    try:
+                        result = await polish_timestamped_segments_resilient(
+                            parts, str(parts[0].get('language') or group[0].get('language') or ''),
+                            group_config, mode='correction', on_checkpoint=checkpoint)
+                        checkpoint(result)
+                        return result
+                    except Exception as part_exc:
+                        if not is_recoverable_structured_error(part_exc):
+                            raise
+                        if len(parts) == 1:
+                            current = next((item for item in record.segments if int(item.get('id', 0)) == int(parts[0]['id'])), None)
+                            if current is not None:
+                                current['ai_pending'] = False
+                                current['ai_error'] = str(part_exc)
+                                record.save_all()
+                            return []
+                        middle = len(parts) // 2
+                        left = await recover_parts(parts[:middle])
+                        right = await recover_parts(parts[middle:])
+                        return [*left, *right]
+
+                mapped = await recover_parts(group)
             checkpoint(mapped)
             completed += 1
             update_progress()
@@ -2477,7 +2534,7 @@ def start_summary_job(record: RecordingRecord, payload: dict[str, Any], *, autom
                                    error_kind=error_kind, region_retry_count=region_attempt - 1, retry_in_seconds=0)
                         return
                     automatic_attempt += 1
-                    if _may_auto_retry(exc) and automatic_attempt <= MAX_AUTOMATIC_RETRIES:
+                    if _may_auto_retry(exc) and automatic_attempt <= _automatic_retry_limit(exc):
                         delay = _automatic_retry_delay(automatic_attempt)
                         save_state(
                             "waiting_retry", error, error_kind=error_kind,

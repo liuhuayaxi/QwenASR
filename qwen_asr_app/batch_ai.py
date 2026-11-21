@@ -16,6 +16,7 @@ from .ai import (
     output_limit_for,
     uses_agy_gemini,
     agy_rewrite_source_budget,
+    is_recoverable_structured_error,
     polish_and_translate,
     polish_timestamped_segments_resilient,
     retry_transient_ai,
@@ -99,6 +100,7 @@ async def correct_batch_segments(
     candidate_by_id = {}
     provenance_by_id = {}
     error = None
+    segment_errors = {}
     installed=set()
     saved_blocks={}
     def checkpoint(blocks):
@@ -116,18 +118,47 @@ async def correct_batch_segments(
             installed.add(ident)
     try:
         async def correct_remaining():
+            segment_errors.clear()
             remaining=[s for s in segments if int(s['id']) not in installed]
             if remaining:
-                result=await polish_timestamped_segments_resilient(remaining,str(segments[0].get('language') or ''),
-                    ai_config,mode='correction',on_checkpoint=checkpoint)
+                try:
+                    result=await polish_timestamped_segments_resilient(remaining,str(segments[0].get('language') or ''),
+                        ai_config,mode='correction',on_checkpoint=checkpoint)
+                except (AIRequestError, ValueError) as exc:
+                    # A malformed/empty structured response from one segment
+                    # must not discard the valid siblings in this batch. The
+                    # resilient helper may already have checkpointed some
+                    # halves before reaching the bad leaf, so retry only the
+                    # still-uninstalled segments individually.
+                    if not is_recoverable_structured_error(exc):
+                        raise
+                    for segment in remaining:
+                        ident = int(segment['id'])
+                        if ident in installed:
+                            continue
+                        try:
+                            one = await polish_timestamped_segments_resilient(
+                                [segment], str(segment.get('language') or segments[0].get('language') or ''),
+                                ai_config, mode='correction', on_checkpoint=checkpoint)
+                            if len(one) != 1 or one[0].get('segment_ids') != [ident]:
+                                raise AIRequestError('单段精修编号不完整，原文保留', kind='invalid_segment_mapping')
+                            checkpoint(one)
+                        except Exception as segment_exc:
+                            if not is_recoverable_structured_error(segment_exc):
+                                raise
+                            segment_errors[ident] = str(segment_exc)
+                    result = [saved_blocks[ident] for ident in
+                              (int(s['id']) for s in remaining)
+                              if ident in saved_blocks]
                 # Validate mock/legacy adapters before accepting their response.
-                expected=[int(s['id']) for s in remaining]
+                expected=[int(s['id']) for s in remaining if int(s['id']) not in segment_errors]
                 actual=[int(b['segment_ids'][0]) for b in result if len(b.get('segment_ids',[]))==1]
-                if actual!=expected:raise AIRequestError('批量精修的段落编号不完整，原文已保留',kind='invalid_segment_mapping')
+                if actual!=expected:
+                    raise AIRequestError('批量精修的段落编号不完整，原文已保留',kind='invalid_segment_mapping')
                 checkpoint(result)
-            return [saved_blocks[int(s['id'])] for s in segments]
+            return [saved_blocks[int(s['id'])] for s in segments if int(s['id']) not in segment_errors]
         blocks = await retry_transient_ai(correct_remaining)
-        expected = [int(segment["id"]) for segment in segments]
+        expected = [int(segment["id"]) for segment in segments if int(segment["id"]) not in segment_errors]
         actual = [int(block["segment_ids"][0]) for block in blocks
                   if len(block.get("segment_ids", [])) == 1 and str(block.get("corrected") or "").strip()]
         if actual != expected or len(blocks) != len(expected):
@@ -137,6 +168,8 @@ async def correct_batch_segments(
         candidate_by_id = {int(block['segment_ids'][0]):{**block['correction_review'],'segment_ids':block['segment_ids']} for block in blocks if block.get('correction_review')}
         provenance_by_id = {int(block['segment_ids'][0]):block['correction_provenance'] for block in blocks if block.get('correction_provenance')}
     except Exception as exc:
+        if not is_recoverable_structured_error(exc):
+            raise
         error = str(exc)
     source_by_id = {int(segment["id"]): segment for segment in segments}
     updated = []
@@ -148,7 +181,9 @@ async def correct_batch_segments(
             updated.append(current)
             continue
         current.update(source_by_id[ident], ai_pending=False)
-        if error is not None:
+        if ident in segment_errors:
+            current["ai_error"] = segment_errors[ident]
+        elif error is not None:
             current["ai_error"] = error
         else:
             current["corrected"] = corrected[ident]

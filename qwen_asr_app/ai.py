@@ -111,6 +111,34 @@ async def retry_transient_ai(
             await asyncio.sleep(delay)
 
 
+RECOVERABLE_STRUCTURED_KINDS = frozenset({
+    "invalid_json",
+    "invalid_segment_mapping",
+    "output_truncated",
+    "output_incomplete",
+    "input_too_long",
+})
+
+
+def is_recoverable_structured_error(exc: BaseException) -> bool:
+    """Return whether an AI response may be safely split and retried.
+
+    Transport, authentication, configuration, and provider errors must escape
+    the structured-output recovery path so the owning task can apply its
+    normal retry policy instead of being silently converted into per-segment
+    errors.
+    """
+    if isinstance(exc, json.JSONDecodeError):
+        return True
+    kind = getattr(exc, "kind", None)
+    if kind is None:
+        # The resilient parser historically treated plain ValueError as a
+        # malformed structured response, but arbitrary runtime/I/O failures
+        # must never be swallowed by a segment fallback.
+        return isinstance(exc, ValueError)
+    return str(kind) in RECOVERABLE_STRUCTURED_KINDS
+
+
 def transport_error_kind(exc: BaseException) -> tuple[str, str]:
     text = str(exc).lower()
     if any(marker in text for marker in ("nodename nor servname", "name or service not known", "temporary failure in name resolution", "getaddrinfo")):
@@ -1178,13 +1206,7 @@ async def polish_timestamped_segments_resilient(
         )
     except (AIRequestError, ValueError) as exc:
         kind = str(getattr(exc, "kind", "invalid_json"))
-        recoverable = kind in {
-            "invalid_json",
-            "invalid_segment_mapping",
-            "output_truncated",
-            "output_incomplete",
-            "input_too_long",
-        } or isinstance(exc, json.JSONDecodeError)
+        recoverable = is_recoverable_structured_error(exc)
         if not recoverable:
             raise
         if len(segments) > 1:

@@ -325,6 +325,19 @@ class SegmentRetryTests(unittest.IsolatedAsyncioTestCase):
 
 
 class AutomaticRetryTests(unittest.IsolatedAsyncioTestCase):
+    def test_ambiguous_agy_auth_timeout_has_a_short_retry_budget(self) -> None:
+        error = AIRequestError(
+            "authentication failed or timed out",
+            kind="network_connect_timeout",
+        )
+        self.assertEqual(app._automatic_retry_limit(error), 2)
+        self.assertEqual(
+            app._automatic_retry_limit(
+                AIRequestError("temporary outage", kind="provider_unavailable")
+            ),
+            app.MAX_AUTOMATIC_RETRIES,
+        )
+
     async def test_aux_task_waits_and_recovers_from_rate_limit(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             record = RecordingRecord(Path(raw), {
