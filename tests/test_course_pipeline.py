@@ -26,6 +26,25 @@ async def until(predicate):
 
 
 class PipelineTests(unittest.IsolatedAsyncioTestCase):
+    async def test_vga_binding_merges_fresh_metadata_and_survives_late_correction_save(self):
+        for active in (False, True):
+            with self.subTest(active=active), tempfile.TemporaryDirectory() as raw:
+                stale = SimpleNamespace(metadata={'correction': 'running'})
+                fresh = SimpleNamespace(metadata={'correction': 'completed'}, save_metadata=Mock())
+                store = SimpleNamespace(find=Mock(side_effect=[stale, fresh]))
+                manager = SimpleNamespace(jobs={'lesson': SimpleNamespace(record=fresh)} if active else {})
+                with patch.object(service.app.state, 'recording_store', store, create=True), \
+                     patch.object(service.app.state, 'course_stream_manager', manager, create=True), \
+                     patch.object(service.client, 'vga_sources', return_value=[{}]), \
+                     patch.object(service, 'extract_courseware', AsyncMock(return_value='asset')):
+                    await service.import_vga({'id': 'A'}, {'id': 'lesson', 'directory': raw}, '测试', {})
+                self.assertEqual(fresh.metadata, {'correction': 'completed', 'review_material_ids': ['asset']})
+                self.assertNotIn('review_material_ids', stale.metadata)
+                if active:
+                    manager.jobs['lesson'].record.metadata['correction'] = 'verified'
+                    manager.jobs['lesson'].record.save_metadata()
+                    self.assertEqual(manager.jobs['lesson'].record.metadata['review_material_ids'], ['asset'])
+
     async def test_vga_download_concatenates_and_extracts_using_existing_transcript(self):
         import av
         from qwen_asr_app import smartclass_vga

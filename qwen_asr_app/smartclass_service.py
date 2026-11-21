@@ -793,6 +793,11 @@ async def import_vga(group, complete, category, entry):
             entry['message'] = '正在从 VGA 提取课堂课件'
             save_imports()
             asset = await extract_courseware(sources, record, category, stop_event)
+        manager = getattr(app.state, 'course_stream_manager', None)
+        stream = manager.jobs.get(complete['id']) if manager else None
+        record = stream.record if stream else store.find(complete['id'])
+        if record is None:
+            raise SmartClassError('无法读取课堂转写')
         record.metadata['review_material_ids'] = [asset]
         record.save_metadata()
         saved = {'status': 'completed', 'asset_id': asset}
