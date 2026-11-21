@@ -6,10 +6,10 @@ import json
 import math
 from pathlib import Path
 import re
-import tempfile
 import uuid
 
 from .paths import PRIVATE_ROOT
+from .remote_operations import discard_completed_payloads
 from .vga_slides import ExtractionCancelled
 
 
@@ -85,10 +85,17 @@ def find_audio(video, audio=None):
 
 
 async def transcribe_audio(path, category, progress=None):
-    root = PRIVATE_ROOT / 'vga-audio'
-    root.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix='transcription-', dir=root) as raw:
-        return await _transcribe_audio(path, category, progress, Path(raw))
+    folder = PRIVATE_ROOT / 'uploads' / ('vga-' + uuid.uuid4().hex) / 'remote'
+    folder.mkdir(parents=True, exist_ok=True)
+    try:
+        return await _transcribe_audio(path, category, progress, folder.parent)
+    finally:
+        await asyncio.to_thread(discard_completed_payloads, folder / 'receipt.json')
+        try:
+            folder.rmdir()
+            folder.parent.rmdir()
+        except OSError:
+            pass
 
 
 async def _transcribe_audio(path, category, progress, folder):

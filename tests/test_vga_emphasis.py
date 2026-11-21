@@ -212,7 +212,7 @@ class VGAEmphasisTests(unittest.IsolatedAsyncioTestCase):
         mode = 'complete'
         async def stream(path, name, config, **options):
             folder = Path(config['_remote_operation_dir'])
-            folder.mkdir(parents=True)
+            folder.mkdir(parents=True, exist_ok=True)
             (folder / 'audio.wav').write_bytes(b'large PCM audio')
             downloaded = folder / 'downloads'
             downloaded.mkdir()
@@ -226,6 +226,7 @@ class VGAEmphasisTests(unittest.IsolatedAsyncioTestCase):
                 yield json.dumps({'type': 'complete', 'session': {'id': 'archive', 'segments': []}}).encode()
         with patch.dict(sys.modules, {'app': SimpleNamespace(batch_transcription_stream=stream)}), \
              patch('qwen_asr_app.vga_emphasis.PRIVATE_ROOT', self.root / 'private'), \
+             patch('qwen_asr_app.remote_operations.PRIVATE_ROOT', self.root / 'private'), \
              patch('qwen_asr_app.inference_providers.inference_settings.for_new_task',
                    return_value={'asr_provider': 'remote_only'}):
             for mode in ('complete', 'error', 'raise'):
@@ -237,6 +238,42 @@ class VGAEmphasisTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(folders[-1].exists())
                 self.assertEqual(archive.read_bytes(), b'archived audio')
                 self.assertTrue(self.image.exists())
+
+    async def test_failed_poll_preserves_recovery_receipt_but_discards_payloads(self):
+        folders = []
+        state = 'running'
+        async def stream(path, name, config, **options):
+            folder = Path(config['_remote_operation_dir'])
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / 'receipt.json').write_text(json.dumps({
+                'state': state, 'job_id': 'accepted-job', 'key': 'idempotency-key',
+                'fingerprint': {'kind': 'asr', 'endpoint': 'http://localhost:8765'}}))
+            (folder / 'receipt.cancel.json').write_text('{"requested": true}')
+            (folder / 'receipt.lock').touch()
+            (folder / 'audio.wav').write_bytes(b'PCM')
+            (folder / 'input.wav').write_bytes(b'canonical PCM')
+            downloads = folder / 'downloads'
+            downloads.mkdir()
+            (downloads / 'segments.json').write_text('[]')
+            (folder / 'downloaded-result.zip').write_bytes(b'zip')
+            folders.append(folder)
+            yield json.dumps({'type': 'error', 'message': '远程轮询失败，取消尚未确认'}).encode()
+        with patch.dict(sys.modules, {'app': SimpleNamespace(batch_transcription_stream=stream)}), \
+             patch('qwen_asr_app.vga_emphasis.PRIVATE_ROOT', self.root / 'private'), \
+             patch('qwen_asr_app.remote_operations.PRIVATE_ROOT', self.root / 'private'), \
+             patch('qwen_asr_app.inference_providers.inference_settings.for_new_task',
+                   return_value={'asr_provider': 'remote_only'}):
+            for state in ('running', 'cancel_unconfirmed'):
+                with self.assertRaisesRegex(RuntimeError, '远程轮询失败'):
+                    await transcribe_audio(self.image, '课程')
+                folder = folders[-1]
+                receipt = json.loads((folder / 'receipt.json').read_text())
+                self.assertEqual(receipt['state'], state)
+                self.assertEqual(receipt['job_id'], 'accepted-job')
+                self.assertEqual(receipt['key'], 'idempotency-key')
+                self.assertEqual({p.name for p in folder.iterdir()},
+                                 {'receipt.json', 'receipt.cancel.json', 'receipt.lock'})
+                self.assertTrue(self.image.is_file())
 
     async def test_running_transcription_is_cancelled(self):
         entered, cancelled, stop = asyncio.Event(), asyncio.Event(), Event()
