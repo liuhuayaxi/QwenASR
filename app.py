@@ -1661,7 +1661,15 @@ async def ai_task_action(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
     existing = (background_summary_tasks.get(record_id) if kind == "summary"
                 else background_ai_tasks.get(f"{kind}:{record_id}"))
     if existing is not None and not existing.done():
-        return {"accepted": False}
+        if existing.cancelling():
+            await asyncio.wait({existing}, timeout=3)
+            current = (background_summary_tasks.get(record_id) if kind == "summary"
+                       else background_ai_tasks.get(f"{kind}:{record_id}"))
+            if current is not None and current is not existing and not current.done():
+                return {"accepted": False, "reason": "任务已由其他请求继续，请刷新查看进度"}
+        if not existing.done():
+            return {"accepted": False, "reason": "任务仍在运行或保存暂停进度，请稍后再试"}
+        record = recording_store.find(record_id) or record
     if not summary_dependency:
         require_recording_available(record_id)
     try:

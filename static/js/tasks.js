@@ -386,7 +386,8 @@ async function perform(targets, action, bulk = false) {
       const failures = result.results.filter(item => !item.ok).map(item => `${targets.find(task => task.id === item.id)?.title || '任务'}：${item.error}`);
       notice('actionResult', `已提交${actionLabels[action]} ${result.accepted}/${result.requested} 项任务${failures.length ? '\n' + failures.join('\n') : ''}`);
     } else {
-      await api('/api/tasks/action', items[0]);
+      const result = await api('/api/tasks/action', items[0]);
+      if (result.accepted === false) throw new Error(result.reason || '任务尚未接受，请稍后再试');
       toast(action === 'pause' || action === 'cancel' ? `已请求${actionLabels[action]}，正在保存进度` : '任务已加入后台队列');
       state.selected.delete(targets[0].id);
     }

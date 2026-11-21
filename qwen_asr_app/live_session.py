@@ -130,6 +130,9 @@ class TranscriptionSession:
         """Coalesce many completed ASR segments into one periodic worker."""
         if (recording.metadata.get('discard_job') or {}).get('status') in {'discarding','discarded'}:
             return
+        job_kind = 'refinement' if kind == 'review' else 'live_summary'
+        if ((recording.metadata.get('ai_jobs') or {}).get(job_kind) or {}).get('status') in {'paused', 'cancelled'}:
+            return
         self.periodic_dirty[kind] = True
         current = self.periodic_tasks.get(kind)
         if current is not None and not current.done():

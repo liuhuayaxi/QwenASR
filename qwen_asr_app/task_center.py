@@ -368,7 +368,10 @@ def task_center_router(ai_tasks, ai_action, courses, pdfs, uploads=None, intelli
             if task["type"] == "upload":
                 return await uploads.action(task["job_id"], action)
             if task["family"] == "ai":
-                return await ai_action({**payload, "recording_id": task["recording_id"], "type": task["type"]})
+                result = await ai_action({**payload, "recording_id": task["recording_id"], "type": task["type"]})
+                if isinstance(result, dict) and result.get('accepted') is False:
+                    raise HTTPException(409, result.get('reason') or '任务尚未接受，请稍后再试')
+                return result
             if task["type"] == "course_pdf":
                 return await courses.conversion_action(task["category"], task["asset_id"], action)
             return pdfs.action(task["job_id"], action)
