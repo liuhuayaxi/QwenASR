@@ -16,6 +16,14 @@ video = test_smartclass.video
 
 
 class ImportStatusTests(unittest.TestCase):
+    def test_completed_lesson_preserves_vga_fallback_warning(self):
+        warning = 'VGA 提取不可用，已回退到本地资料库课件'
+        history = {self.group['id']: {'record_id': 'record-0001', 'state': 'completed', 'warnings': [warning]}}
+        result = self.status([self.record()], history)
+        self.assertEqual(result['state'], 'completed')
+        self.assertEqual(result['warnings'], [warning])
+        self.assertIn(warning, result['detail'])
+
     def setUp(self):
         self.videos = [video('a', '2026-09-03 13:45:00', '2026-09-03 14:30:00', 6),
                        video('b', '2026-09-03 14:35:00', '2026-09-03 15:20:00', 7)]

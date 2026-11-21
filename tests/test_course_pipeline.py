@@ -133,7 +133,14 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                         return httpx.Response(200, json={'accepted': True})
                     self.fail(str(request.url))
                 local = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-                extractor = AsyncMock(side_effect=ValueError('failed')) if failure else AsyncMock(return_value='asset')
+                async def extract(*args):
+                    self.assertEqual(service.imports['A']['state'], 'running')
+                    shown = await service.get_status()
+                    self.assertEqual(shown['imports'][0]['message'], '正在从 VGA 提取课堂课件')
+                    if failure:
+                        raise ValueError('failed')
+                    return 'asset'
+                extractor = AsyncMock(side_effect=extract)
                 with patch.object(service.httpx, 'AsyncClient', return_value=local), \
                      patch.object(service, 'import_stream', AsyncMock(return_value=complete)), \
                      patch.object(service.app.state, 'recording_store', SimpleNamespace(find=lambda _: record), create=True), \

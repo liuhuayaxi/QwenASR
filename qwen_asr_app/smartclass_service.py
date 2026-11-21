@@ -917,13 +917,13 @@ async def import_group(group: dict, run_options: dict | None = None):
             percent = 100 * refinement.get('saved_segments', 0) / max(1, refinement.get('total_segments', 0))
             update_import_phase(entry, "correction", percent, "转写已归档，AI 精修在后台继续", "running")
             entry["message"] = "转写已归档，AI 精修在后台继续"
-        entry.update(state="completed", message="转写已归档，AI 精修在后台继续" if correction_deferred else "音频与转写已归档")
-        save_imports()
         if manifest_path.exists():
             target = Path(complete["directory"]) / "课程来源.json"
             private_json(target, {**read_json(target, {}), **read_json(manifest_path, {})})
         if options.get('vga_extract'):
             await import_vga(group, complete, category, entry)
+        entry.update(state="completed", message="转写已归档，AI 精修在后台继续" if correction_deferred else "音频与转写已归档")
+        save_imports()
         if options.get("generate_summary", True):
             update_import_phase(entry, "summary", 1, "正在提交课堂笔记任务")
             entry.update(message="正在生成整堂课笔记")

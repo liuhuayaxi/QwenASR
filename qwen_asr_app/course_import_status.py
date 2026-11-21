@@ -99,4 +99,11 @@ def lesson_import_statuses(groups, records, imports, queue_items):
         detail = '；'.join(f"第 {period['period']} 节：{period['label'] or '未入库'}" for period in periods)
         result[group['id']] = {'state': state, 'label': LABELS[state], 'detail': detail,
                                'completed': completed, 'total': len(periods), 'periods': periods}
+        ids = set(video_ids(group))
+        warnings = list(dict.fromkeys(warning for entry in history
+            if entry['id'] == group['id'] or ids.intersection(entry.get('video_ids') or [])
+            for warning in entry.get('warnings', [])))
+        if warnings:
+            result[group['id']]['warnings'] = warnings
+            result[group['id']]['detail'] += '；' + '；'.join(warnings)
     return result

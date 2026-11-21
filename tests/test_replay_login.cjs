@@ -42,6 +42,12 @@ async function main() {
   assert.equal(vm.runInContext('optionsLoaded', optionsEnv.context), true);
   assert.equal(optionsEnv.element('summaryModel').value, 'saved-model');
   assert.equal(vm.runInContext('selectedOptions().summary_provider.model', optionsEnv.context), 'saved-model');
+  const rowNodes = {'.lesson-badge':{dataset:{}},'.lesson-import-detail':{}};
+  optionsEnv.context.lessonRow = {querySelector:selector=>rowNodes[selector]};
+  optionsEnv.context.lessonState = {state:'completed',label:'已入库',detail:'VGA 提取不可用，已回退到本地资料库课件',warnings:['fallback']};
+  vm.runInContext('renderLessonStatus(lessonRow, lessonState)', optionsEnv.context);
+  assert.equal(rowNodes['.lesson-import-detail'].hidden, false);
+  assert.match(rowNodes['.lesson-import-detail'].textContent, /本地资料库/);
   const target = 'http://127.0.0.1:8765/course/replay?recording=lesson&seconds=2820';
   for (const action of ['submit','reconnect']) {
     const env=environment(target);

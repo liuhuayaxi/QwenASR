@@ -69,7 +69,7 @@ function renderLessonStatus(row, state) {
   badge.title = state?.detail || '';
   const detail = row.querySelector('.lesson-import-detail');
   detail.textContent = state?.detail || '';
-  detail.hidden = !state?.label || state.state === 'completed';
+  detail.hidden = !state?.label || (state.state === 'completed' && !state.warnings?.length);
 }
 function updateLessonStatuses(statuses) {
   for (const group of currentGroups) {
