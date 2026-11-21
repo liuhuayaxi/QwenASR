@@ -126,10 +126,10 @@ class RefinementCheckpointTests(unittest.IsolatedAsyncioTestCase):
                 return [{'segment_ids':[s['id']],'corrected':s['raw']} for s in segments]
             with patch.object(app,'polish_timestamped_segments_resilient',new=AsyncMock(side_effect=finish)) as call:
                 await app._run_refinement_job_unlocked(record,CONFIG)
-                self.assertEqual(call.await_count,5)
-                self.assertTrue(all(len(item.args[0]) <= app.REFINEMENT_MAX_GROUP_SEGMENTS for item in call.await_args_list))
-                self.assertTrue(all(item.args[2]['ai']['correction_provider']['cli_timeout_seconds'] == app.REFINEMENT_MAX_REQUEST_SECONDS
-                                    for item in call.await_args_list))
+                call.assert_awaited_once()
+                self.assertEqual(len(call.await_args.args[0]), 60)
+                self.assertEqual(call.await_args.args[2]['ai']['correction_provider']['cli_timeout_seconds'],
+                                 app.REFINEMENT_MAX_REQUEST_SECONDS)
             context=context_for(record,record.segments[25:35],1048576)
             self.assertIn('前文',context);self.assertIn('后文',context)
             self.assertGreater(len(context),2000)

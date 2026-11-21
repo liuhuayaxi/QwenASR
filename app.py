@@ -1346,7 +1346,6 @@ def _unrefined_segments(record: RecordingRecord) -> list[dict[str, Any]]:
 
 
 _EMPTY_SPEECH_RE = re.compile(r"^[\s，。！？,.!?、]*(?:啊|哎|诶|嗯|呃|额|唔|那个|就是说)[\s，。！？,.!?、]*$")
-REFINEMENT_MAX_GROUP_SEGMENTS = 12
 REFINEMENT_MAX_REQUEST_SECONDS = 420
 
 
@@ -1388,10 +1387,7 @@ async def _run_refinement_job_unlocked(record: RecordingRecord, config: dict[str
     current_tokens = 0
     for segment in targets:
         cost = estimate_tokens(str(segment.get("raw") or "")) + 24
-        if current and (
-            current_tokens + cost > token_budget
-            or len(current) >= REFINEMENT_MAX_GROUP_SEGMENTS
-        ):
+        if current and current_tokens + cost > token_budget:
             groups.append(current)
             current, current_tokens = [], 0
         current.append(segment)

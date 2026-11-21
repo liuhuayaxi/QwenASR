@@ -78,6 +78,30 @@ class StructuredRecoveryBoundaryTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(all(segment.get('ai_pending') for segment in record.segments))
             self.assertTrue(all(not segment.get('corrected') for segment in record.segments))
 
+    async def test_successful_transport_retry_clears_old_segment_errors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            record = self._record(directory)
+            attempts = 0
+
+            async def respond(items, *args, **kwargs):
+                nonlocal attempts
+                if len(items) > 1:
+                    attempts += 1
+                    if attempts == 1:
+                        raise AIRequestError('malformed JSON', kind='invalid_json')
+                    return [{'segment_ids': [item['id']], 'corrected': '精修' + item['raw']} for item in items]
+                if items[0]['id'] == 1:
+                    raise AIRequestError('empty response', kind='invalid_json')
+                raise AIRequestError('network down', kind='network_transport')
+
+            with patch('qwen_asr_app.ai.asyncio.sleep', new=AsyncMock()), \
+                 patch('qwen_asr_app.batch_ai.polish_timestamped_segments_resilient', side_effect=respond):
+                result = await correct_batch_segments(record, list(record.segments), {})
+
+            self.assertEqual(attempts, 2)
+            self.assertEqual([item['corrected'] for item in result], ['精修原文1', '精修原文2'])
+            self.assertTrue(all(not item.get('ai_error') for item in result))
+
 
 if __name__ == '__main__':
     unittest.main()
