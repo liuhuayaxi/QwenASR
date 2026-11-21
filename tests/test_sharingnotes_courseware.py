@@ -14,7 +14,7 @@ from qwen_asr_app import courseware_publish as cp
 from qwen_asr_app.sharingnotes_courseware import CoursewareSource, material_id
 from qwen_asr_app.sharingnotes_export import export_note
 from qwen_asr_app.sharingnotes_mock_api import MockPublishAPI
-from qwen_asr_app.sharingnotes_publish import Publisher, PublishState, build_upsert
+from qwen_asr_app.sharingnotes_publish import AutoPublisher, Publisher, PublishError, PublishState, build_upsert
 from tests.test_sharingnotes_publish import CONTRACT, COURSE, FIGURE, png, session
 
 ASSET = 'c' * 32
@@ -192,6 +192,44 @@ class CoursewareTests(unittest.TestCase):
         self.item['conversion'] = {'status': 'running'}
         result = self.publish(self.note_session())
         self.assertEqual(self.api.notes[result['id']]['materials'], [])
+
+
+    def test_read_failure_retries_instead_of_dropping_courseware(self):
+        value = self.note_session()
+        first = self.publish(value)
+        self.assertEqual(len(self.api.notes[first['id']]['materials']), 1)
+
+        def broken(course):
+            raise OSError('disk unavailable')
+        self.files.list = broken
+        with self.assertRaises(PublishError):
+            self.publish(self.note_session(title='改标题'))
+        self.assertEqual(len(self.api.notes[first['id']]['materials']), 1)
+
+    def test_invalid_unrelated_pdf_does_not_block_the_note(self):
+        other = 'd' * 32
+        bad = self.tmp / 'files' / other / 'PDF' / '坏.pdf'
+        bad.parent.mkdir(parents=True)
+        bad.write_bytes(b'not a pdf')
+        self.files.items.append({'id': other, 'name': '坏.pptx', 'kind': '课件',
+                                 'conversion': {'status': 'completed', 'name': '坏.pdf'}})
+        result = self.publish(self.note_session())
+        self.assertEqual(result['status'], 'accepted')
+        self.assertEqual([m['id'] for m in self.api.notes[result['id']]['materials']],
+                         [material_id(COURSE, ASSET)])
+        value = self.note_session('rec-2')
+        value['ai_note_summary']['material_version']['course_files'] = {other: 'x' * 64}
+        self.assertEqual(self.publish(value)['status'], 'invalid')
+
+    def test_link_review_and_conversion_wake_the_auto_publisher(self):
+        from qwen_asr_app import section_pages as sp
+        auto = AutoPublisher(None)
+        auto.publisher = Publisher(self.api, [COURSE], self.state)
+        auto.mark([str(sp.LINKS / 'rec-9.json')])
+        self.assertEqual(self.state.pending, ['rec-9'])
+        self.assertFalse(auto.full)
+        auto.mark([str(self.tmp / 'files' / ASSET / 'asset.json')])
+        self.assertTrue(auto.full)
 
 
 if __name__ == '__main__':

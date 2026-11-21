@@ -88,20 +88,23 @@ class CoursewareSource:
         return path
 
     def _materials(self, course):
-        """Every completed AI PDF of a course: id -> (material, path)."""
+        """Every completed AI PDF of a course: (id -> (material, path), id -> why it is unusable).
+
+        Read errors propagate so a transient failure retries instead of
+        publishing the note without its courseware."""
         try:
             folder = self.course_files.folder(course)
-            items = self.course_files.list(course)
-        except (OSError, ValueError):
-            return {}
-        found = {}
-        for item in items:
+        except ValueError:
+            return {}, {}
+        found, bad = {}, {}
+        for item in self.course_files.list(course):
             path = self._pdf(folder, item)
             if path is None:
                 continue
             with path.open('rb') as stream:
                 if not stream.read(8).startswith(b'%PDF-'):
-                    raise ValueError(f'课件 {clean_text(item.get("name"))} 的 AI PDF 签名无效')
+                    bad[item['id']] = f'课件 {clean_text(item.get("name"))} 的 AI PDF 签名无效'
+                    continue
             conversion = item['conversion']
             pages = conversion.get('pages')
             material = {
@@ -116,7 +119,7 @@ class CoursewareSource:
             if type(source_pages) is int and source_pages > 0:
                 material['source_pages'] = source_pages
             found[item['id']] = (material, path)
-        return found
+        return found, bad
 
     # --------------------------------------------------------- page links
     def _links(self, session, note, by_sha):
@@ -180,8 +183,11 @@ class CoursewareSource:
     def __call__(self, exported, session):
         note = exported['note']
         course = str(session.get('category') or '')
-        available = self._materials(course)
+        available, bad = self._materials(course)
         used = ((session.get('ai_note_summary') or {}).get('material_version') or {}).get('course_files') or {}
+        for asset in used:
+            if asset in bad:
+                raise ValueError(bad[asset])
         chosen = {asset: available[asset] for asset in used if asset in available}
         by_sha = {material['sha256']: material for material, _ in available.values()}
         sections, mapping_version = self._links(session, note, by_sha)
