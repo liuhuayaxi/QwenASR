@@ -51,7 +51,7 @@
       <h2>从 VGA 录屏提取课件</h2>
       <p class="muted">输入运行工作台这台电脑上的视频完整路径。自动选取每页最后的稳定画面并保存为当前课程的 PDF 课件；动画识别可能需要人工核对。</p>
       <form id="vgaForm" class="upload-controls">
-        <label for="vgaPath">本机视频路径</label><input id="vgaPath" class="ui-field" placeholder="/完整路径/课堂 VGA.mp4" required>
+        <label for="vgaPath">本机视频路径</label><input id="vgaPath" class="ui-field" placeholder="/完整路径/课堂 VGA.mp4" aria-required="true">
         <label for="vgaName">课件名称（可选）</label><input id="vgaName" class="ui-field" placeholder="默认使用视频文件名">
         <button id="startVga" class="ui-button primary" type="submit">开始提取</button>
         <button id="cancelVga" class="ui-button" type="button" hidden>取消提取</button>

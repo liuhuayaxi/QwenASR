@@ -319,6 +319,14 @@ async function main(){
       await page.locator('#openVga').click();
       await until(()=>s.requests.some(r=>r.p==='/api/course-files/from-vga'),'VGA recovery request missing');
       assert.equal(await page.locator('#vgaProgress').isHidden(),true);
+      const startsBeforeEmpty=s.requests.filter(r=>r.p==='/api/course-files/from-vga' && r.method==='POST').length;
+      for(const emptyPath of ['', '   ']){
+        await page.locator('#vgaPath').fill(emptyPath);
+        await page.locator('#startVga').click();
+        await page.locator('#vgaStatus.error').filter({hasText:'请输入本机 VGA 录屏视频的完整路径'}).waitFor();
+      }
+      assert.equal(s.requests.filter(r=>r.p==='/api/course-files/from-vga' && r.method==='POST').length,startsBeforeEmpty);
+      await page.screenshot({path:path.join(out,'vga-empty-path-chinese-error.png'),fullPage:true});
       await page.locator('#vgaPath').fill('/missing.mp4');
       await page.locator('#startVga').click();
       await page.locator('#vgaStatus').filter({hasText:'视频文件不存在'}).waitFor();
@@ -343,7 +351,7 @@ async function main(){
       assert.ok(Math.abs(progressGeometry.width-progressGeometry.available)<2,'Completed VGA progress must span the panel content width');
       await page.locator('.file-card[data-id="vga-pdf"]').waitFor();
       assert.equal(await page.locator('#cancelVga').isHidden(),true);
-      s.proof={invalidPathShown:true,progressShown:true,cancelWorks:true,completedPdfRefreshed:true,idleProgressHidden:true,completedProgressFullWidth:true};
+      s.proof={invalidPathShown:true,progressShown:true,cancelWorks:true,completedPdfRefreshed:true,idleProgressHidden:true,completedProgressFullWidth:true,emptyPathChineseInlineError:true};
     });
     await scenario('12-drive-settings-are-lazy-and-poll-only-while-visible',async(page,s,context,origin)=>{
       await page.goto(origin);await page.waitForFunction(()=>!document.getElementById('recordButton').disabled);

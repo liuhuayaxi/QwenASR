@@ -274,6 +274,11 @@ $('vgaForm').addEventListener('submit', async event => {
   event.preventDefault();
   if (vgaStarting || vgaActive()) return;
   const payload = {category: state.category, video_path: $('vgaPath').value.trim(), display_name: $('vgaName').value.trim()};
+  if (!payload.video_path) {
+    notice('vgaStatus', '请输入本机 VGA 录屏视频的完整路径', true);
+    $('vgaPath').focus();
+    return;
+  }
   vgaStarting = true; renderVga(); notice('vgaStatus', '正在检查视频文件…');
   try {
     vgaJob = await api('/api/course-files/from-vga', payload);
