@@ -782,6 +782,8 @@ async def import_vga(group, complete, category, entry):
     manifest = read_json(path, {})
     saved = manifest.get('vga', {})
     try:
+        if stop_event.is_set():
+            raise SmartClassError('VGA 提取已暂停，可继续队列重试')
         if record is None:
             raise SmartClassError('无法读取课堂转写')
         asset = saved.get('asset_id')
@@ -793,6 +795,8 @@ async def import_vga(group, complete, category, entry):
             entry['message'] = '正在从 VGA 提取课堂课件'
             save_imports()
             asset = await extract_courseware(sources, record, category, stop_event)
+        if stop_event.is_set():
+            raise SmartClassError('VGA 提取已暂停，可继续队列重试')
         manager = getattr(app.state, 'course_stream_manager', None)
         stream = manager.jobs.get(complete['id']) if manager else None
         record = stream.record if stream else store.find(complete['id'])
@@ -803,6 +807,8 @@ async def import_vga(group, complete, category, entry):
         saved = {'status': 'completed', 'asset_id': asset}
         entry['vga'] = saved
     except Exception as exc:
+        if stop_event.is_set():
+            raise SmartClassError('VGA 提取已暂停，可继续队列重试') from exc
         logging.warning('SmartClass VGA extraction failed for %s: %s', group['id'], type(exc).__name__)
         warning = 'VGA 提取不可用，已回退到本地资料库课件'
         entry.setdefault('warnings', []).append(warning)

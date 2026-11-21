@@ -26,6 +26,37 @@ async def until(predicate):
 
 
 class PipelineTests(unittest.IsolatedAsyncioTestCase):
+    async def test_vga_pause_keeps_queue_resumable_without_fallback(self):
+        with tempfile.TemporaryDirectory() as raw:
+            record = SimpleNamespace(metadata={}, save_metadata=Mock())
+            complete = {'id': 'lesson', 'directory': raw}
+            item = {'group': self.groups['A'], 'options': {'vga_extract': True}, 'state': 'queued'}
+            service.queue_state['items'] = [item]
+            async def extract(*args):
+                service.stop_event.set()
+                service.queue_state['paused'] = True
+                raise SmartClassError('stopped')
+            async def run(group, options):
+                await service.import_vga(group, complete, '测试', service.imports.setdefault('A', {}))
+            with patch.object(service.app.state, 'recording_store', SimpleNamespace(find=lambda _: record), create=True), \
+                 patch.object(service.client, 'vga_sources', return_value=[{}]), \
+                 patch.object(service, 'extract_courseware', AsyncMock(side_effect=extract)) as extractor, \
+                 patch.object(service, 'import_group', run):
+                await service.run_queue()
+                self.assertEqual(item['state'], 'paused')
+                self.assertNotIn('warnings', service.imports['A'])
+                self.assertNotIn('vga', service.imports['A'])
+                self.assertFalse((Path(raw) / '课程来源.json').exists())
+                service.stop_event.clear()
+                service.queue_state['paused'] = False
+                item['state'] = 'queued'
+                extractor.side_effect = None
+                extractor.return_value = 'asset'
+                await service.run_queue()
+                self.assertEqual(item['state'], 'completed')
+                self.assertEqual(record.metadata['review_material_ids'], ['asset'])
+                self.assertEqual(extractor.await_count, 2)
+
     async def test_vga_binding_merges_fresh_metadata_and_survives_late_correction_save(self):
         for active in (False, True):
             with self.subTest(active=active), tempfile.TemporaryDirectory() as raw:
