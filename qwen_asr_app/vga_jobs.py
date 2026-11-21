@@ -64,6 +64,11 @@ class VGAJobs:
                     raise ValueError('请先选择有效课程')
                 if not raw:
                     raise ValueError('请输入本机 VGA 录屏视频的完整路径')
+                for key in ('filter_enabled', 'keep_homework', 'emphasis_enabled'):
+                    if key in payload and not isinstance(payload[key], bool):
+                        raise ValueError('过滤、作业讲解和重点标记选项必须为布尔值')
+                if 'audio_path' in payload and not isinstance(payload['audio_path'], str):
+                    raise ValueError('录音路径必须为文本')
                 path = Path(raw).expanduser().resolve()
                 if not path.is_file():
                     raise ValueError('视频文件不存在或不是文件，请检查本机路径')
@@ -74,7 +79,11 @@ class VGAJobs:
                     name = safe_component(str(payload.get('display_name') or path.stem), '录屏')
                     job = {'id': uuid.uuid4().hex, 'category': category, 'video_path': str(path),
                            'name': name + '(VGA课件).pdf', 'status': 'queued', 'progress': 0,
-                           'stage': '等待提取 VGA 课件', 'created_at': time.time()}
+                           'stage': '等待提取 VGA 课件', 'created_at': time.time(),
+                           'filter_enabled': payload.get('filter_enabled', True),
+                           'keep_homework': payload.get('keep_homework', True),
+                           'emphasis_enabled': payload.get('emphasis_enabled', True),
+                           'audio_path': payload.get('audio_path', '').strip()}
                     self.jobs[job['id']] = job
                     stop = Event()
                     self.controls[job['id']] = stop
@@ -125,12 +134,16 @@ class VGAJobs:
             job.update(status='running', progress=percent, stage=stage)
 
         def extract(output):
-            from .vga_slides import extract_slides, write_slides_pdf
+            from .vga_slides import extract_slides
+            from .vga_filter import filter_slides
             slides = extract_slides(job['video_path'], cancel=stop.is_set,
+                deduplicate=not job.get('filter_enabled', True),
                 progress=lambda elapsed, total: loop.call_soon_threadsafe(update, elapsed, total))
             if not slides:
                 raise ValueError('未找到稳定课件画面，请检查录屏内容或使用更长的视频')
-            return write_slides_pdf(slides, output)
+            result = filter_slides(slides, enabled=job.get('filter_enabled', True),
+                                   keep_homework=job.get('keep_homework', True), cancel=stop.is_set)
+            return result
 
         worker = None
         try:
@@ -139,6 +152,22 @@ class VGAJobs:
                 job.update(status='running', stage='正在读取 VGA 录屏')
                 self.save()
                 worker = asyncio.create_task(asyncio.to_thread(extract, output))
+                try:
+                    result = await asyncio.shield(worker)
+                except asyncio.CancelledError:
+                    stop.set()
+                    await asyncio.gather(worker, return_exceptions=True)
+                    raise
+                from .vga_emphasis import apply_emphasis
+                from .vga_filter import write_filtered_pdf
+                def audio_progress(stage):
+                    job.update(stage='正在根据录音标记重点：' + stage)
+                job.update(progress=95, stage='正在匹配录音重点')
+                await apply_emphasis(result, job['video_path'], audio=job.get('audio_path'),
+                                     enabled=job.get('emphasis_enabled', True), category=job['category'],
+                                     cancel=stop.is_set, progress=audio_progress)
+                job.update(warnings=result.warnings, recording_id=result.recording_id)
+                worker = asyncio.create_task(asyncio.to_thread(write_filtered_pdf, result, output, cancel=stop.is_set))
                 try:
                     manifest = await asyncio.shield(worker)
                 except asyncio.CancelledError:

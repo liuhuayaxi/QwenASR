@@ -30,6 +30,10 @@
 .dropzone h2 { font-size: 16px; }
 .dropzone p { font-size: var(--text-sm); color: var(--muted); margin: 6px 0 0; }
 .upload-controls { display: flex; gap: 8px; margin-left: auto; }
+#vgaForm { flex-wrap: wrap; align-items: center; }
+#vgaForm label { display: inline-flex; align-items: center; gap: 6px; }
+#vgaPath, #vgaName, #vgaAudio { flex: 1; min-width: min(240px, 100%); }
+.vga-options { display: flex; flex-wrap: wrap; gap: 12px; width: 100%; }
 .file-section { margin-top: 28px; }
 .section-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 16px; flex-wrap: wrap; }
 .section-toolbar h2 span { display: inline-block; min-width: 24px; text-align: center; font-size: var(--text-xs); background: var(--green-soft); border-radius: 6px; padding: 3px 7px; margin-left: 6px; color: var(--green); vertical-align: middle; }

@@ -30,6 +30,7 @@ class Slide:
     captured_sec: float
     image_path: Path
     _owner: object = field(default=None, repr=False, compare=False)
+    occurrences: list[dict] = field(default_factory=list)
 
     def manifest(self):
         return {key: getattr(self, key) for key in
@@ -41,7 +42,7 @@ def extract_slides(video_path, *, sample_interval=0.5, min_stable_sec=1.0,
                    stable_threshold=0.01, animation_threshold=0.3,
                    retention_threshold=0.1, duplicate_threshold=0.01,
                    blank_std=3.0, black_threshold=12,
-                   skip_revisited=True, progress=None, cancel=None) -> list[Slide]:
+                   skip_revisited=True, deduplicate=True, progress=None, cancel=None) -> list[Slide]:
     """Return disk-backed slides. Temporary images live as long as the Slides.
 
     progress(elapsed_seconds, total_seconds_or_None) runs for each sample;
@@ -80,7 +81,14 @@ def extract_slides(video_path, *, sample_interval=0.5, min_stable_sec=1.0,
             old = np.load(path).astype(np.int16)
             return candidate.shape == old.shape and changed(candidate, old) <= duplicate_threshold
 
-        if not any(duplicate(old) for old in references):
+        match = next((int(old.stem) - 1 for old in references if duplicate(old)), None) if deduplicate else None
+        if match is not None:
+            retained = slides[match]
+            if not retained.occurrences:
+                retained.occurrences.append(retained.manifest())
+            retained.occurrences.append({'index': retained.index, 'start_sec': candidate_start,
+                                         'end_sec': candidate_end, 'captured_sec': candidate_end})
+        else:
             path = folder / f'{len(slides) + 1:04d}.png'
             shutil.copyfile(candidate_path, path)
             slides.append(Slide(len(slides) + 1, candidate_start, candidate_end,

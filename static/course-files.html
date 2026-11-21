@@ -53,8 +53,14 @@
       <form id="vgaForm" class="upload-controls">
         <label for="vgaPath">本机视频路径</label><input id="vgaPath" class="ui-field" placeholder="/完整路径/课堂 VGA.mp4" aria-required="true">
         <label for="vgaName">课件名称（可选）</label><input id="vgaName" class="ui-field" placeholder="默认使用视频文件名">
+        <label for="vgaAudio">本机录音路径（可选）</label><input id="vgaAudio" class="ui-field" placeholder="留空自动查找同名录音或使用视频音轨">
         <button id="startVga" class="ui-button primary" type="submit">开始提取</button>
         <button id="cancelVga" class="ui-button" type="button" hidden>取消提取</button>
+        <div class="vga-options">
+          <label><input id="vgaFilter" type="checkbox" checked>过滤桌面和重复画面</label>
+          <label><input id="vgaHomework" type="checkbox" checked>保留作业讲解部分</label>
+          <label><input id="vgaEmphasis" type="checkbox" checked>根据录音标记重点页</label>
+        </div>
       </form>
       <progress id="vgaProgress" class="file-progress" max="100" value="0" aria-label="VGA 提取进度" hidden></progress>
       <p id="vgaStatus" class="notice" role="status" hidden></p>

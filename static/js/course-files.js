@@ -241,11 +241,15 @@ const vgaActive = () => ['queued', 'running', 'stopping'].includes(vgaJob?.statu
 function renderVga() {
   $('startVga').disabled = vgaStarting || vgaActive();
   $('vgaPath').disabled = $('vgaName').disabled = vgaStarting || vgaActive();
+  $('vgaFilter').disabled = vgaStarting || vgaActive();
+  $('vgaHomework').disabled = vgaStarting || vgaActive() || !$('vgaFilter').checked;
+  $('vgaEmphasis').disabled = vgaStarting || vgaActive();
+  $('vgaAudio').disabled = vgaStarting || vgaActive() || !$('vgaEmphasis').checked;
   $('cancelVga').hidden = !vgaActive();
   $('cancelVga').disabled = vgaJob?.status === 'stopping';
   $('vgaProgress').hidden = !vgaJob;
   $('vgaProgress').value = vgaJob?.progress || 0;
-  if (vgaJob) notice('vgaStatus', `${vgaJob.category}：${vgaJob.stage}（${vgaJob.progress || 0}%）${vgaJob.error ? '\n' + vgaJob.error : ''}`, vgaJob.status === 'failed');
+  if (vgaJob) notice('vgaStatus', `${vgaJob.category}：${vgaJob.stage}（${vgaJob.progress || 0}%）${vgaJob.error ? '\n' + vgaJob.error : ''}${vgaJob.warnings?.length ? '\n警告：' + vgaJob.warnings.join('\n') : ''}`, vgaJob.status === 'failed');
 }
 const vgaPolling = createVisiblePoll({delay: 1000, enabled: () => !$('vgaPanel').hidden && vgaActive(), run: async () => {
   try {
@@ -270,10 +274,14 @@ $('openVga').addEventListener('click', async () => {
     vgaPolling.wake();
   } catch (error) { notice('vgaStatus', error.message, true); }
 });
+$('vgaFilter').addEventListener('change', renderVga);
+$('vgaEmphasis').addEventListener('change', renderVga);
 $('vgaForm').addEventListener('submit', async event => {
   event.preventDefault();
   if (vgaStarting || vgaActive()) return;
-  const payload = {category: state.category, video_path: $('vgaPath').value.trim(), display_name: $('vgaName').value.trim()};
+  const payload = {category: state.category, video_path: $('vgaPath').value.trim(), display_name: $('vgaName').value.trim(),
+    filter_enabled: $('vgaFilter').checked, keep_homework: $('vgaHomework').checked,
+    emphasis_enabled: $('vgaEmphasis').checked, audio_path: $('vgaAudio').value.trim()};
   if (!payload.video_path) {
     notice('vgaStatus', '请输入本机 VGA 录屏视频的完整路径', true);
     $('vgaPath').focus();

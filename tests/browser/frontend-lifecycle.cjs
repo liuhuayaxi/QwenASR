@@ -319,6 +319,9 @@ async function main(){
       await page.locator('#openVga').click();
       await until(()=>s.requests.some(r=>r.p==='/api/course-files/from-vga'),'VGA recovery request missing');
       assert.equal(await page.locator('#vgaProgress').isHidden(),true);
+      assert.equal(await page.locator('#vgaFilter').isChecked(),true);
+      assert.equal(await page.locator('#vgaHomework').isChecked(),true);
+      assert.equal(await page.locator('#vgaEmphasis').isChecked(),true);
       const startsBeforeEmpty=s.requests.filter(r=>r.p==='/api/course-files/from-vga' && r.method==='POST').length;
       for(const emptyPath of ['', '   ']){
         await page.locator('#vgaPath').fill(emptyPath);
@@ -331,17 +334,33 @@ async function main(){
       await page.locator('#startVga').click();
       await page.locator('#vgaStatus').filter({hasText:'视频文件不存在'}).waitFor();
       await page.locator('#vgaPath').fill('/synthetic/lecture.mp4');
+      await page.locator('#vgaAudio').fill('/synthetic/lecture.aac');
       await page.locator('#startVga').click();
       await page.locator('#vgaStatus').filter({hasText:'25%'}).waitFor();
+      let submitted=s.requests.filter(r=>r.p==='/api/course-files/from-vga' && r.method==='POST').at(-1).body;
+      assert.equal(submitted.filter_enabled,true);assert.equal(submitted.keep_homework,true);
+      assert.equal(submitted.emphasis_enabled,true);assert.equal(submitted.audio_path,'/synthetic/lecture.aac');
+      assert.equal(await page.locator('#vgaEmphasis').isDisabled(),true);
+      assert.equal(await page.locator('#vgaAudio').isDisabled(),true);
+      assert.equal(await page.locator('#vgaFilter').isDisabled(),true);
       assert.equal(await page.locator('#vgaProgress').evaluate(e=>e.position),0.25);
       assert.equal(await page.locator('#startVga').isDisabled(),true);
       await page.locator('#cancelVga').click();
       await page.locator('#vgaStatus').filter({hasText:'已取消'}).waitFor();
+      await page.locator('#vgaHomework').uncheck();
+      await page.locator('#vgaEmphasis').uncheck();
+      assert.equal(await page.locator('#vgaAudio').isDisabled(),true);
+      await page.locator('#vgaFilter').uncheck();
+      assert.equal(await page.locator('#vgaHomework').isDisabled(),true);
       await page.locator('#startVga').click();
       await page.locator('#vgaStatus').filter({hasText:'25%'}).waitFor();
+      submitted=s.requests.filter(r=>r.p==='/api/course-files/from-vga' && r.method==='POST').at(-1).body;
+      assert.equal(submitted.filter_enabled,false);assert.equal(submitted.keep_homework,false);
+      assert.equal(submitted.emphasis_enabled,false);
       s.files=[{id:'vga-pdf',name:'lecture(VGA课件).pdf',kind:'课件',size:1024,created_at:'2026-10-10',conversion:{status:'none'},sync:[]}];
-      s.vga={...s.vga,status:'completed',progress:100,stage:'课件已保存，可用于笔记与复习'};
+      s.vga={...s.vga,status:'completed',progress:100,stage:'课件已保存，可用于笔记与复习',warnings:['录音重点标记失败，已保留全部课件页面']};
       await page.locator('#vgaStatus').filter({hasText:'100%'}).waitFor();
+      await page.locator('#vgaStatus').filter({hasText:'录音重点标记失败'}).waitFor();
       const progressGeometry=await page.locator('#vgaProgress').evaluate(e=>{
         const panel=e.parentElement,style=getComputedStyle(panel);
         return {position:e.position,width:e.getBoundingClientRect().width,
@@ -351,7 +370,7 @@ async function main(){
       assert.ok(Math.abs(progressGeometry.width-progressGeometry.available)<2,'Completed VGA progress must span the panel content width');
       await page.locator('.file-card[data-id="vga-pdf"]').waitFor();
       assert.equal(await page.locator('#cancelVga').isHidden(),true);
-      s.proof={invalidPathShown:true,progressShown:true,cancelWorks:true,completedPdfRefreshed:true,idleProgressHidden:true,completedProgressFullWidth:true,emptyPathChineseInlineError:true};
+      s.proof={invalidPathShown:true,progressShown:true,cancelWorks:true,completedPdfRefreshed:true,idleProgressHidden:true,completedProgressFullWidth:true,emptyPathChineseInlineError:true,emphasisCheckbox:true,audioPathSubmitted:true,asrWarningVisible:true};
     });
     await scenario('12-drive-settings-are-lazy-and-poll-only-while-visible',async(page,s,context,origin)=>{
       await page.goto(origin);await page.waitForFunction(()=>!document.getElementById('recordButton').disabled);
