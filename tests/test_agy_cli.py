@@ -6,6 +6,8 @@ import json
 import subprocess
 import asyncio
 import unittest
+import tempfile
+from pathlib import Path
 from unittest.mock import patch, AsyncMock, Mock
 from types import SimpleNamespace
 
@@ -14,6 +16,22 @@ from qwen_asr_app.ai import AIRequestError
 
 
 class AGYCLITests(unittest.TestCase):
+    def test_sync_startup_and_timeout_failures_write_redacted_diagnostics(self):
+        for error, kind in [(OSError('private credential'), 'agy_cli_unavailable'),
+                            (subprocess.TimeoutExpired('agy', 30), 'network_read_timeout')]:
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as raw, \
+                 patch('qwen_asr_app.agy_cli.PRIVATE_ROOT', Path(raw)), \
+                 patch('qwen_asr_app.agy_cli.executable', return_value='/test/agy'), \
+                 patch('qwen_asr_app.agy_cli.subprocess.run', side_effect=error), \
+                 self.assertLogs('qwen_asr_app.agy_cli', level='WARNING') as logs:
+                with self.assertRaises(AIRequestError):
+                    run_sync('secret prompt', {}, {'cli_model': 'gemini-3.8-flash-high'})
+                files = list(Path(raw).glob('agy-cli/diagnostics/failed-*.json'))
+                self.assertEqual(len(files), 1)
+                self.assertEqual(json.loads(files[0].read_text())['error_kind'], kind)
+                self.assertNotIn('private credential', files[0].read_text())
+                self.assertIn(kind, logs.output[0])
+
     def test_blocked_keychain_lookup_is_local_and_never_a_network_retry(self):
         detail='OS credential manager unavailable (fork/exec /usr/bin/security: operation not permitted); falling back to file-based secret storage'
         failures=['',json.dumps({'event':'result','result':{'status':'FAILED','error':'Authentication failed or timed out'}})]
@@ -184,6 +202,43 @@ class AGYCLITests(unittest.TestCase):
 
 
 class AGYCancellationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_early_async_failures_write_diagnostics_and_server_log(self):
+        for error, kind in [(OSError('secret'), 'agy_cli_unavailable'),
+                            (asyncio.CancelledError(), 'cancelled')]:
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as raw, \
+                 patch('qwen_asr_app.agy_cli.PRIVATE_ROOT', Path(raw)), \
+                 patch('qwen_asr_app.agy_cli.executable', return_value='/test/agy'), \
+                 patch('qwen_asr_app.agy_cli.asyncio.create_subprocess_exec', new=AsyncMock(side_effect=error)), \
+                 self.assertLogs('qwen_asr_app.agy_cli', level='WARNING') as logs:
+                with self.assertRaises(type(error) if kind == 'cancelled' else AIRequestError):
+                    await request_text('secret prompt', {}, {'cli_model': 'gemini-3.8-flash-high'})
+                files = list(Path(raw).glob('agy-cli/diagnostics/failed-*.json'))
+                self.assertEqual(len(files), 1)
+                self.assertEqual(json.loads(files[0].read_text())['error_kind'], kind)
+                self.assertNotIn('secret', files[0].read_text())
+                self.assertIn(kind, logs.output[0])
+
+    async def test_async_timeout_is_diagnosed_and_reaped(self):
+        process = SimpleNamespace(returncode=None,
+            stdin=SimpleNamespace(write=Mock(), drain=AsyncMock(), close=Mock()),
+            stdout=SimpleNamespace(readline=AsyncMock(return_value=b'')),
+            stderr=SimpleNamespace(read=AsyncMock(return_value=b'')), kill=Mock(), wait=AsyncMock())
+        async def timeout(awaitable, **kwargs):
+            awaitable.close()
+            raise asyncio.TimeoutError()
+        with tempfile.TemporaryDirectory() as raw, \
+             patch('qwen_asr_app.agy_cli.PRIVATE_ROOT', Path(raw)), \
+             patch('qwen_asr_app.agy_cli.executable', return_value='/test/agy'), \
+             patch('qwen_asr_app.agy_cli.asyncio.create_subprocess_exec', new=AsyncMock(return_value=process)), \
+             patch('qwen_asr_app.agy_cli.asyncio.wait_for', side_effect=timeout), \
+             self.assertLogs('qwen_asr_app.agy_cli', level='WARNING'):
+            with self.assertRaises(AIRequestError) as raised:
+                await request_text('test', {}, {'cli_model': 'gemini-3.8-flash-high'})
+            self.assertEqual(raised.exception.kind, 'network_read_timeout')
+            self.assertEqual(len(list(Path(raw).glob('agy-cli/diagnostics/failed-*.json'))), 1)
+            process.kill.assert_called_once()
+            process.wait.assert_awaited_once()
+
     async def test_protocol_retry_exhaustion_and_cancellation_preserve_failure(self):
         error = AIRequestError('unauthorized read_file', kind='material_tool_violation', retriable=False)
         with patch('qwen_asr_app.agy_cli._request_text_once', new=AsyncMock(side_effect=error)) as call, \
@@ -248,4 +303,3 @@ class AGYCancellationTests(unittest.IsolatedAsyncioTestCase):
                 await task
         process.kill.assert_called_once()
         process.wait.assert_awaited_once()
-

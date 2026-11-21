@@ -13,6 +13,41 @@ from qwen_asr_app import smartclass_service as service
 
 
 class CourseQueueRemovalTests(unittest.IsolatedAsyncioTestCase):
+    async def test_resume_waits_for_stopping_queue_without_cancelling_it(self):
+        release = asyncio.Event()
+        old = asyncio.create_task(release.wait())
+        stop = asyncio.Event()
+        stop.set()
+        with patch.object(service, 'job', old), patch.object(service, 'stop_event', stop), \
+             patch.object(service, 'queue_state', {'paused': True, 'items': []}), \
+             patch.object(service, 'status', {'identity': 'saved'}), \
+             patch.object(service, 'save_queue'), \
+             patch.object(service, 'reconcile_imports', new=AsyncMock()), \
+             patch.object(service, 'run_queue', new=AsyncMock()) as run:
+            asyncio.get_running_loop().call_soon(release.set)
+            result = await service.resume_queue()
+            await service.job
+            self.assertTrue(result['started'])
+            self.assertFalse(old.cancelled())
+            self.assertFalse(stop.is_set())
+            run.assert_awaited_once()
+
+    async def test_resume_timeout_keeps_stopping_queue_owned(self):
+        old = asyncio.create_task(asyncio.Event().wait())
+        stop = asyncio.Event()
+        stop.set()
+        try:
+            with patch.object(service, 'job', old), patch.object(service, 'stop_event', stop), \
+                 patch.object(service.asyncio, 'wait', new=AsyncMock(return_value=(set(), {old}))):
+                with self.assertRaises(HTTPException) as raised:
+                    await service.resume_queue()
+                self.assertEqual(raised.exception.status_code, 409)
+                self.assertFalse(old.done())
+                self.assertTrue(stop.is_set())
+        finally:
+            old.cancel()
+            await asyncio.gather(old, return_exceptions=True)
+
     async def test_targeted_start_does_not_retry_other_interrupted_lessons(self):
         state={'paused':False,'items':[{'group':{'id':'old','title':'已有中断'},'state':'interrupted','options':{}},
                                      {'group':{'id':'chosen','title':'本次选择'},'state':'queued','options':{}}]}

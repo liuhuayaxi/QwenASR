@@ -15,6 +15,7 @@ last_prompt = ContextVar('agy_last_prompt', default='')
 _call_facts = ContextVar('agy_call_facts', default=None)
 
 import json
+import logging
 import asyncio
 import os
 import re
@@ -444,7 +445,22 @@ def _finish_output(stdout, stderr, working, message, returncode=0, prior_prompts
             ),
         }
         atomic_json(Path(working)/'diagnostics'/f'failed-{uuid.uuid4().hex}.json',failure)
+        logging.getLogger(__name__).warning('AGY request failed kind=%s exit_code=%s', exc.kind, returncode)
         raise
+
+
+def _early_failure(working, kind, retriable, exit_code=None):
+    from .durable import atomic_json
+    facts = _call_facts.get() or {}
+    failure = {'session_id': '', 'retriable': retriable, **_failure_metadata(
+        model_name=facts.get('model'), path_category=facts.get('path_category'),
+        continued=facts.get('continued'), sandbox=facts.get('sandbox'),
+        started=facts.get('started'), error_kind=kind, exit_code=exit_code, detail='')}
+    try:
+        atomic_json(Path(working)/'diagnostics'/f'failed-{uuid.uuid4().hex}.json', failure)
+    except OSError:
+        logging.getLogger(__name__).exception('AGY failure diagnostic could not be saved')
+    logging.getLogger(__name__).warning('AGY request failed kind=%s exit_code=%s', kind, exit_code)
 
 
 def _checked_output(stdout, stderr, working, message, returncode=0, prior_prompts=(), conversation=''):
@@ -603,7 +619,13 @@ def run_sync(instructions: str, payload: dict[str, Any], provider: dict[str, Any
 
 
 def _run_sync_once(instructions: str, payload: dict[str, Any], provider: dict[str, Any]) -> str:
-    command, message, working, env, timeout = _request_arguments(instructions, payload, provider)
+    _call_facts.set({'model': provider.get('cli_model') or provider.get('model'),
+                     'path_category': 'text', 'started': time.monotonic()})
+    try:
+        command, message, working, env, timeout = _request_arguments(instructions, payload, provider)
+    except AIRequestError as exc:
+        _early_failure(PRIVATE_ROOT / 'agy-cli', exc.kind, exc.retriable)
+        raise
     try:
         completed = subprocess.run(
             command,
@@ -616,12 +638,14 @@ def _run_sync_once(instructions: str, payload: dict[str, Any], provider: dict[st
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
+        _early_failure(working, 'network_read_timeout', True)
         raise AIRequestError(
             f"AGY CLI 超过 {timeout} 秒仍未完成，请稍后重试",
             kind="network_read_timeout",
             retriable=True,
         ) from exc
     except OSError as exc:
+        _early_failure(working, 'agy_cli_unavailable', False)
         raise AIRequestError(f"启动 AGY CLI 失败：{exc}", kind="agy_cli_unavailable", retriable=False) from exc
     return _finish_output(completed.stdout, completed.stderr, working, message, completed.returncode)
 
@@ -677,7 +701,13 @@ async def _request_text_once(instructions: str, payload: dict[str, Any], provide
     # Own the child in the task. Cancelling to_thread(subprocess.run) leaves
     # AGY alive, so a timed-out connection test previously continued making
     # requests for up to the provider's 30-minute generation timeout.
-    command, message, working, env, timeout = _request_arguments(instructions, payload, provider, conversation)
+    _call_facts.set({'model': provider.get('cli_model') or provider.get('model'),
+                     'path_category': 'text', 'continued': bool(conversation), 'started': time.monotonic()})
+    try:
+        command, message, working, env, timeout = _request_arguments(instructions, payload, provider, conversation)
+    except AIRequestError as exc:
+        _early_failure(PRIVATE_ROOT / 'agy-cli', exc.kind, exc.retriable)
+        raise
     started = time.monotonic()
     try:
         process = await asyncio.create_subprocess_exec(
@@ -686,7 +716,11 @@ async def _request_text_once(instructions: str, payload: dict[str, Any], provide
             limit=4 * 1024 * 1024,
         )
     except OSError as exc:
+        _early_failure(working, 'agy_cli_unavailable', False)
         raise AIRequestError(f"启动 AGY CLI 失败：{exc}", kind="agy_cli_unavailable", retriable=False) from exc
+    except asyncio.CancelledError:
+        _early_failure(working, 'cancelled', False)
+        raise
 
     async def read_stdout() -> bytes:
         chunks = []
@@ -741,6 +775,8 @@ async def _request_text_once(instructions: str, payload: dict[str, Any], provide
     try:
         stdout, stderr = await asyncio.wait_for(communicate(), timeout=timeout)
     except (asyncio.CancelledError, asyncio.TimeoutError) as exc:
+        _early_failure(working, 'cancelled' if isinstance(exc, asyncio.CancelledError) else 'network_read_timeout',
+                       not isinstance(exc, asyncio.CancelledError), process.returncode)
         if isinstance(exc, asyncio.CancelledError):
             raise
         raise AIRequestError(

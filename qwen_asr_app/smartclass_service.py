@@ -1047,6 +1047,8 @@ async def start_import(data: Selection):
 @app.post("/api/resume")
 async def resume_queue():
     global job
+    if job and not job.done() and stop_event.is_set():
+        await asyncio.wait({job}, timeout=3)
     check_idle()
     for item in queue_state["items"]:
         if item["state"] != "completed":
