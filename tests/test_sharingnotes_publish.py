@@ -9,6 +9,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 import zlib
 from pathlib import Path
@@ -393,6 +394,43 @@ class TriggerTests(Harness):
         self.assertTrue(PublishConfig('https://notes.example', 't', [COURSE]).configured)
         self.assertFalse(PublishConfig('https://notes.example', 't', []).configured)
         self.assertTrue(PublishConfig('http://127.0.0.1:8787', 't', [COURSE]).configured)
+
+    def test_keychain_prompt_does_not_block_auto_publisher_startup(self):
+        async def scenario(token):
+            entered, release, publishing = threading.Event(), threading.Event(), asyncio.Event()
+
+            def read_keychain():
+                entered.set()
+                return token if release.wait(timeout=2) else ''
+
+            async def run():
+                publishing.set()
+
+            auto = AutoPublisher(None, transport=self.api, state=self.state)
+            env = {'SHARINGNOTES_PUBLISH_URL': 'https://coursenote.dczxyy.uk', 'SHARINGNOTES_PUBLISH_COURSES': COURSE}
+            with (patch.dict(os.environ, env, clear=True), patch.object(sys, 'platform', 'darwin'),
+                  patch.object(sharingnotes_publish, 'STATE_DIR', self.tmp),
+                  patch.object(sharingnotes_publish, '_read_keychain_token', side_effect=read_keychain) as read,
+                  patch.object(auto, 'run', side_effect=run)):
+                try:
+                    self.assertTrue(await auto.start())
+                    read.assert_not_called()
+                    self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+                    self.assertIsNone(auto.publisher)
+                    self.assertFalse(publishing.is_set())
+                    release.set()
+                    await asyncio.wait_for(auto.task, 1)
+                    self.assertEqual(publishing.is_set(), bool(token))
+                    if not token:
+                        self.assertIsNone(auto.publisher)
+                    read.assert_called_once_with()
+                finally:
+                    release.set()
+                    await auto.close()
+
+        for token in ('synthetic-keychain-token', ''):
+            with self.subTest(available=bool(token)):
+                asyncio.run(scenario(token))
 
     def test_auto_publisher_publishes_after_a_save_notification(self):
         from qwen_asr_app.background_wakeup import library_changes

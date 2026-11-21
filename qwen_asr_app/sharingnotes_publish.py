@@ -88,7 +88,7 @@ class PublishConfig:
         return bool(self.url and self.token and self.courses)
 
     @classmethod
-    def load(cls, path=None):
+    def load(cls, path=None, *, read_keychain=True):
         path = Path(path or STATE_DIR / 'config.json')
         try:
             saved = json.loads(path.read_text(encoding='utf-8'))
@@ -99,10 +99,18 @@ class PublishConfig:
         courses = [c for c in courses.split(',')] if courses is not None else saved.get('courses') or []
         token = (os.environ.get('SHARINGNOTES_PUBLISH_TOKEN') or '').strip() or saved.get('token')
         config = cls(os.environ.get('SHARINGNOTES_PUBLISH_URL') or saved.get('url'), token, courses)
-        if not config.token and config.url == OFFICIAL_PUBLISH_URL:
-            config.token = _read_keychain_token()
-            config._uses_keychain = bool(config.token)
+        if read_keychain:
+            config.load_keychain()
         return config
+
+    @property
+    def needs_keychain(self):
+        return not self.token and sys.platform == 'darwin' and self.url == OFFICIAL_PUBLISH_URL
+
+    def load_keychain(self):
+        if self.needs_keychain:
+            self.token = _read_keychain_token()
+            self._uses_keychain = bool(self.token)
 
     def transport(self):
         return HttpTransport(self.url, self.token, allow_redirects=not self._uses_keychain)
@@ -545,17 +553,31 @@ class AutoPublisher:
         return results
 
     async def start(self):
-        from .background_wakeup import library_changes
-        config = self.config or PublishConfig.load()
-        if not config.configured or self.task:
+        if self.task:
             return False
+        config = self.config or PublishConfig.load(read_keychain=False)
+        if config.configured:
+            self._activate(config)
+            self.task = asyncio.create_task(self.run())
+        elif self.config is None and config.courses and config.needs_keychain:
+            self.task = asyncio.create_task(self._start_with_keychain(config))
+        else:
+            return False
+        return True
+
+    async def _start_with_keychain(self, config):
+        await asyncio.to_thread(config.load_keychain)
+        if config.configured:
+            self._activate(config)
+            await self.run()
+
+    def _activate(self, config):
+        from .background_wakeup import library_changes
         self.publisher = Publisher(self.transport or config.transport(),
                                    config.courses, self.state or PublishState(state_path(config.url)),
                                    courseware=self.courseware)
         library_changes.callbacks.add(self.mark)
         self.full = True
-        self.task = asyncio.create_task(self.run())
-        return True
 
     async def run(self):
         from .background_wakeup import library_changes
