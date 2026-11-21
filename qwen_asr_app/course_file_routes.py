@@ -201,6 +201,9 @@ class CourseFileAPI:
         self.controls = {}
         self.previews = {}
         self.router = APIRouter(prefix="/api/course-files")
+        from .vga_jobs import VGAJobs
+        self.vga_jobs = VGAJobs(self.store, self.lock, self.tasks)
+        self.vga_jobs.routes(self.router, self.guard)
         self.routes()
 
     def routes(self):

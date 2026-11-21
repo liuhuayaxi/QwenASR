@@ -44,8 +44,20 @@
     <header class="page-heading"><div><p class="eyebrow">PDF LIBRARY</p><h1 id="courseTitle">PDF 资料库</h1><p id="courseMeta" class="muted"></p></div><div class="category-actions" aria-label="当前分类操作"><button id="renameCategory" class="ui-button" disabled>重命名分类</button><button id="deleteCategory" class="ui-button danger" disabled>删除分类</button><button id="reveal" class="ui-button">在 Finder 中打开</button></div></header>
     <section id="dropzone" class="dropzone" aria-label="添加课程文件">
       <div class="upload-icon" aria-hidden="true">↑</div><div><h2>拖入文件，或点击添加</h2></div>
-      <div class="upload-controls"><label for="uploadKind" class="sr-only">资料类型</label><select id="uploadKind" class="ui-field"><option>课件</option><option>讲义</option><option>作业</option><option>参考资料</option><option>复习资料</option><option>其他</option></select><button id="addFiles" class="ui-button primary">＋ 添加文件</button></div>
+      <div class="upload-controls"><label for="uploadKind" class="sr-only">资料类型</label><select id="uploadKind" class="ui-field"><option>课件</option><option>讲义</option><option>作业</option><option>参考资料</option><option>复习资料</option><option>其他</option></select><button id="addFiles" class="ui-button primary">＋ 添加文件</button><button id="openVga" class="ui-button" aria-expanded="false" aria-controls="vgaPanel">从 VGA 录屏提取课件</button></div>
       <input id="filesInput" type="file" multiple hidden><input id="replaceInput" type="file" hidden>
+    </section>
+    <section id="vgaPanel" class="knowledge-search-section" aria-label="从 VGA 录屏提取课件" hidden>
+      <h2>从 VGA 录屏提取课件</h2>
+      <p class="muted">输入运行工作台这台电脑上的视频完整路径。自动选取每页最后的稳定画面并保存为当前课程的 PDF 课件；动画识别可能需要人工核对。</p>
+      <form id="vgaForm" class="upload-controls">
+        <label for="vgaPath">本机视频路径</label><input id="vgaPath" class="ui-field" placeholder="/完整路径/课堂 VGA.mp4" aria-required="true">
+        <label for="vgaName">课件名称（可选）</label><input id="vgaName" class="ui-field" placeholder="默认使用视频文件名">
+        <button id="startVga" class="ui-button primary" type="submit">开始提取</button>
+        <button id="cancelVga" class="ui-button" type="button" hidden>取消提取</button>
+      </form>
+      <progress id="vgaProgress" class="file-progress" max="100" value="0" aria-label="VGA 提取进度" hidden></progress>
+      <p id="vgaStatus" class="notice" role="status" hidden></p>
     </section>
     <p id="uploadStatus" class="notice" role="status" hidden></p>
     <section id="knowledgeSection" class="knowledge-search-section" aria-label="课程知识库检索与索引">

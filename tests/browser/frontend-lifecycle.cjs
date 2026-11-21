@@ -55,6 +55,13 @@ async function main(){
       else if(p==='/course/api/status')data=state.course;
       else if(p==='/course/api/ensure-session')data={started:true};
       else if(p==='/api/course-files')data={category:url.searchParams.get('category')||'未分类',categories:['未分类','合成课程'],shared_folder:true,files:state.files,directory:'/synthetic',capabilities:{office:false,mineru:true}};
+      else if(p==='/api/course-files/from-vga' && method==='POST'){
+        if(body.video_path==='/missing.mp4'){status=400;data={detail:'视频文件不存在或不是文件，请检查本机路径'};}
+        else{assert.equal(body.category,'合成课程');state.vga={id:'vga-fixture',category:body.category,status:'running',progress:25,stage:'正在提取最终稳定画面'};data=state.vga;}
+      }
+      else if(p==='/api/course-files/from-vga')data={job:state.vga||null};
+      else if(p==='/api/course-files/from-vga/vga-fixture/cancel'){state.vga={...state.vga,status:'cancelled',stage:'已取消，未导入课件'};data=state.vga;}
+      else if(p==='/api/course-files/from-vga/vga-fixture')data=state.vga;
       else if(p==='/api/notes')data={category:url.searchParams.get('category')||'未分类',categories:['未分类','合成课程'],notes:[],lessons:[{id:'A',title:'合成课堂 A',date:'2026-10-10'}],prompt_template:'合成提示词',storage_root:'/synthetic'};
       else if(p==='/api/config')data={feature_version:'library-upgrade-v15-classroom-chat'};
       else if(p==='/api/health')data={status:'idle',detail:'合成服务就绪',model:'fixture',device:'fixture',asr_provider:'remote_only'};
@@ -305,6 +312,46 @@ async function main(){
       await page.evaluate(()=>{Object.defineProperty(document,'hidden',{configurable:true,get:()=>false});document.dispatchEvent(new Event('visibilitychange'));});
       await page.locator('.file-card[data-id="file-A"] .file-status').filter({hasText:'已就绪'}).waitFor();
       s.proof={sameFileCardAcrossUnchangedPoll:true,hiddenDataRequests:0,completedConversionRecovered:true};
+    });
+    await scenario('11b-course-files-vga-extraction',async(page,s,context,origin)=>{
+      await page.goto(origin+'/course-files?category='+encodeURIComponent('合成课程'));
+      await page.locator('#courseTitle').filter({hasText:'合成课程'}).waitFor();
+      await page.locator('#openVga').click();
+      await until(()=>s.requests.some(r=>r.p==='/api/course-files/from-vga'),'VGA recovery request missing');
+      assert.equal(await page.locator('#vgaProgress').isHidden(),true);
+      const startsBeforeEmpty=s.requests.filter(r=>r.p==='/api/course-files/from-vga' && r.method==='POST').length;
+      for(const emptyPath of ['', '   ']){
+        await page.locator('#vgaPath').fill(emptyPath);
+        await page.locator('#startVga').click();
+        await page.locator('#vgaStatus.error').filter({hasText:'请输入本机 VGA 录屏视频的完整路径'}).waitFor();
+      }
+      assert.equal(s.requests.filter(r=>r.p==='/api/course-files/from-vga' && r.method==='POST').length,startsBeforeEmpty);
+      await page.screenshot({path:path.join(out,'vga-empty-path-chinese-error.png'),fullPage:true});
+      await page.locator('#vgaPath').fill('/missing.mp4');
+      await page.locator('#startVga').click();
+      await page.locator('#vgaStatus').filter({hasText:'视频文件不存在'}).waitFor();
+      await page.locator('#vgaPath').fill('/synthetic/lecture.mp4');
+      await page.locator('#startVga').click();
+      await page.locator('#vgaStatus').filter({hasText:'25%'}).waitFor();
+      assert.equal(await page.locator('#vgaProgress').evaluate(e=>e.position),0.25);
+      assert.equal(await page.locator('#startVga').isDisabled(),true);
+      await page.locator('#cancelVga').click();
+      await page.locator('#vgaStatus').filter({hasText:'已取消'}).waitFor();
+      await page.locator('#startVga').click();
+      await page.locator('#vgaStatus').filter({hasText:'25%'}).waitFor();
+      s.files=[{id:'vga-pdf',name:'lecture(VGA课件).pdf',kind:'课件',size:1024,created_at:'2026-10-10',conversion:{status:'none'},sync:[]}];
+      s.vga={...s.vga,status:'completed',progress:100,stage:'课件已保存，可用于笔记与复习'};
+      await page.locator('#vgaStatus').filter({hasText:'100%'}).waitFor();
+      const progressGeometry=await page.locator('#vgaProgress').evaluate(e=>{
+        const panel=e.parentElement,style=getComputedStyle(panel);
+        return {position:e.position,width:e.getBoundingClientRect().width,
+          available:panel.clientWidth-parseFloat(style.paddingLeft)-parseFloat(style.paddingRight)};
+      });
+      assert.equal(progressGeometry.position,1);
+      assert.ok(Math.abs(progressGeometry.width-progressGeometry.available)<2,'Completed VGA progress must span the panel content width');
+      await page.locator('.file-card[data-id="vga-pdf"]').waitFor();
+      assert.equal(await page.locator('#cancelVga').isHidden(),true);
+      s.proof={invalidPathShown:true,progressShown:true,cancelWorks:true,completedPdfRefreshed:true,idleProgressHidden:true,completedProgressFullWidth:true,emptyPathChineseInlineError:true};
     });
     await scenario('12-drive-settings-are-lazy-and-poll-only-while-visible',async(page,s,context,origin)=>{
       await page.goto(origin);await page.waitForFunction(()=>!document.getElementById('recordButton').disabled);

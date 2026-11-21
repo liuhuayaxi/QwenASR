@@ -236,6 +236,64 @@ $('upgradeLegacy').addEventListener('click', event => busy(event.currentTarget, 
 }));
 $('reveal').addEventListener('click', event => busy(event.currentTarget, () => api('/api/course-files/reveal', {category: state.category})));
 $('addFiles').addEventListener('click', () => $('filesInput').click());
+let vgaJob = null, vgaStarting = false;
+const vgaActive = () => ['queued', 'running', 'stopping'].includes(vgaJob?.status);
+function renderVga() {
+  $('startVga').disabled = vgaStarting || vgaActive();
+  $('vgaPath').disabled = $('vgaName').disabled = vgaStarting || vgaActive();
+  $('cancelVga').hidden = !vgaActive();
+  $('cancelVga').disabled = vgaJob?.status === 'stopping';
+  $('vgaProgress').hidden = !vgaJob;
+  $('vgaProgress').value = vgaJob?.progress || 0;
+  if (vgaJob) notice('vgaStatus', `${vgaJob.category}：${vgaJob.stage}（${vgaJob.progress || 0}%）${vgaJob.error ? '\n' + vgaJob.error : ''}`, vgaJob.status === 'failed');
+}
+const vgaPolling = createVisiblePoll({delay: 1000, enabled: () => !$('vgaPanel').hidden && vgaActive(), run: async () => {
+  try {
+    const id = vgaJob.id;
+    const job = await api(`/api/course-files/from-vga/${encodeURIComponent(id)}`);
+    if (vgaJob?.id !== id) return;
+    vgaJob = job; renderVga();
+    if (job.status === 'completed') await load();
+  } catch (error) { notice('vgaStatus', `读取进度失败，将自动重试：${error.message}`, true); }
+}});
+$('openVga').addEventListener('click', async () => {
+  const panel = $('vgaPanel'); panel.hidden = !panel.hidden;
+  $('openVga').setAttribute('aria-expanded', String(!panel.hidden));
+  if (panel.hidden) return;
+  try {
+    if (!vgaActive()) {
+      const category = state.category;
+      const data = await api(`/api/course-files/from-vga?${query({category})}`);
+      if (state.category !== category || vgaStarting) return;
+      vgaJob = data.job; renderVga();
+    }
+    vgaPolling.wake();
+  } catch (error) { notice('vgaStatus', error.message, true); }
+});
+$('vgaForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  if (vgaStarting || vgaActive()) return;
+  const payload = {category: state.category, video_path: $('vgaPath').value.trim(), display_name: $('vgaName').value.trim()};
+  if (!payload.video_path) {
+    notice('vgaStatus', '请输入本机 VGA 录屏视频的完整路径', true);
+    $('vgaPath').focus();
+    return;
+  }
+  vgaStarting = true; renderVga(); notice('vgaStatus', '正在检查视频文件…');
+  try {
+    vgaJob = await api('/api/course-files/from-vga', payload);
+    vgaPolling.wake();
+  } catch (error) { vgaJob = null; notice('vgaStatus', error.message, true); }
+  finally { vgaStarting = false; renderVga(); }
+});
+$('cancelVga').addEventListener('click', async () => {
+  $('cancelVga').disabled = true;
+  try {
+    vgaJob = await api(`/api/course-files/from-vga/${encodeURIComponent(vgaJob.id)}/cancel`, {});
+    vgaPolling.wake();
+  } catch (error) { notice('vgaStatus', error.message, true); }
+  finally { renderVga(); }
+});
 $('filesInput').addEventListener('change', async () => { await upload([...$('filesInput').files]); $('filesInput').value = ''; });
 for (const type of ['dragover', 'dragenter']) $('dropzone').addEventListener(type, event => { event.preventDefault(); $('dropzone').classList.add('drag'); });
 for (const type of ['dragleave', 'drop']) $('dropzone').addEventListener(type, event => { event.preventDefault(); $('dropzone').classList.remove('drag'); });
