@@ -16,6 +16,7 @@ from .vga_slides import ExtractionCancelled
 EMPHASIS_KEYWORDS = ('重点', '考点', '考试', '必考', '会考', '要考', '期末')
 EMPHASIS_PATTERN = re.compile('|'.join(EMPHASIS_KEYWORDS) + r'|(?:这个|这里|这点|这一点)(?:非常|很|特别)?重要')
 EMPHASIS_MIN_MINUTES = 1.0
+EMPHASIS_WINDOW_TOLERANCE_SEC = 2.0
 
 
 def normalize_segments(segments):
@@ -65,9 +66,11 @@ def mark_emphasis(result, segments):
                 continue
             fraction = (match.start() + match.end()) / (2 * len(raw))
             hit_sec = segment['start'] + (segment['end'] - segment['start']) * fraction
-            index, _, _ = min(windows, key=lambda w: (
+            index, start, end = min(windows, key=lambda w: (
                 max(w[1] - hit_sec, 0, hit_sec - w[2]),
                 not (w[1] <= hit_sec < w[2]), w[0]))
+            if max(start - hit_sec, 0, hit_sec - end) > EMPHASIS_WINDOW_TOLERANCE_SEC:
+                continue
             page_hits[index].append({
                 'start': segment['start'], 'end': segment['end'], 'hit_sec': hit_sec,
                 'text': raw[max(0, match.start() - 40):match.end() + 40]})

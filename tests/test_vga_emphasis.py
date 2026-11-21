@@ -119,7 +119,7 @@ class VGAEmphasisTests(unittest.IsolatedAsyncioTestCase):
                                               {'start_sec': 80, 'end_sec': 90}]),
                  SimpleNamespace(occurrences=[{'start_sec': 40, 'end_sec': 50}])]
         result = SimpleNamespace(pages=pages)
-        mark_emphasis(result, [{'start': 70, 'end': 72, 'raw': '重点'},
+        mark_emphasis(result, [{'start': 77, 'end': 79, 'raw': '重点'},
                                {'start': 84, 'end': 86, 'raw': '考试'}])
         self.assertEqual(pages[0].emphasis_score, 2)
         self.assertEqual(pages[1].emphasis_score, 0)
@@ -127,6 +127,15 @@ class VGAEmphasisTests(unittest.IsolatedAsyncioTestCase):
         pages[1].occurrences = [{'start_sec': 80, 'end_sec': 90}]
         mark_emphasis(result, [{'start': 84, 'end': 86, 'raw': '考试'}])
         self.assertEqual(sum(p.emphasis_score for p in pages), 1)
+
+    def test_filtered_gap_hit_does_not_mark_unrelated_pages(self):
+        pages = [SimpleNamespace(occurrences=[{'start_sec': 0, 'end_sec': 10}]),
+                 SimpleNamespace(occurrences=[{'start_sec': 80, 'end_sec': 90}])]
+        result = SimpleNamespace(pages=pages)
+        mark_emphasis(result, [{'start': 40, 'end': 50, 'raw': '考试重点'}])
+        self.assertFalse(any(p.important for p in pages))
+        self.assertEqual(sum(p.emphasis_score for p in pages), 0)
+        self.assertTrue(all(not p.matched_snippets for p in pages))
 
     def test_weak_words_no_hits_empty_and_explicit_emphasis(self):
         result = self.result()
