@@ -26,6 +26,7 @@ from urllib.parse import urlsplit
 
 from .durable import atomic_json
 from .paths import PRIVATE_ROOT
+from . import section_pages as sp
 from .sharingnotes_export import export_note
 
 CONTRACT_VERSION = 1
@@ -482,9 +483,13 @@ class AutoPublisher:
         if paths is None:
             self.full = True
             return
+        if any(Path(raw).name == 'asset.json' for raw in paths):
+            self.full = True  # a course file changed; fingerprints find the notes it affects
         ids = session_ids_for_paths(paths)
+        ids += [Path(raw).stem for raw in paths
+                if Path(raw).suffix == '.json' and Path(raw).parent == sp.LINKS]
         if ids:
-            self.publisher.state.mark(ids)
+            self.publisher.state.mark(list(dict.fromkeys(ids)))
 
     def _all_ids(self):
         return [record.id for record in self.store.iter_records()]

@@ -583,6 +583,8 @@ def save(doc):
     path = links_path(doc['recording_id'])
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_json(path, doc)
+    from .background_wakeup import library_changes
+    library_changes.notify([str(path)])
     return path
 
 

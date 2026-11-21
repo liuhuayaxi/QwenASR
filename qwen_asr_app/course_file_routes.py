@@ -737,6 +737,8 @@ class CourseFileAPI:
                     item['conversion'].update(relative_path=output.relative_to(directory).as_posix(),
                                               stamp=self.store.shared_store._stamp(output))
                 self.store.save(category, item)
+                from .background_wakeup import library_changes
+                library_changes.notify([str(directory / "asset.json")])
                 if not changed:
                     from .remote_operations import discard_completed_payloads
                     await asyncio.to_thread(discard_completed_payloads,
