@@ -14,6 +14,7 @@ manual catch-up, a dry run, or testing against the in-process mock API.
 
 Configure ``SHARINGNOTES_PUBLISH_URL`` / ``SHARINGNOTES_PUBLISH_TOKEN`` /
 ``SHARINGNOTES_PUBLISH_COURSES`` or ``<private data>/sharingnotes-publish/config.json``.
+On macOS, the official site can reuse the shared Keychain token.
 """
 import argparse
 import json
@@ -27,7 +28,7 @@ sys.path.insert(0, str(ROOT))
 
 from qwen_asr_app.sharingnotes_export import export_note  # noqa: E402
 from qwen_asr_app.sharingnotes_publish import (  # noqa: E402
-    HttpTransport, PublishConfig, PublishState, Publisher, build_upsert, state_path, store_loader)
+    PublishConfig, PublishState, Publisher, build_upsert, state_path, store_loader)
 
 SKIPPED_STATUSES = {'unchanged', 'skipped_course', 'skipped_unpublishable', 'skipped_deleted'}
 
@@ -82,7 +83,7 @@ def main():
     else:
         if not (config.url and config.token):
             raise SystemExit('没有配置发布接口：设置 SHARINGNOTES_PUBLISH_URL 和 SHARINGNOTES_PUBLISH_TOKEN')
-        transport = HttpTransport(config.url, config.token)
+        transport = config.transport()
         state = PublishState(args.state or state_path(config.url))
     from qwen_asr_app.course_files import CourseFiles
     from qwen_asr_app.sharingnotes_courseware import CoursewareSource
