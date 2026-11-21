@@ -20,6 +20,7 @@ import json
 import sys
 from collections import Counter
 from pathlib import Path
+from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -43,6 +44,7 @@ def main():
     parser.add_argument('--state', metavar='FILE', help='发布状态文件（默认在私有数据目录）')
     parser.add_argument('--delete', metavar='NOTE_ID')
     parser.add_argument('--expected-version')
+    parser.add_argument('--request-id', help='重试同一次删除时使用原 ID（32 位小写十六进制；默认生成新 ID）')
     args = parser.parse_args()
     if args.serve_mock:
         from qwen_asr_app.sharingnotes_mock_api import serve
@@ -90,7 +92,8 @@ def main():
     if args.delete:
         if not args.expected_version:
             raise SystemExit('删除需要 --expected-version（当前线上版本）')
-        result = publisher.delete_note(args.delete, args.expected_version)
+        request_id = uuid4().hex if args.request_id is None else args.request_id
+        result = publisher.delete_note(args.delete, args.expected_version, request_id=request_id)
         print(json.dumps(result, ensure_ascii=False))
         return 0 if result.get('status') == 'deleted' else 1
     if not courses:

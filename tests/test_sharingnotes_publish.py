@@ -180,9 +180,18 @@ class IncrementalPublishTests(Harness):
         for version, status, code in [('0' * 64, 'conflict', 1), ('not-a-hash', 'rejected', 1),
                                       (published['version'], 'deleted', 0), (published['version'], 'deleted', 0)]:
             with self.subTest(status=status, version=version):
-                result = cli('--delete', published['id'], '--expected-version', version)
+                result = cli('--delete', published['id'], '--expected-version', version, '--request-id', '1' * 32)
                 self.assertEqual(result.returncode, code, result.stderr)
                 self.assertEqual(json.loads(result.stdout)['status'], status)
+
+        restore = Publisher(MockPublishAPI(directory), [COURSE], PublishState(self.state.path))
+        self.assertEqual(restore.publish_session(session(), self.read, force=True)['status'], 'accepted')
+        replay = cli('--delete', published['id'], '--expected-version', published['version'], '--request-id', '1' * 32)
+        self.assertEqual(replay.returncode, 1, replay.stderr)
+        self.assertEqual(json.loads(replay.stdout)['status'], 'conflict')
+        new_delete = cli('--delete', published['id'], '--expected-version', published['version'])
+        self.assertEqual(new_delete.returncode, 0, new_delete.stderr)
+        self.assertEqual(json.loads(new_delete.stdout)['status'], 'deleted')
 
         missing = cli('--session', 'missing-recording')
         self.assertEqual(missing.returncode, 1, missing.stderr)
@@ -271,6 +280,8 @@ class MockContractTests(Harness):
         check('note.schema.json', export_note(session(), self.read)['note'])
         check('delete-note.schema.json', {'contractVersion': 1, 'operation': 'delete_note',
                                           'id': 'a' * 20, 'expectedVersion': 'b' * 64})
+        check('delete-note.schema.json', {'contractVersion': 1, 'operation': 'delete_note',
+                                          'id': 'a' * 20, 'expectedVersion': 'b' * 64, 'requestId': 'c' * 32})
         original = self.api.request
         def recording(method, path, body=b'', content_type='application/json'):
             status, response = original(method, path, body, content_type)

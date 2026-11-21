@@ -20,6 +20,7 @@ KINDS = {'note': 'application/json', 'manifest': 'application/json', 'image': 'i
 SIGNATURES = {'image': (b'\x89PNG\r\n\x1a\n',), 'pdf': (b'%PDF-',), 'page': (b'RIFF',)}
 HASH = re.compile(r'^[a-f0-9]{64}$')
 NOTE_ID = re.compile(r'^[a-f0-9]{20}$')
+DELETE_REQUEST_ID = re.compile(r'[a-f0-9]{32}')
 MIRRORED = ['id', 'course', 'title', 'chapter', 'chapters', 'date', 'abstract', 'version', 'wordCount', 'imageCount']
 
 
@@ -38,7 +39,7 @@ class MockPublishAPI:
         self.directory = Path(directory) if directory else None
         self.token = token
         self.notes, self.descriptors, self.tombstones = {}, {}, {}
-        self.deleted_versions = {}
+        self.delete_requests = {}
         self.stored = set()
         self.calls = []
         self.drop_next_response = False
@@ -46,7 +47,11 @@ class MockPublishAPI:
             data = json.loads((self.directory / 'state.json').read_text(encoding='utf-8'))
             self.notes, self.descriptors = data['notes'], data['descriptors']
             self.tombstones, self.stored = data['tombstones'], set(data['stored'])
-            self.deleted_versions = data.get('deletedVersions', {k: [v] for k, v in self.tombstones.items()})
+            if 'deleteRequests' in data:
+                self.delete_requests = data['deleteRequests']
+            else:
+                versions = data.get('deletedVersions', {k: [v] for k, v in self.tombstones.items()})
+                self.delete_requests = {k: [[v, None] for v in history] for k, history in versions.items()}
 
     def _persist(self, kind=None, sha=None, payload=None):
         if not self.directory:
@@ -55,7 +60,7 @@ class MockPublishAPI:
             atomic_bytes(self.directory / 'blobs' / kind / sha, payload)
         atomic_json(self.directory / 'state.json', {'notes': self.notes, 'descriptors': self.descriptors,
                                                     'tombstones': self.tombstones, 'stored': sorted(self.stored),
-                                                    'deletedVersions': self.deleted_versions})
+                                                    'deleteRequests': self.delete_requests})
 
     def visible(self, note_id):
         return (self.notes.get(note_id) or {}).get('note')
@@ -169,19 +174,24 @@ class MockPublishAPI:
 
     def _delete(self, message):
         ident, expected = message.get('id'), message.get('expectedVersion')
+        request_id = message.get('requestId')
         op = {'operation': 'delete_note', 'ident': ident if NOTE_ID.match(str(ident)) else None}
         if message.get('operation') != 'delete_note' or not NOTE_ID.match(str(ident)) or not HASH.match(str(expected)):
             return 400, _response('rejected', error='invalid delete message', **op)
+        if 'requestId' in message and (not isinstance(request_id, str) or not DELETE_REQUEST_ID.fullmatch(request_id)):
+            return 400, _response('rejected', error='invalid delete message', **op)
+        request = [expected, request_id]
+        history = self.delete_requests.get(ident, [])
         current = (self.notes.get(ident) or {}).get('note')
-        if not current and self.tombstones.get(ident) == expected:
+        if not current and self.tombstones.get(ident) == expected and history and history[-1] == request:
             return 200, _response('deleted', **op)
-        if current and expected in self.deleted_versions.get(ident, ()):
+        if current and request in history:
             return 409, _response('conflict', error='Delete predates the current incarnation', **op)
         if not current or current['version'] != expected:
             return 409, _response('conflict', error='expectedVersion does not match the current version', **op)
         self.notes.pop(ident)
         self.tombstones[ident] = expected
-        self.deleted_versions.setdefault(ident, []).append(expected)
+        self.delete_requests.setdefault(ident, []).append(request)
         self._persist()
         return 200, _response('deleted', **op)
 

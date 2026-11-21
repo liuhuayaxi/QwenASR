@@ -377,12 +377,15 @@ class Publisher:
         self._record(session_id, status=status or 'invalid_response', id=note['id'], error=error)
         return {'session': session_id, 'id': note['id'], 'status': status, 'error': error}
 
-    def delete_note(self, note_id, expected_version):
+    def delete_note(self, note_id, expected_version, *, request_id=None):
         """Explicit removal only: a session missing locally is never deleted."""
         with _process_lock(self.state.path):
             self.state.reload()
-            response = self._call(DELETE_PATH, {'contractVersion': CONTRACT_VERSION, 'operation': 'delete_note',
-                                                'id': note_id, 'expectedVersion': expected_version})
+            message = {'contractVersion': CONTRACT_VERSION, 'operation': 'delete_note',
+                       'id': note_id, 'expectedVersion': expected_version}
+            if request_id is not None:
+                message['requestId'] = request_id
+            response = self._call(DELETE_PATH, message)
             if response.get('status') == 'deleted':
                 # Keep a marker so reconciliation does not republish it; --force does.
                 with self.state.lock:

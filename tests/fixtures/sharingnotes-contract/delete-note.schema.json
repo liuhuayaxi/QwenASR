@@ -17,6 +17,11 @@
     "expectedVersion": {
       "type": "string",
       "pattern": "^[a-f0-9]{64}$"
+    },
+    "requestId": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{32}$",
+      "description": "Use a fresh ID for a new delete and the same ID when retrying it."
     }
   },
   "required": [
