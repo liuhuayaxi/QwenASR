@@ -6,6 +6,7 @@ import json
 import math
 from pathlib import Path
 import re
+import tempfile
 import uuid
 
 from .paths import PRIVATE_ROOT
@@ -84,13 +85,20 @@ def find_audio(video, audio=None):
 
 
 async def transcribe_audio(path, category, progress=None):
+    root = PRIVATE_ROOT / 'vga-audio'
+    root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='transcription-', dir=root) as raw:
+        return await _transcribe_audio(path, category, progress, Path(raw))
+
+
+async def _transcribe_audio(path, category, progress, folder):
     from app import batch_transcription_stream
     from .inference_providers import inference_settings
 
     ident = uuid.uuid4().hex
     config = {'category': category, 'title': Path(path).stem + '（VGA录音）',
               'ai_correction': False, 'translation': 'off',
-              '_remote_operation_dir': str(PRIVATE_ROOT / 'vga-audio' / ident / 'remote'),
+              '_remote_operation_dir': str(folder / 'remote'),
               '_remote_operation_key': ident, '_upload_recording_id': 'upload-' + ident,
               'inference_settings': inference_settings.for_new_task('asr')}
     completed = None

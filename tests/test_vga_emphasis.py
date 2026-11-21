@@ -201,6 +201,40 @@ class VGAEmphasisTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('语音识别暂不可用', saved['warnings'][0])
         self.assertIn('警告：', errors.getvalue())
 
+    async def test_transcription_payload_cleanup_preserves_archive_and_source(self):
+        archive = self.root / 'course' / 'recording.aac'
+        archive.parent.mkdir()
+        archive.write_bytes(b'archived audio')
+        folders = []
+        mode = 'complete'
+        async def stream(path, name, config, **options):
+            folder = Path(config['_remote_operation_dir'])
+            folder.mkdir(parents=True)
+            (folder / 'audio.wav').write_bytes(b'large PCM audio')
+            downloaded = folder / 'downloads'
+            downloaded.mkdir()
+            (downloaded / 'segments.json').write_text('[]')
+            folders.append(folder.parent)
+            if mode == 'raise':
+                raise OSError('远程连接失败')
+            if mode == 'error':
+                yield json.dumps({'type': 'error', 'message': '转写失败'}).encode()
+            else:
+                yield json.dumps({'type': 'complete', 'session': {'id': 'archive', 'segments': []}}).encode()
+        with patch.dict(sys.modules, {'app': SimpleNamespace(batch_transcription_stream=stream)}), \
+             patch('qwen_asr_app.vga_emphasis.PRIVATE_ROOT', self.root / 'private'), \
+             patch('qwen_asr_app.inference_providers.inference_settings.for_new_task',
+                   return_value={'asr_provider': 'remote_only'}):
+            for mode in ('complete', 'error', 'raise'):
+                if mode == 'complete':
+                    self.assertEqual((await transcribe_audio(self.image, '课程'))[1], 'archive')
+                else:
+                    with self.assertRaises((RuntimeError, OSError)):
+                        await transcribe_audio(self.image, '课程')
+                self.assertFalse(folders[-1].exists())
+                self.assertEqual(archive.read_bytes(), b'archived audio')
+                self.assertTrue(self.image.exists())
+
     async def test_running_transcription_is_cancelled(self):
         entered, cancelled, stop = asyncio.Event(), asyncio.Event(), Event()
         async def transcribe(*args):
