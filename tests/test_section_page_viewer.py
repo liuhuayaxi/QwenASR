@@ -8,6 +8,7 @@ import shutil
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import httpx
 from fastapi import FastAPI
@@ -80,6 +81,14 @@ class PageImageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(target["viewer_sha256"], SHA)
         self.assertEqual(target["viewer_pages"], 2)
         self.assertTrue(after["resources"][0]["pages_ready"])
+
+    async def test_legacy_summary_returns_no_page_links(self):
+        legacy = SimpleNamespace(metadata={"ai_note_summary": "旧版笔记"})
+        with patch.object(Store, "find", return_value=legacy):
+            async with client() as api:
+                response = await api.get(f"/api/section-page-links/{RECORDING}")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"enabled": True, "sections": []})
 
     async def test_page_images_follow_the_linked_pdf_only(self):
         self.publish()

@@ -20,7 +20,9 @@ def section_page_router(store, course_files):
     async def links(session_id: str):
         if not section_pages.enabled(): return {'enabled': False, 'sections': []}
         record = record_for(session_id)
-        markdown = str((record.metadata.get('ai_note_summary') or {}).get('summary') or '')
+        note = record.metadata.get('ai_note_summary')
+        if not isinstance(note, dict): return {'enabled': True, 'sections': []}
+        markdown = str(note.get('summary') or '')
         doc = section_pages.load(session_id)
         view = section_pages.public_view(doc, markdown) if doc else None
         if not view: return {'enabled': True, 'sections': []}
