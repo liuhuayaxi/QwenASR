@@ -130,7 +130,8 @@ def _filter_slides(slides, enabled, keep_homework, cancel, cache):
             if enabled:
                 thumbnails[slide.index] = cache / f'{slide.index}.npy'
                 np.save(thumbnails[slide.index], comparison(image).astype(np.uint8))
-        pages.append(Page(slide, kind, position, [slide.manifest()]))
+        occurrences = [dict(window) for window in slide.occurrences] or [slide.manifest()]
+        pages.append(Page(slide, kind, position, occurrences))
         decisions.append({**slide.manifest(), 'source_index': slide.index, 'kind': kind,
                           'kept': True, 'detail': detail})
     if enabled:

@@ -30,6 +30,7 @@ class Slide:
     captured_sec: float
     image_path: Path
     _owner: object = field(default=None, repr=False, compare=False)
+    occurrences: list[dict] = field(default_factory=list)
 
     def manifest(self):
         return {key: getattr(self, key) for key in
@@ -80,7 +81,14 @@ def extract_slides(video_path, *, sample_interval=0.5, min_stable_sec=1.0,
             old = np.load(path).astype(np.int16)
             return candidate.shape == old.shape and changed(candidate, old) <= duplicate_threshold
 
-        if not deduplicate or not any(duplicate(old) for old in references):
+        match = next((int(old.stem) - 1 for old in references if duplicate(old)), None) if deduplicate else None
+        if match is not None:
+            retained = slides[match]
+            if not retained.occurrences:
+                retained.occurrences.append(retained.manifest())
+            retained.occurrences.append({'index': retained.index, 'start_sec': candidate_start,
+                                         'end_sec': candidate_end, 'captured_sec': candidate_end})
+        else:
             path = folder / f'{len(slides) + 1:04d}.png'
             shutil.copyfile(candidate_path, path)
             slides.append(Slide(len(slides) + 1, candidate_start, candidate_end,

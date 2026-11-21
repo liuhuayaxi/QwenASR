@@ -120,6 +120,26 @@ class VGAEmphasisTests(unittest.IsolatedAsyncioTestCase):
                                'end': slides[-1].end_sec, 'raw': '这是考试重点'}])
         self.assertTrue(first.important)
 
+    async def test_filter_disabled_cli_retains_revisit_emphasis(self):
+        video = self.root / 'lecture.mp4'
+        synthetic_video(video)
+        slides = extract_slides(video)
+        self.assertEqual(len(slides), 3)
+        self.assertEqual(len(slides[0].occurrences), 2)
+        revisit = slides[0].occurrences[-1]
+        transcript = self.root / 'transcript.json'
+        transcript.write_text(json.dumps([{'start': revisit['start_sec'] + .1,
+                                          'end': revisit['end_sec'], 'raw': '考试重点'}]))
+        output, manifest = self.root / 'revisit.pdf', self.root / 'revisit.json'
+        with patch.object(sys, 'argv', ['extract_vga_slides.py', str(video), '--no-filter',
+                                       '--transcript', str(transcript), '-o', str(output),
+                                       '--manifest', str(manifest)]), contextlib.redirect_stdout(io.StringIO()):
+            await asyncio.to_thread(cli_main)
+        saved = json.loads(manifest.read_text())
+        self.assertEqual(len(saved['pages']), 3)
+        self.assertTrue(saved['pages'][0]['important'])
+        self.assertEqual(len(saved['pages'][0]['occurrences']), 2)
+
     async def test_failure_disabled_transcript_and_cancel(self):
         result = self.result()
         with patch('qwen_asr_app.vga_emphasis.find_audio', return_value=self.image), \

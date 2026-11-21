@@ -154,6 +154,22 @@ class VGAJobRoutes(unittest.IsolatedAsyncioTestCase):
         for options in ({'emphasis_enabled': 1}, {'audio_path': 1}):
             self.assertEqual((await self.start(**options)).status_code, 400)
 
+    async def test_filter_disabled_marks_only_revisit_keyword(self):
+        from qwen_asr_app.vga_slides import extract_slides
+
+        revisit = extract_slides(self.video, deduplicate=False)[-1]
+        segments = [{'start': revisit.start_sec + .1, 'end': revisit.end_sec, 'raw': '考试重点'}]
+        with patch('qwen_asr_app.vga_emphasis.find_audio', return_value=self.video), \
+             patch('qwen_asr_app.vga_emphasis.transcribe_audio', new_callable=AsyncMock,
+                   return_value=(segments, 'recording-revisit')):
+            response = await self.start(filter_enabled=False)
+            job = await self.finish(response.json()['id'])
+        self.assertEqual(job['status'], 'completed')
+        manifest = json.loads((self.api.vga_jobs.root / (job['asset_id'] + '.json')).read_text())
+        self.assertEqual(len(manifest['pages']), 3)
+        self.assertTrue(manifest['pages'][0]['important'])
+        self.assertEqual(len(manifest['pages'][0]['occurrences']), 2)
+
     async def test_blank_video_fails_without_import(self):
         synthetic_video(self.video, [(Image.new('RGB', (160, 120), 'black'), 2)])
         response = await self.start()
