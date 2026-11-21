@@ -12,10 +12,10 @@ def version_id(note):
 
 
 def capture(record, previous):
-    if not previous or not previous.get('summary'):
+    if not isinstance(previous, dict) or not previous.get('summary'):
         return
     current = record.metadata.get('ai_note_summary') or {}
-    if current.get('summary') == previous.get('summary'):
+    if isinstance(current, dict) and current.get('summary') == previous.get('summary'):
         return
     path = record.directory / '.note-history' / (version_id(previous) + '.json')
     if not path.exists():

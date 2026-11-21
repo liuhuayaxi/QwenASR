@@ -16,6 +16,7 @@ from fastapi import FastAPI
 
 from qwen_asr_app import durable
 from qwen_asr_app.note_library import NoteLibrary, note_library_router
+from qwen_asr_app.storage import RecordingStore
 
 
 def library_at(root):
@@ -32,6 +33,45 @@ def add_note(library, root, name):
 
 
 class NoteTransactionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_snapshot_keeps_refresh_maps_private_during_concurrent_removal(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            library = library_at(root)
+            store = RecordingStore.__new__(RecordingStore)
+            store.active = None
+            paths = {name: root / name for name in ('first-record', 'second-record')}
+            started, release = threading.Event(), threading.Event()
+            def checkpoint():
+                started.set()
+                if not release.wait(5):
+                    raise TimeoutError('snapshot was not released')
+            records = [SimpleNamespace(id=name, directory=directory,
+                metadata={'id': name, 'title': name, 'category': '未分类', 'started_at': name},
+                complete_material_only_note=checkpoint if index == 0 else lambda: None)
+                for index, (name, directory) in enumerate(paths.items())]
+            store.paths = paths.copy()
+            store._read_cache = {record.directory / 'session.json': ((None, None), record) for record in records}
+            library.recordings = store
+            with patch.object(store, '_metadata_paths', return_value=list(store._read_cache)), \
+                 patch('qwen_asr_app.storage.RecordingRecord.load', side_effect=AssertionError('lost cached snapshot')):
+                snapshot = asyncio.create_task(asyncio.to_thread(library.snapshot))
+                try:
+                    self.assertTrue(await asyncio.to_thread(started.wait, 3))
+                    self.assertEqual(store.paths, paths)
+                    store.paths.pop('second-record')
+                    store._read_cache.clear()
+                finally:
+                    release.set()
+                result = await snapshot
+            self.assertEqual({lesson['id'] for lesson in result['lessons']}, set(paths))
+
+    async def test_empty_snapshot_has_no_lessons_or_notes(self):
+        with tempfile.TemporaryDirectory() as raw:
+            library = library_at(Path(raw))
+            result = await asyncio.to_thread(library.snapshot)
+            self.assertEqual(result['lessons'], [])
+            self.assertEqual(result['notes'], [])
+
     async def test_overlapping_uploads_and_deletes_survive_restart(self):
         for operation in ('upload', 'delete'):
             with self.subTest(operation=operation), tempfile.TemporaryDirectory() as raw:
