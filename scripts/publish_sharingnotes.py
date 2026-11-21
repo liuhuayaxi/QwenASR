@@ -26,7 +26,7 @@ sys.path.insert(0, str(ROOT))
 
 from qwen_asr_app.sharingnotes_export import export_note  # noqa: E402
 from qwen_asr_app.sharingnotes_publish import (  # noqa: E402
-    HttpTransport, PublishConfig, PublishState, Publisher, build_upsert, store_loader)
+    HttpTransport, PublishConfig, PublishState, Publisher, build_upsert, state_path, store_loader)
 
 
 def main():
@@ -79,7 +79,7 @@ def main():
         if not (config.url and config.token):
             raise SystemExit('没有配置发布接口：设置 SHARINGNOTES_PUBLISH_URL 和 SHARINGNOTES_PUBLISH_TOKEN')
         transport = HttpTransport(config.url, config.token)
-        state = PublishState(args.state) if args.state else None
+        state = PublishState(args.state or state_path(config.url))
     publisher = Publisher(transport, courses, state)
 
     if args.delete:
@@ -91,7 +91,7 @@ def main():
         raise SystemExit('没有要发布的课程：设置 SHARINGNOTES_PUBLISH_COURSES 或 --courses')
     results = publisher.sync([(ident, store_loader(recording_store, ident)) for ident in ids], force=args.force)
     for item in results:
-        if item['status'] not in {'unchanged', 'skipped_course', 'skipped_unpublishable'}:
+        if item['status'] not in {'unchanged', 'skipped_course', 'skipped_unpublishable', 'skipped_deleted'}:
             print(json.dumps(item, ensure_ascii=False))
     print(json.dumps(dict(Counter(item['status'] for item in results)), ensure_ascii=False))
     if any(item['status'] in {'retry', 'conflict', 'rejected', 'invalid'} for item in results):

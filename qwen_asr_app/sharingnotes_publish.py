@@ -131,17 +131,46 @@ def fingerprint(message):
     return _sha(json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode())
 
 
+def state_path(url):
+    """One checkpoint file per publish server: versions from one server mean nothing to another."""
+    return STATE_DIR / f'state-{_sha(str(url or "").rstrip("/").encode())[:16]}.json'
+
+
 class PublishState:
-    """``notes[note_id]`` = last accepted version/fingerprint; ``pending`` = session ids."""
+    """``notes[note_id]`` = last accepted version/fingerprint (or a deletion
+    marker); ``pending`` = session ids awaiting publication.
+
+    Notes and sessions are written only while a publisher holds the process
+    lock. Pending ids live in their own file under a short lock so a save
+    notification never writes stale checkpoints; each mark gets a fresh token
+    so a save during publication keeps the id pending.
+    """
 
     def __init__(self, path=None):
         self.path = Path(path or STATE_DIR / 'state.json')
+        self.pending_path = self.path.with_name(self.path.stem + '.pending.json')
         self.lock = threading.RLock()
-        self.notes, self.sessions, self.pending = {}, {}, []
+        self.notes, self.sessions, self.marks = {}, {}, {}
         self.reload()
 
+    @property
+    def pending(self):
+        return list(self.marks)
+
+    def _read_marks(self):
+        try:
+            data = json.loads(self.pending_path.read_text(encoding='utf-8')).get('pending')
+        except (OSError, ValueError, AttributeError):
+            data = None
+        return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
+
+    def _write_marks(self, marks):
+        self.pending_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        atomic_json(self.pending_path, {'pending': marks})
+        self.marks = marks
+
     def reload(self):
-        """Re-read the file (another publisher may have written it); pending ids merge."""
+        """Re-read the files (another publisher may have written them)."""
         try:
             data = json.loads(self.path.read_text(encoding='utf-8'))
         except (OSError, ValueError):
@@ -149,25 +178,36 @@ class PublishState:
         with self.lock:
             self.notes = data.get('notes') if isinstance(data.get('notes'), dict) else {}
             self.sessions = data.get('sessions') if isinstance(data.get('sessions'), dict) else {}
-            self.pending = list(dict.fromkeys([*(data.get('pending') or []), *self.pending]))
+            with _process_lock(self.pending_path):
+                self.marks = self._read_marks()
 
     def save(self):
         with self.lock:
             self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            atomic_json(self.path, {'notes': self.notes, 'sessions': self.sessions, 'pending': self.pending})
+            atomic_json(self.path, {'notes': self.notes, 'sessions': self.sessions})
 
     def mark(self, session_ids):
-        with self.lock:
-            before = len(self.pending)
-            self.pending = list(dict.fromkeys([*self.pending, *session_ids]))
-            if len(self.pending) != before:
-                self.save()
+        with self.lock, _process_lock(self.pending_path):
+            marks = self._read_marks()
+            for ident in session_ids:
+                marks.pop(str(ident), None)
+                marks[str(ident)] = os.urandom(8).hex()
+            self._write_marks(marks)
 
-    def done(self, session_id):
+    def token(self, session_id):
         with self.lock:
-            if session_id in self.pending:
-                self.pending.remove(session_id)
-                self.save()
+            return self.marks.get(str(session_id))
+
+    def done(self, session_id, token=None):
+        """Clear a pending id unless it was marked again after ``token`` was read."""
+        with self.lock, _process_lock(self.pending_path):
+            marks = self._read_marks()
+            current = marks.get(str(session_id))
+            if current is not None and current == token:
+                del marks[str(session_id)]
+                self._write_marks(marks)
+            else:
+                self.marks = marks
 
 
 @contextlib.contextmanager
@@ -254,6 +294,8 @@ class Publisher:
         extra = dict(self.courseware(exported) or {}) if self.courseware else {}
         blobs.update(extra.pop('blobs', {}) or {})
         previous = self.state.notes.get(note['id']) or {}
+        if previous.get('deleted') and not force:
+            return {'session': session_id, 'id': note['id'], 'status': 'skipped_deleted'}
         message = build_upsert(exported, previous.get('version'), **extra)
         stamp = fingerprint(message)
         if not force and previous.get('fingerprint') == stamp:
@@ -291,13 +333,15 @@ class Publisher:
 
     def delete_note(self, note_id, expected_version):
         """Explicit removal only: a session missing locally is never deleted."""
-        self.state.reload()
-        response = self._call(DELETE_PATH, {'contractVersion': CONTRACT_VERSION, 'operation': 'delete_note',
-                                            'id': note_id, 'expectedVersion': expected_version})
-        if response.get('status') == 'deleted':
-            with self.state.lock:
-                self.state.notes.pop(note_id, None)
-                self.state.save()
+        with _process_lock(self.state.path):
+            self.state.reload()
+            response = self._call(DELETE_PATH, {'contractVersion': CONTRACT_VERSION, 'operation': 'delete_note',
+                                                'id': note_id, 'expectedVersion': expected_version})
+            if response.get('status') == 'deleted':
+                # Keep a marker so reconciliation does not republish it; --force does.
+                with self.state.lock:
+                    self.state.notes[note_id] = {'deleted': True, 'version': None, 'deletedAt': _now()}
+                    self.state.save()
         return response
 
     def sync(self, sessions, read_asset=None, force=False):
@@ -309,25 +353,28 @@ class Publisher:
     def _sync(self, sessions, read_asset, force):
         results = []
         for session_id, load in sessions:
+            token = self.state.token(session_id)
             try:
                 session = load()
             except Exception as exc:  # noqa: BLE001 - a broken recording must not stop the queue
                 results.append({'session': session_id, 'status': 'unreadable', 'error': str(exc)[:400]})
-                self.state.done(session_id)
+                self.state.done(session_id, token)
                 continue
             if session is None:
                 results.append({'session': session_id, 'status': 'missing'})
-                self.state.done(session_id)
+                self.state.done(session_id, token)
                 continue
             try:
                 results.append(self.publish_session(session, read_asset, force=force))
             except PublishError as exc:
                 results.append({'session': session_id, 'status': 'retry', 'error': str(exc)[:400]})
+                if token is None:  # reached by a full reconcile: keep it for the retry
+                    self.state.mark([session_id])
                 continue
             except Exception as exc:  # noqa: BLE001 - one bad note must not block the queue
                 self._record(session_id, status='error', error=str(exc)[:400])
                 results.append({'session': session_id, 'status': 'error', 'error': str(exc)[:400]})
-            self.state.done(session_id)
+            self.state.done(session_id, token)
         return results
 
 
@@ -392,7 +439,7 @@ class AutoPublisher:
             self.full = False
             ids = list(dict.fromkeys([*ids, *self._all_ids()]))
         results = self.publisher.sync([(i, store_loader(self.store, i)) for i in ids])
-        changed = [r for r in results if r['status'] not in {'unchanged', 'skipped_course', 'skipped_unpublishable'}]
+        changed = [r for r in results if r['status'] not in {'unchanged', 'skipped_course', 'skipped_unpublishable', 'skipped_deleted'}]
         self.last = {'at': _now(), 'checked': len(results), 'results': changed[-50:]}
         return results
 
@@ -402,7 +449,7 @@ class AutoPublisher:
         if not config.configured or self.task:
             return False
         self.publisher = Publisher(self.transport or HttpTransport(config.url, config.token),
-                                   config.courses, self.state or PublishState())
+                                   config.courses, self.state or PublishState(state_path(config.url)))
         library_changes.callbacks.add(self.mark)
         self.full = True
         self.task = asyncio.create_task(self.run())

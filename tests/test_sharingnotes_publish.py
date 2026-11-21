@@ -156,7 +156,43 @@ class IncrementalPublishTests(Harness):
         self.assertEqual(self.publisher.delete_note(result['id'], result['version'])['status'], 'deleted')
         self.assertIsNone(self.api.visible(result['id']))
         self.assertEqual(self.publisher.delete_note(result['id'], result['version'])['status'], 'deleted')
-        self.assertNotIn(result['id'], self.state.notes)
+        self.assertTrue(self.state.notes[result['id']]['deleted'])
+
+    def test_deleted_note_is_not_republished_by_reconcile(self):
+        result = self.publish()
+        self.publisher.delete_note(result['id'], result['version'])
+        self.assertEqual(self.publish()['status'], 'skipped_deleted')
+        self.assertIsNone(self.api.visible(result['id']))
+        forced = self.publisher.publish_session(session(), self.read, force=True)
+        self.assertEqual(forced['status'], 'accepted')
+        self.assertEqual(self.api.visible(result['id'])['version'], result['version'])
+
+    def test_save_during_publication_stays_pending(self):
+        self.state.mark(['rec-1'])
+
+        def load():
+            self.state.mark(['rec-1'])  # the user saves again while this snapshot publishes
+            return session()
+        self.assertEqual(self.publisher.sync([('rec-1', load)], self.read)[0]['status'], 'accepted')
+        self.assertEqual(self.state.pending, ['rec-1'])
+
+    def test_reconcile_failure_is_kept_for_retry(self):
+        self.api.drop_next_response = True
+        self.assertEqual(self.publisher.sync([('rec-1', session)], self.read)[0]['status'], 'retry')
+        self.assertEqual(self.state.pending, ['rec-1'])
+
+    def test_save_notification_does_not_overwrite_another_publishers_checkpoint(self):
+        app_state = PublishState(self.tmp / 'state.json')  # the running app's copy, loaded earlier
+        result = self.publish()  # a manual run publishes meanwhile
+        app_state.mark(['rec-1'])
+        reloaded = PublishState(self.tmp / 'state.json')
+        self.assertEqual(reloaded.notes[result['id']]['version'], result['version'])
+        self.assertEqual(reloaded.pending, ['rec-1'])
+
+    def test_each_server_has_its_own_checkpoints(self):
+        from qwen_asr_app.sharingnotes_publish import state_path
+        self.assertNotEqual(state_path('https://a.example'), state_path('https://b.example'))
+        self.assertEqual(state_path('https://a.example/'), state_path('https://a.example'))
 
     def test_missing_local_recording_is_never_deleted_remotely(self):
         result = self.publish()
