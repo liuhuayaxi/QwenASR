@@ -89,6 +89,7 @@ class Page:
     important: bool = False
     matched_snippets: list[dict] = field(default_factory=list)
     transcript_text: str = ''
+    emphasis_score: float = 0.0
 
 
 @dataclass
@@ -106,7 +107,7 @@ class FilterResult:
             entry.update(index=index, source_index=page.slide.index, position_index=page.position + 1,
                          kind=page.kind, section=SECTIONS[page.kind], occurrences=page.occurrences,
                          important=page.important, matched_snippets=page.matched_snippets,
-                         transcript_text=page.transcript_text)
+                         transcript_text=page.transcript_text, emphasis_score=page.emphasis_score)
             pages.append(entry)
         return {'pages': pages, 'dropped': [dict(d) for d in self.decisions if not d['kept']],
                 'warnings': list(self.warnings), 'recording_id': self.recording_id}

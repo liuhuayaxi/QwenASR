@@ -13,8 +13,9 @@ from .remote_operations import discard_completed_payloads
 from .vga_slides import ExtractionCancelled
 
 
-EMPHASIS_KEYWORDS = ('重点', '重要', '考试', '考点', '必考', '会考', '要考', '记住',
-                     '注意', '一定要', '关键', '易错', '期末', '掌握')
+EMPHASIS_KEYWORDS = ('重点', '考点', '考试', '必考', '会考', '要考', '期末')
+EMPHASIS_PATTERN = re.compile('|'.join(EMPHASIS_KEYWORDS) + r'|(?:这个|这里|这点|这一点)(?:非常|很|特别)?重要')
+EMPHASIS_MIN_MINUTES = 1.0
 
 
 def normalize_segments(segments):
@@ -54,15 +55,24 @@ def load_transcript(path):
 
 def mark_emphasis(result, segments):
     segments = normalize_segments(segments)
+    candidates = []
     for page in result.pages:
         overlapping = [s for s in segments if any(
             s['start'] < window['end_sec'] and s['end'] > window['start_sec']
             for window in page.occurrences)]
         page.transcript_text = '\n'.join(s['raw'] for s in overlapping)
-        hits = [s for s in overlapping if any(word in s['raw'] for word in EMPHASIS_KEYWORDS)]
-        page.important = bool(hits)
+        hits = [s for s in overlapping if EMPHASIS_PATTERN.search(s['raw'])]
+        count = sum(len(EMPHASIS_PATTERN.findall(s['raw'])) for s in hits)
+        minutes = sum(max(0, w['end_sec'] - w['start_sec']) for w in page.occurrences) / 60
+        page.emphasis_score = count / max(EMPHASIS_MIN_MINUTES, minutes)
+        page.important = False
+        if count:
+            candidates.append(page)
         page.matched_snippets = [{'start': s['start'], 'end': s['end'], 'text': s['raw'][:300]}
                                  for s in hits[:3]]
+    limit = max(1, math.floor(len(result.pages) * .2 + .5))
+    for page in sorted(candidates, key=lambda page: -page.emphasis_score)[:limit]:
+        page.important = True
     return result
 
 

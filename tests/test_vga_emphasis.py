@@ -54,6 +54,7 @@ class VGAEmphasisTests(unittest.IsolatedAsyncioTestCase):
         output = self.root / 'marked.pdf'
         manifest = write_filtered_pdf(result, output)
         self.assertTrue(manifest['pages'][0]['important'])
+        self.assertGreater(manifest['pages'][0]['emphasis_score'], 0)
         with pymupdf.open(output) as pdf:
             self.assertIn('★', pdf.get_toc()[1][1])
             labels = {word: pdf[0].search_for(word)[0] for word in ('重点', '作业讲解')}
@@ -86,6 +87,37 @@ class VGAEmphasisTests(unittest.IsolatedAsyncioTestCase):
         path.write_text('invalid')
         with self.assertRaises(ValueError):
             load_transcript(path)
+
+    def test_density_ranking_cap_and_rounding(self):
+        pages = [SimpleNamespace(occurrences=[{'start_sec': i * 1000, 'end_sec': i * 1000 + 600}])
+                 for i in range(8)]
+        pages[0].occurrences = [{'start_sec': 0, 'end_sec': 5},
+                                {'start_sec': 100, 'end_sec': 215}]
+        pages[1].occurrences[0]['end_sec'] = 1001
+        result = SimpleNamespace(pages=pages)
+        segments = [{'start': i * 1000 + .1, 'end': i * 1000 + .5, 'raw': '重点' * (i + 1)}
+                    for i in range(8)]
+        mark_emphasis(result, segments)
+        self.assertEqual([i for i, p in enumerate(pages) if p.important], [1, 7])
+        self.assertEqual(pages[0].emphasis_score, .5)
+        self.assertEqual(pages[1].emphasis_score, 2)
+        self.assertEqual(len(pages), 8)
+
+    def test_weak_words_no_hits_empty_and_explicit_emphasis(self):
+        result = self.result()
+        page = result.pages[0]
+        for text in ('注意，一定要记住，掌握关键，很重要，容易易错', '', '普通讲解'):
+            mark_emphasis(result, [{'start': 1, 'end': 2, 'raw': text}])
+            self.assertFalse(page.important)
+            self.assertEqual(page.emphasis_score, 0)
+            self.assertEqual(page.matched_snippets, [])
+        for text in ('这个重要', '这里很重要', '这一点特别重要'):
+            mark_emphasis(result, [{'start': 1, 'end': 2, 'raw': text}])
+            self.assertTrue(page.important)
+        mark_emphasis(result, [])
+        self.assertFalse(page.important)
+        self.assertEqual(page.emphasis_score, 0)
+        self.assertEqual(mark_emphasis(SimpleNamespace(pages=[]), []).pages, [])
 
     def test_sibling_explicit_and_video_audio_detection(self):
         video = self.root / 'lecture.mp4'
