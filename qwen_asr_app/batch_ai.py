@@ -118,6 +118,7 @@ async def correct_batch_segments(
             installed.add(ident)
     try:
         async def correct_remaining():
+            segment_errors.clear()
             remaining=[s for s in segments if int(s['id']) not in installed]
             if remaining:
                 try:
@@ -150,17 +151,17 @@ async def correct_batch_segments(
                               (int(s['id']) for s in remaining)
                               if ident in saved_blocks]
                 # Validate mock/legacy adapters before accepting their response.
-                expected=[int(s['id']) for s in remaining]
+                expected=[int(s['id']) for s in remaining if int(s['id']) not in segment_errors]
                 actual=[int(b['segment_ids'][0]) for b in result if len(b.get('segment_ids',[]))==1]
-                if not segment_errors and actual!=expected:
+                if actual!=expected:
                     raise AIRequestError('批量精修的段落编号不完整，原文已保留',kind='invalid_segment_mapping')
                 checkpoint(result)
-            return [saved_blocks[int(s['id'])] for s in segments]
+            return [saved_blocks[int(s['id'])] for s in segments if int(s['id']) not in segment_errors]
         blocks = await retry_transient_ai(correct_remaining)
-        expected = [int(segment["id"]) for segment in segments]
+        expected = [int(segment["id"]) for segment in segments if int(segment["id"]) not in segment_errors]
         actual = [int(block["segment_ids"][0]) for block in blocks
                   if len(block.get("segment_ids", [])) == 1 and str(block.get("corrected") or "").strip()]
-        if not segment_errors and (actual != expected or len(blocks) != len(expected)):
+        if actual != expected or len(blocks) != len(expected):
             raise AIRequestError("批量精修的段落编号不完整，原文已保留", kind="invalid_segment_mapping")
         checkpoint(blocks)
         corrected = {int(block["segment_ids"][0]): str(block["corrected"]).strip() for block in blocks}
