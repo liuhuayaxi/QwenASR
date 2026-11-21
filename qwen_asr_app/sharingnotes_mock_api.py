@@ -138,7 +138,8 @@ class MockPublishAPI:
         error = self._check(message)
         if error:
             return 400, _response('rejected', error=error, **op)
-        refs = [sha for key in ('images', 'pages', 'pdfs') for sha in message['references'].get(key) or []]
+        refs = [p.get('manifestSha256') for p in message.get('pageSets') or []]
+        refs += [sha for key in ('images', 'pages', 'pdfs') for sha in message['references'].get(key) or []]
         if any(sha not in self.descriptors for sha in refs):
             return 400, _response('rejected', error='unregistered blob reference', **op)
         missing = [self.descriptors[sha] for sha in refs if sha not in self.stored]

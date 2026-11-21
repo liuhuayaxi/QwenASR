@@ -151,6 +151,7 @@ class PublishState:
         self.pending_path = self.path.with_name(self.path.stem + '.pending.json')
         self.lock = threading.RLock()
         self.notes, self.sessions, self.marks = {}, {}, {}
+        self.blobs = set()  # "kind/sha256" the server confirmed it stores
         self.reload()
 
     @property
@@ -178,13 +179,14 @@ class PublishState:
         with self.lock:
             self.notes = data.get('notes') if isinstance(data.get('notes'), dict) else {}
             self.sessions = data.get('sessions') if isinstance(data.get('sessions'), dict) else {}
+            self.blobs = set(data.get('blobs') or []) if isinstance(data.get('blobs'), list) else set()
             with _process_lock(self.pending_path):
                 self.marks = self._read_marks()
 
     def save(self):
         with self.lock:
             self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            atomic_json(self.path, {'notes': self.notes, 'sessions': self.sessions})
+            atomic_json(self.path, {'notes': self.notes, 'sessions': self.sessions, 'blobs': sorted(self.blobs)})
 
     def mark(self, session_ids):
         with self.lock, _process_lock(self.pending_path):
@@ -256,25 +258,47 @@ class Publisher:
         if sha not in blobs:
             raise PublishError(f'服务端缺少本机没有的资源 {str(sha)[:12]}')
         kind, content_type, payload = blobs[sha]
+        size = payload.stat().st_size if isinstance(payload, Path) else len(payload)
         return {'contractVersion': CONTRACT_VERSION, 'sha256': sha, 'kind': kind,
-                'contentType': content_type, 'size': len(payload)}, payload
+                'contentType': content_type, 'size': size}, payload
 
     def _put(self, descriptor, payload):
         path = f"{BLOBS_PATH}/{descriptor['kind']}/{descriptor['sha256']}"
+        if isinstance(payload, Path):  # courseware is read only when the server lacks it
+            payload = payload.read_bytes()
+            if hashlib.sha256(payload).hexdigest() != descriptor['sha256']:
+                raise PublishError(f"{descriptor['kind']} 文件在发布时被修改，下次再发布")
         status, response = self.transport.request('PUT', path, payload, descriptor['contentType'])
         if status >= 300 or not isinstance(response, dict) or response.get('status') != 'accepted':
             error = response.get('error') if isinstance(response, dict) else None
             raise PublishError(error or f"上传 {descriptor['kind']} 失败（HTTP {status}）")
+        with self.state.lock:
+            self.state.blobs.add(f"{descriptor['kind']}/{descriptor['sha256']}")
 
     def _ensure_blob(self, sha, blobs):
         """Register a referenced blob; upload its bytes only if the server lacks them."""
         descriptor, payload = self._descriptor(sha, blobs)
+        if f"{descriptor['kind']}/{sha}" in self.state.blobs:
+            return None  # confirmed earlier; skipped
         response = self._call(BLOBS_PATH, descriptor)
         if response.get('status') == 'missing_blobs':
             self._put(descriptor, payload)
         elif response.get('status') != 'accepted':
             raise PublishError(response.get('error') or f'登记资源失败：{response.get("status")}')
+        with self.state.lock:
+            self.state.blobs.add(f"{descriptor['kind']}/{sha}")
         return response.get('status') == 'missing_blobs'
+
+    def _dependents(self, note_id, materials):
+        """Sessions of other published notes that list one of these materials with an older PDF."""
+        current = {m['id']: m['sha256'] for m in materials}
+        found = []
+        for other, entry in self.state.notes.items():
+            if other == note_id or entry.get('deleted') or not entry.get('session'):
+                continue
+            if any(mid in current and sha != current[mid] for mid, sha in (entry.get('materials') or {}).items()):
+                found.append(entry['session'])
+        return found
 
     def publish_session(self, session, read_asset=None, force=False):
         """Publish one recording's note if it changed. Never raises for
@@ -291,7 +315,13 @@ class Publisher:
             return {'session': session_id, 'status': 'skipped_unpublishable'}
         note = exported['note']
         blobs = {sha: ('image', 'image/png', data) for sha, data in exported['images'].items()}
-        extra = dict(self.courseware(exported) or {}) if self.courseware else {}
+        try:
+            extra = dict(self.courseware(exported, session) or {}) if self.courseware else {}
+        except ValueError as exc:
+            self._record(session_id, status='invalid', error=str(exc)[:400])
+            return {'session': session_id, 'status': 'invalid', 'error': str(exc)}
+        except OSError as exc:
+            raise PublishError(f'读取课件失败：{exc}') from None
         blobs.update(extra.pop('blobs', {}) or {})
         previous = self.state.notes.get(note['id']) or {}
         if previous.get('deleted') and not force:
@@ -300,12 +330,22 @@ class Publisher:
         stamp = fingerprint(message)
         if not force and previous.get('fingerprint') == stamp:
             return {'session': session_id, 'id': note['id'], 'status': 'unchanged'}
-        uploaded = 0
+        uploaded, cached = 0, []
         for sha in blobs:
-            uploaded += self._ensure_blob(sha, blobs)
+            result = self._ensure_blob(sha, blobs)
+            if result is None:
+                cached.append(sha)
+            uploaded += bool(result)
         for _ in range(MAX_REPLAYS + 1):
             response = self._call(NOTES_PATH, message)
             status = response.get('status')
+            if status == 'rejected' and cached:
+                # The server forgot blobs we skipped registering (e.g. a reset): register them now.
+                with self.state.lock:
+                    self.state.blobs.difference_update(f'{blobs[sha][0]}/{sha}' for sha in cached)
+                uploaded += sum(bool(self._ensure_blob(sha, blobs)) for sha in cached)
+                cached = []
+                continue
             if status == 'missing_blobs':
                 for item in response.get('missingBlobs') or []:
                     descriptor, payload = self._descriptor(item.get('sha256'), blobs)
@@ -321,10 +361,15 @@ class Publisher:
             with self.state.lock:
                 self.state.notes[note['id']] = {'session': session_id, 'version': note['version'],
                                                 'fingerprint': stamp, 'file': exported['catalogEntry']['file'],
+                                                'materials': {m['id']: m['sha256'] for m in message['materials']},
                                                 'publishedAt': _now()}
+                # A shared material's PDF changed: notes still mapped to the old PDF follow it.
+                requeue = self._dependents(note['id'], message['materials'])
+            if requeue:
+                self.state.mark(requeue)
             self._record(session_id, status='accepted', id=note['id'], version=note['version'])
             return {'session': session_id, 'id': note['id'], 'status': 'accepted', 'version': note['version'],
-                    'replaced': previous.get('version'), 'uploadedBlobs': uploaded}
+                    'replaced': previous.get('version'), 'uploadedBlobs': uploaded, 'requeued': requeue}
         # conflict/rejected: someone else changed the note, or the payload is
         # invalid. Not retried automatically; a person decides.
         error = str(response.get('error') or status)[:400]
@@ -344,11 +389,22 @@ class Publisher:
                     self.state.save()
         return response
 
-    def sync(self, sessions, read_asset=None, force=False):
-        """Publish ``(session_id, loader)`` pairs; transport failures keep ids pending."""
+    def sync(self, sessions, read_asset=None, force=False, loader=None):
+        """Publish ``(session_id, loader)`` pairs; transport failures keep ids pending.
+        With ``loader(session_id)``, notes requeued because a shared PDF changed
+        are published in the same run."""
         with _process_lock(self.state.path):
             self.state.reload()
-            return self._sync(sessions, read_asset, force)
+            results = self._sync(sessions, read_asset, force)
+            done = {str(ident) for ident, _ in sessions}
+            for _ in range(MAX_REPLAYS if loader else 0):
+                follow = [i for r in results for i in r.get('requeued') or () if i not in done]
+                follow = list(dict.fromkeys(follow))
+                if not follow:
+                    break
+                done.update(follow)
+                results += self._sync([(i, loader(i)) for i in follow], read_asset, False)
+            return results
 
     def _sync(self, sessions, read_asset, force):
         results = []
@@ -411,8 +467,8 @@ class AutoPublisher:
     """
 
     def __init__(self, store, config=None, transport=None, state=None, debounce=5, retry=60,
-                 reconcile_interval=6 * 3600):
-        self.store, self.config = store, config
+                 reconcile_interval=6 * 3600, courseware=None):
+        self.store, self.config, self.courseware = store, config, courseware
         self.transport, self.state = transport, state
         self.debounce, self.retry, self.reconcile_interval = debounce, retry, reconcile_interval
         self.task = None
@@ -438,7 +494,8 @@ class AutoPublisher:
         if self.full:
             self.full = False
             ids = list(dict.fromkeys([*ids, *self._all_ids()]))
-        results = self.publisher.sync([(i, store_loader(self.store, i)) for i in ids])
+        results = self.publisher.sync([(i, store_loader(self.store, i)) for i in ids],
+                                      loader=lambda i: store_loader(self.store, i))
         changed = [r for r in results if r['status'] not in {'unchanged', 'skipped_course', 'skipped_unpublishable', 'skipped_deleted'}]
         self.last = {'at': _now(), 'checked': len(results), 'results': changed[-50:]}
         return results
@@ -449,7 +506,8 @@ class AutoPublisher:
         if not config.configured or self.task:
             return False
         self.publisher = Publisher(self.transport or HttpTransport(config.url, config.token),
-                                   config.courses, self.state or PublishState(state_path(config.url)))
+                                   config.courses, self.state or PublishState(state_path(config.url)),
+                                   courseware=self.courseware)
         library_changes.callbacks.add(self.mark)
         self.full = True
         self.task = asyncio.create_task(self.run())

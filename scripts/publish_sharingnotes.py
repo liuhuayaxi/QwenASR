@@ -80,7 +80,10 @@ def main():
             raise SystemExit('没有配置发布接口：设置 SHARINGNOTES_PUBLISH_URL 和 SHARINGNOTES_PUBLISH_TOKEN')
         transport = HttpTransport(config.url, config.token)
         state = PublishState(args.state or state_path(config.url))
-    publisher = Publisher(transport, courses, state)
+    from qwen_asr_app.course_files import CourseFiles
+    from qwen_asr_app.sharingnotes_courseware import CoursewareSource
+    from qwen_asr_app.storage import app_settings
+    publisher = Publisher(transport, courses, state, courseware=CoursewareSource(CourseFiles(app_settings)))
 
     if args.delete:
         if not args.expected_version:
@@ -89,7 +92,8 @@ def main():
         return
     if not courses:
         raise SystemExit('没有要发布的课程：设置 SHARINGNOTES_PUBLISH_COURSES 或 --courses')
-    results = publisher.sync([(ident, store_loader(recording_store, ident)) for ident in ids], force=args.force)
+    results = publisher.sync([(ident, store_loader(recording_store, ident)) for ident in ids], force=args.force,
+                             loader=lambda ident: store_loader(recording_store, ident))
     for item in results:
         if item['status'] not in {'unchanged', 'skipped_course', 'skipped_unpublishable', 'skipped_deleted'}:
             print(json.dumps(item, ensure_ascii=False))

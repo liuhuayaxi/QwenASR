@@ -80,6 +80,8 @@ from qwen_asr_app.course_file_routes import CourseFileAPI
 from qwen_asr_app.categories import change_category
 from qwen_asr_app.shared_library import LibraryWatch, discover_courses
 from qwen_asr_app.sharingnotes_publish import AutoPublisher
+from qwen_asr_app.sharingnotes_courseware import CoursewareSource
+from qwen_asr_app.course_files import CourseFiles
 from qwen_asr_app.library_backup import BackupManager, backup_router, backup_sources
 from qwen_asr_app.drive_backup import DriveBackup, drive_backup_router
 from qwen_asr_app.library_layout import shared
@@ -201,7 +203,7 @@ pdf_ai_jobs = pdf_jobs.jobs
 pdf_ai_background_tasks = pdf_jobs.tasks
 course_file_api = CourseFileAPI(app_settings, recording_store, ideashell_manager, pdf_ai_lock)
 library_watch = LibraryWatch(app_settings, recording_store)
-sharingnotes_publisher = AutoPublisher(recording_store)
+sharingnotes_publisher = AutoPublisher(recording_store, courseware=CoursewareSource(CourseFiles(app_settings)))
 backup_manager = BackupManager()
 app.include_router(course_file_api.router)
 from qwen_asr_app.knowledge.service import KnowledgeService
