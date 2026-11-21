@@ -1,0 +1,184 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sharingnotes.invalid/contract/common.schema.json",
+  "title": "Sharing Notes common (current snapshot)",
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{20}$"
+    },
+    "hash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "pdf": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{20}$"
+        },
+        "course": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "pages": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "updatedAt": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "url": {
+          "type": "string"
+        },
+        "pending": {
+          "type": "boolean"
+        },
+        "source_pages": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "pageImages": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "course",
+        "title",
+        "kind",
+        "pages",
+        "updatedAt",
+        "sha256",
+        "bytes",
+        "url"
+      ],
+      "additionalProperties": true
+    },
+    "pageLinkEntry": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "mapping_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sections": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "index": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "heading": {
+                "type": "string"
+              },
+              "content_sha": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "targets": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "pdf": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{20}$"
+                    },
+                    "sha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "page_start": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "page_end": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 1
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "viewer_page_start": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "viewer_page_end": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 1
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "pdf",
+                    "sha256",
+                    "title",
+                    "page_start",
+                    "page_end",
+                    "viewer_page_start",
+                    "viewer_page_end"
+                  ],
+                  "additionalProperties": true
+                }
+              }
+            },
+            "required": [
+              "index",
+              "heading",
+              "targets"
+            ],
+            "additionalProperties": true
+          }
+        },
+        "materials": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{20}$"
+          }
+        }
+      },
+      "required": [
+        "version",
+        "sections"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

@@ -79,6 +79,7 @@ from qwen_asr_app.task_center import task_center_router
 from qwen_asr_app.course_file_routes import CourseFileAPI
 from qwen_asr_app.categories import change_category
 from qwen_asr_app.shared_library import LibraryWatch, discover_courses
+from qwen_asr_app.sharingnotes_publish import AutoPublisher
 from qwen_asr_app.library_backup import BackupManager, backup_router, backup_sources
 from qwen_asr_app.drive_backup import DriveBackup, drive_backup_router
 from qwen_asr_app.library_layout import shared
@@ -135,6 +136,7 @@ async def lifespan(_: FastAPI):
         # without opening another listener.
         async with smartclass_service.lifespan(smartclass_service.app):
             await library_watch.start()
+            await sharingnotes_publisher.start()
             yuketang_service.loop = asyncio.get_running_loop()
             await drive_backup_manager.start_loop()
             await knowledge_service.start()
@@ -163,6 +165,7 @@ async def lifespan(_: FastAPI):
                 from qwen_asr_app.knowledge.embeddings import close_embedder
                 await asyncio.to_thread(close_embedder)
                 await backup_manager.close()
+                await sharingnotes_publisher.close()
                 await library_watch.close()
                 await course_stream_manager.close()
                 tasks = [
@@ -198,6 +201,7 @@ pdf_ai_jobs = pdf_jobs.jobs
 pdf_ai_background_tasks = pdf_jobs.tasks
 course_file_api = CourseFileAPI(app_settings, recording_store, ideashell_manager, pdf_ai_lock)
 library_watch = LibraryWatch(app_settings, recording_store)
+sharingnotes_publisher = AutoPublisher(recording_store)
 backup_manager = BackupManager()
 app.include_router(course_file_api.router)
 from qwen_asr_app.knowledge.service import KnowledgeService

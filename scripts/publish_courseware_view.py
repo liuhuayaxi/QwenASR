@@ -18,6 +18,7 @@ unchanged and does not commit.
 """
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -28,7 +29,7 @@ from qwen_asr_app.courseware_publish import publish_courseware_view  # noqa: E40
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--sharingnotes', default=str(ROOT.parent / 'sharingnotes'))
+    parser.add_argument('--sharingnotes', default=os.environ.get('SHARINGNOTES_DIR') or str(ROOT.parent / 'sharingnotes'))
     parser.add_argument('--stage', default='', help='sync_site snapshot directory; skips the git commit')
     parser.add_argument('--assets', default='', help='prepared-assets.json from sync_site')
     parser.add_argument('--links', default='', help='section-page-links directory; defaults to QwenASR private data')

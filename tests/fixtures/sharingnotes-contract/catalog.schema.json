@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sharingnotes.invalid/contract/catalog.schema.json",
+  "title": "Sharing Notes catalog (current snapshot)",
+  "type": "object",
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "publishedAt": {
+      "type": "string"
+    },
+    "courses": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{20}$"
+          },
+          "course": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "chapter": {
+            "type": "string"
+          },
+          "chapters": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "date": {
+            "type": "string"
+          },
+          "abstract": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "wordCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "imageCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "file": {
+            "type": "string",
+            "pattern": "^notes/[a-f0-9]{20}-[a-f0-9]{12}\\.json$"
+          },
+          "sourceCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "lessonAt": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "course",
+          "title",
+          "chapter",
+          "chapters",
+          "date",
+          "abstract",
+          "version",
+          "wordCount",
+          "imageCount",
+          "file",
+          "sourceCount",
+          "lessonAt"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "textOnly": {
+      "type": "boolean"
+    },
+    "includesImages": {
+      "type": "boolean"
+    },
+    "authentication": {
+      "const": "njupt"
+    }
+  },
+  "required": [
+    "version",
+    "publishedAt",
+    "courses",
+    "notes",
+    "textOnly",
+    "includesImages",
+    "authentication"
+  ],
+  "additionalProperties": true
+}

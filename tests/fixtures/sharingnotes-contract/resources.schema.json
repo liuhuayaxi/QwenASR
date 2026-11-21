@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sharingnotes.invalid/contract/resources.schema.json",
+  "title": "Sharing Notes resources (current snapshot)",
+  "type": "object",
+  "properties": {
+    "version": {
+      "const": 2
+    },
+    "pdfs": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/pdf"
+      }
+    },
+    "noteMaterials": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[a-f0-9]{20}$"
+      },
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{20}$"
+        }
+      }
+    }
+  },
+  "required": [
+    "version",
+    "pdfs",
+    "noteMaterials"
+  ],
+  "additionalProperties": true
+}

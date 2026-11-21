@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sharingnotes.invalid/contract/page-links.schema.json",
+  "title": "Sharing Notes page-links (current snapshot)",
+  "type": "object",
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "enabled": {
+      "type": "boolean"
+    },
+    "notes": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[a-f0-9]{20}$"
+      },
+      "additionalProperties": {
+        "$ref": "common.schema.json#/$defs/pageLinkEntry"
+      }
+    }
+  },
+  "required": [
+    "version",
+    "enabled",
+    "notes"
+  ],
+  "additionalProperties": true
+}

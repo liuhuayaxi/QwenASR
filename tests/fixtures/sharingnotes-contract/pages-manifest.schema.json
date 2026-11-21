@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sharingnotes.invalid/contract/pages-manifest.schema.json",
+  "title": "Sharing Notes pages-manifest (current snapshot)",
+  "type": "object",
+  "properties": {
+    "version": {
+      "const": 2
+    },
+    "pdf_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "pages": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "format": {
+      "const": "webp"
+    },
+    "width": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "quality": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "thumb_width": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "sizes": {
+      "type": "array",
+      "items": {
+        "type": "array",
+        "prefixItems": [
+          {
+            "type": "integer",
+            "minimum": 1
+          },
+          {
+            "type": "integer",
+            "minimum": 1
+          }
+        ],
+        "items": false,
+        "minItems": 2,
+        "maxItems": 2
+      }
+    },
+    "source_pages": {
+      "type": "array",
+      "items": {
+        "anyOf": [
+          {
+            "type": "integer",
+            "minimum": 1
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "bytes": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "version",
+    "pdf_sha256",
+    "pages",
+    "format",
+    "width",
+    "quality",
+    "thumb_width",
+    "sizes",
+    "source_pages",
+    "bytes"
+  ],
+  "additionalProperties": true
+}
