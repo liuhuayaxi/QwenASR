@@ -28,7 +28,7 @@ sys.path.insert(0, str(ROOT))
 
 from qwen_asr_app.sharingnotes_export import export_note  # noqa: E402
 from qwen_asr_app.sharingnotes_publish import (  # noqa: E402
-    PublishConfig, PublishState, Publisher, build_upsert, state_path, store_loader)
+    PublishConfig, PublishState, Publisher, build_upsert, course_selected, state_path, store_loader)
 
 SKIPPED_STATUSES = {'unchanged', 'skipped_course', 'skipped_unpublishable', 'skipped_deleted'}
 
@@ -36,7 +36,7 @@ SKIPPED_STATUSES = {'unchanged', 'skipped_course', 'skipped_unpublishable', 'ski
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--session', action='append', default=[], help='只发布指定录音（可重复）')
-    parser.add_argument('--courses', help='逗号分隔的课程，覆盖配置')
+    parser.add_argument('--courses', help='逗号分隔的课程，* 为所有课程；覆盖配置')
     parser.add_argument('--force', action='store_true', help='内容未变也重新提交')
     parser.add_argument('--dry-run', action='store_true', help='只在本机生成消息并统计，不发请求')
     parser.add_argument('--mock', metavar='DIR', help='发到保存在 DIR 的本机模拟接口')
@@ -53,7 +53,7 @@ def main():
         return serve(args.serve_mock, args.port)
 
     config = PublishConfig.load()
-    courses = [c for c in args.courses.split(',') if c.strip()] if args.courses is not None else config.courses
+    courses = [c.strip() for c in args.courses.split(',') if c.strip()] if args.courses is not None else config.courses
     from qwen_asr_app.storage import recording_store
     ids = args.session or [record.id for record in recording_store.iter_records()]
 
@@ -61,7 +61,7 @@ def main():
         counts, sizes = Counter(), 0
         for ident in ids:
             session = store_loader(recording_store, ident)()
-            if not session or session.get('category') not in courses:
+            if not session or not course_selected(courses, session.get('category')):
                 counts['skipped'] += 1
                 continue
             try:

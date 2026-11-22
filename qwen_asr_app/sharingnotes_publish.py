@@ -7,7 +7,7 @@ upsert is replayed. Contract: sharingnotes-code ``contract/README.md``.
 
 Configuration (environment wins over ``<PRIVATE_ROOT>/sharingnotes-publish/config.json``):
 ``SHARINGNOTES_PUBLISH_URL``, ``SHARINGNOTES_PUBLISH_TOKEN`` and
-``SHARINGNOTES_PUBLISH_COURSES`` (comma separated; empty publishes nothing).
+``SHARINGNOTES_PUBLISH_COURSES`` (comma separated; ``*`` selects all courses; empty publishes nothing).
 For the official site on macOS, a missing token is read from the shared Keychain item.
 """
 from __future__ import annotations
@@ -274,6 +274,11 @@ def _process_lock(path):
             fcntl.flock(handle, fcntl.LOCK_UN)
 
 
+def course_selected(courses, category):
+    name = str(category or '')
+    return bool(name) and ('*' in courses or name in courses)
+
+
 class Publisher:
     def __init__(self, transport, courses, state=None, courseware=None):
         self.transport = transport
@@ -349,7 +354,7 @@ class Publisher:
         """Publish one recording's note if it changed. Never raises for
         content problems: they are recorded and returned as a status."""
         session_id = str(session.get('id') or '')
-        if str(session.get('category') or '') not in self.courses:
+        if not course_selected(self.courses, session.get('category')):
             return {'session': session_id, 'status': 'skipped_course'}
         try:
             exported = export_note(session, read_asset)

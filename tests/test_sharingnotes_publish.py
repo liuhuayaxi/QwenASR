@@ -5,6 +5,7 @@ import copy
 import importlib.util
 import json
 import os
+import runpy
 import struct
 import subprocess
 import sys
@@ -145,6 +146,30 @@ class IncrementalPublishTests(Harness):
         self.assertEqual(self.publish(session(category='私人'))['status'], 'skipped_course')
         self.assertEqual(self.publish(session(status='recording'))['status'], 'skipped_unpublishable')
         self.assertEqual(self.api.calls, [])
+
+    def test_wildcard_publishes_all_named_courses_but_not_unfinished_notes(self):
+        self.assertEqual(Publisher(self.api, [], self.state).publish_session(session(), self.read)['status'],
+                         'skipped_course')
+        publisher = Publisher(self.api, ['*'], self.state)
+        for category in (COURSE, '另一门课程'):
+            self.assertEqual(publisher.publish_session(session(category=category), self.read)['status'], 'accepted')
+        self.assertEqual(publisher.publish_session(session(category=''), self.read)['status'], 'skipped_course')
+        self.assertEqual(publisher.publish_session(session(status='recording'), self.read)['status'],
+                         'skipped_unpublishable')
+
+    def test_dry_run_honors_wildcard_from_config_or_cli(self):
+        script = str(ROOT / 'scripts' / 'publish_sharingnotes.py')
+        config = self.tmp / 'config.json'
+        config.write_text(json.dumps({'courses': ['*']}))
+        for override, expected in (([], 'notes'), (['--courses', ''], 'skipped'), (['--courses', '*'], 'notes')):
+            with (self.subTest(override=override), patch.dict(os.environ, {}, clear=True),
+                  patch.object(sharingnotes_publish, 'STATE_DIR', self.tmp),
+                  patch.object(sys, 'argv', [script, '--session', 'one', '--dry-run', *override]),
+                  patch.object(sharingnotes_publish, 'store_loader',
+                               return_value=lambda: session(ai_note_summary={'summary': '文本'})),
+                  patch('builtins.print') as output):
+                runpy.run_path(script)['main']()
+                self.assertEqual(json.loads(output.call_args.args[0])[expected], 1)
 
     def test_invalid_image_is_recorded_without_requests(self):
         self.image = b'not a png'
