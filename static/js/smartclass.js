@@ -1,5 +1,6 @@
 const $ = id => document.getElementById(id);
 let currentGroups = [], courseVersion = '', catalogRevision = null, optionsLoaded = false;
+let vgaEdited = false;
 const selectedLessonIds = new Set();
 let busy = false, submitting = false, loadingCourse = '', loadSerial = 0, accountCollapsed = false;
 let replayLoginSubmitted = false;
@@ -69,7 +70,7 @@ function renderLessonStatus(row, state) {
   badge.title = state?.detail || '';
   const detail = row.querySelector('.lesson-import-detail');
   detail.textContent = state?.detail || '';
-  detail.hidden = !state?.label || (state.state === 'completed' && !state.warnings?.length);
+  detail.hidden = !state?.label || (state.state === 'completed' && !state.vga_ready && !state.warnings?.length);
 }
 function updateLessonStatuses(statuses) {
   for (const group of currentGroups) {
@@ -178,14 +179,13 @@ function renderCourseState(s) {
     catalogRevision = s.course_revision;
     if ($('courses').value && !loadingCourse) loadLessons();
   }
-  if (!optionsLoaded && s.options) $('vgaExtract').checked = s.options.vga_extract === true;
+  if (!optionsLoaded && !vgaEdited && s.options) $('vgaExtract').checked = s.options.vga_extract === true;
   if (!optionsLoaded && s.options.summary_provider) {
     const p = s.options.summary_provider;
     $('summaryBase').value = p.base_url || '';
     $('summaryModel').value = p.model || '';
     $('generateSummary').checked = s.options.generate_summary !== false;
     $('aiCorrection').checked = s.options.ai_correction !== false;
-    $('vgaExtract').checked = s.options.vga_extract === true;
     const correction = s.options.correction_provider || p;
     $('correctionBase').value = correction.base_url || '';
     $('correctionModel').value = correction.model || '';
@@ -349,6 +349,7 @@ async function saveOptions() {
 }
 for (const id of ['summaryBase','summaryModel','correctionBase','correctionModel','generateSummary','aiCorrection','vgaExtract']) {
   $(id).addEventListener('input', () => {
+    if (id === 'vgaExtract') vgaEdited = true;
     optionsDirty = true;
     clearTimeout(optionsSaveTimer);
     $('optionsStatus').textContent = '配置已修改，等待保存…';

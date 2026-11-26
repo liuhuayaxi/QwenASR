@@ -9,7 +9,7 @@ from tests.test_live_recovery import live_record
 
 
 class LessonStageTests(unittest.TestCase):
-    def test_failed_verification_preserves_asr_and_first_correction(self):
+    def test_legacy_transcript_verification_does_not_block_note_generation(self):
         with tempfile.TemporaryDirectory() as raw:
             record=live_record(Path(raw))
             record.segments=[{'id':1,'raw':'原话九','corrected':'原话九','start':0,'end':1,
@@ -21,14 +21,13 @@ class LessonStageTests(unittest.TestCase):
             phases=lesson_phases(entry,record)
             self.assertEqual(phases['asr']['state'],'completed')
             self.assertEqual(phases['correction']['state'],'completed')
-            self.assertEqual(phases['verification']['state'],'error')
-            self.assertIn('剩余 1 条',phases['verification']['detail'])
+            self.assertNotIn('verification',phases)
             self.assertEqual(record.metadata,before)
             task={'id':'course_queue','type':'course_queue','title':'whole queue','status':'interrupted','total':5,'completed':0,
                   'course_items':[{'id':'one','title':'lesson','recording_id':record.id,'state':'interrupted',
                     'phases':[{'key':k,**v} for k,v in phases.items()]}]}
             groups,_=group_tasks([task]);shown=groups[0]['tasks'][0]
             self.assertEqual(shown['completed'],3)
-            self.assertEqual(shown['total'],5)
+            self.assertEqual(shown['total'],4)
             self.assertEqual(shown['progress_unit'],'阶段')
-            self.assertIn('复核',shown['next_action'])
+            self.assertNotIn('复核',shown['next_action'])

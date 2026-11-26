@@ -27,8 +27,8 @@ DEFAULT_CHAT_PROMPT = """你是陪学生上课的即时答疑助手。根据本�
 使用 Markdown，支持短段落、列表、加粗和代码。数学使用 $...$ 或 $$...$$，解释必要的符号。只返回回答正文，不输出思考过程。"""
 
 DEFAULT_PROVIDER = {
-    'transport': 'agy_cli', 'model': 'gemini-3.8-flash-high',
-    'cli_model': 'gemini-3.8-flash-high', 'cli_effort': 'high',
+    'transport': 'agy_cli', 'model': 'gemini-4-hydrogen-medium',
+    'cli_model': 'gemini-4-hydrogen-medium', 'cli_effort': 'medium',
     'cli_timeout_seconds': 180, 'context_window': 1_048_576,
     'max_output_tokens': 4096, 'concurrency': 1, 'extra_params': {},
     'system_prompt': DEFAULT_CHAT_PROMPT,

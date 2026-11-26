@@ -1,0 +1,38 @@
+/* Result screens can also be served by the OAuth loopback listener. */
+body.status-window {
+  display: flow-root;
+  margin: 0;
+  min-height: 100vh;
+  background-color: var(--paper, #f7f8f5);
+  background-image: radial-gradient(60vw 48vh at 12% 0%, var(--ambient-green, rgb(34 107 81 / .14)), transparent 75%);
+  color: var(--ink, #26352e);
+  font: 14px/1.65 var(--font-sans, system-ui, sans-serif);
+}
+.status-page { width: min(660px, calc(100% - 32px)); margin: clamp(28px, 8vh, 90px) auto; }
+.launch-card {
+  padding: clamp(20px, 4vw, 36px);
+  border: 1px solid var(--line, #e1e7de);
+  border-radius: var(--radius, 18px);
+  background: var(--card, #fff);
+  box-shadow: var(--elevation-1, 0 1px 2px rgb(20 37 27 / .06), 0 12px 40px -24px rgb(20 37 27 / .26));
+}
+.launch-card h1 { margin: 0 0 12px; font-size: clamp(20px, 3vw, 26px); }
+.launch-card p { color: var(--muted, #66746a); line-height: 1.8; overflow-wrap: anywhere; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    color-scheme: dark;
+    --paper: #000;
+    --card: #101411;
+    --line: #2e3730;
+    --ink: #f5f7f5;
+    --muted: #b8bfb9;
+    --ambient-green: rgb(54 152 103 / .18);
+  }
+}
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more), (forced-colors: active) {
+  body.status-window { background-image: none; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .status-page:not([hidden]) { animation: status-appear .42s cubic-bezier(.22, 1, .36, 1); }
+  @keyframes status-appear { from { opacity: 0; translate: 0 8px; } }
+}

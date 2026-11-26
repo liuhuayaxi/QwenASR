@@ -16,6 +16,7 @@ from .durable import atomic_bytes, atomic_json
 from .native_pdf import pdf_operation
 from .note_latex import prepare_document
 from .note_latex_author import validate_coverage, _binding
+from .note_prompts import EXPLANATORY_PROSE
 from .review_materials import safe_path
 
 VERSION='source-grounded-local-review-repair-v1'
@@ -32,7 +33,7 @@ INSTRUCTIONS=r'''你负责自动复核独立审查的问题，并提出最小局
 LaTeX图注与Markdown说法不同时分别核实：仅排版时引入的错误只改LaTeX；两者都有内容错误则都改。已正确的Markdown不必改。
 保留全部知识ID、来源引用、原图路径、公式条件、讲解与习题步骤，不得删除知识点、改学习要求层级、伪造来源或修改原件。不得修改区块标记、SourceRef、图片路径或跨区块操作。
 特殊带圈数字不能显示时可改为普通括号数字，编号必须对照原图；不要根据审查建议猜编号。来源不足时不擅自改公式。
-只返回符合结构的JSON，必须覆盖本批所有 issue_index。没有需改内容时两个patch数组为空。修正提案会经程序校验、重新编译和另一会话逐页复核，不是你自行宣布通过。'''
+只返回符合结构的JSON，必须覆盖本批所有 issue_index。没有需改内容时两个patch数组为空。修正提案会经程序校验、重新编译和另一会话逐页复核，不是你自行宣布通过。''' + '\n' + EXPLANATORY_PROSE
 
 
 def _hash(value):

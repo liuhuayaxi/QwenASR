@@ -21,6 +21,7 @@ class KnowledgeCoordinator:
         self.errors={}
         self.pending={}
         self.dirty=set()
+        self.checking=False
 
     def mark_dirty(self, paths=None):
         if paths is None:
@@ -77,7 +78,11 @@ class KnowledgeCoordinator:
             self.dirty.difference_update(check)
             for category in sorted(check):
                 try:
-                    stamp=await asyncio.to_thread(self.fingerprint, category)
+                    self.checking=True
+                    try:
+                        stamp=await asyncio.to_thread(self.fingerprint, category)
+                    finally:
+                        self.checking=False
                     previous=self.stamps.get(category)
                     self.stamps[category]=stamp
                     # First boot only touches courses which already requested an index.

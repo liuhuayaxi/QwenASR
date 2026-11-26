@@ -21,7 +21,12 @@ export async function startViewer({ root, url, images = null, page = 1, end = 0,
   const $ = (name) => root.querySelector(`[data-pv="${name}"]`);
   const titleText = () => typeof title === 'function' ? (title() || '') : (title || '');
   const systemHref = () => typeof systemUrl === 'function' ? (systemUrl() || '') : (systemUrl || '');
-  const status = (text) => { $('status').textContent = text; $('status').hidden = !text; };
+  const status = (text, loading = false) => {
+    const message = $('status');
+    message.textContent = text;
+    message.hidden = !text;
+    message.toggleAttribute('data-loading', loading);
+  };
   document.title = (titleText() ? titleText() + ' · ' : '') + `第 ${page} 页`;
   $('title').textContent = titleText() || '课件';
   if (rangeText || (end && end > page)) { $("range").textContent = rangeText || `本节对应 第 ${page}–${end} 页`; $("range").hidden = false; }
@@ -33,7 +38,7 @@ export async function startViewer({ root, url, images = null, page = 1, end = 0,
   };
   system();
   if (!url && !images) { status(fallback || '这份课件暂时无法在页内打开。'); return; }
-  if (!(early?.box?.classList.contains('pv-rendered') || early?.box?.classList.contains('pv-preview'))) status('正在加载课件…');
+  if (!(early?.box?.classList.contains('pv-rendered') || early?.box?.classList.contains('pv-preview'))) status('正在加载课件…', true);
   let pdfjs;
   if (!images) try {
     pdfjs = await import(new URL('../vendor/pdfjs/pdf.min.mjs', import.meta.url).href);
@@ -58,7 +63,8 @@ export async function startViewer({ root, url, images = null, page = 1, end = 0,
   catch (error) { status(`第 ${target} 页读取未完成（${error?.message || error}）。`); return; }
   const base = { width: sizes[target].w, height: sizes[target].h };
   let zoom = 1;
-  const bar = () => root.querySelector('.pv-bar')?.offsetHeight || 0;
+  const toolbar = root.querySelector('.pv-bar');
+  const bar = () => toolbar ? toolbar.offsetHeight + (parseFloat(getComputedStyle(toolbar).top) || 0) : 0;
   function fitWidth() {
     const avail = Math.max(240, document.documentElement.clientWidth - 32);
     const height = Math.max(240, window.innerHeight - bar() - 2 * GAP);
@@ -296,9 +302,10 @@ export async function startViewer({ root, url, images = null, page = 1, end = 0,
   function show(number, behavior = 'smooth') {
     const n = Math.max(1, Math.min(total, Math.round(Number(number) || 1)));
     const top = els[n].getBoundingClientRect().top + window.scrollY - bar() - GAP / 2;
-    const instant = behavior !== 'smooth' || Math.abs(top - window.scrollY) < 2;
+    const instant = behavior !== 'smooth' || Math.abs(top - window.scrollY) < 2
+      || matchMedia('(prefers-reduced-motion: reduce)').matches;
     scrollTarget = instant ? 0 : n;
-    window.scrollTo({ top, behavior: instant ? 'auto' : 'smooth' });
+    window.scrollTo({ top, behavior: instant ? 'instant' : 'smooth' });
     setCurrent(n);
     if (images) requestPage(n, 'high');
     if (!instant) setTimeout(() => { if (scrollTarget === n) { scrollTarget = 0; setCurrent(visiblePage()); } }, 1200);   // browsers without scrollend
@@ -315,7 +322,7 @@ export async function startViewer({ root, url, images = null, page = 1, end = 0,
   $('next').onclick = () => show(current + 1);
   $('form').onsubmit = (event) => { event.preventDefault(); show($('input').value); $('input').blur(); };
   $('input').addEventListener('blur', () => { $('input').value = String(current); });
-  $('zoom-out').onclick = () => setZoom(ZOOMS.slice().reverse().find((z) => z < zoom - 1e-6) ?? zoom);
+  $('zoom-out').onclick = () => setZoom(ZOOMS.findLast((z) => z < zoom - 1e-6) ?? zoom);
   $('zoom-in').onclick = () => setZoom(ZOOMS.find((z) => z > zoom + 1e-6) ?? zoom);
   $('zoom-fit').onclick = () => setZoom(1);
   window.addEventListener('keydown', (event) => {

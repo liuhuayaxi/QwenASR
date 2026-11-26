@@ -21,6 +21,8 @@ def visual_features(image):
     color = rgb.max(axis=2) - rgb.min(axis=2)
     center, saturation = gray[77:338, 118:481], color[77:338, 118:481]
     density = ((center < 170) & (saturation < 45)).mean(axis=1)
+    taskbar = gray[-13:, 60:410]
+    banner = rgb[4:28]
     return {
         'top_dark': float((gray[:32] < 100).mean()),
         'ribbon': float(((gray[:55] > 170) & (gray[:55] < 240) & (color[:55] < 25)).mean()),
@@ -31,7 +33,13 @@ def visual_features(image):
                          & (color[40:350, 94:109] < 15)).mean()),
         'status': float(((gray[-18:] > 170) & (gray[-18:] < 240) & (color[-18:] < 25)).mean()),
         'taskbar_dark': float((gray[-18:] < 100).mean()),
+        'taskbar_light': float((taskbar > 200).mean()),
+        'taskbar_color': float((color[-13:, 60:410] > 45).mean()),
+        'taskbar_edges': float((np.abs(np.diff(taskbar, axis=1)) > 22).mean()),
+        'warm_banner': float(((banner[:, :, 0] - banner[:, :, 2] > 40)
+                              & (banner[:, :, 0] - banner[:, :, 1] > 28)).mean()),
         'side_color': float((np.concatenate((color[58:326, :10], color[58:326, -10:]), axis=1) > 45).mean()),
+        'edge_bands': tuple(float((edge > 45).mean()) for edge in (color[4:380, :10], color[4:380, -10:])),
         'white': float(((center > 235) & (saturation < 20)).mean()),
         'text_rows': int(((density > .02) & (density < .40)).sum()),
         'color': float((saturation > 45).mean()),
@@ -41,6 +49,16 @@ def visual_features(image):
 def classify_page(image):
     f = visual_features(image)
     content = f['white'] > .72 and f['text_rows'] > 20 and f['color'] < .04
+    taskbar = (f['status'] > .25 and f['taskbar_light'] > .72
+               and f['taskbar_color'] > .035 and f['taskbar_edges'] > .04)
+    left, right = f['edge_bands']
+    if (max(left, right) > .85 and min(left, right) < .10 and f['white'] > .60
+            and f['ribbon'] < .15 and f['status'] < .15):
+        return 'slide', '全屏正文与单侧连续模板色带'
+    if taskbar and f['warm_banner'] > .60 and f['white'] > .50 and f['top_edges'] > .025:
+        return 'document', '演示文稿编辑窗口'
+    if taskbar and f['top_dark'] > .95:
+        return 'junk', '播放器窗口和桌面任务栏'
     icon_grid = f['icon_edges'] > .025 or (f['icon_edges'] > .01 and f['taskbar_dark'] > .70)
     desktop = icon_grid and (f['white'] > .10 or f['color'] > .50)
     if f['side_color'] > .30 and desktop and not (content and f['ribbon'] > .25):
@@ -56,6 +74,8 @@ def classify_page(image):
     editor = ribbon and (f['rail'] > .55 or f['status'] > .30)
     if editor or (f['ribbon'] > .15 and content):
         return 'document', '编辑器工具栏和正文区域'
+    if taskbar:
+        return 'junk', '桌面任务栏与非课件窗口'
     if f['top_dark'] < .05 or f['top_dark'] > .95 or (f['top_edges'] < .025 and f['ribbon'] < .15):
         return 'slide', '全屏正文画面'
     return 'document', '无法确认是无关画面，保留正文'

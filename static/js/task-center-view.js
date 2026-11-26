@@ -119,5 +119,5 @@ export function taskProgressView(task) {
 
 export function progressGroups(groups) {
   const running=group=>(group.current_tasks||[]).some(t=>activeStatuses.has(t.status));
-  return [...groups].sort((a,b)=>Number(running(b))-Number(running(a)));
+  return groups.toSorted((a,b)=>Number(running(b))-Number(running(a)));
 }

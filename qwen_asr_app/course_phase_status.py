@@ -5,9 +5,9 @@ import copy
 
 def lesson_phases(entry, record=None):
     phases=copy.deepcopy(entry.get('phases') or {})
+    phases.pop('verification', None)
     if record is None:return phases
     from .refinement import saved_progress
-    from .transcription_assist.routes import active_candidates
     stream=record.metadata.get('course_stream') or {}
     chunks=stream.get('chunks') or []
     asr_done=record.metadata.get('status')=='completed' or bool(
@@ -22,7 +22,6 @@ def lesson_phases(entry, record=None):
         placement, _ = execution(record)
         phases['asr'].update(label=placement['label'], execution=placement)
     progress=saved_progress(record)
-    pending=len(active_candidates(record))
     if 'correction' in phases:
         done=asr_done and progress['remaining_segments']==0
         correction_job = (record.metadata.get('ai_jobs') or {}).get('refinement') or {}
@@ -31,18 +30,7 @@ def lesson_phases(entry, record=None):
                             else 'error' if stream.get('correction_deferred')
                             else 'running' if stream.get('ai_in_background')
                             else phases['correction'].get('state', 'pending'))
-        put('correction','首轮文字修正',100 if done else 100*progress['saved_segments']/max(1,progress['total_segments']),
+        put('correction','AI 文字校对',100 if done else 100*progress['saved_segments']/max(1,progress['total_segments']),
             correction_state, f"已保存 {progress['saved_segments']}/{progress['total_segments']} 段"
             + ('；'+stream['correction_error'] if not done and stream.get('correction_error') else ''))
-        state=record.metadata.get('correction_verification') or {}
-        retrying=entry.get('state') in {'running','queued'} and stream.get('stage')!='interrupted'
-        failed=not retrying and (state.get('status')=='failed' or (done and pending and stream.get('error')))
-        from .note_content import transcript_blocks
-        checked=max(int(state.get('completed') or 0),sum(bool(b.get('ai_verification')) for b in transcript_blocks(record)))
-        total=max(checked+pending,int(state.get('total') or 0))
-        if not pending and done:
-            put('verification','独立文字复核',100,'completed','修改已复核，无法确认的内容保留原文')
-        else:
-            put('verification','独立文字复核',100*checked/max(1,total),'error' if failed else state.get('status','pending'),
-                f'已复核 {checked}/{total} 条修改；剩余 {pending} 条'+('，继续未完成复核' if failed else ''))
     return phases

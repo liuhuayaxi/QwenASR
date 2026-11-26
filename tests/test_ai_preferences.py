@@ -119,3 +119,74 @@ class PreferencesRouteTests(unittest.IsolatedAsyncioTestCase):
                 # The durable AI settings are authoritative across restarts;
                 # stale course options cannot override them.
                 self.assertEqual(service.options['summary_provider']['model'], 'saved-model')
+
+    async def test_note_review_and_lightweight_routing_with_legacy_fallback(self):
+        from unittest.mock import AsyncMock, patch
+        from qwen_asr_app.ai import provider_for_mode, lightweight_mode_for, summarize_note_abstract, generate_recording_title
+        with tempfile.TemporaryDirectory() as raw:
+            preferences = AIPreferences(Path(raw) / 'settings.json')
+            secrets = AISecretStore(Path(raw) / 'keys.json')
+            preferences.save({
+                'function_providers': {
+                    'summary': {'transport': 'agy_cli', 'cli_model': 'gemini-4-hydrogen-medium', 'cli_effort': 'medium'},
+                    'note_review': {'transport': 'agy_cli', 'cli_model': 'gemini-4-hydrogen-high', 'cli_effort': 'high'},
+                    'correction': {'transport': 'agy_cli', 'cli_model': 'gemini-4-hydrogen-low', 'cli_effort': 'low'},
+                }
+            }, secrets)
+            config = preferences.task_config(required_modes=('summary',))
+            self.assertEqual(provider_for_mode(config['ai'], 'note_review')['cli_model'], 'gemini-4-hydrogen-high')
+            self.assertEqual(provider_for_mode(config['ai'], 'summary')['cli_model'], 'gemini-4-hydrogen-medium')
+            self.assertEqual(lightweight_mode_for(config, 'summary'), 'correction')
+            mock_text = AsyncMock(return_value='短摘要')
+            mock_json = AsyncMock(return_value={'title': '课堂标题'})
+            with patch('qwen_asr_app.ai.request_ai_text', mock_text), patch('qwen_asr_app.ai.request_ai_json', mock_json):
+                await summarize_note_abstract('笔记正文', config)
+                await generate_recording_title('摘要内容', '取名提示', config)
+            self.assertEqual(mock_text.await_args.kwargs['mode'], 'correction')
+            self.assertEqual(mock_json.await_args.kwargs['mode'], 'correction')
+
+            # Legacy saves without note_review or correction must still fall back cleanly to summary.
+            legacy_prefs = AIPreferences(Path(raw) / 'legacy' / 'settings.json')
+            legacy_prefs.save({
+                'function_providers': {
+                    'summary': {'transport': 'agy_cli', 'cli_model': 'gemini-4-hydrogen-medium', 'cli_effort': 'medium'},
+                }
+            }, AISecretStore(Path(raw) / 'legacy' / 'keys.json'))
+            legacy = legacy_prefs.task_config(required_modes=('summary',))
+            self.assertEqual(provider_for_mode(legacy['ai'], 'note_review')['cli_model'], 'gemini-4-hydrogen-medium')
+            self.assertEqual(lightweight_mode_for(legacy, 'summary'), 'summary')
+
+    async def test_regenerate_task_action_preserves_saved_agy_model(self):
+        import app
+        from unittest.mock import patch
+        from qwen_asr_app.storage import RecordingRecord
+        with tempfile.TemporaryDirectory() as raw:
+            preferences = AIPreferences(Path(raw) / 'settings.json')
+            secrets = AISecretStore(Path(raw) / 'keys.json')
+            preferences.save({
+                'function_providers': {
+                    'correction': {'transport': 'agy_cli', 'cli_model': 'gemini-4-hydrogen-low', 'cli_effort': 'low', 'concurrency': 2},
+                }
+            }, secrets)
+            rec_dir = Path(raw) / 'rec-regen'
+            rec_dir.mkdir(parents=True, exist_ok=True)
+            record = RecordingRecord(rec_dir, {'id': 'rec-regen', 'title': 'T', 'category': 'C', 'status': 'completed', 'sample_count': 0})
+            record.upsert_segment({'id': 1, 'start': 0.0, 'end': 1.0, 'raw': '测试句子。'})
+            captured = {}
+
+            def fake_run(rec, cfg):
+                captured['config'] = cfg
+                return None
+
+            def fake_start(rec, k, runner):
+                runner()
+                return True
+
+            with patch.object(app, 'ai_preferences', preferences), \
+                    patch.object(app.recording_store, 'find', return_value=record), \
+                    patch.object(app, '_run_refinement_job', new=fake_run), \
+                    patch.object(app, '_start_aux_ai_job', side_effect=fake_start):
+                await app.ai_task_action({'recording_id': 'rec-regen', 'type': 'refinement', 'action': 'regenerate'})
+            provider = captured['config']['ai']['correction_provider']
+            self.assertEqual(provider['cli_model'], 'gemini-4-hydrogen-low')
+            self.assertGreaterEqual(provider['concurrency'], 4)

@@ -635,8 +635,8 @@ class TranscriptionSession:
                 recording.metadata["last_ai_review_at"] = window_end
                 recording.save_all()
                 if not review.get('ai_error'):
-                    from .transcription_assist.verification import verify_corrections
-                    await verify_corrections(recording,config)
+                    from .refinement import finalize_corrections
+                    finalize_corrections(recording)
                 if review.get("ai_error"):
                     await self.send({"type": "ai_review", "review": review})
                 else:

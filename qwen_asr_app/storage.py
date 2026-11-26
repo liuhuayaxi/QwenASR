@@ -591,7 +591,7 @@ class RecordingRecord:
         }
         self.metadata["ai_note_summary"] = item
         if not isinstance(previous, dict) or previous.get('summary') != text:
-            item['review_status'] = 'stale'
+            item.pop('pdf_ready', None)
             item.pop('pdf_sha256', None)
             item['review_warning'] = '正文已修改，PDF 与独立审查需要重新生成'
         sync = self.metadata.get("ideashell_sync")
@@ -1026,11 +1026,12 @@ class RecordingRecord:
                       downloads={name.replace('-', '_'): f'/api/recordings/{self.id}/download/{name}'
                                  for name in ('bundle', 'audio', 'transcript', 'raw-transcript', 'corrected-transcript', 'ai-summary', 'json')})
         for name, fields in {
-            'ai_note_summary': ('abstract', 'abstract_error', 'title_error', 'review_status','review_warning','image_count'),
+            'ai_note_summary': ('abstract', 'abstract_error', 'title_error', 'pdf_ready','review_enabled','review_warning','image_count'),
             'summary_job': ('status', 'error', 'resume_stage', 'updated_at'),
             'finalization': ('status', 'error', 'updated_at'),
             'batch_progress': ('stage', 'message', 'progress', 'percent'),
             'ideashell_sync': ('status', 'note_id', 'note_ids', 'server_url', 'last_pushed_at'),
+            'ideashell_auto_push': ('status', 'error', 'attempts', 'updated_at'),
         }.items():
             value = self.metadata.get(name)
             if isinstance(value, dict):

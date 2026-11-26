@@ -1,0 +1,47 @@
+/* Keep the global settings surface on the page that opened it. The settings
+   implementation itself lives in the recording workbench, so other surfaces
+   host that implementation in this same-page modal iframe. */
+.settings-bridge-dialog {
+  width: min(1120px, calc(100vw - 32px));
+  height: min(860px, calc(100dvh - 32px));
+  max-width: none;
+  max-height: none;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-lg, 18px);
+  overflow: hidden;
+  background: var(--paper);
+  color: var(--ink);
+  box-shadow: var(--shadow);
+}
+
+.settings-bridge-dialog::backdrop {
+  background: var(--backdrop, rgba(19, 28, 24, .42));
+  backdrop-filter: blur(3px);
+}
+
+.settings-bridge-dialog iframe {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: var(--paper);
+}
+
+.settings-bridge-loading {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  color: var(--muted);
+  background: var(--paper);
+  font-size: 14px;
+}
+
+@media (max-width: 740px) {
+  .settings-bridge-dialog {
+    width: calc(100vw - 20px);
+    height: calc(100dvh - 20px);
+    border-radius: var(--radius, 12px);
+  }
+}

@@ -64,20 +64,21 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                 fresh = SimpleNamespace(metadata={'correction': 'completed'}, save_metadata=Mock())
                 store = SimpleNamespace(find=Mock(side_effect=[stale, fresh]))
                 manager = SimpleNamespace(jobs={'lesson': SimpleNamespace(record=fresh)} if active else {})
+                entry = {'warnings': ['VGA 提取不可用，已回退到本地资料库课件', '其他警告']}
                 with patch.object(service.app.state, 'recording_store', store, create=True), \
                      patch.object(service.app.state, 'course_stream_manager', manager, create=True), \
                      patch.object(service.client, 'vga_sources', return_value=[{}]), \
                      patch.object(service, 'extract_courseware', AsyncMock(return_value='asset')):
-                    await service.import_vga({'id': 'A'}, {'id': 'lesson', 'directory': raw}, '测试', {})
+                    await service.import_vga({'id': 'A'}, {'id': 'lesson', 'directory': raw}, '测试', entry)
                 self.assertEqual(fresh.metadata, {'correction': 'completed', 'review_material_ids': ['asset']})
+                self.assertEqual(entry['warnings'], ['其他警告'])
                 self.assertNotIn('review_material_ids', stale.metadata)
                 if active:
                     manager.jobs['lesson'].record.metadata['correction'] = 'verified'
                     manager.jobs['lesson'].record.save_metadata()
                     self.assertEqual(manager.jobs['lesson'].record.metadata['review_material_ids'], ['asset'])
 
-    async def test_vga_download_concatenates_and_extracts_using_existing_transcript(self):
-        import av
+    async def test_vga_decodes_each_segment_and_uses_the_existing_transcript(self):
         from qwen_asr_app import smartclass_vga
         from tests.test_vga_slides import synthetic_video
         from qwen_asr_app.course_files import CourseFiles
@@ -85,16 +86,21 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             source = root / 'source.mp4'
-            synthetic_video(source)
+            synthetic_video(source, codec='libx264')
             @contextmanager
             def media(*args):
                 with source.open('rb') as handle:
                     yield handle
-            sources = [{'url': 'https://njuptvod7.smartclass.cn/VGA.mp4'}] * 2
+            sources = [{'url': 'https://njuptvod7.smartclass.cn/VGA.mp4', 'duration': 13.5}] * 2
             with patch.object(smartclass_vga, 'parallel_media', media):
-                smartclass_vga.download_video(sources, root / 'joined.mp4', threading.Event())
-                with av.open(str(root / 'joined.mp4')) as video:
-                    self.assertAlmostEqual(float(video.duration / av.time_base), 27, delta=.2)
+                slides = smartclass_vga.extract_replay_slides(sources, threading.Event())
+                count = len(slides) // 2
+                self.assertGreater(count, 0)
+                self.assertEqual(len(slides), count * 2)
+                self.assertEqual([s.index for s in slides], list(range(1, len(slides) + 1)))
+                for first, second in zip(slides[:count], slides[count:]):
+                    self.assertAlmostEqual(second.start_sec - first.start_sec, 13.5)
+                    self.assertAlmostEqual(second.end_sec - first.end_sec, 13.5)
                 record = SimpleNamespace(directory=root, metadata={'title': '课堂'}, segments=[{'start': 0, 'end': 1, 'raw': '重点'}])
                 def emphasis(result, video, **kwargs):
                     self.assertEqual(json.loads(kwargs['transcript'].read_text())['segments'], record.segments)

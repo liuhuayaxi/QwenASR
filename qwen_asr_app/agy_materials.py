@@ -191,6 +191,8 @@ async def _request_materials(instructions, folder, provider, *, read_paths=(), r
         '只准使用 view_file(AbsolutePath) 或新版 read_file(Path) 读取下列明确列出的文件；不得读取其他路径，不得执行命令、写文件、浏览网页、发送消息或调用子代理。'
         '必须实际用 view_file 或 read_file 查看每张要求的图片，不能仅根据文件名猜测。每个工具调用只读一张图，同一轮可安排最多四个独立读取调用，避免逐图等待模型往返；后续图片继续在同一会话读取。全部输出直接返回。\n'
         +json.dumps({'allowed_files':sorted(allowed),'required_images':sorted(images)},ensure_ascii=False)+'\n'+instructions)
+    from .agy_input import encode_prompt
+    prompt=encode_prompt(prompt)
     from .ai import estimate_tokens
     if estimate_tokens(prompt)+len(images)*4096+32768+16000>int(provider.get('context_window') or 32768):
         raise ValueError('视觉资料、协议及输出超过当前已保存上下文预算；未静默截断')

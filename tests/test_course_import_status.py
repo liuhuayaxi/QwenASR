@@ -23,6 +23,11 @@ class ImportStatusTests(unittest.TestCase):
         self.assertEqual(result['state'], 'completed')
         self.assertEqual(result['warnings'], [warning])
         self.assertIn(warning, result['detail'])
+        history[self.group['id']]['vga'] = {'status': 'completed', 'asset_id': 'courseware'}
+        result = self.status([self.record()], history)
+        self.assertTrue(result['vga_ready'])
+        self.assertNotIn(warning, result['detail'])
+        self.assertIn('VGA 课件 PDF 已归档', result['detail'])
 
     def setUp(self):
         self.videos = [video('a', '2026-09-03 13:45:00', '2026-09-03 14:30:00', 6),

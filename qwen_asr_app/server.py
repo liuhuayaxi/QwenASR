@@ -3,28 +3,15 @@
 HTTP and WebSocket I/O still wake the event loop immediately. Only Uvicorn's
 housekeeping loop is less frequent; request handling does not poll this loop.
 """
-import asyncio
 import argparse
+import os
 
-import uvicorn
 
-
-class IdleServer(uvicorn.Server):
-    async def main_loop(self):
-        self._exit_event = asyncio.Event()
-        counter = 0
-        while not await self.on_tick(counter):
-            try:
-                await asyncio.wait_for(self._exit_event.wait(), 1.0)
-            except asyncio.TimeoutError:
-                pass
-            counter = (counter + 10) % 864000
-
-    def handle_exit(self, sig, frame):
-        super().handle_exit(sig, frame)
-        event = getattr(self, '_exit_event', None)
-        if event is not None:
-            event.set()
+def __getattr__(name):
+    if name=='IdleServer':
+        from .http_runtime import IdleServer
+        return IdleServer
+    raise AttributeError(name)
 
 
 def main():
@@ -34,8 +21,11 @@ def main():
     parser.add_argument('--port', type=int, default=8765)
     parser.add_argument('--timeout-graceful-shutdown', type=int, default=10)
     args = parser.parse_args()
-    IdleServer(uvicorn.Config(args.app, host=args.host, port=args.port,
-                             timeout_graceful_shutdown=args.timeout_graceful_shutdown)).run()
+    if os.getenv('QWEN_ASR_STANDBY_STATE'):
+        from .standby import run
+    else:
+        from .http_runtime import run
+    run(args)
 
 
 if __name__ == '__main__':

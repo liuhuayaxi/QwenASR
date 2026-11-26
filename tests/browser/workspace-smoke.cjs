@@ -321,7 +321,7 @@ async function fixtures(route) {
   });
   await scenario('实测回归：PDF暂忙保留笔记页面并允许重试下载',async(page,context,origin)=>{
     noteReviewEnabled=false;
-    const pdfRecord={...record,ai_note_summary:{...record.ai_note_summary,review_status:'skipped',review_enabled:false,review_policy:'disabled_by_settings'},downloads:{...record.downloads,ai_summary:'/api/recordings/smoke-class/download/ai-summary'}};
+    const pdfRecord={...record,ai_note_summary:{...record.ai_note_summary,pdf_ready:true,review_enabled:false,review_policy:'disabled_by_settings'},downloads:{...record.downloads,ai_summary:'/api/recordings/smoke-class/download/ai-summary'}};
     await context.route('**/api/recordings/smoke-class',route=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({session:pdfRecord})}));
     await context.route('**/api/recordings/smoke-class/summary-status',route=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({job:{running:false,status:'completed'},session:pdfRecord})}));
     let downloads=0;
@@ -683,7 +683,7 @@ async function fixtures(route) {
     syntheticRecords=Array.from({length:35},(_,i)=>({...record,id:i?`synthetic-${i}`:record.id,title:`第 ${i+1} 节合成课堂`}));
     await context.route('**/api/recordings/smoke-class',route=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({session:long})}));
     await context.route('**/api/recordings/smoke-class/summary-status',route=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({job:{running:false,status:'completed'},session:long})}));
-    await context.route('**/api/recordings/smoke-class/note-proposal',route=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({task_id:'synthetic-proposal',current_summary:long.ai_note_summary.summary,note:{review_status:'passed',summary:'# 合成候选版本\n\n只供预览。'}})}));
+    await context.route('**/api/recordings/smoke-class/note-proposal',route=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({task_id:'synthetic-proposal',current_summary:long.ai_note_summary.summary,note:{pdf_ready:true,summary:'# 合成候选版本\n\n只供预览。'}})}));
     await page.setViewportSize({width:1440,height:650});await page.goto(origin+'/library');
     await page.locator('.library-open').first().waitFor();
     await page.evaluate(()=>scrollTo(0,300));

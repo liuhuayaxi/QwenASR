@@ -129,6 +129,25 @@ class EnergyIdleTests(unittest.IsolatedAsyncioTestCase):
                 await coordinator.close()
                 self.assertNotIn(coordinator.mark_dirty, library_changes.callbacks)
 
+    async def test_wake_rechecks_saved_fingerprints_without_rescheduling_unchanged_courses(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root=Path(raw);(root/'A').mkdir();source=root/'A/notes.md';source.write_text('first')
+            service=SimpleNamespace(settings=SimpleNamespace(storage_root=root,categories=['A']),
+                store=SimpleNamespace(get_course=lambda _:True,get_active_job_for_category=lambda _:False),
+                schedule=Mock())
+            coordinator=KnowledgeCoordinator(service,interval=.01,reconcile_interval=60)
+            coordinator.stamps['A']=coordinator.fingerprint('A')
+            await coordinator.start()
+            try:
+                await asyncio.sleep(.04)
+                service.schedule.assert_not_called()
+                source.write_text('changed after previous standby')
+                library_changes.notify([str(source)])
+                await asyncio.sleep(.05)
+                service.schedule.assert_called_once_with('A')
+            finally:
+                await coordinator.close()
+
     async def test_empty_backlog_sleeps_until_change_without_periodic_gc(self):
         store = SimpleNamespace(remote_backlog_ids=Mock(return_value=[]))
         cleanup = Mock()

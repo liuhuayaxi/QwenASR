@@ -202,7 +202,7 @@ class StreamTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(list(Path(temp).rglob('session.json'))), 1)
             self.assertEqual(model.active_jobs, 0)
 
-    async def test_resume_only_verification_reuses_first_round_and_asr(self):
+    async def test_resume_saved_corrections_uses_first_round_without_asr_or_second_ai_pass(self):
         with tempfile.TemporaryDirectory() as temp:
             record=make_record(Path(temp))
             raw=bytes(3*16000*2)
@@ -216,11 +216,13 @@ class StreamTests(unittest.IsolatedAsyncioTestCase):
             with patch('qwen_asr_app.batch_pipeline.correct_batch_segment',new=AsyncMock()) as rewrite,patch('qwen_asr_app.transcription_assist.verification.verify_corrections',new=AsyncMock()) as verify:
                 job=CourseStreamJob(record,{'ai_correction':True},model,set());job.start()
                 await asyncio.wait_for(job.task,5)
-            rewrite.assert_not_awaited();model.transcribe.assert_not_awaited();verify.assert_awaited_once()
+            rewrite.assert_not_awaited();model.transcribe.assert_not_awaited();verify.assert_not_awaited()
             self.assertEqual(record.metadata['status'],'completed')
             self.assertEqual(record.segments[0]['raw'],'原始数值九')
+            from qwen_asr_app.note_content import transcript_blocks
+            self.assertEqual(transcript_blocks(record)[0]['text'],'原始数值9')
 
-    async def test_verification_interruption_recovers_without_repeating_audio(self):
+    async def test_pipeline_completion_does_not_retry_a_removed_transcript_review(self):
         from qwen_asr_app.ai import AIRequestError
         from qwen_asr_app.batch_pipeline import SegmentCorrectionPipeline
         with tempfile.TemporaryDirectory() as temp:
@@ -232,10 +234,10 @@ class StreamTests(unittest.IsolatedAsyncioTestCase):
                  patch('qwen_asr_app.batch_pipeline.correct_batch_segment',new=AsyncMock()) as rewrite:
                 pipeline=SegmentCorrectionPipeline(record, {})
                 await asyncio.wait_for(pipeline.finish(),2)
-            self.assertEqual(verify.await_count,2)
+            verify.assert_not_awaited()
             rewrite.assert_not_awaited()
             self.assertEqual(record.segments[0]['raw'],'已保存原文')
-            self.assertEqual(record.metadata['correction_verification']['auto_retry_count'],1)
+            self.assertNotIn('correction_verification',record.metadata)
 
     async def test_resume_accepted_chunks_without_duplicate_asr(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -3,29 +3,33 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#f5f7f5" />
+    <meta name="theme-color" content="#f7f8f5" />
     <title>Qwen3-ASR · 本地语音工作台</title>
     <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
-    <script src="/static/js/theme.js?v=20261011-ui-final"></script>
-    <link rel="stylesheet" href="/static/styles.css?v=20261031-browser-fixes-1" />
+    <script src="/static/js/theme.js?v=20261119-paper"></script>
+    <link rel="modulepreload" href="/static/app.js?v=20261119-paper" />
+    <link rel="modulepreload" href="/static/js/markdown-reader.js?v=20261119-paper" />
+    <link rel="stylesheet" href="/static/styles.css?v=20261117-modern-1" />
     <link rel="stylesheet" href="/static/ppt-jump.css?v=2" />
-    <link rel="stylesheet" href="/static/ui.css?v=20261011-ui-final" />
+    <link rel="stylesheet" href="/static/ui.css?v=20261119-paper" />
     <link rel="stylesheet" href="/static/classroom-chat.css?v=20261011-ui-final" />
     <link rel="stylesheet" href="/static/classroom-intelligence.css?v=20261014-knowledge-1" />
     <link rel="stylesheet" href="/static/settings-layout.css?v=20261020-note-review-switch" />
-    <link rel="stylesheet" href="/static/custom-controls.css?v=20261014-selection-hover" />
+    <link rel="stylesheet" href="/static/custom-controls.css?v=20261119-paper" />
     <link rel="stylesheet" href="/static/vendor/katex/katex.min.css" />
   <script src="/static/vendor/katex/katex.min.js" defer></script>
-<link rel="stylesheet" href="/static/workspace.css?v=20261015-reader-math-scope-8" />
+<link rel="stylesheet" href="/static/workspace.css?v=20261111-settings-current-surface" />
 <script>
   const readerParams = new URLSearchParams(location.search);
   const fullNoteReader = location.pathname === '/library' && readerParams.get('note_reader') === '1';
   if (fullNoteReader) document.documentElement.classList.add('note-reader-mode');
+  if (readerParams.get('embedded') === '1' && readerParams.get('settings') === 'ai') document.documentElement.classList.add('settings-embedded');
   document.addEventListener('DOMContentLoaded', () => {
     if (readerParams.get('embedded') === '1') document.body.classList.add('workspace-embedded');
     if (fullNoteReader) document.body.classList.add('note-reader-mode');
   });
 </script>
+<link rel="stylesheet" href="/static/appearance.css?v=20261119-paper">
 </head>
   <body class="workbench-page">
     <header class="app-header">
@@ -42,7 +46,7 @@
           <a href="/course-files">PDF 资料库</a>
           <a href="/tasks">任务中心</a>
         </nav>
-        <div class="app-header-tools"><button class="theme-toggle" type="button" data-theme-toggle aria-pressed="false" aria-label="切换深色模式" title="切换深色模式"><span data-theme-icon aria-hidden="true">☾</span><span data-theme-label>深色</span></button><a class="header-settings" data-open-settings href="/?settings=ai"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3" fill="var(--paper)"/><circle cx="15" cy="17" r="3" fill="var(--paper)"/></svg><span>设置</span></a></div>
+        <div class="app-header-tools"><button class="theme-toggle" type="button" data-theme-toggle aria-label="切换配色"><span data-theme-icon aria-hidden="true">☀</span><span data-theme-label>白纸</span></button><a class="header-settings" data-open-settings href="/?settings=ai"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3" fill="var(--paper)"/><circle cx="15" cy="17" r="3" fill="var(--paper)"/></svg><span>设置</span></a></div>
       </div>
     </header>
     <main class="shell">
@@ -499,6 +503,7 @@
 <button type="button" data-ai-tab="review">分段整理</button>
 <button type="button" data-ai-tab="global">长文本复核</button>
 <button type="button" data-ai-tab="summary">课后复习笔记</button>
+<button type="button" data-ai-tab="note_review">独立审核</button>
 <button type="button" data-ai-tab="chat">课堂问答</button>
 </nav>
 <p class="muted">最大输出 tokens：API 按此限制输出；AGY 的课后笔记按此规划批次，实际输出上限由模型决定。超限时会尝试恢复完整续写，无法恢复则拆批继续，保留已完成结果。</p>
@@ -518,7 +523,7 @@
                     <label><span>整理通道</span><select id="sentenceTransport" class="field-select"><option value="api">OpenAI 兼容 API</option><option value="agy_cli">AGY 本地 CLI</option></select></label>
                     <label>
                       <span>模型名称 / AGY 模型</span>
-                      <input id="aiModel" type="text" placeholder="gpt-5-mini 或 gemini-3.8-flash-high" autocomplete="off" />
+                      <input id="aiModel" type="text" placeholder="gpt-5-mini 或 gemini-4-hydrogen-low" autocomplete="off" />
                     </label>
                     <label><span>AGY 思考强度</span><select id="sentenceEffort" class="field-select"><option value="low">low（测试）</option><option value="medium">medium</option><option value="high" selected>high（正式）</option><option value="xhigh">xhigh</option><option value="max">max</option></select></label>
                     <label>
@@ -558,7 +563,7 @@
                 <div class="provider-settings-body settings-group-grid">
                   <label class="wide"><span>Base URL</span><span class="provider-url-row"><input id="reviewBaseUrl" type="url" placeholder="https://api.openai.com/v1" autocomplete="off" /><button type="button" class="mini-button test-provider" data-provider="review">测试连接</button></span><output class="provider-test-result" id="test-review" role="status" aria-live="polite"></output></label>
                   <label><span>整理通道</span><select id="reviewTransport" class="field-select"><option value="api">OpenAI 兼容 API</option><option value="agy_cli">AGY 本地 CLI</option></select></label>
-                  <label><span>模型名称 / AGY 模型</span><input id="reviewModel" type="text" placeholder="gpt-5-mini 或 gemini-3.8-flash-high" autocomplete="off" /></label>
+                  <label><span>模型名称 / AGY 模型</span><input id="reviewModel" type="text" placeholder="gpt-5-mini 或 gemini-4-hydrogen-low" autocomplete="off" /></label>
                   <label><span>AGY 思考强度</span><select id="reviewEffort" class="field-select"><option value="low">low（测试）</option><option value="medium">medium</option><option value="high" selected>high（正式）</option><option value="xhigh">xhigh</option><option value="max">max</option></select></label>
                   <label><span>Context Window </span><input id="reviewContextWindow" type="number" min="2048" max="2000000" step="1024" value="131072" /></label>
                   <label><span>最大输出 tokens </span><input id="reviewMaxOutput" type="number" min="128" max="32768" step="128" value="8000" /></label>
@@ -584,7 +589,7 @@
                 <div class="provider-settings-body settings-group-grid">
                   <label class="wide"><span>Base URL</span><span class="provider-url-row"><input id="summaryBaseUrl" type="url" placeholder="https://api.openai.com/v1" autocomplete="off" /><button type="button" class="mini-button test-provider" data-provider="summary">测试连接</button></span><output class="provider-test-result" id="test-summary" role="status" aria-live="polite"></output></label>
                   <label><span>整理通道</span><select id="summaryTransport" class="field-select"><option value="api">OpenAI 兼容 API</option><option value="agy_cli">AGY 本地 CLI</option></select></label>
-                  <label><span>模型名称 / AGY 模型</span><input id="summaryModel" type="text" placeholder="gpt-5-mini 或 gemini-3.8-flash-high" autocomplete="off" /></label>
+                  <label><span>模型名称 / AGY 模型</span><input id="summaryModel" type="text" placeholder="gpt-5-mini 或 gemini-4-hydrogen-medium" autocomplete="off" /></label>
                   <label><span>AGY 思考强度</span><select id="summaryEffort" class="field-select"><option value="low">low（测试）</option><option value="medium">medium</option><option value="high" selected>high（正式）</option><option value="xhigh">xhigh</option><option value="max">max</option></select></label>
                   <label><span>Context Window </span><input id="summaryContextWindow" type="number" min="2048" max="2000000" step="1024" value="131072" /></label>
                   <label><span>最大输出 tokens </span><input id="summaryMaxOutput" type="number" min="128" max="32768" step="128" value="16384" /></label>
@@ -601,6 +606,7 @@
 
 <label class="wide toggle-row note-latex-toggle"><span><b>AI LaTeX 重新排版（较慢）</b><small>默认关闭。关闭时笔记直接由 Markdown + KaTeX 打印为 PDF（几秒、不调用 AI）；开启后由 AI 重写为 LaTeX 再编译，每节约多 15–20 分钟。</small></span><input id="noteAiLatexEnabled" type="checkbox" /><span class="toggle" aria-hidden="true"></span></label>
 <label class="wide toggle-row note-review-toggle"><span><b>生成后开启 AI 逐页审核</b><small>默认关闭。仅在你明确开启后，生成或重新导出笔记才会进行审核；关闭时直接保存可下载的未审核版本。</small></span><input id="noteReviewEnabled" type="checkbox" /><span class="toggle" aria-hidden="true"></span></label>
+<label class="wide toggle-row note-strict-scope-toggle"><span><b>严格按课件学习范围限制公式（较慢）</b><small>默认关闭。关闭时默认补全并推导全部公式；开启后才按原课件掌握/理解/了解层级拦截范围外独立公式并可能触发多轮打回。</small></span><input id="noteStrictScopeEnabled" type="checkbox" /><span class="toggle" aria-hidden="true"></span></label>
 <label class="wide">
                 <span>课后复习笔记提示词 </span>
                 <textarea id="summarySystemPrompt" rows="10">你是大学课堂复习笔记编辑。基于课堂转写生成详细、准确、可独立复习的 Markdown 笔记。
@@ -615,12 +621,26 @@
 <label class="wide"><span>AI 标题提示词 </span><textarea id="titlePrompt" rows="4">请根据录音总结生成一个准确、具体、便于日后检索的中文标题。优先体现课程主题或核心议题，不要使用“录音总结”“课堂记录”等空泛词，不要添加总结中没有的信息，控制在 6–20 个汉字。</textarea></label>
                 <label class="wide"><span>API 最大并发请求数 </span><input id="summaryConcurrency" type="number" min="1" max="8" step="1" value="3" /></label></div>
               </details>
+<details class="provider-settings hidden" data-ai-section="note_review" open>
+ <summary><b>独立审核</b><span><i id="note_reviewBaseSummary"></i><strong id="note_reviewModelSummary"></strong></span></summary>
+ <div class="provider-settings-body settings-group-grid">
+ <label class="wide"><span>Base URL</span><span class="provider-url-row"><input id="note_reviewBaseUrl" type="url" placeholder="https://api.openai.com/v1" autocomplete="off" /><button type="button" class="mini-button test-provider" data-provider="note_review">测试连接</button></span><output class="provider-test-result" id="test-note_review" role="status"></output></label>
+ <label><span>整理通道</span><select id="note_reviewTransport" class="field-select"><option value="api">OpenAI 兼容 API</option><option value="agy_cli">AGY 本地 CLI</option></select></label>
+ <label><span>模型名称 / AGY 模型</span><input id="note_reviewModel" type="text" placeholder="gpt-5-mini 或 gemini-4-hydrogen-high" autocomplete="off" /></label>
+ <label><span>AGY 思考强度</span><select id="note_reviewEffort" class="field-select"><option value="low">low（测试）</option><option value="medium">medium</option><option value="high" selected>high（正式）</option><option value="xhigh">xhigh</option><option value="max">max</option></select></label>
+ <label><span>Context Window </span><input id="note_reviewContextWindow" type="number" min="2048" max="2000000" step="1024" value="1048576" /></label>
+ <label><span>最大输出 tokens </span><input id="note_reviewMaxOutput" type="number" min="128" max="32768" step="128" value="16384" /></label>
+ <label><span>接口格式</span><select id="note_reviewApiMode" class="field-select"><option value="auto">自动识别</option><option value="responses">Responses API</option><option value="chat_completions">Chat Completions API</option></select></label>
+ <label><span>API Key</span><input id="note_reviewApiKey" type="password" autocomplete="off" /></label>
+ <label class="wide"><span>自定义发送参数（JSON）</span><textarea id="note_reviewApiParams" rows="5" class="code-input">{}</textarea></label>
+ <label class="wide"><span>审核补充提示词（可选）</span><textarea id="note_reviewPrompt" rows="4" placeholder="留空即按系统内置逐页视觉审核与修复标准执行。"></textarea></label>
+ <label class="wide"><span>API 最大并发请求数 </span><input id="note_reviewConcurrency" type="number" min="1" max="8" step="1" value="4" /></label></div></details>
 <details class="provider-settings hidden" data-ai-section="correction" open>
  <summary><b>转写校对</b><span><i id="correctionBaseSummary"></i><strong id="correctionModelSummary"></strong></span></summary>
  <div class="provider-settings-body settings-group-grid">
  <label class="wide"><span>Base URL</span><span class="provider-url-row"><input id="correctionBaseUrl" type="url" placeholder="https://api.openai.com/v1" autocomplete="off" /><button type="button" class="mini-button test-provider" data-provider="correction">测试连接</button></span><output class="provider-test-result" id="test-correction" role="status"></output></label>
  <label><span>整理通道</span><select id="correctionTransport" class="field-select"><option value="api">OpenAI 兼容 API</option><option value="agy_cli">AGY 本地 CLI</option></select></label>
- <label><span>模型名称 / AGY 模型</span><input id="correctionModel" type="text" placeholder="gpt-5-mini 或 gemini-3.8-flash-high" /></label>
+ <label><span>模型名称 / AGY 模型</span><input id="correctionModel" type="text" placeholder="gpt-5-mini 或 gemini-4-hydrogen-low" /></label>
  <label><span>AGY 思考强度</span><select id="correctionEffort" class="field-select"><option value="low">low（测试）</option><option value="medium">medium</option><option value="high" selected>high（正式）</option><option value="xhigh">xhigh</option><option value="max">max</option></select></label>
  <label><span>Context Window </span><input id="correctionContextWindow" type="number" min="2048" max="2000000" value="131072" /></label>
  <label><span>最大输出 tokens</span><input id="correctionMaxOutput" type="number" min="128" max="32768" step="128" value="8000" /></label>
@@ -633,7 +653,7 @@
  <div class="provider-settings-body settings-group-grid">
  <label class="wide"><span>Base URL</span><span class="provider-url-row"><input id="globalBaseUrl" type="url" placeholder="https://api.openai.com/v1" autocomplete="off" /><button type="button" class="mini-button test-provider" data-provider="global">测试连接</button></span><output class="provider-test-result" id="test-global" role="status"></output></label>
  <label><span>整理通道</span><select id="globalTransport" class="field-select"><option value="api">OpenAI 兼容 API</option><option value="agy_cli">AGY 本地 CLI</option></select></label>
- <label><span>模型名称 / AGY 模型</span><input id="globalModel" type="text" placeholder="gpt-5-mini 或 gemini-3.8-flash-high" /></label>
+ <label><span>模型名称 / AGY 模型</span><input id="globalModel" type="text" placeholder="gpt-5-mini 或 gemini-4-hydrogen-low" /></label>
  <label><span>AGY 思考强度</span><select id="globalEffort" class="field-select"><option value="low">low（测试）</option><option value="medium">medium</option><option value="high" selected>high（正式）</option><option value="xhigh">xhigh</option><option value="max">max</option></select></label>
  <label><span>Context Window </span><input id="globalContextWindow" type="number" min="2048" max="2000000" value="131072" /></label>
  <label><span>最大输出 tokens</span><input id="globalMaxOutput" type="number" min="128" max="32768" step="128" value="8000" /></label>
@@ -668,10 +688,10 @@
                 </div>
               </details>
               <details class="provider-settings hidden" data-ai-section="intelligence" open>
-                <summary><b>随堂速记与对齐增强</b><span><i id="intelProviderSummary">AGY CLI</i><strong id="intelModelSummary">gemini-3.8-flash-high</strong></span></summary>
+                <summary><b>随堂速记与对齐增强</b><span><i id="intelProviderSummary">AGY CLI</i><strong id="intelModelSummary">gemini-4-hydrogen-medium</strong></span></summary>
                 <div class="provider-settings-body settings-group-grid">
                   <label><span>处理通道</span><select id="intelTransport" class="field-select"><option value="agy_cli">AGY 本地 CLI</option><option value="api">OpenAI 兼容 API</option></select></label>
-                  <label><span>模型</span><input id="intelModel" type="text" placeholder="gemini-3.8-flash-high" autocomplete="off" /></label>
+                  <label><span>模型</span><input id="intelModel" type="text" placeholder="gemini-4-hydrogen-medium" autocomplete="off" /></label>
                   <div class="chat-effort-setting"><div class="chat-effort-heading"><label for="intelEffort">AGY 思考强度</label><output id="intelEffortValue" for="intelEffort">high</output></div><input id="intelEffort" type="range" min="0" max="4" step="1" value="2" aria-valuetext="high" /><div class="chat-effort-ticks" aria-hidden="true"><span>low</span><span>medium</span><span>high</span><span>xhigh</span><span>max</span></div></div>
                   <label><span>AGY 超时（秒）</span><input id="intelTimeout" type="number" min="30" max="7200" value="180" /></label>
                   <label><span>Context Window</span><input id="intelContextWindow" type="number" min="2048" max="2000000" value="1048576" /></label>
@@ -940,6 +960,6 @@
     </dialog>
 
     <div id="toast" class="toast" role="status"></div>
-    <script src="/static/app.js?v=20261111-note-regeneration" type="module"></script>
+    <script src="/static/app.js?v=20261119-paper" type="module"></script>
   </body>
 </html>

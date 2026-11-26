@@ -147,14 +147,5 @@ class SegmentCorrectionPipeline:
         for _ in range(self.concurrency):
             await self.submit(None)
         await self.task
-        from .transcription_assist.verification import verify_corrections
-        def waiting(kind, delay, attempt, exc):
-            if self.record is not None:
-                state = self.record.metadata.setdefault('correction_verification', {})
-                state.update(status='waiting_retry', error=str(exc), error_kind=kind,
-                             retry_in_seconds=delay, auto_retry_count=attempt)
-                self.record.save_metadata()
-        # This pipeline also owns course-stream/upload work outside the task
-        # center's retry loop. Resume verification receipts without repeating
-        # ASR or first-pass correction after a native CLI interruption.
-        await retry_transient_ai(lambda: verify_corrections(self.record,self.config), on_wait=waiting)
+        from .refinement import finalize_corrections
+        finalize_corrections(self.record)

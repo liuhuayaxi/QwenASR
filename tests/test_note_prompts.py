@@ -4,6 +4,20 @@ from qwen_asr_app import note_prompts as np
 
 
 class NotePromptTests(unittest.TestCase):
+    def test_writers_and_review_repairs_share_explanatory_prose(self):
+        from qwen_asr_app.ai import summary_instructions
+        from qwen_asr_app.note_latex_author import BATCH_INSTRUCTIONS
+        from qwen_asr_app.note_review_repair import INSTRUCTIONS as repair_instructions
+        from qwen_asr_app.review_notes import TEACHING
+
+        found = np.features({'sources': []}, {}, [])
+        for instructions in (
+            np.compose(found), summary_instructions({}), TEACHING,
+            BATCH_INSTRUCTIONS, repair_instructions,
+        ):
+            self.assertIn(np.EXPLANATORY_PROSE, instructions)
+        self.assertNotIn(np.EXPLANATORY_PROSE, summary_instructions({}, live=True))
+
     def test_modules_follow_lesson_features(self):
         scope = {'enabled': True, 'items': [{'level': 'mastery', 'text': '掌握P-I特性'}]}
         package = {'category': '光电子学', 'sources': [{'name': 'x.pdf', 'pages': [{'text': '第四章 信道 翻转课堂课件'}, {'text': '正文'}]}]}
@@ -42,6 +56,13 @@ class NotePromptTests(unittest.TestCase):
         self.assertEqual(np.human_date('2026-10-14T08:00:00+08:00'), '2026年10月14日 08:00')
         from qwen_asr_app.note_content import _date
         self.assertEqual(_date('2026-10-12T09:50:00+08:00'), '2026年10月12日 09:50'); self.assertEqual(_date(None), '未知')
+
+    def test_clean_preserves_instruction_tree_as_nested_list(self):
+        src = '说明\n\n```\n中断响应\n├── 保护断点\n│   └── CS、IP 压栈\n└── 转向服务程序\n```\n\n后文'
+        cleaned, info = np.clean(src)
+        self.assertIn('中断响应\n\n- 保护断点\n  - CS、IP 压栈\n- 转向服务程序', cleaned)
+        self.assertEqual(info['ascii_blocks_removed'], 0)
+        self.assertEqual(np.clean(cleaned)[0], cleaned)
 
 
     def test_exercise_section_layout_is_normalized(self):

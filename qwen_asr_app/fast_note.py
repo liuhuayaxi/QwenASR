@@ -20,7 +20,7 @@ import json
 import re
 import time
 
-from .ai import request_ai_text, provider_for_mode, AIRequestError
+from .ai import request_ai_text, provider_for_mode, lightweight_mode_for, AIRequestError
 from .durable import atomic_bytes, atomic_json
 from .note_content import transcript_blocks, clock
 from .review_materials import collect, extract_image, bind_markdown_images
@@ -131,7 +131,7 @@ async def generate_fast(record, config):
     task = json.loads(task_path.read_text()) if task_path.exists() else {'id': identity, 'version': VERSION, 'created_at': local_now(), 'base_body_sha256': initial}
     timings = task.setdefault('timings', {})
     existing = record.metadata.get('ai_note_summary') or {}
-    if (task.get('status') == 'completed' and existing.get('review_package') == relative
+    if (existing.get('review_package') == relative
             and (folder/'note.md').is_file() and body_hash(existing) == hashlib.sha256((folder/'note.md').read_bytes()).hexdigest()):
         update_automatic_chapters(record)
         return existing
@@ -151,7 +151,10 @@ async def generate_fast(record, config):
     if not blocks and not package.get('sources'):
         raise ValueError('录音没有可用转写，也没有选中课件，无法生成笔记')
     package['_has_transcript'] = bool(blocks)
-    scope = await review_scope.prepare(package, folder, provider_for_mode(config.get('ai', {}), 'summary'))
+    strict_scope = config.get('note_strict_scope_enabled') is True
+    scope = (await review_scope.prepare(package, folder, provider_for_mode(config.get('ai', {}), lightweight_mode_for(config, 'summary')))) if strict_scope else {'enabled': False, 'version': review_scope.VERSION}
+    if not strict_scope and (folder / 'learning-scope.json').exists():
+        atomic_json(folder / 'learning-scope.json', scope)
     mark('materials')
 
     draft_path = folder / 'note.md'
@@ -170,6 +173,8 @@ async def generate_fast(record, config):
         custom = '\n'.join(x for x in (saved if saved.strip() != DEFAULT_NOTE_SUMMARY_PROMPT.strip() else '',
                                         str(config.get('_note_summary_custom_prompt') or '')) if x.strip())
         instructions = note_prompts.compose(found, custom)
+        if not strict_scope:
+            instructions += '\n默认补全并写全本节与所选课件中涉及的所有核心公式、符号物理意义、适用条件与关键推导/计算步骤；不强制受“了解/理解/未确认范围”公式禁令限制。'
         complete_materials = config.get('_note_material_coverage') == 'selected_files'
         if complete_materials:
             instructions += ('\n本次用户明确要求完整覆盖所选课件，录音存在缺失。本次范围是所选课件的全部页面与整个章节；'
@@ -262,7 +267,7 @@ async def generate_fast(record, config):
 
     note = {'summary': markdown, 'abstract': abstract_from(markdown), 'source': 'post_recording', 'created_at': local_now(), 'updated_at': local_now(),
             'review_package': relative, 'material_version': provenance, 'pdf_sha256': (export or {}).get('pdf_sha256'),
-            'review_status': report['status'], 'review_enabled': False, 'review_policy': 'disabled_by_settings',
+            'pdf_ready': report['status'] in {'passed','skipped'}, 'review_enabled': False, 'review_policy': 'disabled_by_settings',
             'source_map': {str(i): {'start': b['start'], 'end': b['end'], 'segment_ids': b.get('segment_ids', [])} for i, b in enumerate(blocks, 1)},
             'image_count': len(images), 'pipeline': VERSION}
     if report.get('policy') == 'pdf_failed':
@@ -271,7 +276,7 @@ async def generate_fast(record, config):
     current = json.loads(record.meta_path.read_text())
     if body_hash(current.get('ai_note_summary')) != task['base_body_sha256'] or (current.get('ai_note_summary') or {}).get('source') in {'edited', 'ideashell_pull', 'restored'}:
         record.metadata.update(current)
-        record.metadata['ai_note_proposal'] = {'task_id': identity, 'review_status': report['status'], 'pdf_sha256': note['pdf_sha256']}
+        record.metadata['ai_note_proposal'] = {'task_id': identity, 'pdf_ready': note['pdf_ready'], 'pdf_sha256': note['pdf_sha256']}
         record.save_metadata()
         raise ProposalKept('生成期间或此前正文被人工修改；新版已保留为候选，未覆盖人工编辑')
     record.metadata.update(current)

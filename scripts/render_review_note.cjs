@@ -11,6 +11,10 @@ async function main(){
  const browser=await playwright.chromium.launch({headless:true,...(executablePath?{executablePath}:{})});
  try{
   const page=await browser.newPage();
+  const failedScripts=new Set();
+  page.on('requestfailed',request=>{
+   if(request.resourceType()==='script')failedScripts.add(new URL(request.url()).pathname);
+  });
   await page.route('**/*',async route=>{
    const url=new URL(route.request().url());
    if(url.origin!=='https://qwenasr.invalid')return route.abort();
@@ -19,17 +23,24 @@ async function main(){
     h1{font-size:23pt;line-height:1.35;color:#183f63}h2{font-size:16pt;color:#1c5275;border-bottom:1px solid #b7cbd7;padding-bottom:5pt;margin-top:20pt}h3{font-size:13pt;color:#254f69;margin-top:15pt}h1,h2,h3,h4{break-after:avoid}p{orphans:3;widows:3}img{display:block;max-width:100%;max-height:175mm;object-fit:contain;margin:10pt auto 3pt}figure{break-inside:avoid;margin:12pt 0}figcaption{font-size:9pt;color:#42586a;line-height:1.5}table{border-collapse:collapse;width:100%;font-size:9pt}th,td{border:1px solid #bfcbd4;padding:5pt;vertical-align:top}thead{display:table-header-group}tr{break-inside:avoid}blockquote{border-left:3pt solid #7197b1;margin:10pt 0;padding:6pt 12pt;background:#f2f6fa}a{color:#315b79;text-decoration:none}.katex-display{overflow:visible;font-size:.95em}pre{white-space:pre-wrap;font-size:9pt}code{font-size:.9em}hr{border:0;border-top:1px solid #ddd}
     body{line-break:strict}p{break-inside:avoid}.lesson-time-range{break-after:avoid}a[href^="#source-"]{white-space:nowrap}li{break-inside:avoid}li>ul,li>ol{break-before:avoid}figure img{max-height:130mm}figcaption p{margin:3pt 0}figcaption ul,figcaption ol{margin:3pt 0;padding-left:17pt}figcaption li{break-inside:avoid}p:has(+figure){break-after:avoid}
     .note-chapter-subtitle{font-size:13pt;line-height:1.6;color:#415b70;margin-top:-7pt;margin-bottom:16pt;break-after:avoid}
-    </style><script src="/static/vendor/katex/katex.min.js"></script><main id="note"></main><script type="module">import {renderMarkdown} from '/static/js/markdown-reader.js';window.renderNote=renderMarkdown;</script></html>`});
+    </style><script src="/static/vendor/katex/katex.min.js"></script><main id="note"></main><script type="module">
+    import('/static/js/markdown-reader.js').then(({renderMarkdown})=>{window.renderNote=renderMarkdown;})
+     .catch(error=>{window.renderNoteError=error.message||String(error);});
+    </script></html>`});
    const rel=decodeURIComponent(url.pathname).slice(1);
-   // markdown-reader imports ppt-jump.js for courseware page links. Keep the
-   // offline renderer self-contained while allowing that same local module.
-   if(!rel.startsWith('static/vendor/')&&!['static/js/markdown-reader.js','static/js/ppt-jump.js'].includes(rel))return route.abort();
+   // Include every local dependency of the shared Markdown renderer. Keep
+   // external requests and unrelated application modules blocked offline.
+   if(!rel.startsWith('static/vendor/')&&!['static/js/markdown-reader.js','static/js/ppt-jump.js','static/js/rendering.js'].includes(rel))return route.abort();
    const local=path.resolve(request.repo_root,rel);
    if(!local.startsWith(path.resolve(request.repo_root,'static')+path.sep))return route.abort();
+   if(!fs.existsSync(local))return route.fulfill({status:404,body:'Offline renderer asset missing'});
    return route.fulfill({path:local,contentType:local.endsWith('.js')?'text/javascript':undefined});
   });
   await page.goto('https://qwenasr.invalid/');
-  await page.waitForFunction(()=>typeof window.renderNote==='function');
+  await page.waitForFunction(()=>typeof window.renderNote==='function'||Boolean(window.renderNoteError));
+  const initializationError=await page.evaluate(()=>window.renderNoteError||'');
+  if(initializationError)throw new Error('PDF 渲染器初始化失败：'+initializationError+
+   (failedScripts.size?'；未能加载本地模块：'+[...failedScripts].join(', '):''));
   await page.evaluate(markdown=>{
    document.querySelector('#note').innerHTML=window.renderNote(markdown);
    for(const block of document.querySelectorAll('p,li')){

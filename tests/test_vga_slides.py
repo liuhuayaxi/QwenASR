@@ -12,7 +12,7 @@ from qwen_asr_app.native_pdf import pdf_operation
 from qwen_asr_app.vga_slides import ExtractionCancelled, extract_slides, write_slides_pdf
 
 
-def synthetic_video(path, states=None):
+def synthetic_video(path, states=None, *, codec='mpeg4'):
     first = Image.new('RGB', (160, 120), 'white')
     ImageDraw.Draw(first).rectangle((0, 0, 79, 119), fill='black')
     builds = []
@@ -32,7 +32,7 @@ def synthetic_video(path, states=None):
                   (builds[1], 2), (builds[2], 2),
                   (Image.new('RGB', first.size, 'black'), 1), (last, 2), (first, 2)]
     with av.open(str(path), 'w') as output:
-        stream = output.add_stream('mpeg4', rate=10)
+        stream = output.add_stream(codec, rate=10)
         stream.width, stream.height = first.size
         stream.pix_fmt = 'yuv420p'
         for image, seconds in states:

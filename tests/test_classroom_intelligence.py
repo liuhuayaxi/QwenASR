@@ -545,18 +545,18 @@ class ClassroomIntelligenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('全反射', refreshed['suggestion']['content'])
         self.assertIn('老师说全反射临界角是 45 度', refreshed['suggestion']['content'])
 
-    # 9. Independent settings default gemini-3.8-flash-high and PUT validation
+    # 9. Independent settings default gemini-4-hydrogen-medium and PUT validation
     async def test_independent_settings(self):
         settings_file = self.root / 'custom-intel-settings.json'
         with patch('qwen_asr_app.classroom_intelligence.settings.intelligence_settings_path', return_value=settings_file):
             initial = get_intelligence_settings()
-            self.assertEqual(initial['provider']['model'], 'gemini-3.8-flash-high')
+            self.assertEqual(initial['provider']['model'], 'gemini-4-hydrogen-medium')
             self.assertEqual(initial['provider']['transport'], 'agy_cli')
 
             # GET settings API
             res_get = await self.client.get('/api/intelligence/settings')
             self.assertEqual(res_get.status_code, 200)
-            self.assertEqual(res_get.json()['provider']['model'], 'gemini-3.8-flash-high')
+            self.assertEqual(res_get.json()['provider']['model'], 'gemini-4-hydrogen-medium')
 
             # PUT settings API
             res_put = await self.client.put(

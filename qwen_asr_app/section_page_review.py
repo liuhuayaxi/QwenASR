@@ -86,9 +86,10 @@ def _apply(section, page, why, verdict):
     section['review'] = {'by': REVIEWER, 'verdict': verdict, 'why': why, 'auto_pages': was}
 
 
-async def review(doc, markdown, sources, config, *, mode='summary', concurrency=None, force=False, log=None):
-    from .ai import request_ai_json, uses_agy_gemini, context_window_for, concurrency_for, AIRequestError
+async def review(doc, markdown, sources, config, *, mode=None, concurrency=None, force=False, log=None):
+    from .ai import request_ai_json, uses_agy_gemini, context_window_for, concurrency_for, lightweight_mode_for, AIRequestError
     from .context_budget import estimate_tokens
+    mode = mode or lightweight_mode_for(config, fallback='summary')
     long_context = uses_agy_gemini(config, mode)
     if concurrency is None:
         concurrency = concurrency_for(config, mode) if long_context else 4

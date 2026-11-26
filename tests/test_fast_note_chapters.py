@@ -117,6 +117,15 @@ class FastNoteChapterTests(unittest.IsolatedAsyncioTestCase):
                                  if p.is_file() and p != self.record.meta_path})
         self.writer.assert_not_awaited(); self.collect.assert_not_called(); self.export.assert_not_called()
 
+    async def test_saved_note_is_reused_when_post_generation_review_was_interrupted(self):
+        note=await fast_note.generate_fast(self.record,{})
+        task_path=self.record.directory/note['review_package']/'task.json'
+        task=json.loads(task_path.read_text());task.update(status='interrupted',stage='独立审查')
+        task_path.write_text(json.dumps(task))
+        self.writer.reset_mock();self.export.reset_mock()
+        self.assertEqual(await fast_note.generate_fast(self.record,{}),note)
+        self.writer.assert_not_awaited();self.export.assert_not_called()
+
     async def test_explicit_regeneration_writes_a_new_package_but_resume_reuses_that_round(self):
         old=await fast_note.generate_fast(self.record,{})
         new=await fast_note.generate_fast(self.record,{'_note_generation_id':'explicit-user-round-1'})

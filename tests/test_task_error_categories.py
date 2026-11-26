@@ -50,7 +50,7 @@ class WrappedProviderErrorTests(unittest.IsolatedAsyncioTestCase):
                         raise MaterialSessionError('AGY 资料会话连接中断', kind='network_transport', retriable=True)
                     except MaterialSessionError as cause:
                         raise HTTPException(502, str(cause)) from cause
-                return {'summary': {'summary': '完成的笔记', 'review_status': 'passed'}}
+                return {'summary': {'summary': '完成的笔记', 'pdf_ready': True}}
             with patch.object(app, 'recording_store', store_for(record)), \
                  patch.object(app.ai_preferences, 'task_config', return_value={}), \
                  patch.object(app, 'generate_library_summary', side_effect=generate), \
@@ -104,7 +104,7 @@ class WrappedProviderErrorTests(unittest.IsolatedAsyncioTestCase):
                         _decode_output(json.dumps({'event': 'result', 'result': {'status': 'FAILED', 'error': 'interrupted'}}), '')
                     except RuntimeError as cause:
                         raise HTTPException(502, str(cause)) from cause
-                return {'summary': {'summary': '完成', 'review_status': 'passed'}}
+                return {'summary': {'summary': '完成', 'pdf_ready': True}}
             with patch.object(app, 'recording_store', store_for(record)), \
                  patch.object(app.ai_preferences, 'task_config', return_value={}), \
                  patch.object(app, 'generate_library_summary', side_effect=generate), \
@@ -149,18 +149,58 @@ class WrappedProviderErrorTests(unittest.IsolatedAsyncioTestCase):
             'material_tool_violation',
         )
 
+    def test_review_issue_summary_is_specific_about_pages_and_severity(self):
+        details = app.review_issue_details({'status': 'needs_revision', 'issues': [
+            {'page': 2, 'severity': 'blocking', 'problem': '公式符号错误'},
+            {'page': 3, 'severity': 'warning', 'problem': '图注指代不清'},
+        ]})
+        self.assertEqual(details['blocking_count'], 1)
+        self.assertEqual(details['warning_count'], 1)
+        self.assertIn('必须修订页：第 2 页', details['message'])
+        self.assertIn('提示页：第 3 页', details['message'])
+
+    def test_summary_task_exposes_durable_review_findings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            record = self.record(directory)
+            package = record.directory / '.review-notes' / ('a' * 24)
+            report_path = package / 'pdf' / 'candidate' / 'review.json'
+            report_path.parent.mkdir(parents=True)
+            report_path.write_text(json.dumps({'status': 'needs_revision',
+                'pdf_sha256': 'reviewed-pdf', 'issues': [
+                    {'page': 2, 'severity': 'blocking', 'problem': '公式符号错误',
+                     'evidence': '第2页', 'suggestion': '改正符号'},
+                    {'page': 8, 'severity': 'warning', 'problem': '取整说明缺失',
+                     'evidence': '第8页', 'suggestion': '补充说明'},
+                ]}))
+            (package / 'task.json').write_text(json.dumps({'id': 'a' * 24,
+                'review_report': 'pdf/candidate/review.json'}))
+            record.metadata['summary_job'] = {'status': 'completed_with_errors',
+                'error': '候选笔记已保存，独立审查仍有待处理项'}
+            record.metadata['ai_note_summary'] = {'summary': '候选正文',
+                'pdf_ready': False, 'pdf_sha256': 'reviewed-pdf',
+                'review_package': '.review-notes/' + ('a' * 24)}
+            record.save_metadata()
+            with patch.object(app, 'recording_store', store_for(record)):
+                task = next(item for item in app.compact_ai_tasks() if item['type'] == 'summary')
+            self.assertEqual(task['error_kind'], 'review_needs_revision')
+            self.assertIn('必须修订页：第 2 页', task['error'])
+            self.assertEqual(task['review_issue_count'], 2)
+            self.assertEqual(task['review_blocking_count'], 1)
+            self.assertEqual(task['review_warning_count'], 1)
+            self.assertEqual(task['review_issues'][0]['problem'], '公式符号错误')
+
     async def test_transient_abstract_failure_retries_only_abstract_and_preserves_note(self):
         with tempfile.TemporaryDirectory() as directory:
             record = self.record(directory)
             note = record.directory / 'saved-note.md'
             note.write_text('已经完成审查的完整笔记')
             before = note.read_bytes()
-            full_result = {'summary': {'summary':'已经完成审查的完整笔记','review_status':'passed',
+            full_result = {'summary': {'summary':'已经完成审查的完整笔记','pdf_ready':True,
                 'abstract_error':'AGY CLI 请求失败：Eligibility check failed: Get "https://www.googleapis.com/oauth2/v2/userinfo": EOF'}}
             with patch.object(app, 'recording_store', store_for(record)), \
                  patch.object(app.ai_preferences, 'task_config', return_value={}), \
                  patch.object(app, 'generate_library_summary', new=AsyncMock(return_value=full_result)) as full, \
-                 patch.object(app, 'generate_library_summary_abstract', new=AsyncMock(return_value={'summary':{'review_status':'passed'}})) as abstract, \
+                 patch.object(app, 'generate_library_summary_abstract', new=AsyncMock(return_value={'summary':{'pdf_ready':True}})) as abstract, \
                  patch.object(app, '_automatic_retry_delay', return_value=0):
                 app.start_summary_job(record, {'config': {}})
                 await asyncio.wait_for(app.background_summary_tasks[record.id], 2)
@@ -192,7 +232,7 @@ class WrappedProviderErrorTests(unittest.IsolatedAsyncioTestCase):
             record.save_metadata()
             async def generate_library_summary(*args, **kwargs):
                 await asyncio.sleep(.03)
-                return {'summary': {'summary': '完成', 'review_status': 'passed'}}
+                return {'summary': {'summary': '完成', 'pdf_ready': True}}
             guarded = app.recording_operation(generate_library_summary)
             with patch.object(app, 'recording_store', store_for(record)), \
                  patch.object(app.ai_preferences, 'task_config', return_value={}), \

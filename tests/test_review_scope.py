@@ -268,6 +268,42 @@ class ScopeCacheTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ScopeVisualGateTests(unittest.IsolatedAsyncioTestCase):
+    async def test_fast_review_retries_invented_id_and_keeps_the_content_issue(self):
+        import pymupdf
+        from qwen_asr_app.review_notes import visual_review
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            pdf = root / 'candidate.pdf'
+            with pymupdf.open() as document:
+                document.new_page().insert_text((50,50), 'Interrupt response')
+                document.save(pdf)
+            (root/'note.md').write_text('中断响应')
+            (root/'learning-scope.json').write_text(json.dumps(lesson_scope()))
+            ledger = {'scope_review_method':'page_evidence'}
+            issue = {'page':1, 'severity':'blocking', 'problem':'中断步骤遗漏', 'evidence':'冒号后没有步骤'}
+            ids = ['future','gain','gamma']
+            async def reviewer(prompt, folder, provider, **kwargs):
+                payload = json.loads(prompt.rsplit('\n',1)[-1])
+                self.assertEqual(payload['required_scope_ids'], ids)
+                schema = kwargs['schema']['properties']['scope_findings']
+                self.assertCountEqual(schema['items']['properties']['objective_id']['enum'], ids)
+                if request.await_count == 1:
+                    returned = ['interrupt_response_four_steps']
+                else:
+                    self.assertIn('interrupt_response_four_steps', prompt)
+                    returned = ids
+                result = {'viewed_pages':[1], 'scope_policy_checked':True, 'status':'needs_revision',
+                          'issues':[issue], 'scope_findings':[{'objective_id':i,'status':'not_in_batch',
+                          'page':1,'evidence':'本页仅讨论中断响应'} for i in returned]}
+                return json.dumps(result), {'session_id':str(request.await_count)}
+            with patch('qwen_asr_app.review_notes.request_materials',side_effect=reviewer) as request:
+                report = await visual_review(pdf, {'pages':1,'renderer':'test',
+                    'pdf_sha256':hashlib.sha256(pdf.read_bytes()).hexdigest()}, root, {}, ledger, [])
+            self.assertEqual(request.await_count, 2)
+            self.assertEqual(report['issues'], [issue])
+            self.assertEqual(report['reviewer_session_ids'], ['2'])
+            self.assertFalse(report['scope_review_passed'])
+
     async def test_relevant_understanding_objective_is_dispatched_without_a_standalone_knowledge_block(self):
         import pymupdf
         from qwen_asr_app.review_notes import visual_review

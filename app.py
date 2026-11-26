@@ -69,6 +69,7 @@ from qwen_asr_app.ideashell_attachments import image_attachment_batches, documen
 # Image-only note_update calls over a few MB time out on the IdeaShell side.
 IDEASHELL_APPEND_BATCH_BYTES = 1_500_000
 from qwen_asr_app.ideashell_note_assets import prepare_push_assets, restore_image_markdown
+from qwen_asr_app.paths import PRIVATE_ROOT
 from qwen_asr_app.model_runtime import ModelManager
 from qwen_asr_app.ai_activity import track_ai_activity, task_ai_activity
 from qwen_asr_app.request_security import websocket_origin_allowed, http_request_allowed
@@ -91,6 +92,7 @@ from qwen_asr_app.review import (
     has_repetitive_tail,
     trim_repetitive_tail,
 )
+from qwen_asr_app.review_notes import review_issue_details
 from qwen_asr_app.settings import (
     DEFAULT_AI_TITLE_PROMPT,
     DEFAULT_AI_SYSTEM_PROMPT,
@@ -140,6 +142,8 @@ async def lifespan(_: FastAPI):
             await library_watch.start()
             await sharingnotes_publisher.start()
             yuketang_service.loop = asyncio.get_running_loop()
+            from qwen_asr_app.standby_state import restore_deadlines
+            restore_deadlines(drive_backup_manager)
             await drive_backup_manager.start_loop()
             await knowledge_service.start()
             await knowledge_coordinator.start()
@@ -151,9 +155,12 @@ async def lifespan(_: FastAPI):
                 lambda ident: ident in record_operations or ident in finalization_tasks or ident in running_batch_ids or recording_discard.busy(ident),
                 claim=backlog_record_claim,on_completed=backlog_completed,on_idle=schedule_memory_cleanup))
             correction_recovery=asyncio.create_task(resume_correction_verifications())
+            if os.getenv('QWEN_ASR_PREVIEW') != '1':
+                await ideashell_auto_push.start()
             try:
                 yield
             finally:
+                await ideashell_auto_push.close()
                 await drive_backup_manager.close()
                 backlog.cancel()
                 correction_recovery.cancel()
@@ -285,6 +292,83 @@ SUMMARY_WORKFLOW_TIMEOUT_SECONDS = 7200
 SUMMARY_SMALL_OPERATION_TIMEOUT_SECONDS = 1800
 
 
+def standby_blockers():
+    """Report only operation names, so idle diagnostics never include note data."""
+    tasks=[*background_summary_tasks.values(),*background_ai_tasks.values(),*finalization_tasks.values(),
+           *pdf_ai_background_tasks.values(),*course_file_api.tasks.values(),*upload_jobs.tasks.values(),
+           *recording_discard.tasks.values()]
+    tasks.extend(job.task for job in course_stream_manager.jobs.values() if job.task is not None)
+    tasks.extend(task for task in [smartclass_service.job,smartclass_service.catalog_job] if task is not None)
+    tasks.extend(smartclass_service.platform_workers)
+    tasks.extend(connection._connect_task for connection in ideashell_manager.connections.values()
+                 if connection._connect_task is not None)
+    intelligence=intelligence_router.intelligence_service
+    tasks.extend([*intelligence._running_tasks.values(),*intelligence._debounce_tasks.values()])
+    checks={
+        'recording_operation':bool(record_operations), 'batch':bool(running_batch_ids),
+        'classroom_chat':bool(classroom_chat_running), 'mutation':bool(service_mutations),
+        'inference':bool(model_manager.active_jobs or model_manager.connected_clients),
+        'backup':bool(backup_manager.busy or backup_manager.downloads or drive_backup_manager.busy),
+        'authorization':bool(drive_backup_manager.pending_auth),
+        'course_file':course_file_api.lock.locked(), 'pdf':pdf_ai_lock.locked(),
+        'yuketang':bool(yuketang_service.running),
+        'knowledge':bool(knowledge_service.job_manager._active_job_id or knowledge_service.job_manager._queue.qsize()
+                         or knowledge_coordinator.checking or knowledge_coordinator.dirty or knowledge_coordinator.pending),
+        'background_task':any(not task.done() for task in tasks),
+        'recording':bool(recording_store.active and recording_store.active.metadata.get('status')=='active'),
+        'ideashell_push':any(item['status']=='running' or (item['status']=='queued' and item.get('next_attempt',0)<=time.time())
+                            for item in ideashell_auto_push.items),
+    }
+    from qwen_asr_app.standby_state import companion_ready
+    if (Path.home()/'Library/LaunchAgents/cn.liuhuayaxi.sharingnotes.sync.plist').is_file():
+        checks['publication']=not companion_ready(Path.home()/'.local/state/sharingnotes/companion.json',
+                                                  PRIVATE_ROOT/'services/mode.json',os.getpid())
+    return [name for name,busy in checks.items() if busy]
+
+
+def can_enter_standby():
+    return not standby_blockers()
+
+
+def standby_context():
+    root=app_settings.storage_root
+    watch=[ROOT,PRIVATE_ROOT,root]
+    if root.is_dir():
+        for course in root.iterdir():
+            if not course.is_dir() or course.name.startswith('.'):continue
+            watch.extend([course,course/'AI友好型',course/'.qwenasr-files',course/'上课录音'])
+            if (course/'上课录音').is_dir():
+                watch.extend(path for path in (course/'上课录音').iterdir() if path.is_dir())
+    deadlines={}
+    drive=drive_backup_manager
+    if drive.state['options']['automatic'] and drive.public()['connected']:
+        deadlines['drive']=time.time()+max(0,drive.next_run-time.monotonic())
+    for item in ideashell_auto_push.items:
+        if item['status']=='waiting_retry':deadlines['push:'+item['id']]=item['next_attempt']
+    for record in recording_store.iter_records():
+        package=(record.metadata.get('ai_note_summary') or {}).get('review_package')
+        if package:
+            assets=record.directory/package/'assets'
+            if assets.is_dir():watch.append(assets)
+        if record.metadata.get('pending_segments') or (record.metadata.get('remote_backlog') or {}).get('status')=='pending':
+            deadlines['remote-backlog']=time.time()+30
+    intelligence=intelligence_router.intelligence_service
+    for _,rows in intelligence._note_job_index.records(intelligence.store):
+        for row in rows:
+            job=row.get('job') or {}
+            if not row.get('locked') and row.get('status')=='failed' and job.get('retryable') and job.get('next_retry_at'):
+                deadlines['note-retry:'+str(row.get('id',''))]=float(job['next_retry_at'])
+    return {'watch_dirs':[str(path) for path in watch if path.is_dir()],
+            'knowledge_stamps':dict(knowledge_coordinator.stamps),
+            'wake_at':min(deadlines.values(),default=None),'deadlines':deadlines}
+
+
+def restore_standby_context(metadata):
+    # A wake is the continuation of the same service. Recheck fingerprints,
+    # but do not schedule an unchanged course as if it were a fresh startup.
+    knowledge_coordinator.stamps.update(metadata.get('knowledge_stamps',{}))
+
+
 def schedule_memory_cleanup():
     from qwen_asr_app.runtime_memory import schedule_idle_reclaim
     def is_idle():
@@ -340,7 +424,7 @@ def _remember_ai_keys(config: Any) -> None:
         if isinstance(config, dict):
             from qwen_asr_app.ai import provider_for_mode
             ai = config.get("ai") if isinstance(config.get("ai"), dict) else {}
-            values = {mode: str((ai.get(mode + "_provider") or {}).get("api_key") or "") for mode in ("sentence", "review", "summary", "correction", "global")}
+            values = {mode: str((ai.get(mode + "_provider") or {}).get("api_key") or "") for mode in ("sentence", "review", "summary", "note_review", "correction", "global")}
             if any(values.values()):
                 ai_secret_store.update(values, {mode: provider_for_mode(ai, mode).get("base_url") for mode in values})
         return
@@ -491,7 +575,7 @@ async def test_provider(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
     if not isinstance(config, dict):
         raise HTTPException(status_code=400, detail="AI 配置格式无效")
     mode = str(payload.get("mode") or "sentence")
-    required_mode = mode if mode in {"sentence", "review", "summary", "correction", "global"} else "sentence"
+    required_mode = mode if mode in {"sentence", "review", "summary", "note_review", "correction", "global"} else "sentence"
     try:
         # The test button is intentionally ephemeral: it may validate a cheap
         # AGY model before the user saves it. Task actions still use only the
@@ -550,15 +634,26 @@ async def summary_status(session_id: str) -> dict[str, Any]:
     progress = _summary_phase_progress(record, draft)
     saved_job = record.metadata.get("summary_job") or {}
     summary = _saved_note_summary(record)
+    review_details = _summary_review_details(record)
+    display_error = saved_job.get("error", "")
+    if (summary.get('pdf_ready') is False
+            and review_details.get('status') == 'needs_revision'
+            and review_details.get('message')):
+        display_error = review_details['message']
     return {"running": bool(job) or session_id in background_summary_tasks,
-            "status": saved_job.get("status", ""), "error": saved_job.get("error", ""),
+            "status": saved_job.get("status", ""), "error": display_error,
             "completed_parts": progress['completed_parts'],
             "total_parts": progress['total_parts'], "progress_unit": progress.get('unit', '批'),
             "phase": (job or {}).get("phase") or progress['phase'],
             "material_selection": str(draft.get("material_selection") or ""),
             "elapsed_seconds": round(time.monotonic() - job["started"]) if job else 0,
             "has_summary": bool(summary.get("summary")),
-            "review_status": summary.get('review_status','unreviewed')}
+            "review_status": review_details.get('status') or summary.get('review_status','unreviewed'),
+            "pdf_ready": summary.get('pdf_ready') is True,
+            "review_issue_count": review_details.get('issue_count', 0),
+            "review_blocking_count": review_details.get('blocking_count', 0),
+            "review_warning_count": review_details.get('warning_count', 0),
+            "review_issues": review_details.get('issues', [])}
 
 
 @app.post('/api/recordings/{session_id}/review-pdf')
@@ -610,6 +705,7 @@ async def adopt_note_proposal(session_id: str,payload:dict=Body(...)):
     # transcripts, which can contain the prior summary or user edits.
     record.save_metadata()
     record.save_summary_markdown()
+    ideashell_auto_push.enqueue(record)
     return {'summary':note,'session':record.public()}
 
 
@@ -633,7 +729,8 @@ async def upgrade_library_note_pdf(session_id: str, payload):
     from qwen_asr_app.review_notes import upgrade_pdf
     record=recording_store.find(session_id)
     if record is None:raise HTTPException(404,'没有找到这次录音')
-    result=await upgrade_pdf(record,payload['config'])
+    config = {**payload['config'], '_fresh_review': payload.get('_fresh_review') is True}
+    result=await upgrade_pdf(record,config)
     return {'summary':record.metadata.get('ai_note_summary'),'review':result}
 
 
@@ -718,6 +815,8 @@ def _update_ai_job(record: RecordingRecord, kind: str, **values: Any) -> None:
 
 def _task_error_kind(error: str) -> str:
     value = str(error or "").lower()
+    if "独立审查未通过" in value or "必须修订的问题" in value:
+        return "review_needs_revision"
     # These are the redacted material-channel messages, not raw CLI output.
     # Keep their transport category when a public HTTP boundary wraps them.
     if "未授权工具" in value or "material_tool_violation" in value:
@@ -762,6 +861,36 @@ def _review_batch_activity(folder, task):
     if report.get('pdf_sha256')!=task.get('pdf_sha256'):return []
     return [{key:value[key] for key in ('pages','attempt','started_at','timeout_seconds','deadline_policy','state') if key in value}
             for value in report.get('active_batches',{}).values() if isinstance(value,dict)]
+
+
+def _summary_review_details(record):
+    """Read the durable PDF review report for a saved note, if present."""
+    note = _saved_note_summary(record)
+    relative = str(note.get('review_package') or '').strip()
+    if not relative:
+        return {}
+    folder = (record.directory / relative).resolve()
+    if not folder.is_relative_to(record.directory.resolve()):
+        return {}
+    task_path = folder / 'task.json'
+    try:
+        task = json.loads(task_path.read_text())
+    except (OSError, ValueError, TypeError):
+        task = {}
+    report_value = str(task.get('review_report') or '').strip()
+    report_path = (folder / report_value).resolve() if report_value else None
+    if report_path is None or not report_path.is_relative_to(folder) or not report_path.is_file():
+        return {}
+    try:
+        report = json.loads(report_path.read_text())
+    except (OSError, ValueError, TypeError):
+        return {}
+    if note.get('pdf_sha256') and report.get('pdf_sha256') != note.get('pdf_sha256'):
+        return {}
+    details = review_issue_details(report)
+    if details.get('status') == 'needs_revision' and details.get('message'):
+        details['report_path'] = str(report_path.relative_to(record.directory.resolve()))
+    return details
 
 
 def _summary_phase_progress(record, draft):
@@ -1079,6 +1208,12 @@ def _build_compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any
             if abstract_pending and status in {"failed", "interrupted"}:
                 status = "completed_with_errors"
             summary_error, summary_previous, summary_kind = _summary_error_view(summary, status)
+            review_details = _summary_review_details(record)
+            if (_saved_note_summary(record).get('pdf_ready') is False
+                    and review_details.get('status') == 'needs_revision'
+                    and review_details.get('message')):
+                summary_error = review_details['message']
+                summary_kind = 'review_needs_revision'
             tasks.append({
                 **base,
                 **ai_provider_snapshot("summary"),
@@ -1089,6 +1224,12 @@ def _build_compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any
                 "error": summary_error,
                 "error_kind": summary_kind,
                 "previous_error": summary_previous,
+                "review_status": review_details.get('status', ''),
+                "review_issue_count": review_details.get('issue_count', 0),
+                "review_blocking_count": review_details.get('blocking_count', 0),
+                "review_warning_count": review_details.get('warning_count', 0),
+                "review_issues": review_details.get('issues', []),
+                "review_report": review_details.get('report_path', ''),
                 "completed": summary_progress['completed_parts'],
                 "total": int(summary_progress['total_parts'] or 0),
                 "progress_unit": summary_progress.get('unit', '批'),
@@ -1357,7 +1498,9 @@ def _unrefined_segments(record: RecordingRecord) -> list[dict[str, Any]]:
 
 
 
-_EMPTY_SPEECH_RE = re.compile(r"^[\s，。！？,.!?、]*(?:啊|哎|诶|嗯|呃|额|唔|那个|就是说)[\s，。！？,.!?、]*$")
+_EMPTY_SPEECH_RE = re.compile(
+    r"[\s，。！？,.!?、]*(?:(?:[啊哎诶嗯呃额唔][\s，。！？,.!?、]*)+|(?:那个|就是说)[\s，。！？,.!?、]*)"
+)
 REFINEMENT_MAX_REQUEST_SECONDS = 420
 
 
@@ -1378,7 +1521,7 @@ async def _run_refinement_job_unlocked(record: RecordingRecord, config: dict[str
         suppressed_ids = {int(segment.get("id", 0)) for segment in suppressed}
         targets = [segment for segment in targets if int(segment.get("id", 0)) not in suppressed_ids]
     if not targets:
-        await _verify_refinement_candidates(record,config)
+        await _finalize_refinement_candidates(record,config)
         progress=saved_progress(record)
         _update_ai_job(record,"refinement",completed=progress['saved_segments'],total=progress['total_segments'],
             progress_unit='段',saved_segments=progress['saved_segments'],remaining_segments=0)
@@ -1472,9 +1615,16 @@ async def _run_refinement_job_unlocked(record: RecordingRecord, config: dict[str
                                 record.save_all()
                             return []
                         middle = len(parts) // 2
-                        left = await recover_parts(parts[:middle])
-                        right = await recover_parts(parts[middle:])
-                        return [*left, *right]
+                        left_res, right_res = await asyncio.gather(
+                            recover_parts(parts[:middle]),
+                            recover_parts(parts[middle:]),
+                            return_exceptions=True,
+                        )
+                        if isinstance(left_res, BaseException):
+                            raise left_res
+                        if isinstance(right_res, BaseException):
+                            raise right_res
+                        return [*left_res, *right_res]
 
                 mapped = await recover_parts(group)
             checkpoint(mapped)
@@ -1492,17 +1642,16 @@ async def _run_refinement_job_unlocked(record: RecordingRecord, config: dict[str
         await asyncio.gather(*workers, return_exceptions=True)
         update_progress()
 
-    await _verify_refinement_candidates(record,config)
+    await _finalize_refinement_candidates(record,config)
 
 
-async def _verify_refinement_candidates(record,config):
-    from qwen_asr_app.transcription_assist.verification import verify_corrections
-    await verify_corrections(record,config,on_progress=lambda done,total:
-        _update_ai_job(record,'refinement',phase=f'AI 自动复核 · {done}/{total} 段'))
+async def _finalize_refinement_candidates(record,config):
+    from qwen_asr_app.refinement import finalize_corrections
+    finalize_corrections(record)
 
 
 async def resume_correction_verifications():
-    """Resume protected edits once on startup, respecting explicit stops."""
+    """Finalize legacy saved corrections locally, respecting explicit stops."""
     from qwen_asr_app.transcription_assist.routes import active_candidates
     ids=[r.id for r in getattr(recording_store,'iter_records',recording_store.list_records)()
          if r.metadata.get('status')=='completed' and active_candidates(r)]
@@ -1761,16 +1910,13 @@ async def ai_task_action(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
         # before the complete lecture note is returned.
         config["_summary_force_chunk_tokens"] = 6000
     if action == "regenerate":
-        # Batch maintenance keeps the saved Gemini High model but uses a
-        # bounded thinking level so one stale provider request cannot hold the
-        # whole repair batch indefinitely. This does not change daily settings.
-        ai = config.get("ai") if isinstance(config.get("ai"), dict) else {}
-        for provider in ai.values():
-            if isinstance(provider, dict) and str(provider.get("transport") or "").lower() == "agy_cli":
-                provider["cli_model"] = "gemini-3.8-flash-high"
-                provider["model"] = "gemini-3.8-flash-high"
-                provider["cli_effort"] = "high"
-                if kind == "refinement":
+        # Maintenance regeneration respects the saved per-function AGY model
+        # tiers (e.g., high for review, medium for notes, low for refinement)
+        # rather than resetting providers back to a legacy hard-coded model.
+        if kind == "refinement":
+            ai = config.get("ai") if isinstance(config.get("ai"), dict) else {}
+            for provider in ai.values():
+                if isinstance(provider, dict) and str(provider.get("transport") or "").lower() == "agy_cli":
                     provider["concurrency"] = max(4, int(provider.get("concurrency") or 0))
     if action in {"retry", "regenerate"}:
         if kind == "summary":
@@ -1803,6 +1949,10 @@ async def ai_task_action(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
             # Retry/continue preserve all validated results and candidates.
         record.save_all()
     if kind == "summary":
+        fresh_review = bool(
+            action in {"continue", "retry"}
+            and (record.metadata.get("summary_job") or {}).get("resume_stage") == "pdf"
+        )
         summary_payload = {
             "config": config,
             "regenerate": action == 'regenerate',
@@ -1810,6 +1960,7 @@ async def ai_task_action(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
             "material_coverage": (record.metadata.get('summary_job') or {}).get('material_coverage', 'lesson'),
             "_resume_abstract": resume_abstract,
             "_pdf_only": action != 'regenerate' and (record.metadata.get('summary_job') or {}).get('resume_stage') == 'pdf',
+            "_fresh_review": fresh_review,
             "summary_system_prompt": config.get("_note_summary_system_prompt") or DEFAULT_NOTE_SUMMARY_PROMPT,
             "abstract_system_prompt": config.get("_note_abstract_system_prompt") or DEFAULT_NOTE_ABSTRACT_PROMPT,
         }
@@ -1925,6 +2076,7 @@ async def service_stop_guard(action: str, request: Request):
         *intelligence_router.intelligence_service._debounce_tasks.values(),
     ]
     if (backup_manager.busy or backup_manager.downloads or drive_backup_manager.busy or drive_backup_manager.pending_auth or service_mutations or model_manager.active_jobs or model_manager.connected_clients or running_batch_ids or record_operations
+        or any(item['status'] == 'running' for item in ideashell_auto_push.items)
         or knowledge_service.job_manager._active_job_id or knowledge_service.job_manager._queue.qsize()
         or any(not t.done() for t in tasks) or (active and active.metadata.get("status") == "active")):
         raise HTTPException(409, "录音或任务仍在运行，进度已保留，请完成或暂停后再停止")
@@ -1947,6 +2099,7 @@ async def health() -> dict[str, Any]:
     return {
         "service": "workbench", "pid": os.getpid(), "instance": os.getenv("QWEN_ASR_INSTANCE", ""),
         "cpu_seconds": time.process_time(),
+        "standby": {"mode":"active", "blockers":standby_blockers()},
         "status": model_manager.status,
         "detail": model_manager.detail,
         "device": model_manager.device,
@@ -2247,12 +2400,13 @@ async def update_recording(session_id: str, payload: dict[str, Any] = Body(...))
     title = str(payload.get("title") or record.metadata.get("title") or "").strip()
     category = str(payload.get("category") or record.metadata.get("category") or "未分类")
     try:
-        from qwen_asr_app.chapters import normalize_chapters
-        from qwen_asr_app.chapter_routes import apply_manual_chapter
-        chapter = normalize_chapters(payload.get('chapters', payload.get('chapter'))) if ('chapters' in payload or 'chapter' in payload) else None
+        from qwen_asr_app.chapter_routes import manual_chapter_fields, save_chapter_fields
+        chapter = (manual_chapter_fields(record, payload.get('chapters', payload.get('chapter')),
+                                         payload.get('chapter_sections'))
+                   if 'chapters' in payload or 'chapter' in payload else None)
         updated = recording_store.update(session_id, title, category) if ('title' in payload or 'category' in payload) else record
         if chapter is not None:
-            apply_manual_chapter(updated, chapter)
+            save_chapter_fields(updated, chapter)
         return {"session": updated.public(), **app_settings.public()}
     except (ValueError, TypeError, OSError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2347,6 +2501,8 @@ async def generate_library_summary(
     config["_note_abstract_system_prompt"] = str(
         config.get("_note_abstract_system_prompt") or DEFAULT_NOTE_ABSTRACT_PROMPT
     ).strip()[:20_000]
+    previous_body=str((record.metadata.get('ai_note_summary') or {}).get('summary') or '')
+    delivery_queued=False
     try:
         summary = await build_note_summary(record, config)
         # Keep naming inside the server-owned operation, after the note is saved.
@@ -2374,6 +2530,8 @@ async def generate_library_summary(
             record.save_metadata()
         record.metadata.pop('ai_note_summary_draft',None)
         record.save_metadata()
+        ideashell_auto_push.enqueue(record, generation_id)
+        delivery_queued=True
         return {"summary": summary, "session": record.public(include_segments=False)}
     except ValueError as exc:
         from qwen_asr_app.fast_note import ProposalKept
@@ -2389,6 +2547,15 @@ async def generate_library_summary(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"AI 总结请求失败：{exc}") from exc
+    finally:
+        # A later PDF/review failure must not strand a body that was already
+        # saved successfully. The queue waits for this operation to release
+        # the record; SharingNotes still applies its independent review gate.
+        current=recording_store.find(session_id) or record
+        body=str((current.metadata.get('ai_note_summary') or {}).get('summary') or '')
+        if not delivery_queued and body.strip() and body!=previous_body:
+            receipt=generation_id or 'saved-'+hashlib.sha256(body.encode()).hexdigest()
+            ideashell_auto_push.enqueue(current,receipt)
 
 
 # Each note owns one AGY conversation, so several notes can run side by side.
@@ -2499,7 +2666,7 @@ def start_summary_job(record: RecordingRecord, payload: dict[str, Any], *, autom
                     result = await (upgrade_library_note_pdf(session_id, payload) if payload.get('_pdf_only') else generate_library_summary_abstract(session_id, payload) if continue_abstract
                                     else generate_library_summary(session_id, payload))
                     note_result = result.get('summary') or {}
-                    if note_result.get('review_status') in {'needs_revision','unreviewed'}:
+                    if note_result.get('pdf_ready') is False:
                         save_state('completed_with_errors',note_result.get('review_warning') or '候选笔记已保存，独立审查仍有待处理项',resume_stage='pdf')
                         return
                     abstract_error = (result.get("summary") or {}).get("abstract_error")
@@ -2855,7 +3022,7 @@ def ideashell_note_content(payload: dict[str, Any]) -> str:
     # exceed 1 after edits), followed by retained older memos.
     # Pull only the primary body, never the older half-note or attachment text.
     primary = re.search(r"^\*\*Memo \d+:[^\n]*\*\*[ \t]*\n(?:summary:[^\n]*\n)?", value, re.M)
-    if primary and "\n## Memos\n" in value:
+    if primary and re.search(r'^## Memos\s*$', value, re.M):
         value = value[primary.end():]
         boundary = re.search(r"^(?:\*\*Memo \d+:[^\n]*\*\*|## (?:Audios|Links|Images|Documents))\s*$", value, re.M)
         if boundary:
@@ -3026,25 +3193,32 @@ async def ideashell_status(request: Request, server_url: str) -> dict[str, Any]:
 async def ideashell_oauth_callback(
     code: str = "", state: str | None = None, iss: str | None = None, error: str = ""
 ) -> HTMLResponse:
-    if error:
+    def result(title: str, detail: str, *, status: int = 400) -> HTMLResponse:
+        close_window = "<script>setTimeout(() => window.close(), 1200)</script>" if status == 200 else ""
         return HTMLResponse(
-            f"<h2>IdeaShell 授权未完成</h2><p>{html.escape(error)}</p>", status_code=400
+            '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width, initial-scale=1">'
+            f"<title>{html.escape(title)} · QwenASR</title>"
+            '<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">'
+            '<script src="/static/js/theme.js?v=20261119-paper"></script>'
+            '<link rel="stylesheet" href="/static/ui.css?v=20261119-paper">'
+            '<link rel="stylesheet" href="/static/appearance.css?v=20261119-paper">'
+            '<link rel="stylesheet" href="/static/status.css?v=20261119-paper">'
+            '</head><body class="status-window"><main class="status-page"><section class="launch-card">'
+            f"<h1>{html.escape(title)}</h1><p>{html.escape(detail)}</p>"
+            f"</section></main>{close_window}</body></html>",
+            status_code=status,
         )
+
+    if error:
+        return result("IdeaShell 授权未完成", error)
     if not code:
-        return HTMLResponse("<h2>IdeaShell 授权回调缺少 code</h2>", status_code=400)
+        return result("IdeaShell 授权未完成", "授权回调缺少 code，请返回 QwenASR 重新发起授权。")
     try:
         await ideashell_manager.deliver_callback(code, state, iss)
     except ValueError as exc:
-        return HTMLResponse(
-            f"<h2>IdeaShell 授权未完成</h2><p>{html.escape(str(exc))}</p>",
-            status_code=400,
-        )
-    return HTMLResponse(
-        "<meta charset='utf-8'><title>IdeaShell 已授权</title>"
-        "<style>body{font-family:-apple-system;padding:40px;color:#17211d}</style>"
-        "<h2>IdeaShell 授权已提交</h2><p>你可以关闭此窗口并返回 QwenASR。</p>"
-        "<script>setTimeout(()=>window.close(),1200)</script>"
-    )
+        return result("IdeaShell 授权未完成", str(exc))
+    return result("IdeaShell 授权已提交", "你可以关闭此窗口并返回 QwenASR。", status=200)
 
 
 @app.post("/api/recordings/{session_id}/ideashell/preview")
@@ -3073,6 +3247,34 @@ async def preview_ideashell_push(session_id: str, payload: dict[str, Any] = Body
         return archive
     except (ValueError, OSError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+async def auto_push_generated_note(session_id: str, generation_id: str = '') -> dict[str, Any]:
+    from qwen_asr_app.ideashell_sync import FileTokenStorage, IDEASHELL_SERVERS
+    record = recording_store.find(session_id)
+    if record is None:
+        raise ValueError('没有找到这条录音')
+    sync = record.metadata.get('ideashell_sync') or {}
+    if generation_id and sync.get('auto_generation_id') == generation_id and sync.get('status') == 'synced':
+        return {'synced': True}  # Delivery succeeded before a process restart.
+    server = (record.metadata.get('ideashell_sync') or {}).get('server_url') or ideashell_manager.active_url
+    if not server:
+        saved = [url for url in IDEASHELL_SERVERS.values() if FileTokenStorage(url).has_saved_tokens()]
+        if len(saved) != 1:
+            raise ValueError('请先在设置中连接闪念贝壳；自动推送需要已授权的区域')
+        server = saved[0]
+    payload = {'content_mode': 'combined', 'include_audio': False, 'server_url': server,
+               '_auto_generation_id': generation_id}
+    preview = await preview_ideashell_push(session_id, payload)
+    return await push_recording_summary_to_ideashell(session_id, {
+        **payload, 'preview_digest': preview['digest'], 'assets_digest': preview['assets_digest'],
+        'audio_sha256s': [],
+    })
+
+
+from qwen_asr_app.ideashell_auto_push import AutoPushQueue
+ideashell_auto_push = AutoPushQueue(PRIVATE_ROOT / 'ideashell-auto-push.json',
+                                  recording_store.find, recording_is_busy, auto_push_generated_note)
 
 
 @app.post("/api/recordings/{session_id}/ideashell/push")
@@ -3137,7 +3339,7 @@ async def push_recording_summary_to_ideashell(
         # 闪念贝壳 note_update appends a new memo instead of replacing the old
         # one, so a re-push publishes a fresh note and retires the old one to
         # the 「待删除」 folder for the user to delete.
-        replaced = list(previous_ids) if (previous_ids and not create_new and sync.get("status") == "synced"
+        replaced = list(previous_ids) if (previous_ids and not create_new and sync.get("status") in {"synced", "local_changes"}
                                          and payload.get("replace_existing") is not False) else []
         create_new = create_new or bool(replaced)
         server_url = sync.get("server_url") if previous_ids else payload.get("server_url")
@@ -3292,6 +3494,8 @@ async def push_recording_summary_to_ideashell(
             sync["audio_error"] = audio_error
         else:
             sync.pop("audio_error", None)
+        if payload.get('_auto_generation_id'):
+            sync['auto_generation_id'] = payload['_auto_generation_id']
         record.metadata["ideashell_sync"] = sync
         record.save_metadata()
         return {
@@ -3368,7 +3572,9 @@ async def verify_ideashell_note(session_id: str, payload: dict[str, Any] = Body(
         kinds[kind] = kinds.get(kind, 0) + 1
     trash = await ensure_ideashell_course_folder(connection, IDEASHELL_TRASH_FOLDER)
     trash_listing = json.dumps(await connection.call_tool('folder_notes', {'folder_id': trash}), ensure_ascii=False)
+    content_sha256 = hashlib.sha256(ideashell_note_content(detail).strip().encode()).hexdigest()
     return {'note_id': note_id, 'in_course_folder': note_id in visible, 'old_still_in_course_folder': lingering,
+            'content_sha256': content_sha256,
             'retired_now': retired, 'old_in_trash': [value for value in old_ids if value in trash_listing],
             'memo_count': len(re.findall(r'^\*\*Memo \d+', full, re.M)), 'attachment_mentions': kinds,
             'attachment_lines': [line[:160] for line in full.splitlines() if re.search(r'\.(png|jpe?g|webp|pdf|aac|m4a)\b', line, re.I)][:40],
@@ -3762,7 +3968,7 @@ def redacted_batch_config(config: dict[str, Any]) -> dict[str, Any]:
     saved = json.loads(json.dumps(config))
     ai = saved.get("ai") if isinstance(saved.get("ai"), dict) else {}
     ai.pop("api_key", None)
-    for provider_name in ("review_provider", "summary_provider", "global_provider", "correction_provider"):
+    for provider_name in ("review_provider", "summary_provider", "note_review_provider", "global_provider", "correction_provider"):
         provider = ai.get(provider_name)
         if isinstance(provider, dict):
             provider.pop("api_key", None)

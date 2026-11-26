@@ -4,6 +4,7 @@ import {createVisiblePoll} from './visible-poll.js';
 
 const $ = (id) => document.getElementById(id);
 const storageKey = 'qwen-asr-ideashell-settings-v1';
+const embedded = new URLSearchParams(location.search).get('embedded') === '1';
 const state = {category: new URLSearchParams(location.search).get('category') || '未分类', files: [], reviewNotes: [], categories: [], selected: null, preview: null, sharedFolder: false, fileAction: null, replacing: null, uploading: false, syncing: false, managing: false, categoryAction: null, epoch: 0, modalEpoch: 0};
 let polling, connectionTimer, toastTimer, previewTimer;
 let loadRequest = null, reloadRequested = false, coursesSignature = '', filesSignature = '';
@@ -87,6 +88,11 @@ function renderFiles() {
   $('files').innerHTML = files.map(file => {
     const conversion = file.conversion || {};
     const ready = ['completed', 'stale'].includes(conversion.status);
+    const sourcePages = conversion.source_pages;
+    const aiPages = conversion.pages;
+    const pageCounts = Number.isInteger(aiPages) && aiPages > 0
+      ? (Number.isInteger(sourcePages) && sourcePages > 0 ? `原件 ${sourcePages} 页 · AI 版 ${aiPages} 页` : `AI 版 ${aiPages} 页`)
+      : '已关联文件夹版本';
     const needsMineru = ready && file.needs_mineru_upgrade;
     const settingsChanged = ready && file.mineru_settings_changed;
     const tier = {auto: '自动', flash: '极速', basic: '基础', standard: '标准', advanced: '高级'}[conversion.mineru_settings?.tier];
@@ -101,7 +107,12 @@ function renderFiles() {
     const previewVariant = /\.pdf$/i.test(file.name) ? 'original' : ready ? 'pdf' : '';
     const title = previewVariant ? `<button type="button" class="file-title-link" data-action="open-pdf" data-variant="${previewVariant}" title="在 Chrome 中查看${previewVariant === 'pdf' ? ' AI 优化后' : ''} PDF">${esc(file.name)}</button>` : esc(file.name);
     const fileControls = state.sharedFolder ? `<button class="ui-button" data-action="rename">重命名</button><button class="ui-button" data-action="replace">替换原件</button><button class="ui-button danger" data-action="delete">移到废纸篓</button>` : '';
-    return `<article class="file-card" data-id="${esc(file.id)}"><div class="file-icon">${esc(file.name.split('.').at(-1).slice(0,6).toUpperCase())}</div><div class="file-main"><h3 class="file-title">${title}</h3><div class="file-meta"><span class="badge">${esc(file.kind)}</span><span>${size(file.size)}</span>${file.relative_path && file.relative_path !== file.name ? `<span>${esc(file.relative_path)}</span>` : ''}<span>${esc(file.created_at.slice(0,10))}</span><span>${esc(syncText)}</span></div><p class="file-status ${failed || pending ? 'error' : ''}">${esc(ready ? `AI 优化后 PDF 已就绪 · ${conversion.pages ? `${conversion.pages} 页` : '已关联文件夹版本'} · ${needsMineru ? '旧版识别结果，可升级为 MinerU 4' : conversion.external ? '与本机 AI 友好型文件同步' : `识别完成${tier ? ` · ${tier}档` : ''}${settingsChanged ? ' · 参数已更新，可重新识别' : ''}`}` : `${conversion.stage || '原件已保存，可生成 AI 友好 PDF'}${working && conversion.progress != null ? ` · ${conversion.progress_estimate?.estimated ? '整体预估 ' : ''}${conversion.progress || 0}%` : ''}`)}${(conversion.warnings || []).map(w => `<br>${esc(w)}`).join('')}</p>${working && conversion.progress != null ? `<progress class="file-progress" max="100" value="${Math.max(0, Math.min(99, Number(conversion.progress) || 0))}" aria-label="识别整体预估进度"></progress>` : ''}${working && conversion.progress_estimate ? `<p class="file-estimate">${esc(mineruEstimateLabel(conversion.progress_estimate, conversion.status))}</p>` : ''}<div class="actions">${taskLink && conversion.status && conversion.status !== 'none' ? `<a class="ui-button" href="/tasks">查看识别任务</a>` : ''}<button class="ui-button" data-action="convert" ${working || (ready && !needsMineru && !settingsChanged) ? 'disabled' : ''}>${needsMineru ? '升级识别版本' : settingsChanged ? '按新参数重新识别' : ready ? '✓ AI 优化后 PDF 已就绪' : working ? '正在转换 PDF…' : failed ? '重新转换 PDF' : '生成 AI 友好 PDF'}</button><a class="ui-button" href="${esc(original)}" download>下载原件</a><button class="ui-button" data-action="copy-original">复制原件</button>${ready ? `<a class="ui-button" href="${esc(pdf)}" download>下载 AI 优化后 PDF</a><button class="ui-button" data-action="copy-pdf">复制 PDF</button>` : ''}${fileControls}<button class="ui-button sync-action" data-action="sync">匹配笔记并上传 ↗</button></div></div></article>`;
+    const taskAction = taskLink && conversion.status && conversion.status !== 'none'
+      ? embedded
+        ? '<button class="ui-button" type="button" data-action="open-task-center">查看识别任务</button>'
+        : '<a class="ui-button" href="/tasks">查看识别任务</a>'
+      : '';
+    return `<article class="file-card" data-id="${esc(file.id)}"><div class="file-icon">${esc(file.name.split('.').at(-1).slice(0,6).toUpperCase())}</div><div class="file-main"><h3 class="file-title">${title}</h3><div class="file-meta"><span class="badge">${esc(file.kind)}</span><span>${size(file.size)}</span>${file.relative_path && file.relative_path !== file.name ? `<span>${esc(file.relative_path)}</span>` : ''}<span>${esc(file.created_at.slice(0,10))}</span><span>${esc(syncText)}</span></div><p class="file-status ${failed || pending ? 'error' : ''}">${esc(ready ? `AI 优化后 PDF 已就绪 · ${pageCounts} · ${needsMineru ? '旧版识别结果，可升级为 MinerU 4' : conversion.external ? '与本机 AI 友好型文件同步' : `识别完成${tier ? ` · ${tier}档` : ''}${settingsChanged ? ' · 参数已更新，可重新识别' : ''}`}` : `${conversion.stage || '原件已保存，可生成 AI 友好 PDF'}${working && conversion.progress != null ? ` · ${conversion.progress_estimate?.estimated ? '整体预估 ' : ''}${conversion.progress || 0}%` : ''}`)}${(conversion.warnings || []).map(w => `<br>${esc(w)}`).join('')}</p>${working && conversion.progress != null ? `<progress class="file-progress" max="100" value="${Math.max(0, Math.min(99, Number(conversion.progress) || 0))}" aria-label="识别整体预估进度"></progress>` : ''}${working && conversion.progress_estimate ? `<p class="file-estimate">${esc(mineruEstimateLabel(conversion.progress_estimate, conversion.status))}</p>` : ''}<div class="actions">${taskAction}<button class="ui-button" data-action="convert" ${working || (ready && !needsMineru && !settingsChanged) ? 'disabled' : ''}>${needsMineru ? '升级识别版本' : settingsChanged ? '按新参数重新识别' : ready ? '✓ AI 优化后 PDF 已就绪' : working ? '正在转换 PDF…' : failed ? '重新转换 PDF' : '生成 AI 友好 PDF'}</button><a class="ui-button" href="${esc(original)}" download>下载原件</a><button class="ui-button" data-action="copy-original">复制原件</button>${ready ? `<a class="ui-button" href="${esc(pdf)}" download>下载 AI 优化后 PDF</a><button class="ui-button" data-action="copy-pdf">复制 PDF</button>` : ''}${fileControls}<button class="ui-button sync-action" data-action="sync">匹配笔记并上传 ↗</button></div></div></article>`;
   }).join('') + reviews.map(reviewCard).join('');
 }
 async function load() {
@@ -348,6 +359,14 @@ $('files').addEventListener('click', event => {
   const button = event.target.closest('button[data-action]'); if (!button) return;
   const file = state.files.find(f => f.id === button.closest('[data-id]').dataset.id); if (!file) return;
   const action = button.dataset.action;
+  if (action === 'open-task-center') {
+    if (embedded && window.parent !== window) {
+      window.parent.postMessage({type: 'qwenasr:open-task-center'}, location.origin);
+    } else {
+      location.href = '/tasks';
+    }
+    return;
+  }
   if (action === 'open-pdf') {
     busy(button, async () => {
       await api(`/api/course-files/${file.id}/open-pdf`, {category: state.category, variant: button.dataset.variant});

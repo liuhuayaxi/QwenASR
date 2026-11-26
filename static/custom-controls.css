@@ -30,7 +30,7 @@ select {
   transition: border-color .15s ease, box-shadow .15s ease, background-color .15s ease;
 
   /* 自定义 chevron 箭头：强行锁定 no-repeat，杜绝任何 shorthand 导致的底纹重复平铺 */
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none'%3E%3Cpath d='M3 4.5L6 7.5L9 4.5' stroke='%236b7078' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") !important;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none'%3E%3Cpath d='M3 4.5L6 7.5L9 4.5' stroke='%2366746a' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") !important;
   background-repeat: no-repeat !important;
   background-position: right 11px center !important;
   background-size: 12px 12px !important;
@@ -38,7 +38,7 @@ select {
 
 /* 深色模式下的下拉箭头 */
 html[data-theme="dark"] select {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none'%3E%3Cpath d='M3 4.5L6 7.5L9 4.5' stroke='%239ca1a9' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") !important;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none'%3E%3Cpath d='M3 4.5L6 7.5L9 4.5' stroke='%23b8bfb9' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") !important;
 }
 
 /* 交互状态：Hover & Focus */
@@ -108,7 +108,7 @@ select.ui-field,
 #workspaceCourse,
 #typeFilter,
 #categoryFilter,
-#courses {
+select#courses {
   min-height: 38px;
   padding: 8px 34px 8px 12px !important;
   border: 1px solid var(--line) !important;
@@ -125,7 +125,7 @@ select.ui-field:hover:not(:disabled),
 #workspaceCourse:hover:not(:disabled),
 #typeFilter:hover:not(:disabled),
 #categoryFilter:hover:not(:disabled),
-#courses:hover:not(:disabled) {
+select#courses:hover:not(:disabled) {
   border-color: var(--green-line) !important;
   background-color: var(--card) !important;
 }
@@ -134,7 +134,7 @@ select.ui-field:focus:not(:disabled),
 #workspaceCourse:focus:not(:disabled),
 #typeFilter:focus:not(:disabled),
 #categoryFilter:focus:not(:disabled),
-#courses:focus:not(:disabled) {
+select#courses:focus:not(:disabled) {
   border-color: var(--green) !important;
   box-shadow: 0 0 0 3px var(--focus-ring) !important;
 }

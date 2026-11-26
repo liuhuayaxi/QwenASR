@@ -1,16 +1,16 @@
 import {renderCorrectionReview} from "./js/transcription-assist.js?v=20261016-decisions-1";
-import "./js/knowledge-settings.js?v=20261015-illustrated-windows";
+import "./js/knowledge-settings.js?v=20261119-paper";
 import {cachedJson} from './js/cached-json.js';
 import {createVisiblePoll} from './js/visible-poll.js';
 import { createBatchView } from "./js/batch-view.js?v=20261015-reader-math-scope-8";
-import { createLibraryTools } from "./js/library-tools.js?v=20261031-browser-fixes-1";
-import { createMarkdownReader, renderMarkdown } from "./js/markdown-reader.js?v=20261108-ppt-4";
+import { createLibraryTools } from "./js/library-tools.js?v=20261119-paper";
+import { createMarkdownReader, renderMarkdown } from "./js/markdown-reader.js?v=20261119-paper";
 import { createNoteAutosave } from "./js/note-autosave.js?v=20260923-upgrade-1";
 import { downloadNotePdf } from "./js/note-download.js?v=20261031";
 import { chapterValue, chapterLabel, createChapterControls } from './js/recording-chapters.js?v=20261031-browser-fixes-2';
 import { DEFAULT_NOTE_SUMMARY_PROMPT } from "./js/default-prompts.js?v=20261015-learning-scope-1";
 import { resample } from "./js/audio.js";
-import { createSummaryView } from "./js/summary-view.js?v=20261015-reader-math-scope-8";
+import { createSummaryView } from "./js/summary-view.js?v=20261119-paper";
 import { createTranscriptView } from "./js/transcript-view.js?v=20261031-browser-fixes-1";
 import { createRecordingDiscard } from "./js/recording-discard.js?v=20261015-reader-math-scope-8";
 import { IDEASHELL_SERVERS, normalizeIdeashellServer } from "./js/ideashell-config.js?v=20261007";
@@ -43,6 +43,7 @@ const els = {
   summaryEnabled: $("#summaryEnabled"),
   noteReviewEnabled: $("#noteReviewEnabled"),
   noteAiLatexEnabled: $("#noteAiLatexEnabled"),
+  noteStrictScopeEnabled: $("#noteStrictScopeEnabled"),
   translation: $("#translation"), aiBaseUrl: $("#aiBaseUrl"),
   aiModel: $("#aiModel"), reviewBaseUrl: $("#reviewBaseUrl"), reviewModel: $("#reviewModel"),
   reviewApiKey: $("#reviewApiKey"), reviewApiMode: $("#reviewApiMode"),
@@ -382,9 +383,10 @@ function renderProviderSummaries() {
   els.reviewModelSummary.textContent = els.reviewModel.value.trim() || "未设置模型";
   els.summaryBaseSummary.textContent = providerSummary("summary", "summaryBaseUrl");
   els.summaryModelSummary.textContent = els.summaryModel.value.trim() || "未设置模型";
-  for (const mode of ["global", "correction"]) {
-    $(`#${mode}BaseSummary`).textContent = providerSummary(mode, `${mode}BaseUrl`);
-    $(`#${mode}ModelSummary`).textContent = $(`#${mode}Model`).value.trim() || "未设置模型";
+  for (const mode of ["global", "correction", "note_review"]) {
+    const baseSummary = $(`#${mode}BaseSummary`), modelSummary = $(`#${mode}ModelSummary`);
+    if (baseSummary) baseSummary.textContent = providerSummary(mode, `${mode}BaseUrl`);
+    if (modelSummary) modelSummary.textContent = $(`#${mode}Model`)?.value.trim() || "未设置模型";
   }
 }
 
@@ -487,6 +489,7 @@ function saveApiSettings() {
     summary_enabled: els.summaryEnabled.checked, api_key: els.aiApiKey.value,
     note_review_enabled: els.noteReviewEnabled.checked,
     note_ai_latex_enabled: els.noteAiLatexEnabled.checked,
+    note_strict_scope_enabled: Boolean(els.noteStrictScopeEnabled?.checked),
     extra_params: els.apiParams.value, ai_correction: els.aiCorrection.checked,
     api_mode: els.aiApiMode.value, history_chars: els.historyChars.value,
     translation: els.translation.value, title_prompt: els.titlePrompt.value,
@@ -495,7 +498,7 @@ function saveApiSettings() {
     review_base_url: els.reviewBaseUrl.value, review_model: els.reviewModel.value,
     review_api_key: els.reviewApiKey.value, review_api_mode: els.reviewApiMode.value,
     review_context_window: els.reviewContextWindow.value, review_extra_params: els.reviewApiParams.value,
-    function_providers: Object.fromEntries(["sentence", "review", "summary", "global", "correction"].map((mode) => [mode, rawProvider(mode)])),
+    function_providers: Object.fromEntries(["sentence", "review", "summary", "note_review", "global", "correction"].map((mode) => [mode, rawProvider(mode)])),
     summary_base_url: els.summaryBaseUrl.value, summary_model: els.summaryModel.value,
     summary_api_key: els.summaryApiKey.value, summary_api_mode: els.summaryApiMode.value,
     summary_context_window: els.summaryContextWindow.value, summary_extra_params: els.summaryApiParams.value,
@@ -550,6 +553,7 @@ async function restoreApiSettings() {
     els.summaryEnabled.checked = Boolean(saved.summary_enabled);
     els.noteReviewEnabled.checked = saved.note_review_enabled === true;
     els.noteAiLatexEnabled.checked = saved.note_ai_latex_enabled === true;
+    if (els.noteStrictScopeEnabled) els.noteStrictScopeEnabled.checked = saved.note_strict_scope_enabled === true;
     els.aiApiMode.value = saved.api_mode || "auto";
     els.aiApiKey.value = saved.api_key || "";
     els.historyChars.value = saved.history_chars ?? "2000";
@@ -992,7 +996,7 @@ function renderLibraryCalendar(records) {
   });
   const maxCount = Math.max(1, ...visibleKeys.map((key) => byDate.get(key)?.count || 0));
   const today = localDateKey(new Date());
-  els.calendarGrid.innerHTML = "";
+  els.calendarGrid.replaceChildren();
 
   for (let index = 0; index < visibleKeys.length; index++) {
     const key = visibleKeys[index];
@@ -1059,6 +1063,14 @@ function courseReplayLinks(record) {
   }));
 }
 
+function autoPushLabel(record) {
+  const push = record.ideashell_auto_push;
+  const labels = {queued:'笔记已保存，等待自动推送到闪念贝壳', running:'正在自动推送到闪念贝壳',
+    waiting_retry:'自动推送暂未完成，将在后台重试', completed:'已自动推送总结＋精修原文到闪念贝壳',
+    failed:'自动推送未完成，可使用推送按钮处理'};
+  return push ? (labels[push.status] || '') + (push.error ? `：${push.error}` : '') : '';
+}
+
 function renderLibrary() {
   const category = els.libraryCategory.value;
   const categoryRecords = state.library.filter((record) => !category || record.category === category);
@@ -1066,7 +1078,7 @@ function renderLibrary() {
   const records = state.selectedLibraryDate
     ? categoryRecords.filter((record) => localDateKey(record.started_at) === state.selectedLibraryDate)
     : categoryRecords;
-  els.libraryList.innerHTML = "";
+  els.libraryList.replaceChildren();
   if (!records.length) {
     $("#libraryPageStatus").textContent = "0 条录音";
     $("#libraryPrevious").disabled = $("#libraryNext").disabled = true;
@@ -1107,6 +1119,7 @@ function renderLibrary() {
         <p>${summaryBusy ? "课后复习笔记正在后台生成，刷新或关闭网页后仍会继续。" : summaryFailure ? `上次生成未完成：${escapeHtml(summaryFailure)}。可点击重新生成，已有笔记仍保留。` : hasSummary ? escapeHtml(record.library_summary) : summaryError ? `短摘要生成失败：${escapeHtml(summaryError)}` : detailedSummary ? "课后复习笔记已生成，但课堂记录短摘要尚未生成。" : "尚未生成，可重新生成课后复习笔记。"}</p>
         ${hasSummary ? "" : canRegenerateAbstract ? `<button class="library-regenerate-abstract" type="button">重新生成短摘要</button>` : `<button class="library-generate-summary" type="button" ${canGenerateSummary ? "" : "disabled"}>生成课后复习笔记</button>`}
       </div>
+      ${record.ideashell_auto_push ? `<p class="library-card-meta" role="status">${escapeHtml(autoPushLabel(record))}</p>` : ''}
       ${!summaryBusy && record.ai_note_summary?.title_error ? `<p class="library-card-meta">自动取名未完成：${escapeHtml(record.ai_note_summary.title_error)}。可点击“AI 取名”重试。</p>` : ""}
       <div class="library-card-actions">
         <input class="library-title-input" value="${escapeHtml(record.title || "")}" aria-label="录音名称" />
@@ -1125,7 +1138,7 @@ function renderLibrary() {
         <a href="${record.downloads.audio}">AAC</a>
         <a href="${record.downloads.raw_transcript || record.downloads.transcript}">原始转写 TXT</a>
         <a href="${record.downloads.corrected_transcript || record.downloads.transcript}">AI 修正 TXT</a>
-        <a data-review-pdf="${escapeHtml(record.id)}" data-pdf-ready="${record.ai_note_summary?.review_status === 'passed' || (record.ai_note_summary?.review_status === 'skipped' && !els.noteReviewEnabled.checked)}" class="${detailedSummary ? "" : "disabled-download"}" href="${record.downloads.ai_summary}">复习笔记 PDF${record.ai_note_summary?.review_status === 'skipped'?'（未审核）':''}</a>
+        <a data-review-pdf="${escapeHtml(record.id)}" data-pdf-ready="${record.ai_note_summary?.pdf_ready === true && (record.ai_note_summary?.review_enabled !== false || !els.noteReviewEnabled.checked)}" class="${detailedSummary ? "" : "disabled-download"}" href="${record.downloads.ai_summary}">复习笔记 PDF</a>
         ${courseReplayLinks(record).map((link) => `<a class="library-replay-link" href="${link.url}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(link.title || "在南邮 Smart Class 打开对应回放")}">${escapeHtml(link.label)}</a>`).join("")}
         <button class="library-regenerate-summary" type="button" ${canGenerateSummary ? "" : "disabled"}>重新生成复习笔记</button>
       </div>` : ""}`;
@@ -1163,6 +1176,7 @@ function postRecordingAiConfig(record = null) {
 
 function automaticSummaryPayload(record) {
   return { config: { terminology: record?.course_settings?.terminology || terminologyValues(), ai: { summary_provider: rawProvider("summary"),
+    note_review_provider: rawProvider("note_review"), correction_provider: rawProvider("correction"),
     system_prompt: record?.course_settings?.ai_system_prompt || els.systemPrompt.value.trim() } },
     summary_system_prompt: els.summarySystemPrompt.value.trim(),
     abstract_system_prompt: els.abstractPrompt.value.trim(),
@@ -1449,6 +1463,15 @@ async function openLibraryRecord(sessionId, focus = null) {
     if (!els.noteDialog.open) els.noteDialog.showModal();
     document.dispatchEvent(new Event('qwenasr:viewchange'));
     if (focus) requestAnimationFrame(() => libraryTools.focusSearch(focus));
+    else {
+      const heading = payload.session.chapter_info?.sections?.[$('#libraryChapter').value];
+      if (heading) requestAnimationFrame(() => {
+        if (state.noteSession?.id !== sessionId) return;
+        Array.from($('#noteSummaryReader').querySelectorAll('h1,h2,h3,h4,h5,h6'))
+          .find(node => node.textContent.trim().startsWith(heading))
+          ?.scrollIntoView({block:'start'});
+      });
+    }
     return payload.session;
   } catch (error) { toast(error.message, 5000); }
 }
@@ -1562,7 +1585,7 @@ function renderNoteSummary(session) {
       : session.ideashell_sync?.note_id ? " · 已关联 IdeaShell" : "";
     const abstractNotice = summary.abstract_error ? ` · 课堂记录短摘要失败：${summary.abstract_error}` : "";
     const titleNotice = summary.title_error ? " · 自动取名未完成，可在课堂记录点击“AI 取名”重试" : "";
-    const reviewNotice = summary.review_status === 'passed' ? ' · PDF 已逐页独立审查，下载时核验当前版本' : summary.review_status === 'skipped' ? ' · 未审核（审核已关闭），下载时核验当前 PDF' : ' · 当前版本未审核，下载时按已保存的审核开关处理';
+    const reviewNotice = summary.pdf_ready === true ? ' · 下载时核验当前 PDF' : ' · PDF 需要重新生成，下载时自动处理';
     els.noteSummaryHint.textContent = `图文复习笔记${edited}${syncState}${abstractNotice}${titleNotice}${reviewNotice}${summary.updated_at ? ` · ${new Date(summary.updated_at).toLocaleString()}` : ""}`;
   } else {
     els.noteSummaryHint.textContent = summary.abstract_error
@@ -1573,6 +1596,7 @@ function renderNoteSummary(session) {
   else if (["failed", "interrupted"].includes(session.summary_job?.status)) {
     els.noteSummaryHint.textContent = `上次生成未完成：${session.summary_job.error || "任务中断"}；已有笔记保留，可重新生成`;
   }
+  if (session.ideashell_auto_push) els.noteSummaryHint.textContent += ` · ${autoPushLabel(session)}`;
 }
 
 els.downloadNoteSummary.addEventListener('click', async event => {
@@ -1582,7 +1606,7 @@ els.downloadNoteSummary.addEventListener('click', async event => {
   try {
     if (!await saveNoteSummary({quiet:true})) return;
     if (state.noteSession?.id !== session.id) return;
-    if (state.noteSession.ai_note_summary?.review_status === 'passed' || (state.noteSession.ai_note_summary?.review_status === 'skipped' && !els.noteReviewEnabled.checked)) {
+    if (state.noteSession.ai_note_summary?.pdf_ready === true && (state.noteSession.ai_note_summary?.review_enabled !== false || !els.noteReviewEnabled.checked)) {
       await downloadNotePdf(state.noteSession.downloads.ai_summary, {title:state.noteSession.title, onStatus:message => toast(message, 5000)});
       return;
     }
@@ -1617,7 +1641,8 @@ $('#chooseReviewMaterials')?.addEventListener('click', async () => {
     const response = await fetch(url); const data = await response.json();
     if (!response.ok) throw new Error(data.detail || '无法读取课程资料');
     const dialog = document.createElement('dialog');
-    dialog.className = 'review-material-picker';
+    dialog.className = 'ui-dialog note-tools-dialog review-material-picker';
+    dialog.setAttribute('aria-label', '本节使用的课件');
     const heading = document.createElement('h3'); heading.textContent = '本节使用的课件'; dialog.append(heading);
     const hint = document.createElement('p'); hint.textContent = '只列出本课程原件。勾选后会保留已完成且输入未变的结果；可恢复自动匹配。'; dialog.append(hint);
     for (const item of data.materials) {
@@ -1626,9 +1651,9 @@ $('#chooseReviewMaterials')?.addEventListener('click', async () => {
       input.checked = data.selected === null || data.selected === undefined || data.selected.includes(item.id);
       label.append(input, document.createTextNode(` ${item.name}`)); dialog.append(label);
     }
-    const save = document.createElement('button'); save.textContent = '保存选择';
-    const auto = document.createElement('button'); auto.textContent = '恢复自动匹配';
-    const close = document.createElement('button'); close.textContent = '关闭'; close.onclick = () => dialog.close();
+    const save = document.createElement('button'); save.className = 'ui-button primary'; save.textContent = '保存选择';
+    const auto = document.createElement('button'); auto.className = 'ui-button'; auto.textContent = '恢复自动匹配';
+    const close = document.createElement('button'); close.className = 'ui-button'; close.textContent = '关闭'; close.onclick = () => dialog.close();
     const persist = async ids => {
       const response = await fetch(url, {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({material_ids:ids})});
       const result = await response.json(); if (!response.ok) throw new Error(result.detail || '保存失败');
@@ -1646,12 +1671,14 @@ $('#previewNoteProposal')?.addEventListener('click', async () => {
     if (!await saveNoteSummary({quiet:true})) return;
     const url=`/api/recordings/${encodeURIComponent(session.id)}/note-proposal`;
     const response=await fetch(url);const data=await response.json();if(!response.ok)throw new Error(data.detail || '候选版本不可用');
-    const dialog=document.createElement('dialog');dialog.style.cssText='width:min(1000px,94vw);max-height:92vh;overflow:auto';
-    const heading=document.createElement('h3');heading.textContent=data.note.review_status==='passed'?'候选版本 · 已完成逐页审查':'候选版本 · 未完成视觉审查';
+    const dialog = document.createElement('dialog');
+    dialog.className = 'ui-dialog note-tools-dialog note-proposal-dialog';
+    dialog.setAttribute('aria-label', '候选版本');
+    const heading=document.createElement('h3');heading.textContent='候选版本';
     const text=document.createElement('div');text.className='markdown-body';text.innerHTML=renderMarkdown(data.note.summary,`/api/recordings/${encodeURIComponent(session.id)}/note-assets/${data.task_id}/`);
-    const adopt=document.createElement('button');adopt.textContent='采用此版本，原文保留在历史中';adopt.disabled=data.note.review_status!=='passed';
+    const adopt=document.createElement('button');adopt.className='ui-button primary';adopt.textContent='采用此版本，原文保留在历史中';adopt.disabled=!(data.note.pdf_ready===true&&data.note.review_enabled!==false);
     adopt.onclick=async()=>{try{const r=await fetch(url+'/adopt',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({task_id:data.task_id,expected_summary:data.current_summary})});const result=await r.json();if(!r.ok)throw new Error(result.detail);state.noteSession=result.session;renderNoteSummary(result.session);dialog.close();toast('已采用图文版本，原编辑保留在版本历史中');}catch(error){toast(error.message);}};
-    const close=document.createElement('button');close.textContent='保留原文并关闭';close.onclick=()=>dialog.close();dialog.append(heading,adopt,close,text);dialog.addEventListener('close',()=>dialog.remove());document.body.append(dialog);dialog.showModal();
+    const close=document.createElement('button');close.className='ui-button';close.textContent='保留原文并关闭';close.onclick=()=>dialog.close();dialog.append(heading,adopt,close,text);dialog.addEventListener('close',()=>dialog.remove());document.body.append(dialog);dialog.showModal();
   } catch(error){toast(error.message);}
 });
 
@@ -2038,7 +2065,7 @@ async function resumeLibraryRecord(record) {
   } catch (_) { return; }
 
   state.uploading = true;
-  els.batchRaw.innerHTML = "";
+  els.batchRaw.replaceChildren();
   for (const segment of record.segments || []) {
     addBatchBlock(els.batchRaw, segment, segment.raw, `已保存原始段 ${segment.id}`);
   }
@@ -2607,7 +2634,12 @@ els.terminology.addEventListener("change", () => sendLiveConfigUpdate("课程术
 els.openSettingsDialog.addEventListener("click", () => openAdvancedSettings());
 document.querySelector("[data-open-settings]")?.addEventListener("click", event => { event.preventDefault(); openAdvancedSettings(); });
 els.closeSettingsDialog.addEventListener("click", () => els.settingsDialog.close());
-els.settingsDialog.addEventListener('close', () => document.dispatchEvent(new Event('qwenasr:viewchange')));
+els.settingsDialog.addEventListener('close', () => {
+  document.dispatchEvent(new Event('qwenasr:viewchange'));
+  if (window.parent !== window && new URLSearchParams(location.search).get('embedded') === '1') {
+    window.parent.postMessage({type: 'qwenasr:settings-close'}, location.origin);
+  }
+});
 els.settingsDialog.addEventListener("click", (event) => {
   if (event.target === els.settingsDialog) els.settingsDialog.close();
 });
@@ -2761,6 +2793,7 @@ els.summaryEnabled.addEventListener("change", () => {
 });
 els.noteReviewEnabled.addEventListener('change',scheduleApiSave);
 els.noteAiLatexEnabled.addEventListener('change',scheduleApiSave);
+els.noteStrictScopeEnabled?.addEventListener('change',scheduleApiSave);
 [els.aiBaseUrl, els.aiModel, els.contextWindow, els.aiApiKey, els.apiParams, $("#sentenceTransport"), $("#sentenceEffort"), $("#sentenceMaxOutput"),
   els.reviewBaseUrl, els.reviewModel, els.reviewContextWindow, els.reviewApiKey, els.reviewApiParams,
   els.summaryBaseUrl, els.summaryModel, els.summaryContextWindow, els.summaryApiKey, els.summaryApiParams, $("#reviewTransport"), $("#reviewEffort"), $("#reviewMaxOutput"), $("#summaryTransport"), $("#summaryEffort"), $("#summaryMaxOutput"),
@@ -2818,6 +2851,7 @@ els.clearApiConfig.addEventListener("click", async () => {
   els.summaryEnabled.checked = false;
   els.noteReviewEnabled.checked = false;
   els.noteAiLatexEnabled.checked = false;
+  if (els.noteStrictScopeEnabled) els.noteStrictScopeEnabled.checked = false;
   els.translation.value = "off";
   els.saveApiConfig.checked = true;
   restoreFunctionProviders({});
@@ -2843,6 +2877,13 @@ window.addEventListener("beforeunload", () => { if (apiSettingsDirty) saveApiSet
 
 async function init() {
   const query = new URLSearchParams(location.search);
+  // The settings bridge embeds this page only to reuse the existing settings
+  // implementation. Open the dialog before waiting for the workbench data so
+  // the recording screen never flashes between the click and the settings.
+  if (query.get('embedded') === '1' && query.get('settings') === 'ai') {
+    openAdvancedSettings();
+    selectAiSettings('summary');
+  }
   chapterControls.restoreLibrary(els.libraryCategory, state);
   drawIdleMeter();
   if (location.pathname === "/library") switchView("library");
@@ -2900,26 +2941,28 @@ function readProvider(mode, required = true) {
     sentence: [els.aiBaseUrl, els.aiModel, els.aiApiKey, els.aiApiMode, els.contextWindow, els.apiParams, "逐句实时"],
     review: [els.reviewBaseUrl, els.reviewModel, els.reviewApiKey, els.reviewApiMode, els.reviewContextWindow, els.reviewApiParams, "分段整理"],
     summary: [els.summaryBaseUrl, els.summaryModel, els.summaryApiKey, els.summaryApiMode, els.summaryContextWindow, els.summaryApiParams, "课后复习笔记"],
+    note_review: [$("#note_reviewBaseUrl"), $("#note_reviewModel"), $("#note_reviewApiKey"), $("#note_reviewApiMode"), $("#note_reviewContextWindow"), $("#note_reviewApiParams"), "独立审核"],
     global: [$("#globalBaseUrl"), $("#globalModel"), $("#globalApiKey"), $("#globalApiMode"), $("#globalContextWindow"), $("#globalApiParams"), "长文本复核"],
     correction: [$("#correctionBaseUrl"), $("#correctionModel"), $("#correctionApiKey"), $("#correctionApiMode"), $("#correctionContextWindow"), $("#correctionApiParams"), "转写校对"],
   };
   const [base, model, key, format, context, params, label] = fields[mode];
+  if (!base && !model && !required) return {};
   const maxOutput = $(`#${mode}MaxOutput`);
   const transport = $(`#${mode}Transport`);
   const effort = $(`#${mode}Effort`);
   const useAgy = transport?.value === "agy_cli";
   return {
     transport: transport?.value || "api",
-    base_url: useAgy ? base.value.trim() : (required ? requiredProviderText(base, `${label} Base URL`) : base.value.trim()),
-    model: required ? requiredProviderText(model, `${label}模型或 AGY 模型`) : model.value.trim(),
-    cli_model: useAgy ? model.value.trim() : "",
+    base_url: useAgy ? (base?.value.trim() || "") : (required ? requiredProviderText(base, `${label} Base URL`) : (base?.value.trim() || "")),
+    model: required ? requiredProviderText(model, `${label}模型或 AGY 模型`) : (model?.value.trim() || ""),
+    cli_model: useAgy ? (model?.value.trim() || "") : "",
     cli_effort: settingsNavigation.readEffort(effort),
-    api_key: key.value.trim(), api_mode: format.value,
-    concurrency: Math.max(1, Math.min(8, Number($(`#${mode}Concurrency`).value) || 2)),
-    context_window: required ? contextWindowValue(context, label) : Number(context.value) || DEFAULT_CONTEXT_TOKENS,
-    max_output_tokens: Math.max(128, Math.min(32768, Number(maxOutput?.value) || (mode === "summary" ? 16384 : 8000))),
+    api_key: key?.value.trim() || "", api_mode: format?.value || "auto",
+    concurrency: Math.max(1, Math.min(8, Number($(`#${mode}Concurrency`)?.value) || 2)),
+    context_window: required ? contextWindowValue(context, label) : Number(context?.value) || DEFAULT_CONTEXT_TOKENS,
+    max_output_tokens: Math.max(128, Math.min(32768, Number(maxOutput?.value) || (mode === "summary" || mode === "note_review" ? 16384 : 8000))),
     extra_params: required ? parseJsonSettings(params, `${label}参数`) : {},
-    system_prompt: mode === "summary" ? els.summarySystemPrompt.value : mode === "sentence" ? els.systemPrompt.value : $(`#${mode}Prompt`).value,
+    system_prompt: mode === "summary" ? els.summarySystemPrompt.value : mode === "sentence" ? els.systemPrompt.value : ($(`#${mode}Prompt`)?.value ?? ""),
   };
 }
 function readAiConfig(requiredModes) {
@@ -2927,6 +2970,7 @@ function readAiConfig(requiredModes) {
     ...readProvider("sentence", requiredModes.includes("sentence")),
     review_provider: readProvider("review", requiredModes.includes("review")),
     summary_provider: readProvider("summary", requiredModes.includes("summary")),
+    note_review_provider: readProvider("note_review", false),
     global_provider: readProvider("global", requiredModes.includes("global")),
     correction_provider: readProvider("correction", requiredModes.includes("correction")),
     system_prompt: els.systemPrompt.value.trim(), history_chars: Number(els.historyChars.value) || 0,
@@ -3030,15 +3074,20 @@ function selectAiSettings(mode) {
   document.querySelectorAll("[data-ai-tab]").forEach((button) => { button.classList.toggle("active", button.dataset.aiTab === mode); button.setAttribute("aria-pressed", String(button.dataset.aiTab === mode)); });
   settingsNavigation.syncActions();
   if (mode === "chat") void classroomChat?.refreshModels();
+  if (window.parent !== window && new URLSearchParams(location.search).get('embedded') === '1'
+      && new URLSearchParams(location.search).get('settings') === 'ai') {
+    window.parent.postMessage({type: 'qwenasr:settings-ready'}, location.origin);
+  }
 }
 function rawProvider(mode) {
   const provider = readProvider(mode, false);
   const input = mode === "sentence" ? els.apiParams : $(`#${mode}ApiParams`);
-  provider.extra_params = input.value;
+  if (input) provider.extra_params = input.value;
   return provider;
 }
 function fillProvider(mode, provider) {
-  $(`#${mode}Concurrency`).value = provider.concurrency || (mode === "summary" ? 3 : 2);
+  const concurrency = $(`#${mode}Concurrency`);
+  if (concurrency) concurrency.value = provider.concurrency || (mode === "summary" ? 3 : mode === "note_review" ? 4 : 2);
   const map = mode === "sentence" ? {transport:"sentenceTransport", base_url: "aiBaseUrl", model:"aiModel", cli_model:"aiModel", cli_effort:"sentenceEffort", api_key:"aiApiKey", api_mode:"aiApiMode", context_window:"contextWindow", max_output_tokens:"sentenceMaxOutput", extra_params:"apiParams", system_prompt:"systemPrompt"}
     : {transport:mode+"Transport", base_url: mode+"BaseUrl", model:mode+"Model", cli_model:mode+"Model", cli_effort:mode+"Effort", api_key:mode+"ApiKey", api_mode:mode+"ApiMode", context_window:mode+"ContextWindow", max_output_tokens:mode+"MaxOutput", extra_params:mode+"ApiParams", system_prompt:mode === "summary" ? "summarySystemPrompt" : mode+"Prompt"};
   for (const [key, id] of Object.entries(map)) {
@@ -3052,7 +3101,8 @@ function fillProvider(mode, provider) {
 function restoreFunctionProviders(saved) {
   const precise = saved.function_providers;
   if (precise) {
-    for (const [mode, provider] of Object.entries(precise)) if (["sentence","review","summary","global","correction"].includes(mode)) fillProvider(mode, provider);
+    for (const [mode, provider] of Object.entries(precise)) if (["sentence","review","summary","note_review","global","correction"].includes(mode)) fillProvider(mode, provider);
+    if (!precise.note_review && precise.summary) fillProvider("note_review", {...precise.summary});
     return;
   }
   const sentence = rawProvider("sentence"), review = rawProvider("review"), legacyLong = rawProvider("summary");
@@ -3066,7 +3116,7 @@ function restoreFunctionProviders(saved) {
 }
 document.querySelectorAll("[data-ai-tab]").forEach((button) => button.addEventListener("click", () => selectAiSettings(button.dataset.aiTab)));
 $("#openSummarySettings").addEventListener("click", () => { selectAiSettings("summary"); openAdvancedSettings(els.summaryModel); });
-for (const mode of ["global","correction","review"]) {
+for (const mode of ["global","correction","review","note_review"]) {
   for (const suffix of ["Transport","Effort","BaseUrl","Model","ApiKey","ApiMode","ContextWindow","MaxOutput","ApiParams","Prompt"]) {
     const input = $(`#${mode}${suffix}`);
     input?.addEventListener("input", () => { scheduleApiSave(); renderProviderSummaries(); });
@@ -3130,10 +3180,10 @@ sharedLibraryEvents.onmessage = () => {
   }, 200);
 };
 
-for (const mode of ["sentence", "review", "summary", "correction", "global"]) {
+for (const mode of ["sentence", "review", "summary", "note_review", "correction", "global"]) {
   const base = mode === "sentence" ? els.aiBaseUrl : $(`#${mode}BaseUrl`);
   const key = mode === "sentence" ? els.aiApiKey : $(`#${mode}ApiKey`);
-  base.addEventListener("input", () => {
+  if (base && key) base.addEventListener("input", () => {
     key.value = "";
     toast("接口地址已改变，请为这个服务填写 Key；原服务凭证仍保存在本机", 5000);
   }, true);

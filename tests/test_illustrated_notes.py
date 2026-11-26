@@ -97,9 +97,9 @@ class AssetTests(unittest.TestCase):
 
     def test_edit_invalidates_review_and_history_preserves_assets(self):
         with tempfile.TemporaryDirectory() as raw:
-            record=RecordingRecord(Path(raw),{'id':'sample-record','ai_note_summary':{'summary':'old','review_status':'passed','pdf_sha256':'oldhash','review_package':'.review-notes/old'}})
+            record=RecordingRecord(Path(raw),{'id':'sample-record','ai_note_summary':{'summary':'old','pdf_ready':True,'pdf_sha256':'oldhash','review_package':'.review-notes/old'}})
             record.save_all();record.update_note_summary('new')
-            self.assertEqual(record.metadata['ai_note_summary']['review_status'],'stale')
+            self.assertNotIn('pdf_ready',record.metadata['ai_note_summary'])
             self.assertNotIn('pdf_sha256',record.metadata['ai_note_summary'])
             from qwen_asr_app.note_history import versions,read_version
             old=read_version(record,versions(record)[0]['id'])

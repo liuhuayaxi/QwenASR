@@ -1,5 +1,6 @@
 """Chapter metadata operations. Note text and source files are never rewritten."""
 import asyncio
+import re
 from fastapi import APIRouter, Body, HTTPException
 
 from .chapters import chapter_fields, labels_from_metadata, normalize_chapters, suggestion_for_record
@@ -16,8 +17,26 @@ def save_chapter_fields(record, fields):
     record.save_metadata()
 
 
-def apply_manual_chapter(record, value):
+def manual_chapter_fields(record, value, sections=None):
     fields = chapter_fields(normalize_chapters(value), 'manual', [])
+    labels = fields['chapters']
+    if sections is None:
+        current = (record.metadata.get('chapter_info') or {}).get('sections') or {}
+        sections = {label: current[label] for label in labels if label in current}
+    else:
+        if not isinstance(sections, dict) or any(label not in labels for label in sections):
+            raise ValueError('章节定位必须对应这次保存的章节')
+        note = record.metadata.get('ai_note_summary') or {}
+        headings = set(re.findall(r'^#{1,6}[ \t]+(.+?)[ \t]*$', note.get('summary') or '', re.M))
+        if any(not isinstance(heading, str) or heading not in headings for heading in sections.values()):
+            raise ValueError('章节定位必须对应笔记现有的小节标题')
+    if sections:
+        fields['chapter_info']['sections'] = sections
+    return fields
+
+
+def apply_manual_chapter(record, value, sections=None):
+    fields = manual_chapter_fields(record, value, sections)
     save_chapter_fields(record, fields)
     return fields
 

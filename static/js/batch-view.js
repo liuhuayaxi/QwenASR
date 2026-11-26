@@ -1,4 +1,4 @@
-import { renderMarkdown } from "./markdown-reader.js?v=20261108-ppt-4";
+import { renderMarkdown } from "./markdown-reader.js?v=20261119-paper";
 
 // Uploaded files are submitted before observing their background jobs.
 export function createBatchView({els, state, formatDuration, escapeHtml, summaryView, showSession, updateButtons, toast, sessionConfig, selectedRecordCategory, loadLibrary}) {
@@ -75,14 +75,14 @@ async function transcribeUploadedFile(file, config, fileIndex, fileCount, resume
         );
       } else if (event.type === "ai_group") {
         els.batchAi.classList.remove("muted-output");
-        if (els.batchAi.dataset.placeholder === "true") els.batchAi.innerHTML = "";
+        if (els.batchAi.dataset.placeholder === "true") els.batchAi.replaceChildren();
         els.batchAi.dataset.placeholder = "false";
         const group = event.group || {};
         const text = [group.corrected || group.raw, group.translation && `译文：${group.translation}`].filter(Boolean).join("\n\n");
         addBatchBlock(els.batchAi, group, text, `AI 长段 ${group.id || ""}`);
       } else if (event.type === "ai_segment") {
         els.batchAi.classList.remove("muted-output");
-        if (els.batchAi.dataset.placeholder === "true") els.batchAi.innerHTML = "";
+        if (els.batchAi.dataset.placeholder === "true") els.batchAi.replaceChildren();
         els.batchAi.dataset.placeholder = "false";
         const segment = event.segment || {};
         const text = [segment.corrected || segment.raw, segment.translation && `译文：${segment.translation}`]
@@ -132,7 +132,7 @@ async function uploadRecordings(fileList) {
   const files = Array.from(fileList || []);
   if (!files.length || state.uploading || state.activeSession) return;
   state.uploading = true;
-  els.batchRaw.innerHTML = "";
+  els.batchRaw.replaceChildren();
   els.batchAi.textContent = els.aiCorrection.checked || els.translation.value !== "off"
     ? "等待转写与 转写校对"
     : "等待转写";

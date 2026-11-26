@@ -58,6 +58,25 @@ class RefinementCheckpointTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(record.segments[2].get('ai_error'),'empty response')
             self.assertEqual(blocks[4]['corrected'],'校对4')
 
+    async def test_retry_skips_repeated_fillers_without_losing_speech_or_raw_text(self):
+        with tempfile.TemporaryDirectory() as raw:
+            record=self.record(raw)
+            record.segments[0].update(raw='嗯嗯。', ai_error='AI 没有返回精修文本')
+            record.segments[1]['raw']='啊，嗯。'
+            record.segments[2]['raw']='嗯，中断向量表在低地址。'
+            async def finish(segments,*args,**kwargs):
+                self.assertEqual([s['id'] for s in segments],[3,4])
+                return [{'segment_ids':[s['id']],'corrected':s['raw']} for s in segments]
+            with patch.object(app,'polish_timestamped_segments_resilient',new=AsyncMock(side_effect=finish)) as call:
+                await app._run_refinement_job_unlocked(record,CONFIG)
+                call.assert_awaited_once()
+            saved=type(record).load(record.directory)
+            self.assertEqual(saved.segments[0]['raw'],'嗯嗯。')
+            self.assertNotIn('ai_error',saved.segments[0])
+            self.assertEqual([s['id'] for s in saved.segments if s.get('ai_suppressed')],[1,2])
+            self.assertEqual(saved_progress(saved),{'saved_segments':2,'total_segments':2,
+                                                    'remaining_segments':0,'review_blocks':0})
+
     async def test_cancel_after_valid_half_keeps_checkpoint_and_visible_text(self):
         with tempfile.TemporaryDirectory() as raw:
             record=self.record(raw);waiting=asyncio.Event()

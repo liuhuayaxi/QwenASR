@@ -161,6 +161,11 @@ $('workspaceNoteDialog').addEventListener('close', () => {
   if (chat) openClassroomChat(chat);
 });
 window.addEventListener('message', event => {
+  if (event.origin === location.origin && event.source === $('workspaceFrame').contentWindow
+      && event.data?.type === 'qwenasr:open-task-center') {
+    timeline();
+    return;
+  }
   if (event.origin !== location.origin || event.source !== $('workspaceNoteFrame').contentWindow
       || !$('workspaceNoteDialog').open || !noteReturn
       || event.data?.type !== 'qwenasr:open-classroom-chat' || event.data.recording !== noteReturn.recording) return;
@@ -168,7 +173,15 @@ window.addEventListener('message', event => {
   requestNoteClose();
 });
 function timeline() {
-  $('timelineFrame').src = '/tasks?' + query({embedded:'1'});
+  const frame = $('timelineFrame');
+  const source = '/tasks?' + query({embedded:'1'});
+  // Keep the task center mounted while the drawer is closed so filters,
+  // search text, and the user's scroll position survive a reopen. A changed
+  // course is a new context and may intentionally reload the frame.
+  if (frame.dataset.requestedSource !== source) {
+    frame.dataset.requestedSource = source;
+    frame.src = source;
+  }
   $('timelineDialog').showModal();
 }
 function beginRequest() {

@@ -16,6 +16,38 @@ from qwen_asr_app.ai import AIRequestError
 
 
 class AGYCLITests(unittest.TestCase):
+    def test_background_keychain_failure_is_local_and_private_log_is_removed(self):
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        from qwen_asr_app.agy_cli import consume_startup_auth_failure
+        with TemporaryDirectory() as directory:
+            log=Path(directory)/'startup.log'
+            log.write_text('Failed to load stored token from keyring, falling back to file: exit status 36')
+            error=consume_startup_auth_failure(log)
+            self.assertEqual(error.kind,'provider_keychain_context')
+            self.assertFalse(error.retriable)
+            self.assertFalse(log.exists())
+            log.write_text('Failed to load stored token from keyring: exit status 36\nPrint mode: silent auth succeeded')
+            self.assertIsNone(consume_startup_auth_failure(log))
+            self.assertFalse(log.exists())
+
+    def test_text_failure_uses_only_this_invocations_startup_log(self):
+        def launch(command,**kwargs):
+            from pathlib import Path
+            Path(command[command.index('--log-file')+1]).write_text(
+                'private-auth-data\nFailed to load stored token from keyring: exit status 36')
+            return subprocess.CompletedProcess(command,1,json.dumps({
+                'event':'result','result':{'status':'FAILED','error':'authentication failed or timed out'}}),'')
+        with patch('qwen_asr_app.agy_cli.executable',return_value='/test/agy'), \
+                patch('qwen_asr_app.agy_cli.subprocess.run',side_effect=launch) as run:
+            with self.assertRaises(AIRequestError) as caught:
+                run_sync('test',{}, {'cli_model':'gemini-3.8-flash-high'})
+            self.assertEqual(caught.exception.kind,'provider_keychain_context')
+            self.assertFalse(caught.exception.retriable)
+            self.assertNotIn('private-auth-data',str(caught.exception))
+            from pathlib import Path
+            self.assertFalse(Path(run.call_args.args[0][run.call_args.args[0].index('--log-file')+1]).exists())
+
     def test_sync_startup_and_timeout_failures_write_redacted_diagnostics(self):
         for error, kind in [(OSError('private credential'), 'agy_cli_unavailable'),
                             (subprocess.TimeoutExpired('agy', 30), 'network_read_timeout')]:
@@ -202,6 +234,28 @@ class AGYCLITests(unittest.TestCase):
 
 
 class AGYCancellationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_background_request_preserves_keychain_cause_and_removes_log(self):
+        from pathlib import Path
+        output=asyncio.StreamReader()
+        output.feed_data((json.dumps({'event':'result','result':{
+            'status':'FAILED','error':'authentication failed or timed out'}})+'\n').encode())
+        output.feed_eof()
+        process=SimpleNamespace(returncode=1,stdin=SimpleNamespace(write=Mock(),drain=AsyncMock(),close=Mock()),
+            stdout=output,stderr=SimpleNamespace(read=AsyncMock(return_value=b'')),wait=AsyncMock())
+        logs=[]
+        async def launch(*command,**kwargs):
+            log=Path(command[command.index('--log-file')+1]);logs.append(log)
+            log.write_text('Failed to load stored token from keyring: exit status 36')
+            return process
+        with patch('qwen_asr_app.agy_cli.executable',return_value='/test/agy'), \
+                patch('qwen_asr_app.agy_cli.asyncio.create_subprocess_exec',side_effect=launch) as call:
+            with self.assertRaises(AIRequestError) as caught:
+                await request_text('test',{}, {'cli_model':'gemini-3.8-flash-high'})
+            self.assertEqual(caught.exception.kind,'provider_keychain_context')
+            self.assertFalse(caught.exception.retriable)
+            self.assertEqual(call.await_count,1)
+            self.assertFalse(logs[0].exists())
+
     async def test_early_async_failures_write_diagnostics_and_server_log(self):
         for error, kind in [(OSError('secret'), 'agy_cli_unavailable'),
                             (asyncio.CancelledError(), 'cancelled')]:

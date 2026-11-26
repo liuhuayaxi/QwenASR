@@ -259,9 +259,13 @@ def main():
             command = [sys.executable, '-m', 'qwen_asr_app.server', 'app:app', '--host', '127.0.0.1', '--port', str(PORT), '--timeout-graceful-shutdown', '10']
             from .launch_memory import service_environment
             env = {**service_environment(), 'QWEN_ASR_INSTANCE': token}
-            with (ROOT / 'server.log').open('ab') as output:
-                process = subprocess.Popen(command, cwd=ROOT, env=env, stdin=subprocess.DEVNULL,
-                                           stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+            if sys.platform == 'darwin':
+                from .launch_agent import start
+                process = start(command, root=ROOT, run=run, env=env, port=PORT)
+            else:
+                with (ROOT / 'server.log').open('ab') as output:
+                    process = subprocess.Popen(command, cwd=ROOT, env=env, stdin=subprocess.DEVNULL,
+                                               stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
             started = process_snapshot().get(process.pid, {}).get('started')
             instances = {name: {'pid': process.pid, 'token': token, 'started': started} for name in ENDPOINTS}
             atomic_json(path, instances)

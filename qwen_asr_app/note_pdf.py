@@ -205,13 +205,44 @@ def export_pdf(markdown,folder,provenance=None):
     return _export_markdown_pdf(markdown,folder,provenance)
 
 
+def _saved_pdf(folder, markdown, checksum):
+    if not checksum:
+        return None
+    body_checksum = hashlib.sha256(markdown.encode()).hexdigest()
+    for manifest in (folder / 'pdf').glob('*/export.json'):
+        try:
+            export = json.loads(manifest.read_text())
+            if export.get('pdf_sha256') != checksum or export.get('body_sha256') != body_checksum:
+                continue
+            if type(export.get('pages')) is not int or export['pages'] < 1:
+                continue
+            pdf = safe_path(folder, str(manifest.with_name('candidate.pdf').relative_to(folder)))
+            if pdf.is_file() and digest(pdf) == checksum:
+                return pdf, export
+        except (OSError, ValueError, AttributeError):
+            continue
+    return None
+
+
 def reviewed_pdf(record):
     note=record.metadata.get('ai_note_summary') or {}
     markdown=note.get('summary','');relative=note.get('review_package')
     if not relative:raise ValueError('历史 Markdown 尚未导出并完成独立视觉审查，请在笔记页升级 PDF')
     folder=safe_path(record.directory,relative)
-    pdf,export=export_pdf(markdown,folder,chapter_provenance(note.get('material_version'),record.metadata))
-    if note.get('review_status')=='skipped' and note.get('review_enabled') is False and note.get('review_policy')=='disabled_by_settings':
+    checksum=note.get('pdf_sha256')
+    saved=_saved_pdf(folder,markdown,checksum)
+    if saved is None:
+        # An existing export owns its cover labels. Directory labels are used
+        # when explicitly building a new version.
+        provenance=note.get('material_version')
+        if not checksum:
+            provenance=chapter_provenance(provenance,record.metadata)
+        pdf,export=export_pdf(markdown,folder,provenance)
+        if checksum and checksum!=export.get('pdf_sha256'):
+            raise ValueError('笔记保存的 PDF 版本缺失或已改变，请重新导出')
+    else:
+        pdf,export=saved
+    if note.get('pdf_ready') is True and note.get('review_enabled') is False and note.get('review_policy')=='disabled_by_settings':
         if note.get('pdf_sha256')!=export['pdf_sha256']:
             raise ValueError('笔记或 PDF 已改变，请重新导出当前未审核版本')
         return pdf

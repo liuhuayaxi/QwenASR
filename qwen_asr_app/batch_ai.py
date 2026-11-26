@@ -132,21 +132,40 @@ async def correct_batch_segments(
                     # still-uninstalled segments individually.
                     if not is_recoverable_structured_error(exc):
                         raise
-                    for segment in remaining:
-                        ident = int(segment['id'])
-                        if ident in installed:
-                            continue
-                        try:
-                            one = await polish_timestamped_segments_resilient(
-                                [segment], str(segment.get('language') or segments[0].get('language') or ''),
-                                ai_config, mode='correction', on_checkpoint=checkpoint)
-                            if len(one) != 1 or one[0].get('segment_ids') != [ident]:
-                                raise AIRequestError('单段精修编号不完整，原文保留', kind='invalid_segment_mapping')
-                            checkpoint(one)
-                        except Exception as segment_exc:
-                            if not is_recoverable_structured_error(segment_exc):
-                                raise
-                            segment_errors[ident] = str(segment_exc)
+                    pending_segments = [s for s in remaining if int(s['id']) not in installed]
+                    if pending_segments:
+                        semaphore = asyncio.Semaphore(max(1, concurrency_for(ai_config, 'correction')))
+                        aborted = False
+
+                        async def _refine_one(segment: dict[str, Any]) -> None:
+                            nonlocal aborted
+                            ident = int(segment['id'])
+                            if aborted or ident in installed:
+                                return
+                            async with semaphore:
+                                if aborted or ident in installed:
+                                    return
+                                try:
+                                    one = await polish_timestamped_segments_resilient(
+                                        [segment], str(segment.get('language') or segments[0].get('language') or ''),
+                                        ai_config, mode='correction', on_checkpoint=checkpoint)
+                                    if len(one) != 1 or one[0].get('segment_ids') != [ident]:
+                                        raise AIRequestError('单段精修编号不完整，原文保留', kind='invalid_segment_mapping')
+                                    checkpoint(one)
+                                except Exception as segment_exc:
+                                    if not is_recoverable_structured_error(segment_exc):
+                                        aborted = True
+                                        raise
+                                    segment_errors[ident] = str(segment_exc)
+
+                        # Probe the first segment before fanning out so an unreachable
+                        # network fails fast without launching redundant concurrent leaves.
+                        await _refine_one(pending_segments[0])
+                        if len(pending_segments) > 1:
+                            outcomes = await asyncio.gather(*(_refine_one(segment) for segment in pending_segments[1:]), return_exceptions=True)
+                            for outcome in outcomes:
+                                if isinstance(outcome, BaseException):
+                                    raise outcome
                     result = [saved_blocks[ident] for ident in
                               (int(s['id']) for s in remaining)
                               if ident in saved_blocks]
@@ -355,8 +374,8 @@ async def global_rewrite_events(
     record.metadata["ai_global_rewrite"] = global_result
     record.save_all()
     if global_result['complete']:
-        from .transcription_assist.verification import verify_corrections
-        await verify_corrections(record,config)
+        from .refinement import finalize_corrections
+        finalize_corrections(record)
     yield {"type": "ai_global_complete", "global_rewrite": global_result}
 
 
@@ -433,12 +452,19 @@ async def build_note_summary(
     record: RecordingRecord,
     config: dict[str, Any],
 ) -> dict[str, Any]:
-    from .transcription_assist.verification import verify_corrections
-    await verify_corrections(record,config)
+    from .refinement import finalize_corrections
+    finalize_corrections(record)
     from .ai import provider_for_mode
     provider = provider_for_mode(config.get('ai', {}), 'summary')
     if provider.get('transport') == 'agy_cli':
-        if config.get('note_pipeline', 'fast') == 'fast':
+        # A note that will be independently reviewed must be authored by the
+        # full illustrated pipeline.  The fast pipeline asks the writer to
+        # choose page locators from text and only discovers the actual image
+        # pixels after writing.  That allows a plausible caption to drift away
+        # from the image, leaving a review failure that the Markdown upgrade
+        # path cannot repair.  The full pipeline reads and records each source
+        # image before writing and has the LaTeX repair loop available.
+        if config.get('note_review_enabled') is not True and config.get('note_pipeline', 'fast') == 'fast':
             # One AGY turn per lesson (see fast_note); the multi-stage
             # pipeline stays available with note_pipeline='full'.
             from .fast_note import generate_fast
@@ -450,10 +476,10 @@ async def build_note_summary(
         return result
     result = await _build_text_note_summary(record, config)
     if config.get('note_review_enabled') is True:
-        result['review_status'] = 'unreviewed'
+        result['pdf_ready'] = False
         result['review_warning'] = '当前提供商没有已验证的图文审查能力；完整 Markdown 已保存，未完成视觉审查'
     else:
-        result.update(review_status='skipped',review_enabled=False,review_policy='disabled_by_settings')
+        result.update(pdf_ready=True,review_enabled=False,review_policy='disabled_by_settings')
         result.pop('review_warning',None)
     from .chapters import update_automatic_chapters
     update_automatic_chapters(record)

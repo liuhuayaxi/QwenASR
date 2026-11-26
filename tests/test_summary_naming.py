@@ -127,7 +127,7 @@ class SummaryNamingTests(unittest.IsolatedAsyncioTestCase):
         # Independent note review is off unless explicitly saved as enabled, so a
         # text-provider note is complete rather than "unreviewed".
         self.assertEqual(saved.metadata["summary_job"]["status"], "completed")
-        self.assertEqual(saved.metadata['ai_note_summary']['review_status'],'skipped')
+        self.assertEqual(saved.metadata['ai_note_summary']['pdf_ready'],True)
         self.assertEqual(saved.metadata['ai_note_summary']['review_policy'],'disabled_by_settings')
         self.assertTrue(saved.ai_summary_path.exists())
         self.assertFalse(self.record.directory.exists())
@@ -138,7 +138,7 @@ class SummaryNamingTests(unittest.IsolatedAsyncioTestCase):
                           side_effect=lambda config, **_: {**(config or {}), "note_review_enabled": True}):
             saved = await self.run_job()
         self.assertEqual(saved.metadata["summary_job"]["status"], "completed_with_errors")
-        self.assertEqual(saved.metadata['ai_note_summary']['review_status'],'unreviewed')
+        self.assertEqual(saved.metadata['ai_note_summary']['pdf_ready'],False)
 
     async def test_direct_generation_uses_saved_prompt_then_default(self):
         result = await app.generate_library_summary(self.record.id, self.payload)

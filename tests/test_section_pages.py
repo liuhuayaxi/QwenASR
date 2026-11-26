@@ -32,6 +32,13 @@ class SectionPageTests(unittest.TestCase):
         sp.set_enabled(True)
         self.assertTrue(sp.enabled())
 
+    def test_topics_nested_under_summary_still_get_page_candidates(self):
+        items = sp.headings('# 课程\n\n## 本节要点\n要点\n\n### 菲涅耳公式\n边界条件\n\n## 随堂练习\n\n### 第一题\n题目')
+        by_index = {item['index']: item for item in items}
+        self.assertEqual(sp.exclusion(items[1], by_index), 'summary')
+        self.assertIsNone(sp.exclusion(items[2], by_index))
+        self.assertEqual(sp.exclusion(items[4], by_index), 'question')
+
     def test_viewer_page_uses_marker_map(self):
         page_map = {'method': 'ai-transcript-markers', 'source_to_viewer': {'1': 2, '82': 83}}
         self.assertEqual(sp.to_viewer(page_map, 82), 83)

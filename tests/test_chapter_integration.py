@@ -1,5 +1,6 @@
 from tests import isolation  # noqa: F401
 import json
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,7 +13,7 @@ from qwen_asr_app.chapter_routes import chapter_router, apply_manual_chapter
 from qwen_asr_app.chapters import chapter_fields
 from qwen_asr_app.library_query import listing
 from qwen_asr_app.library_search import LibrarySearch
-from qwen_asr_app.note_pdf import chapter_provenance, fingerprint
+from qwen_asr_app.note_pdf import chapter_provenance, fingerprint, reviewed_pdf
 from qwen_asr_app.note_latex import prepare_document
 from qwen_asr_app.storage import RecordingRecord
 
@@ -84,6 +85,39 @@ class ChapterMetadataTests(unittest.TestCase):
             new=chapter_provenance(base,{'chapters':['第2章 光学']})
             self.assertNotEqual(old,fingerprint(text,temp,new))
             self.assertEqual(chapter_provenance(new,{'chapters':[]}),base)
+
+    def test_catalog_chapter_update_preserves_the_bound_pdf(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            pdf = root / '.review-notes/task/pdf/version/candidate.pdf'
+            pdf.parent.mkdir(parents=True)
+            pdf.write_bytes(b'%PDF-1.7 archived')
+            checksum = hashlib.sha256(pdf.read_bytes()).hexdigest()
+            text = '# 正文\n\n## 信道\n\n已核对'
+            pdf.with_name('export.json').write_text(json.dumps({
+                'pages': 1, 'pdf_sha256': checksum,
+                'body_sha256': hashlib.sha256(text.encode()).hexdigest(),
+            }))
+            pdf.with_name('review.json').write_text(json.dumps({
+                'policy': 'visual-pages-and-originals-v3', 'status': 'passed',
+                'pdf_sha256': checksum, 'viewed_pages': [1],
+            }))
+            record = RecordingRecord(root, {
+                'id': 'record', 'chapters': ['第1章'],
+                'ai_note_summary': {
+                    'summary': text, 'review_package': '.review-notes/task',
+                    'pdf_sha256': checksum, 'material_version': {'chapter_labels': ['第1章']},
+                },
+            })
+            sections = {'第4章 信道': '信道'}
+            apply_manual_chapter(record, ['第1章', '第4章 信道'], sections)
+            apply_manual_chapter(record, ['第1章', '第4章 信道'])
+            self.assertEqual(record.metadata['chapter_info']['sections'], sections)
+            with patch('qwen_asr_app.note_pdf.export_pdf') as export:
+                self.assertEqual(reviewed_pdf(record), pdf.resolve())
+                export.assert_not_called()
+            with self.assertRaises(ValueError):
+                apply_manual_chapter(record, ['第4章 信道'], {'第4章 信道': '不存在的标题'})
 
     def test_latex_subtitle_is_escaped_and_preserves_source_body(self):
         with tempfile.TemporaryDirectory() as temp:

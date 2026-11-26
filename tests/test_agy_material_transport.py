@@ -129,6 +129,22 @@ class MaterialTransportTests(unittest.IsolatedAsyncioTestCase):
                         _,receipt=await call
                         self.assertEqual(len(receipt['viewed_files']),25)
 
+    async def test_material_prompt_preserves_pdf_glyphs_in_the_wire_request(self):
+        from qwen_asr_app.agy_input import JSON_REQUEST_HEADER
+        process=child([{'event':'init','conversation_id':'synthetic-wire-request'},
+                       {'event':'result','result':{'status':'SUCCESS','response':'complete'}}])
+        instructions='核对 native_page_text：R=0.9\u200b；原始字形\ue020\uf8eb；不得省略公式。'
+        with tempfile.TemporaryDirectory() as raw, \
+             patch('qwen_asr_app.agy_materials.executable',return_value='/usr/bin/true'), \
+             patch('qwen_asr_app.agy_materials.asyncio.create_subprocess_exec',return_value=process):
+            await request_materials(instructions,Path(raw),PROVIDER)
+        wire=json.loads(process.stdin.write.call_args.args[0])['message']['content']
+        original=json.loads(wire[len(JSON_REQUEST_HEADER):])['request']
+        self.assertTrue(original.endswith(instructions))
+        self.assertNotIn('\u200b',wire)
+        self.assertNotIn('\ue020',wire)
+        self.assertIn('\\u200b',wire)
+
     def test_literal_json_newlines_are_preserved_but_other_invalid_syntax_is_rejected(self):
         self.assertEqual(parse_json('{"quote":"原文第一行\n第二行\t公式"}'),{'quote':'原文第一行\n第二行\t公式'})
         for value in ['{"quote":"bad\x00data"}','{"quote" "missing-colon"}','{"quote":"bad\\q escape"}']:

@@ -35,7 +35,7 @@ from .paths import PRIVATE_ROOT
 from .context_budget import estimate_tokens, normalize_context_window
 
 
-DEFAULT_MODEL = "gemini-3.8-flash-medium"
+DEFAULT_MODEL = "gemini-4-hydrogen-medium"
 DEFAULT_TIMEOUT = 1800
 # AGY's user-request envelope truncates near 192 KB, independently of the
 # model's token window. Keep inline turns small; transport larger inputs as
@@ -123,6 +123,11 @@ def sandbox_auth_failure(detail):
     if re.search(r'fork/exec\s+/usr/bin/security:\s*(?:operation not permitted|permission denied)',str(detail or ''),re.I):
         return AIRequestError('本机资料沙箱阻止了 AGY 读取 macOS 钥匙串登录状态；请更新并重启本机服务，已有结果保留',
                               kind='material_sandbox_auth',retriable=False)
+    if re.search(r'Failed to load stored token from keyring[^\n]*exit status 36|'
+                 r'(?:-25308|errSecInteractionNotAllowed|User interaction is not allowed)',
+                 str(detail or ''),re.I):
+        return AIRequestError('当前后台服务无法读取 macOS 钥匙串登录状态（不允许交互）；请重启 QwenASR 服务以恢复登录会话，已有结果保留',
+                              kind='provider_keychain_context',retriable=False)
     return None
 
 
@@ -131,7 +136,11 @@ def consume_startup_auth_failure(log_path):
     path=Path(log_path)
     try:
         with path.open('r',encoding='utf-8',errors='replace') as handle:
-            return sandbox_auth_failure(handle.read(1_048_576))
+            detail=handle.read(1_048_576)
+            # Startup discovery may fail before a later successful auth.
+            restored=list(re.finditer(r'silent auth succeeded|OAuth: authenticated successfully',detail))
+            if restored:detail=detail[restored[-1].end():]
+            return sandbox_auth_failure(detail)
     except OSError:
         return None
     finally:
@@ -417,11 +426,13 @@ def _file_prompt(prompt: str, working: Path, *, additional_read_paths=()):
     return transport_prompt, request
 
 
-def _finish_output(stdout, stderr, working, message, returncode=0, prior_prompts=(), conversation=''):
+def _finish_output(stdout, stderr, working, message, returncode=0, prior_prompts=(), conversation='', startup_auth_error=None):
     last_session_id.set('')
     try:
         return _checked_output(stdout,stderr,working,message,returncode,prior_prompts=prior_prompts,conversation=conversation)
     except AIRequestError as exc:
+        if startup_auth_error:
+            exc=startup_auth_error
         from .durable import atomic_json
         exc.session_id=last_session_id.get()
         # Correlation and classifications only. The raw provider text is read
@@ -446,7 +457,7 @@ def _finish_output(stdout, stderr, working, message, returncode=0, prior_prompts
         }
         atomic_json(Path(working)/'diagnostics'/f'failed-{uuid.uuid4().hex}.json',failure)
         logging.getLogger(__name__).warning('AGY request failed kind=%s exit_code=%s', exc.kind, returncode)
-        raise
+        raise exc
 
 
 def _early_failure(working, kind, retriable, exit_code=None):
@@ -539,7 +550,8 @@ def _checked_output(stdout, stderr, working, message, returncode=0, prior_prompt
 
 
 def _request_arguments(instructions: str, payload: dict[str, Any], provider: dict[str, Any], conversation: str = ''):
-    prompt = compose_prompt(instructions, payload)
+    from .agy_input import encode_prompt
+    prompt = encode_prompt(compose_prompt(instructions, payload))
     window = normalize_context_window(provider.get('context_window'))
     estimated = estimate_tokens(prompt) + 16_000
     if estimated > window:
@@ -567,8 +579,11 @@ def _request_arguments(instructions: str, payload: dict[str, Any], provider: dic
     # an empty private directory, so transcript text cannot become a command
     # or an edit to the QwenASR checkout.
     message = json.dumps({"event": "user", "message": {"content": prompt}}, ensure_ascii=False) + "\n"
+    temporary=working/'.tmp'
+    temporary.mkdir(exist_ok=True,mode=0o700)
     command = [
         cli,
+        '--log-file',str(temporary/('agy-startup-'+uuid.uuid4().hex+'.log')),
         "--input-format", "stream-json",
         "--output-format", "stream-json",
         "--model", selected_model,
@@ -588,8 +603,6 @@ def _request_arguments(instructions: str, payload: dict[str, Any], provider: dic
         from .agy_materials import sandbox_profile
         command = ['sandbox-exec', '-p', sandbox_profile(working, cli), *command]
         env = subprocess_environment(provider)
-        temporary = working/'.tmp'
-        temporary.mkdir(mode=0o700)
         env['TMPDIR'] = str(temporary)
         sandbox = True
     else:
@@ -647,7 +660,10 @@ def _run_sync_once(instructions: str, payload: dict[str, Any], provider: dict[st
     except OSError as exc:
         _early_failure(working, 'agy_cli_unavailable', False)
         raise AIRequestError(f"启动 AGY CLI 失败：{exc}", kind="agy_cli_unavailable", retriable=False) from exc
-    return _finish_output(completed.stdout, completed.stderr, working, message, completed.returncode)
+    finally:
+        startup_auth_error=consume_startup_auth_failure(command[command.index('--log-file')+1])
+    return _finish_output(completed.stdout, completed.stderr, working, message, completed.returncode,
+                          startup_auth_error=startup_auth_error)
 
 
 # Kinds where a failed continued turn is retried once as a fresh conversation.
@@ -716,6 +732,7 @@ async def _request_text_once(instructions: str, payload: dict[str, Any], provide
             limit=4 * 1024 * 1024,
         )
     except OSError as exc:
+        consume_startup_auth_failure(command[command.index('--log-file')+1])
         _early_failure(working, 'agy_cli_unavailable', False)
         raise AIRequestError(f"启动 AGY CLI 失败：{exc}", kind="agy_cli_unavailable", retriable=False) from exc
     except asyncio.CancelledError:
@@ -790,12 +807,14 @@ async def _request_text_once(instructions: str, payload: dict[str, Any], provide
             except ProcessLookupError:
                 pass
             await process.wait()
+        startup_auth_error=consume_startup_auth_failure(command[command.index('--log-file')+1])
     decoded=stdout.decode('utf-8',errors='replace')
     prompt = json.loads(message)['message']['content']
     ok = False
     try:
         response = _finish_output(decoded, stderr.decode("utf-8", errors="replace"), working, message, process.returncode,
-                                  prior_prompts=prior_prompts, conversation=conversation)
+                                  prior_prompts=prior_prompts, conversation=conversation,
+                                  startup_auth_error=startup_auth_error)
         ok = True
         last_prompt.set(prompt)
         return response

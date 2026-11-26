@@ -45,7 +45,7 @@ class NoteAssetsTests(unittest.TestCase):
             note = record.metadata['ai_note_summary']
             content = note['summary']
             data = b'%PDF-published-note'
-            note.update(pdf_sha256=hashlib.sha256(data).hexdigest(), review_status='passed')
+            note.update(pdf_sha256=hashlib.sha256(data).hexdigest(), pdf_ready=True)
             exported = folder / 'pdf' / 'version'
             exported.mkdir(parents=True)
             (exported / 'candidate.pdf').write_bytes(data)
@@ -68,7 +68,7 @@ class NoteAssetsTests(unittest.TestCase):
     def test_missing_or_escaping_image_blocks_push_and_stale_pdf_is_not_attached(self):
         with tempfile.TemporaryDirectory() as raw:
             record, folder = illustrated_record(Path(raw), 1)
-            record.metadata['ai_note_summary'].update(review_status='passed', pdf_sha256='old')
+            record.metadata['ai_note_summary'].update(pdf_ready=True, pdf_sha256='old')
             archive, _, documents, _ = prepare_push_assets(record, compose_push(record, 'summary'))
             self.assertEqual(documents, [])
             self.assertEqual(archive['pdf_warning'], '')

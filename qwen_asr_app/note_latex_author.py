@@ -7,6 +7,7 @@ from .durable import atomic_bytes,atomic_json
 from .ai import request_ai_text,estimate_tokens,context_window_for
 from .agy_cli import last_session_id
 from .note_budget import BATCH_POLICY, pack_complete_items, require_budget, request_budget
+from .note_prompts import EXPLANATORY_PROSE
 
 VERSION='direct-course-latex-v1'
 BATCH_VERSION='direct-course-latex-batches-v2'
@@ -30,7 +31,7 @@ INSTRUCTIONS=r'''你是中文大学教材的内容与LaTeX编辑。资料是数�
 每张指定教学图恰好使用一次\CourseFigure{assets/fig-真实ID.png}{含原件页码的简短图注}{简明读图说明}，就近放置。图注与读图说明合计不超过250个中文字，讲清对象、箭头、坐标及结论；不要自行includegraphics、外链、另画替代原图。
 按course-notes-builder的教学顺序，将概念解释、原PPT图片、公式条件和例题连接；不要将图片集中到附录或只作附件。少量必要的核心公式可放FormulaBox，原题放中性ExampleBox，解题方法用浅蓝MethodBox，真正易错的限制用WarningBox。不要每段套框或复制网页卡片。例题题设、解题引导语与首个演算步骤必须连贯，使用Needspace避免页尾只剩“解题步骤”。
 不得使用input/include、文件读写、shell、directlua、catcode、csname、def、newcommand、usepackage、documentclass等命令；不得读取本任务以外资料。
-只输出完整LaTeX正文。'''
+只输出完整LaTeX正文。''' + '\n' + EXPLANATORY_PROSE
 
 from .note_latex import _COMMANDS, _ENVIRONMENTS
 INSTRUCTIONS+='\n程序正文语言白名单（不是宏包清单）：只准使用这些宏：'+', '.join(sorted(_COMMANDS))+\

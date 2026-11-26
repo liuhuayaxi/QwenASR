@@ -23,6 +23,9 @@ def recording_inventory(records):
             for record in records]
 
 
+VGA_FALLBACK_WARNING = 'VGA 提取不可用，已回退到本地资料库课件'
+
+
 def lesson_import_statuses(groups, records, imports, queue_items):
     """Use live archives for completion and the durable queue/history for attempts."""
     records_by_id = {record['id']: record for record in records}
@@ -99,10 +102,14 @@ def lesson_import_statuses(groups, records, imports, queue_items):
         detail = '；'.join(f"第 {period['period']} 节：{period['label'] or '未入库'}" for period in periods)
         result[group['id']] = {'state': state, 'label': LABELS[state], 'detail': detail,
                                'completed': completed, 'total': len(periods), 'periods': periods}
+        if (imports.get(group['id'], {}).get('vga') or {}).get('status') == 'completed':
+            result[group['id']]['vga_ready'] = True
+            result[group['id']]['detail'] += '；VGA 课件 PDF 已归档'
         ids = set(video_ids(group))
         warnings = list(dict.fromkeys(warning for entry in history
             if entry['id'] == group['id'] or ids.intersection(entry.get('video_ids') or [])
-            for warning in entry.get('warnings', [])))
+            for warning in entry.get('warnings', [])
+            if warning != VGA_FALLBACK_WARNING or (entry.get('vga') or {}).get('status') != 'completed'))
         if warnings:
             result[group['id']]['warnings'] = warnings
             result[group['id']]['detail'] += '；' + '；'.join(warnings)

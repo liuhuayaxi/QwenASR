@@ -23,9 +23,9 @@ DEFAULT_INTELLIGENCE_PROMPT = """你是课堂速记整理与智能扩充助手�
 
 DEFAULT_INTELLIGENCE_PROVIDER = {
     'transport': 'agy_cli',
-    'model': 'gemini-3.8-flash-high',
-    'cli_model': 'gemini-3.8-flash-high',
-    'cli_effort': 'high',
+    'model': 'gemini-4-hydrogen-medium',
+    'cli_model': 'gemini-4-hydrogen-medium',
+    'cli_effort': 'medium',
     'cli_timeout_seconds': 180,
     'context_window': 1_048_576,
     'max_output_tokens': 4096,

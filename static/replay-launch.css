@@ -1,8 +1,4 @@
-.replay-launch { width:min(660px, calc(100% - 32px)); margin:clamp(28px, 8vh, 90px) auto; }
 .back-link { display:inline-block; margin-bottom:20px; font-size:var(--text-control); text-decoration:none; }
-.launch-card { padding:28px; background:var(--card); border:1px solid var(--line); border-radius:var(--radius-lg); }
-.launch-card h1 { margin:8px 0 18px; font-size:24px; font-weight:650; }
-.launch-card p { line-height:1.8; overflow-wrap:anywhere; }
 #replayTitle { color:var(--muted); }
 .replay-target-time { color:var(--green-dark); font-size:16px; font-weight:600; }
 #launchStatus { padding:14px; background:var(--green-soft); border:1px solid var(--green-line); border-radius:var(--radius-sm); }

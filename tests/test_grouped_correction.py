@@ -240,6 +240,56 @@ class GroupedCorrectionTests(unittest.IsolatedAsyncioTestCase):
                 await polish_timestamped_segments([segment(1), segment(2)], 'Chinese', config, mode='correction')
         self.assertEqual(caught.exception.kind, 'invalid_segment_mapping')
 
+    async def test_pure_filler_segment_omitted_or_blank_keeps_batch_valid_while_substantive_empty_fails(self):
+        config = high_config()
+        s1 = segment(1, '今天讲解香农采样定理。')
+        s2 = {**segment(2, '嗯嗯。'), 'id': 2, 'text': '嗯嗯。', 'raw': '嗯嗯。'}
+        s3 = {**segment(3, '采样频率需大于两倍最高频率。'), 'id': 3}
+        # Model deletes filler segment 2 (omits it) -> batch still succeeds cleanly.
+        omitted = {'blocks': [{'segment_ids': [1], 'corrected': '今天讲解香农采样定理。'}, {'segment_ids': [3], 'corrected': '采样频率需大于两倍最高频率。'}]}
+        with patch('qwen_asr_app.ai.request_ai_json', new=AsyncMock(return_value=omitted)):
+            result = await polish_timestamped_segments([s1, s2, s3], 'Chinese', config, mode='correction')
+        self.assertEqual([b['segment_ids'] for b in result], [[1], [2], [3]])
+        self.assertEqual(result[1]['corrected'], '嗯嗯。')
+        # Model returns empty string for filler segment 2 -> restored cleanly.
+        blank_filler = {'blocks': [{'segment_ids': [1], 'corrected': '今天讲解香农采样定理。'}, {'segment_ids': [2], 'corrected': ''}, {'segment_ids': [3], 'corrected': '采样频率需大于两倍最高频率。'}]}
+        with patch('qwen_asr_app.ai.request_ai_json', new=AsyncMock(return_value=blank_filler)):
+            result2 = await polish_timestamped_segments([s1, s2, s3], 'Chinese', config, mode='correction')
+        self.assertEqual(result2[1]['corrected'], '嗯嗯。')
+        # Substantive segment returned empty or omitted must still raise.
+        blank_real = {'blocks': [{'segment_ids': [1], 'corrected': ''}, {'segment_ids': [2], 'corrected': '嗯嗯。'}, {'segment_ids': [3], 'corrected': '采样频率需大于两倍最高频率。'}]}
+        with patch('qwen_asr_app.ai.request_ai_json', new=AsyncMock(return_value=blank_real)):
+            with self.assertRaises(AIRequestError) as caught:
+                await polish_timestamped_segments([s1, s2, s3], 'Chinese', config, mode='correction')
+        self.assertEqual(caught.exception.kind, 'invalid_segment_mapping')
+
+    async def test_correct_batch_segments_fallback_runs_remaining_concurrently(self):
+        import asyncio
+        config = high_config()
+        config['ai']['correction_provider']['concurrency'] = 4
+        active = 0
+        peak = 0
+
+        async def fake_resilient(parts, lang, cfg, mode='correction', on_checkpoint=None):
+            nonlocal active, peak
+            if len(parts) > 1:
+                raise AIRequestError('映射错乱', kind='invalid_segment_mapping')
+            active += 1
+            peak = max(peak, active)
+            try:
+                await asyncio.sleep(0.03)
+                return [{'segment_ids': [int(parts[0]['id'])], 'corrected': parts[0]['raw'] + '（已校对）'}]
+            finally:
+                active -= 1
+
+        with tempfile.TemporaryDirectory() as raw, patch('qwen_asr_app.batch_ai.polish_timestamped_segments_resilient', side_effect=fake_resilient):
+            record = record_at(Path(raw))
+            segs = [{**segment(i, f'第{i}句'), 'id': i} for i in range(1, 5)]
+            for s in segs:
+                record.upsert_segment(s)
+            await correct_batch_segments(record, segs, config)
+        self.assertGreaterEqual(peak, 2)
+
 
 if __name__ == '__main__':
     unittest.main()

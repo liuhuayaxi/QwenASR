@@ -2,7 +2,7 @@
  * Classroom Intelligence: Side Rail Tabs, Scribbles (速记), and Related Materials.
  * Follows the QwenASR knowledge development contract.
  */
-import { renderMarkdown } from "./markdown-reader.js?v=20261108-ppt-4";
+import { renderMarkdown } from "./markdown-reader.js?v=20261119-paper";
 import {createVisiblePoll, classroomPanelVisible} from './visible-poll.js';
 
 const $ = (selector) => document.querySelector(selector);
@@ -1046,7 +1046,7 @@ export function createClassroomIntelligence({ toast = () => {}, openSettings = (
       const data = await api("/api/intelligence/settings");
       const p = data.provider || {};
       if ($("#intelTransport")) $("#intelTransport").value = p.transport || "agy_cli";
-      if (elModel) elModel.value = p.model || "gemini-3.8-flash-high";
+      if (elModel) elModel.value = p.model || "gemini-4-hydrogen-medium";
       const effortIdx = EFFORT_LEVELS.indexOf(p.cli_effort || "high");
       if ($("#intelEffort")) $("#intelEffort").value = effortIdx >= 0 ? effortIdx : 2;
       if ($("#intelEffortValue")) $("#intelEffortValue").textContent = p.cli_effort || "high";
@@ -1058,7 +1058,7 @@ export function createClassroomIntelligence({ toast = () => {}, openSettings = (
       if ($("#intelApiParams")) $("#intelApiParams").value = typeof p.extra_params === "string" ? p.extra_params : JSON.stringify(p.extra_params || {}, null, 2);
       if ($("#intelPrompt")) $("#intelPrompt").value = p.system_prompt || "";
       if ($("#intelProviderSummary")) $("#intelProviderSummary").textContent = p.transport === "agy_cli" ? "AGY CLI" : (p.base_url || "API");
-      if ($("#intelModelSummary")) $("#intelModelSummary").textContent = p.model || "gemini-3.8-flash-high";
+      if ($("#intelModelSummary")) $("#intelModelSummary").textContent = p.model || "gemini-4-hydrogen-medium";
     } catch {
       // Quiet fallback
     }
@@ -1071,8 +1071,8 @@ export function createClassroomIntelligence({ toast = () => {}, openSettings = (
       const effort = EFFORT_LEVELS[Number($("#intelEffort")?.value)] || "high";
       const provider = {
         transport: $("#intelTransport")?.value || "agy_cli",
-        model: $("#intelModel")?.value?.trim() || "gemini-3.8-flash-high",
-        cli_model: $("#intelModel")?.value?.trim() || "gemini-3.8-flash-high",
+        model: $("#intelModel")?.value?.trim() || "gemini-4-hydrogen-medium",
+        cli_model: $("#intelModel")?.value?.trim() || "gemini-4-hydrogen-medium",
         cli_effort: effort,
         cli_timeout_seconds: Number($("#intelTimeout")?.value) || 180,
         context_window: Number($("#intelContextWindow")?.value) || 1048576,

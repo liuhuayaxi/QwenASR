@@ -24,7 +24,7 @@ from .smartclass import (STATE_DIR, SmartClassClient, SmartClassError, private_j
                         LoginRequired, course_key, current_term, lesson_groups, extract_audio, connection_error)
 from .course_download import stream_audio
 from .replay_bridge import replay_bridge_router
-from .course_import_status import lesson_import_statuses, recording_inventory, video_ids
+from .course_import_status import VGA_FALLBACK_WARNING, lesson_import_statuses, recording_inventory, video_ids
 from .ai_preferences import ai_preferences, PROVIDER_FIELDS
 from .smartclass_vga import extract_courseware
 
@@ -122,7 +122,7 @@ def save_imports(*, force=True):
     _last_import_save = now
 
 
-PHASE_WEIGHTS = {"download": 25, "asr": 45, "correction": 10, "verification": 5, "summary": 10, "review": 5}
+PHASE_WEIGHTS = {"download": 25, "asr": 45, "correction": 10, "verification": 5, "vga": 5, "summary": 10, "review": 5}
 
 
 def begin_import_progress(entry, run_options):
@@ -133,6 +133,8 @@ def begin_import_progress(entry, run_options):
     if run_options.get("ai_correction", True):
         phases["correction"] = {"label": "首轮文字修正", "percent": 0, "detail": "等待转写", "state": "pending"}
         phases["verification"] = {"label": "独立文字复核", "percent": 0, "detail": "等待首轮修正", "state": "pending"}
+    if run_options.get("vga_extract"):
+        phases["vga"] = {"label": "VGA 课件提取", "percent": 0, "detail": "等待转写归档", "state": "pending"}
     if run_options.get("generate_summary", True):
         phases["summary"] = {"label": "课堂笔记", "percent": 0, "detail": "等待转写完成", "state": "pending"}
         phases["review"] = {"label": "笔记逐页审查", "percent": 0, "detail": "等待排版完成", "state": "pending"}
@@ -165,6 +167,8 @@ def complete_import_phase(entry, key, detail="已完成"):
 
 def complete_import_progress(entry):
     for key in tuple(entry.get("phases", {})):
+        if key == "vga" and entry["phases"][key].get("state") == "completed":
+            continue
         complete_import_phase(entry, key)
     entry["progress"] = 100
 
@@ -781,6 +785,7 @@ async def import_vga(group, complete, category, entry):
     path = Path(complete['directory']) / '课程来源.json'
     manifest = read_json(path, {})
     saved = manifest.get('vga', {})
+    fallback_warning = VGA_FALLBACK_WARNING
     try:
         if stop_event.is_set():
             raise SmartClassError('VGA 提取已暂停，可继续队列重试')
@@ -788,11 +793,14 @@ async def import_vga(group, complete, category, entry):
             raise SmartClassError('无法读取课堂转写')
         asset = saved.get('asset_id')
         if not asset:
+            update_import_phase(entry, 'vga', 0, '正在读取课堂投屏轨道')
+            save_imports()
             async with platform_lock:
                 sources = await asyncio.to_thread(client.vga_sources, group)
             if not sources:
                 raise SmartClassError('此回放没有 VGA 轨道')
             entry['message'] = '正在从 VGA 提取课堂课件'
+            update_import_phase(entry, 'vga', 0, entry['message'])
             save_imports()
             asset = await extract_courseware(sources, record, category, stop_event)
         if stop_event.is_set():
@@ -806,14 +814,19 @@ async def import_vga(group, complete, category, entry):
         record.save_metadata()
         saved = {'status': 'completed', 'asset_id': asset}
         entry['vga'] = saved
+        complete_import_phase(entry, 'vga', 'VGA 课件 PDF 已归档')
+        if 'warnings' in entry:
+            entry['warnings'] = [warning for warning in entry['warnings'] if warning != fallback_warning]
     except Exception as exc:
         if stop_event.is_set():
             raise SmartClassError('VGA 提取已暂停，可继续队列重试') from exc
         logging.warning('SmartClass VGA extraction failed for %s: %s', group['id'], type(exc).__name__)
-        warning = 'VGA 提取不可用，已回退到本地资料库课件'
-        entry.setdefault('warnings', []).append(warning)
-        saved = {'status': 'fallback', 'warning': warning}
+        warnings = entry.setdefault('warnings', [])
+        if fallback_warning not in warnings:
+            warnings.append(fallback_warning)
+        saved = {'status': 'fallback', 'warning': fallback_warning}
         entry['vga'] = saved
+        complete_import_phase(entry, 'vga', fallback_warning)
     try:
         private_json(path, {**manifest, 'vga': saved})
     except OSError:

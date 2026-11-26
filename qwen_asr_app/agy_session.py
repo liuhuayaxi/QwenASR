@@ -183,10 +183,11 @@ def read_session(session_id, prompt, *, root=None, allowed_files=None, required_
         raise SessionEvidenceError('AGY 会话输入与本次请求不一致')
     limits = [i for i,e in enumerate(entries) if e.get('type') == 'ERROR_MESSAGE'
               and e.get('status') == 'DONE' and 'exceeded the output token limit' in _error_text(e)]
-    other_errors=[e for i,e in enumerate(entries) if e.get('type')=='ERROR_MESSAGE' and i not in limits]
+    other_errors=[i for i,e in enumerate(entries) if e.get('type')=='ERROR_MESSAGE' and i not in limits]
+    recovered_planner_errors = set()
     if other_errors:
         from .agy_cli import _error_kind
-        kinds=[_error_kind(_error_text(e))[0] for e in other_errors]
+        kinds=[_error_kind(_error_text(entries[index]))[0] for index in other_errors]
         kind=next((k for k in kinds if k in {'provider_auth','provider_region','agy_cli_config'}),'agy_cli_error')
         transient=all(k in {'network_transport','network_read_timeout','network_connect_timeout','provider_unavailable','rate_limit'} for k in kinds)
         if limits and transient:
@@ -196,6 +197,19 @@ def read_session(session_id, prompt, *, root=None, allowed_files=None, required_
         # tool, path, source-hash and finish checks below still apply in full.
         if not (allow_recovered_transients and transient):
             raise SessionEvidenceError('AGY 续写包含其他失败，未采纳结果',kind=kind)
+        # The native planner can record the same upstream error twice: first
+        # on the failed planner step and then in its retry diagnostic.
+        for index in other_errors:
+            if index == 0:
+                continue
+            entry = entries[index]
+            previous = entries[index - 1]
+            if (entry.get('status') == 'DONE'
+                    and previous.get('type') == 'PLANNER_RESPONSE' and previous.get('status') == 'ERROR'
+                    and not previous.get('tool_calls') and not previous.get('content')):
+                detail = re.fullmatch(r'API error \(attempt \d+\): (.+)', _error_text(entry), re.DOTALL)
+                if detail and detail[1] == _error_text(previous):
+                    recovered_planner_errors.add(index - 1)
     if require_output_continuation:
         if not limits:
             raise SessionEvidenceError('AGY 缺少本次输出超限及完整资料证据')
@@ -216,6 +230,8 @@ def read_session(session_id, prompt, *, root=None, allowed_files=None, required_
     for entry_index,entry in enumerate(entries):
         status = entry.get('status')
         if status in {'ERROR', 'FAILED', 'CANCELLED', 'CANCELED'}:
+            if entry_index in recovered_planner_errors and not pending:
+                continue
             # Some agents ask for an extra offset after the tool explicitly
             # reported the complete text file. An exhausted offset adds no
             # missing evidence; keep the successful read instead of throwing
@@ -296,10 +312,8 @@ def read_session(session_id, prompt, *, root=None, allowed_files=None, required_
                     **({'media':entry['media']} if entry.get('media') else {})}}})
     if pending or (structured is None and (not responses or entries[-1] is not responses[-1])):
         raise SessionEvidenceError('AGY 未保存完整最终正文')
-    if other_errors:
-        last_error=max(i for i,e in enumerate(entries) if e in other_errors)
-        if max(response_index,structured_index)<=last_error:
-            raise SessionEvidenceError('AGY 上游失败后尚未保存完整最终结果')
+    if other_errors and max(response_index,structured_index) <= other_errors[-1]:
+        raise SessionEvidenceError('AGY 上游失败后尚未保存完整最终结果')
     if limits and ((structured is None and (not responses or response_index <= limits[-1]))
                    or (structured is not None and structured_index<=limits[-1])):
         raise SessionEvidenceError('AGY 超限后尚未完成续写',kind='output_truncated')

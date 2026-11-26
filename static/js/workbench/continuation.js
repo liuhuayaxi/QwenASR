@@ -57,7 +57,7 @@ export function createContinuation({root = document, openRecord, toast, fetcher 
     const currentTasks = tasks.filter(isCurrentTask);
     const pending = currentTasks.filter(task => attentionStatuses.has(task.status));
     const running = currentTasks.filter(task => activeStatuses.has(task.status));
-    const ordered = [...records].sort((a,b) => String(b.started_at || '').localeCompare(String(a.started_at || '')));
+    const ordered = records.toSorted((a,b) => String(b.started_at || '').localeCompare(String(a.started_at || '')));
     const latest = records.find(record => record.id === read(RECORD_KEY)) || ordered[0];
     const items = [...new Set([latest?.id, ...currentTasks.filter(task => activeStatuses.has(task.status) || attentionStatuses.has(task.status)).map(recordingId)].filter(Boolean))]
       .map(id => records.find(record => record.id === id)).filter(Boolean).slice(0, 3);

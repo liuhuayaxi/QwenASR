@@ -11,7 +11,7 @@ function environment(returnTo) {
     if (!elements.has(id)) elements.set(id, {value:'',checked:false,dataset:{}, addEventListener(event, callback){this[event]=callback}});
     return elements.get(id);
   };
-  const context = {URL, URLSearchParams, Date,
+  const context = {URL, URLSearchParams, Date, clearTimeout(){},
     location:{origin:'http://127.0.0.1:8765',search:'?returnTo='+encodeURIComponent(returnTo),replace:url=>navigations.push(url)},
     document:{getElementById:element,addEventListener(){}}, window:{addEventListener(){},setTimeout(){return 1},clearTimeout(){}},
     async fetch(url, options) {
@@ -42,6 +42,15 @@ async function main() {
   assert.equal(vm.runInContext('optionsLoaded', optionsEnv.context), true);
   assert.equal(optionsEnv.element('summaryModel').value, 'saved-model');
   assert.equal(vm.runInContext('selectedOptions().summary_provider.model', optionsEnv.context), 'saved-model');
+  const editing = environment('');
+  vm.runInContext("courseVersion = '[]'; importsSignature = '[]';", editing.context);
+  editing.element('vgaExtract').checked = true;
+  editing.element('vgaExtract').input();
+  editing.context.statusFixture = {state:'idle',courses:[],imports:[],
+    options:{vga_extract:false,summary_provider:{model:'saved-model'}},queue:{}};
+  vm.runInContext('renderCourseState(statusFixture)', editing.context);
+  await vm.runInContext('saveOptions()', editing.context);
+  assert.equal(editing.requests[0][1].vga_extract, true);
   const rowNodes = {'.lesson-badge':{dataset:{}},'.lesson-import-detail':{}};
   optionsEnv.context.lessonRow = {querySelector:selector=>rowNodes[selector]};
   optionsEnv.context.lessonState = {state:'completed',label:'已入库',detail:'VGA 提取不可用，已回退到本地资料库课件',warnings:['fallback']};

@@ -189,6 +189,29 @@ class SummaryFollowupTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(saved.metadata['ai_note_summary']['summary'], original)
                 self.assertNotIn('ai_note_summary_draft', saved.metadata)
 
+    async def test_continue_and_retry_request_a_fresh_pdf_review(self):
+        for action in ('continue', 'retry'):
+            with self.subTest(action=action), tempfile.TemporaryDirectory() as directory:
+                record = record_at(Path(directory), ai_note_summary={'summary': '已保存笔记', 'pdf_ready': False},
+                                   summary_job={'status': 'completed_with_errors', 'resume_stage': 'pdf'})
+                record.save_all()
+                store = store_for(record)
+                async def finish_review(record, config):
+                    self.assertIs(config.get('_fresh_review'), True)
+                    record.metadata['ai_note_summary']['pdf_ready'] = True
+                    record.save_metadata()
+                    return {'status': 'passed'}
+                with patch.object(app, 'recording_store', store), \
+                     patch.object(app, '_saved_ai_task_config', return_value={}), \
+                     patch.object(app.ai_preferences, 'task_config', return_value={'note_review_enabled': True}), \
+                     patch('qwen_asr_app.review_notes.upgrade_pdf', side_effect=finish_review) as review:
+                    result = await app.ai_task_action(
+                        {'recording_id': record.id, 'type': 'summary', 'action': action})
+                    self.assertTrue(result['accepted'])
+                    await asyncio.wait_for(app.background_summary_tasks[record.id], 2)
+                    review.assert_awaited_once()
+                self.assertEqual(store.find(record.id).metadata['summary_job']['status'], 'completed')
+
     async def test_failed_abstract_stays_visible_after_detailed_generation(self):
         with tempfile.TemporaryDirectory() as directory:
             record = saved_summary_record(directory)
@@ -213,15 +236,15 @@ class ParallelRecoveryTests(unittest.IsolatedAsyncioTestCase):
             record.segments = [{'id': i, 'raw': f'课堂原文{i}', 'start': i - 1, 'end': i} for i in range(1, 31)]
             config = {'_parallel_refinement': True, 'ai': {'correction_provider': {
                 'transport': 'agy_cli', 'cli_model': 'gemini-3.8-flash-high',
-                'cli_effort': 'high', 'concurrency': 6, 'context_window': 256000}}}
+                'cli_effort': 'high', 'concurrency': 2, 'context_window': 256000}}}
             running = peak = 0
-            six_started, finish = asyncio.Event(), asyncio.Event()
+            two_running, finish = asyncio.Event(), asyncio.Event()
             async def refine(segments, *args, **kwargs):
                 nonlocal running, peak
                 running += 1
                 peak = max(peak, running)
                 if running == 2:
-                    six_started.set()
+                    two_running.set()
                 try:
                     await finish.wait()
                     await asyncio.sleep((30 - segments[0]['id']) / 10000)
@@ -232,7 +255,7 @@ class ParallelRecoveryTests(unittest.IsolatedAsyncioTestCase):
                  patch.object(app, 'polish_timestamped_segments_resilient', refine):
                 task = asyncio.create_task(app._run_refinement_job_unlocked(record, config))
                 try:
-                    await asyncio.wait_for(six_started.wait(), 1)
+                    await asyncio.wait_for(two_running.wait(), 1)
                     self.assertEqual(peak, 2)
                     finish.set()
                     await asyncio.wait_for(task, 2)

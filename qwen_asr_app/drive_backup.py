@@ -10,6 +10,7 @@ import base64
 import copy
 import hashlib
 import hmac
+import html
 import json
 import mimetypes
 import os
@@ -390,12 +391,25 @@ class DriveBackup:
                 self.auth_task = None
                 self.save()
             # No request URLs, authorization codes or provider errors are logged.
-            import html
-            body = ("<!doctype html><html lang='zh-CN'><meta charset='utf-8'><meta name='viewport' content='width=device-width'>"
-                    "<title>QwenASR · Google Drive</title><body><h2>Google Drive 备份</h2><p>"
-                    + html.escape(message) + "</p><p>现在可以关闭此页面。</p></body></html>").encode()
             try:
-                writer.write(f"HTTP/1.1 {status} {'OK' if status == 200 else 'Bad Request'}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {len(body)}\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'none'; frame-ancestors 'none'\r\nConnection: close\r\n\r\n".encode() + body)
+                stylesheet = (Path(__file__).resolve().parents[1] / "static" / "status.css").read_text(encoding="utf-8")
+                style_hash = base64.b64encode(hashlib.sha256(stylesheet.encode()).digest()).decode("ascii")
+                body = (
+                    "<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'>"
+                    "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+                    f"<title>QwenASR · Google Drive</title><style>{stylesheet}</style></head>"
+                    "<body class='status-window'><main class='status-page'><section class='launch-card'>"
+                    f"<h1>Google Drive 备份</h1><p>{html.escape(message)}</p>"
+                    "<p>现在可以关闭此页面。</p></section></main></body></html>"
+                ).encode()
+                writer.write((
+                    f"HTTP/1.1 {status} {'OK' if status == 200 else 'Bad Request'}\r\n"
+                    "Content-Type: text/html; charset=utf-8\r\n"
+                    f"Content-Length: {len(body)}\r\n"
+                    "Cache-Control: no-store\r\nReferrer-Policy: no-referrer\r\n"
+                    f"Content-Security-Policy: default-src 'none'; style-src 'sha256-{style_hash}'; frame-ancestors 'none'\r\n"
+                    "Connection: close\r\n\r\n"
+                ).encode() + body)
                 await writer.drain()
             finally:
                 writer.close()

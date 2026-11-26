@@ -31,6 +31,9 @@ OUTLINE = '\n' + _read('outline.md')
 PREVIEW = '\n' + _read('preview.md')
 MATERIAL_ONLY = '\n' + _read('material_only.md')
 
+EXPLANATORY_PROSE = """正文直接写清对象、机制和结论。把影响结论的条件写在对应的定义、公式、例题或结论旁。数值和时间尺度写清对应的物理量或过程，例如「SOA 的带内载流子弛豫可达亚皮秒量级」。
+易错点只写课堂或课件明确指出的误用，以及会改变本节计算、推导或结论的具体误用，给出正确关系。省去对假想误读的逐项反驳、泛化免责、来源自证和审查过程。遇到知识错误就直接修正原句，审查理由留在报告里。"""
+
 
 def fingerprint() -> str:
     """Changes whenever any prompt file is edited, so a lesson is rewritten
@@ -124,6 +127,7 @@ def compose(found: dict, custom_prompt: str = '') -> str:
         parts.append(instructions(write_section=True))
     if custom_prompt.strip():
         parts.append('\n用户补充要求（不得与上面的格式禁令冲突；其中的“知识点速览”由“本节要点”承担，“公式速览”与“公式与结论汇总”合并为一张表，不重复成节；不写“待核对”）：\n' + custom_prompt.strip())
+    parts.append(EXPLANATORY_PROSE)
     return '\n'.join(parts)
 
 
@@ -135,6 +139,23 @@ def requirement_items(scope: dict) -> list[dict]:
 # ---- post-processing (program-side guarantees) ---------------------------------
 _META = re.compile(r'^\s*>?\s*(?:新旧内容判断范围|资料依据说明|<strong>资料依据说明|本笔记(?:以|仅|依据|根据)|.*文件源ID|.*源ID[:：]).*$', re.M)
 _ASCII_ART = re.compile(r'[┌┐└┘├┤┬┴┼─│═║╔╗╚╝▲▼◀▶]|(?:[|/\\_\-+*]\s*){6,}|^\s*[|+].*[|+]\s*$', re.M)
+_TREE_ITEM = re.compile(r'^((?:(?:│| ) {3})*)[├└]─+\s*(\S.*)$')
+
+
+def _tree_list(body: str) -> str:
+    """Keep the labels and nesting of a text outline when removing its drawing."""
+    lines = [line for line in body.splitlines() if line.strip()]
+    heading = []
+    if lines and not _TREE_ITEM.match(lines[0]):
+        heading.append(lines.pop(0))
+    items = []
+    for line in lines:
+        match = _TREE_ITEM.fullmatch(line)
+        if not match or not any(c.isalnum() for c in match[2]):
+            return ''
+        depth = len(match[1]) // 4
+        items.append('  ' * depth + '- ' + match[2])
+    return '\n\n'.join(heading + ['\n'.join(items)]) + '\n' if items else ''
 
 
 def is_ascii_diagram(code: str) -> bool:
@@ -154,6 +175,10 @@ def clean(markdown: str) -> tuple[str, dict]:
     def fence(match):
         body = match.group(2)
         if is_ascii_diagram(body):
+            outline = _tree_list(body) if match.group(1).strip().lower() in ('', 'text', 'plaintext') else ''
+            if outline:
+                report['tree_lists_preserved'] = report.get('tree_lists_preserved', 0) + 1
+                return outline
             report['ascii_blocks_removed'] += 1
             return ''
         return match.group(0)

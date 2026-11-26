@@ -165,7 +165,10 @@ def exclusion(item, by_index):
     parent = by_index.get(item['parent']) if item['parent'] is not None else None
     if parent is not None:
         reason = exclusion(parent, by_index)
-        if reason in {'summary', 'question'}: return reason
+        # Older notes sometimes leave real topic headings nested under
+        # "本节要点". Exclude the summary itself, not every later topic. Page
+        # candidates still require review before a button is shown.
+        if reason == 'question': return reason
     return None
 
 

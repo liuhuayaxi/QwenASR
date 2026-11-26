@@ -4,6 +4,8 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-53e+ITmYTu8g41d1nXTaCWWs4P4ajy+8dw0rllTH8Bo='; style-src 'self'; img-src 'self' data: blob:; worker-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
 <title>课件 · QwenASR</title>
+<script src="/static/js/theme.js?v=20261119-paper"></script>
+<link rel="stylesheet" href="/static/ui.css?v=20261119-paper">
 <script>
 (function () {
   var q = new URLSearchParams(location.search);
@@ -62,8 +64,9 @@
 })();
 </script>
 <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="/static/pdf-viewer.css?v=12">
-<link rel="modulepreload" href="/static/js/pdf-viewer-page.js?v=12" fetchpriority="low"><link rel="modulepreload" href="/static/js/pdf-page-viewer.js?v=12" fetchpriority="low">
+<link rel="stylesheet" href="/static/pdf-viewer.css?v=20261119-paper">
+<link rel="modulepreload" href="/static/js/pdf-viewer-page.js?v=20261119-paper" fetchpriority="low"><link rel="modulepreload" href="/static/js/pdf-page-viewer.js?v=20261119-paper" fetchpriority="low">
+<link rel="stylesheet" href="/static/appearance.css?v=20261119-paper">
 </head>
 <body>
 <div id="viewer">
@@ -79,9 +82,9 @@
     </form>
     <a class="pv-system" data-pv="system" href="#" target="_blank" rel="noopener noreferrer">下载 PDF</a>
   </header>
-  <p class="pv-status" data-pv="status" role="status">正在加载课件…</p>
+  <p class="pv-status" data-pv="status" data-loading role="status">正在加载课件…</p>
   <main class="pv-stage" data-pv="stage"><div class="pv-pages" data-pv="pages" aria-label="课件页面"></div></main>
 </div>
-<script type="module" src="/static/js/pdf-viewer-page.js?v=12" fetchpriority="low"></script>
+<script type="module" src="/static/js/pdf-viewer-page.js?v=20261119-paper" fetchpriority="low"></script>
 </body>
 </html>

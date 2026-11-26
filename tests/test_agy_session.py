@@ -130,6 +130,24 @@ class SessionRecoveryTests(unittest.TestCase):
         result=self.recover(require_output_continuation=True)
         self.assertEqual(json.loads(result['response']),{'answer':'完整正文'})
 
+    def test_recovered_planner_failure_requires_matching_diagnostic_and_final_finish(self):
+        error = 'stream reading error: unexpected EOF'
+        planner = self.answer(status='ERROR', content=None, error=error)
+        diagnostic = {'type':'ERROR_MESSAGE', 'status':'DONE', 'error':f'API error (attempt 1): {error}'}
+        finish = self.answer(content=None, tool_calls=[{'name':'finish','args':{'answer':'完成'}}])
+        receipt = {'type':'GENERIC','status':'DONE','content':'success'}
+        self.save([self.user(), planner, diagnostic, finish, receipt])
+        with self.assertRaises(SessionEvidenceError):
+            self.recover(schema={})
+        recovered = self.recover(schema={}, allow_recovered_transients=True)
+        self.assertEqual(json.loads(recovered['response']), {'answer':'完成'})
+        for steps in ([planner, diagnostic], [finish, receipt, planner, diagnostic],
+                      [planner, {**diagnostic, 'error':'API error (attempt 1): 503'}, finish, receipt],
+                      [{**planner, 'tool_calls':[{'name':'read_file'}]}, diagnostic, finish, receipt]):
+            self.save([self.user(), *steps])
+            with self.assertRaises(SessionEvidenceError):
+                self.recover(schema={}, allow_recovered_transients=True)
+
     def test_adapter_recovers_only_successful_empty_results(self):
         self.save([self.user(),self.answer()])
         message=json.dumps({'event':'user','message':{'content':PROMPT}})

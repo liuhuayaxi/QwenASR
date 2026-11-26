@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from os import PathLike, fspath
 from pathlib import Path
 import shutil
 import tempfile
@@ -118,7 +119,8 @@ def extract_slides(video_path, *, sample_interval=0.5, min_stable_sec=1.0,
         segment_image.save(candidate_path)
 
     try:
-        with av.open(str(video_path)) as container:
+        source = fspath(video_path) if isinstance(video_path, PathLike) else video_path
+        with av.open(source) as container:
             if not container.streams.video:
                 raise ValueError('File contains no video stream')
             stream = container.streams.video[0]

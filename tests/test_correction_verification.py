@@ -43,6 +43,41 @@ class AutomaticVerificationTests(unittest.IsolatedAsyncioTestCase):
              patch('qwen_asr_app.transcription_assist.service.evidence_config',side_effect=evidence):
             return await verify.verify_corrections(record,CONFIG,**kwargs)
 
+    def test_single_pass_finalization_preserves_raw_and_journals_proposals_once(self):
+        from qwen_asr_app.refinement import finalize_corrections
+        with tempfile.TemporaryDirectory() as directory:
+            record=self.record(directory,True)
+            original=copy.deepcopy(record.segments)
+            record.metadata['correction_verification']={'status':'interrupted','completed':0,'total':3}
+            self.assertEqual(finalize_corrections(record),{'adopted':3})
+            self.assertEqual(record.segments,original)
+            self.assertFalse(active_candidates(record))
+            self.assertNotIn('correction_verification',record.metadata)
+            self.assertTrue(all('ai_verification' not in b for b in transcript_blocks(record)))
+            files={p.name:p.read_bytes() for p in (record.directory/'.correction-finalizations').glob('*.json')}
+            self.assertEqual(len(files),4)
+            self.assertEqual(finalize_corrections(record),{'adopted':0})
+            self.assertEqual(files,{p.name:p.read_bytes() for p in (record.directory/'.correction-finalizations').glob('*.json')})
+
+    async def test_review_enabled_notes_use_full_pipeline_without_transcript_review(self):
+        from qwen_asr_app.batch_ai import build_note_summary
+        with tempfile.TemporaryDirectory() as directory:
+            record=self.record(directory);order=[]
+            async def write(r,c):
+                self.assertFalse(active_candidates(r))
+                order.append('full')
+                r.metadata['ai_note_summary']={'summary':'已保存的笔记正文','pdf_ready':True}
+                r.save_metadata()
+                return r.metadata['ai_note_summary']
+            config={'note_review_enabled':True,'ai':{'summary_provider':{'transport':'agy_cli','cli_model':'gemini-3.8-flash-high'}}}
+            with patch('qwen_asr_app.review_notes.generate',side_effect=write), \
+                    patch('qwen_asr_app.batch_ai._section_page_links',new=AsyncMock()), \
+                    patch.object(verify,'request_ai_json',new=AsyncMock()) as transcript_review:
+                result=await build_note_summary(record,config)
+            self.assertEqual(order,['full'])
+            self.assertEqual(result['pdf_ready'],True)
+            transcript_review.assert_not_awaited()
+
     async def test_independent_decisions_keep_segments_and_acoustic_source_and_resolve_uncertainty(self):
         with tempfile.TemporaryDirectory() as directory:
             record=self.record(directory,True);original=copy.deepcopy(record.segments)
@@ -239,14 +274,15 @@ class AutomaticVerificationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(peak,2)
             self.assertFalse(active_candidates(record))
 
-    async def test_completed_refinement_with_only_candidates_runs_verifier(self):
+    async def test_completed_refinement_installs_saved_corrections_without_another_ai_call(self):
         with tempfile.TemporaryDirectory() as directory:
             record=self.record(directory)
             async def upstream(**request):return self.reply(request['payload'])
             with patch.object(verify,'request_ai_json',side_effect=upstream) as request, \
                  patch.object(app,'polish_timestamped_segments_resilient',new=AsyncMock()) as rewrite:
                 await app._run_refinement_job_unlocked(record,CONFIG)
-                request.assert_awaited_once();rewrite.assert_not_awaited()
+            request.assert_not_awaited();rewrite.assert_not_awaited()
+            self.assertTrue(all(block['text'].endswith('不是9。') for block in transcript_blocks(record)))
             self.assertFalse(active_candidates(record))
 
     async def test_startup_queues_unchecked_completed_records_and_respects_pause_cancel(self):

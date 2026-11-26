@@ -1,6 +1,7 @@
 import { marked } from "../vendor/marked/marked.esm.js";
 import DOMPurify from "../vendor/dompurify/purify.es.mjs";
 import { headingTexts, pptJump } from "./ppt-jump.js?v=1";
+import { deferOffscreen } from './rendering.js';
 
 const escape = (value) => String(value).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 function canonicalMathExpression(value) {
@@ -100,6 +101,11 @@ export function renderMarkdown(markdown, assetBase = '') {
 export function createMarkdownReader({ container, source, toc, onChange }) {
   let active = null;
   let tokens = [];
+  let lastRender = null;
+  // Cache sanitized HTML, never live nodes or unsanitized AI output. A bounded
+  // cache also reuses repeated math without retaining an entire course library.
+  const htmlCache = new Map();
+  let cacheBytes = 0;
   // Section → courseware page links (feature-flagged, stored outside the note).
   let pageLinks = null;
   const viewerHref = (recording, target) => {
@@ -207,6 +213,7 @@ export function createMarkdownReader({ container, source, toc, onChange }) {
   }
   function begin(token, element) {
     if (active?.token === token) return;
+    lastRender = null; // Even an unchanged/cancelled edit must restore its DOM.
     // Commit before rebuilding, then locate by the original token index.
     const index = tokens.indexOf(token);
     if (active) {
@@ -223,7 +230,12 @@ export function createMarkdownReader({ container, source, toc, onChange }) {
     const original = token.raw;
     element.classList.add("editing");
     element.replaceChildren(input);
-    const resize = () => { input.style.height = "auto"; input.style.height = `${Math.max(70, input.scrollHeight + 2)}px`; };
+    const nativeSizing = CSS.supports('field-sizing', 'content');
+    const resize = () => {
+      if (nativeSizing) return;
+      input.style.height = "auto";
+      input.style.height = `${Math.max(70, input.scrollHeight + 2)}px`;
+    };
     input.addEventListener("input", () => { token.raw = editedRaw(input, original); updateSource(); resize(); });
     input.addEventListener("keydown", (event) => {
       if (event.isComposing) return;
@@ -236,11 +248,15 @@ export function createMarkdownReader({ container, source, toc, onChange }) {
     input.focus({ preventScroll: true });
   }
   function render() {
+    const markdown = source.value.replace(/\r\n?/g, "\n");
+    const assetBase = source.dataset?.assetBase || '';
+    if (!active && lastRender?.markdown === markdown && lastRender.assetBase === assetBase
+        && lastRender.pageLinks === pageLinks && lastRender.mathReady === Boolean(window.katex)) return;
     active = null;
     for (const jump of watched) jumpObserver?.unobserve(jump);
     watched.clear();
-    const markdown = source.value.replace(/\r\n?/g, "\n");
     tokens = marked.lexer(markdown);
+    const referenceKey = JSON.stringify(tokens.links);
     // Lexer raws preserve source, including structural whitespace and links.
     const fragment = document.createDocumentFragment();
     if (toc) toc.replaceChildren();
@@ -262,7 +278,26 @@ export function createMarkdownReader({ container, source, toc, onChange }) {
       block.tabIndex = 0;
       block.setAttribute("aria-label", "笔记段落，按回车编辑");
       const subset = [token]; subset.links = tokens.links;
-      block.innerHTML = DOMPurify.sanitize(marked.parser(subset), { FORBID_TAGS: ["style", "iframe", "form", "input"] });
+      const key = `${Boolean(window.katex)}\n${referenceKey}\n${token.raw}`;
+      let html = htmlCache.get(key);
+      if (html === undefined) {
+        html = DOMPurify.sanitize(marked.parser(subset), { FORBID_TAGS: ["style", "iframe", "form", "input"] });
+        if (key.length + html.length < 65536) {
+          htmlCache.set(key, html);
+          cacheBytes += key.length + html.length;
+          while (htmlCache.size > 512 || cacheBytes > 1024 * 1024) {
+            const first = htmlCache.keys().next().value;
+            cacheBytes -= first.length + htmlCache.get(first).length;
+            htmlCache.delete(first);
+          }
+        }
+      }
+      block.innerHTML = html;
+      // Leave the opening blocks eager; defer illustrations deeper in a note.
+      for (const image of block.querySelectorAll('img')) {
+        image.decoding = 'async';
+        if (index > 12) image.loading = 'lazy';
+      }
       if (source.dataset?.assetBase) for (const image of block.querySelectorAll('img')) {
         const value = image.getAttribute('src');
         if (/^assets\/fig-[a-f0-9]{16}\.png$/.test(value || '')) image.src = source.dataset.assetBase + value.slice(7);
@@ -278,7 +313,11 @@ export function createMarkdownReader({ container, source, toc, onChange }) {
         const link = document.createElement("button");
         link.type = "button"; link.className = `toc-level-${token.depth}`;
         link.textContent = block.textContent;
-        link.addEventListener("click", () => { finish(); container.querySelector(`[data-block="${index}"]`)?.scrollIntoView({ behavior: "smooth", block: "start" }); });
+        link.addEventListener("click", () => {
+          finish();
+          const behavior = matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth";
+          container.querySelector(`[data-block="${index}"]`)?.scrollIntoView({ behavior, block: "start" });
+        });
         toc.append(link);
       }
       if (token.type === "heading") headings.push({ headingIndex, block, token });
@@ -303,6 +342,8 @@ export function createMarkdownReader({ container, source, toc, onChange }) {
       if (container.dataset.pptLinks !== "pending") container.dataset.pptLinks = "off";
     } else container.dataset.pptLinks = aligned ? "ready" : "mismatch";
     container.replaceChildren(fragment);
+    lastRender = {markdown, assetBase, pageLinks, mathReady: Boolean(window.katex)};
+    requestAnimationFrame(() => deferOffscreen(container));
   }
   container.addEventListener("pointerdown", (event) => {
     if (!active || event.target.closest("a,button,textarea") || event.button !== 0) return;

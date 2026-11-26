@@ -1,4 +1,4 @@
-import { renderMarkdown } from "./markdown-reader.js?v=20261108-ppt-4";
+import { renderMarkdown } from "./markdown-reader.js?v=20261119-paper";
 
 export function createTranscriptView({
   els, state, toast, updateButtons, switchView, onSessionShown = () => {},
@@ -108,7 +108,7 @@ export function createTranscriptView({
   }
 
   function renderSavedReviews(reviews) {
-    for (const review of [...reviews].sort((left, right) =>
+    for (const review of reviews.toSorted((left, right) =>
       Number(left.window_end || left.end || 0) - Number(right.window_end || right.end || 0)
       || Number(left.start || 0) - Number(right.start || 0))) {
       renderPeriodicReview(review);
@@ -343,7 +343,7 @@ export function createTranscriptView({
     reviewWindows.clear();
     state.segments.clear();
     state.reviewCards.clear();
-    els.transcript.innerHTML = "";
+    els.transcript.replaceChildren();
     els.partialCard.classList.add("hidden");
     refreshEmptyState();
   }

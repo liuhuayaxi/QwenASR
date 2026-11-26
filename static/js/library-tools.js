@@ -119,10 +119,11 @@ export function createLibraryTools({getSession, openRecord, saveNote, renderNote
   async function seek(seconds, play = true) {
     const session = getSession(); if (!session) return;
     const time = Math.max(0, Number(seconds) || 0);
+    const behavior = matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth";
     document.querySelectorAll('.note-transcript-segment').forEach(node => {
       const selected = Number(node.dataset.start) <= time && Number(node.dataset.end) > time;
       node.classList.toggle('source-highlight', selected);
-      if (selected) node.scrollIntoView({behavior:'smooth', block:'center'});
+      if (selected) node.scrollIntoView({behavior, block:'center'});
     });
     $('noteColumns').classList.remove('focus-reading');
     if (session.status !== 'completed') { if (play) toast('结束并保存后可以回听'); return; }
@@ -267,13 +268,14 @@ export function createLibraryTools({getSession, openRecord, saveNote, renderNote
       seek(start, false);
       return;
     }
+    const behavior = matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth";
     if (kind === 'summary') {
       const match = highlight($('noteSummaryReader'), query);
-      match?.scrollIntoView({behavior: 'smooth', block: 'center'});
+      match?.scrollIntoView({behavior, block: 'center'});
       return;
     }
     const match = highlight($('noteDialogTitle'), query);
-    match?.scrollIntoView({behavior: 'smooth', block: 'center'});
+    match?.scrollIntoView({behavior, block: 'center'});
   }
 
   return {attach, seek, search, focusSearch};

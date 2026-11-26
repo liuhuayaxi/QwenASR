@@ -122,6 +122,17 @@ body.workspace-note-open > .app-header, .workspace-note-open .course-workspace >
 
 /* Embedded views inherit the course shell instead of nesting another page shell. */
 body.workspace-embedded > .app-header { display: none; }
+html.settings-embedded body { background: transparent; }
+html.settings-embedded body > .app-header,
+html.settings-embedded body > .shell { visibility: hidden; }
+html.settings-embedded #settingsDialog.settings-dialog {
+  width: 100vw;
+  height: 100dvh;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  border-radius: 0;
+}
 .workspace-embedded .files-layout { grid-template-columns: minmax(0, 1fr); width: calc(100% - 40px); margin: 20px auto; }
 .workspace-embedded .course-sidebar { display: none; }
 .workspace-embedded.library-page .shell { width: 100%; padding: 0; }

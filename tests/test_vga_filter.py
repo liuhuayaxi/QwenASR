@@ -66,6 +66,26 @@ class VGAFilterTests(unittest.TestCase):
         self.assertEqual(classify_page(viewer)[0], 'junk')
         self.assertEqual(classify_page(Image.new('RGB', (512, 384), '#2079c9'))[0], 'slide')
 
+    def test_full_height_template_strip_is_not_wallpaper_and_taskbar_is_not_a_slide(self):
+        slide = fixture()
+        draw = ImageDraw.Draw(slide)
+        draw.rectangle((0, 0, 31, 383), fill='#006084')
+        for y in range(24, 365, 35):
+            draw.rectangle((3, y, 15, y + 8), fill='#09b0ec')
+        self.assertEqual(classify_page(slide)[0], 'slide')
+
+        desktop = fixture()
+        draw = ImageDraw.Draw(desktop)
+        draw.rectangle((0, 360, 511, 383), fill='#e3ecf8')
+        for x in range(83, 410, 22):
+            draw.rectangle((x, 370, x + 3, 381), fill='#084eac')
+            draw.rectangle((x + 4, 371, x + 5, 378), fill='#ffca14')
+        self.assertEqual(classify_page(desktop)[0], 'junk')
+        draw.rectangle((0, 0, 511, 30), fill='#ad492b')
+        for x in range(20, 490, 12):
+            draw.rectangle((x, 34, x + 3, 54), fill='#353535')
+        self.assertEqual(classify_page(desktop)[0], 'document')
+
     def test_smoothing_sections_and_overlay(self):
         slides = self.slides([fixture('document'), fixture(), fixture(), fixture('document'), fixture('junk')])
         with patch('qwen_asr_app.vga_filter.comparison_metrics', return_value=(1, 1, 1)):

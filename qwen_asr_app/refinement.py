@@ -17,7 +17,7 @@ def source_hash(segments):
 
 
 def pending_ids(record):
-    # Protected edits belong to the independent verifier, not another rewrite.
+    # Saved proposals are finalized locally, never rewritten a second time.
     return {int(i) for block in transcript_blocks(record)
             if not block['refined'] and not block.get('correction_review')
             for i in block.get('segment_ids',[])}
@@ -29,6 +29,50 @@ def saved_progress(record):
     return {'saved_segments':sum(int(s['id']) not in pending for s in usable),
             'total_segments':len(usable),'remaining_segments':len(pending),
             'review_blocks':sum(bool(b.get('correction_review')) for b in transcript_blocks(record))}
+
+
+def finalize_corrections(record):
+    """Install the saved first-pass corrections without another AI request.
+
+    Older checkpoints held numerical/formula changes as proposals. Keep their
+    complete previous holders on disk, then use the already generated text.
+    Raw acoustic transcripts remain the source of truth and are never changed.
+    """
+    if record is None:
+        return {'adopted': 0}
+    from .transcription_assist.routes import active_candidates, _holders, _identity, _refresh_global_text
+    candidates = active_candidates(record)
+    created = local_now()
+    owners = []
+    for candidate in candidates:
+        holder = next(holder for level, holder in _holders(record)
+                      if _identity(level, holder, holder['correction_review']) == candidate['candidate_id'])
+        if not str(candidate.get('after') or '').strip():
+            raise ValueError('已保存的校对正文为空，原文保留')
+        atomic_json(record.directory/'.correction-finalizations'/(candidate['candidate_id']+'.json'), {
+            'policy': 'single-pass-correction-v1', 'candidate': candidate,
+            'before_holder': copy.deepcopy(holder), 'created_at': created,
+        })
+        owners.append((holder, candidate))
+    for holder, candidate in owners:
+        holder.update(corrected=candidate['after'], ai_pending=False,
+                      correction_resolution={'policy': 'single-pass-correction-v1',
+                                             'candidate_id': candidate['candidate_id'], 'created_at': created})
+        holder.pop('correction_review', None)
+        holder.pop('ai_error', None)
+    previous = record.metadata.pop('correction_verification', None)
+    if previous:
+        atomic_json(record.directory/'.correction-finalizations'/'previous-verification.json', previous)
+    job = (record.metadata.get('ai_jobs') or {}).get('refinement') or {}
+    if str(job.get('phase') or '').startswith('AI 自动复核'):
+        job['phase'] = ''
+    if owners or previous:
+        _refresh_global_text(record)
+        record.metadata['correction_finalization'] = {
+            'policy': 'single-pass-correction-v1', 'adopted': len(owners), 'updated_at': created,
+        }
+        record.save_all()
+    return {'adopted': len(owners)}
 
 
 def commit_blocks(record, blocks, *, destination='reviews'):

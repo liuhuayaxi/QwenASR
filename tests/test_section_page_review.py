@@ -73,6 +73,21 @@ class ReviewTests(unittest.TestCase):
         doc['sections'][0]['status'] = 'verified'
         self.assertEqual(len(sp.public_view(doc, md)['sections']), 1)
 
+    def test_section_page_review_prefers_correction_tier_when_configured(self):
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+        doc = {'sections': [section(1, 'A', 3)]}
+        sources = [{'source_id': 's', 'pages': [f'page {n}' for n in range(1, 5)]}]
+        config = {'ai': {
+            'summary_provider': {'transport': 'agy_cli', 'cli_model': 'gemini-4-hydrogen-medium', 'context_window': 1048576, 'concurrency': 3},
+            'correction_provider': {'transport': 'agy_cli', 'cli_model': 'gemini-4-hydrogen-low', 'context_window': 1048576, 'concurrency': 6},
+        }}
+        mock = AsyncMock(return_value={'items': [{'id': 'h1', 'page': 3, 'sure': True}]})
+        with patch('qwen_asr_app.ai.request_ai_json', mock):
+            stats = asyncio.run(rv.review(doc, '# t\n## A\nalpha\n', sources, config))
+        self.assertEqual(stats['verified'], 1)
+        self.assertEqual(mock.await_args.kwargs['mode'], 'correction')
+
 
 if __name__ == '__main__':
     unittest.main()

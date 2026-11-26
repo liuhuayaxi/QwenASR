@@ -389,22 +389,46 @@ def merge_coverage(results, scope):
     return merged
 
 
+class ScopeReviewValidationError(ValueError):
+    """The independent reviewer must correct its own receipt."""
+
+
+REVIEW_STATUSES = ('appropriate', 'not_in_batch', 'mastery_missing', 'familiarity_expanded', 'unconfirmed')
+
+
+def findings_schema(scope):
+    ids = [item['id'] for item in scope['items']]
+    finding = {'type': 'object', 'required': ['objective_id', 'status', 'page', 'evidence'],
+               'properties': {'objective_id': {'type': 'string', **({'enum': ids} if ids else {})},
+                              'status': {'type': 'string', 'enum': list(REVIEW_STATUSES)},
+                              'page': {'type': 'integer'}, 'evidence': {'type': 'string', 'minLength': 1},
+                              'suggestion': {'type': 'string'}}}
+    return {'type': 'array', 'items': finding, **({} if ids else {'maxItems': 0})}
+
+
 def validate_review(result, scope, required_ids):
     """A generic passed flag cannot certify objective-depth compliance."""
     if not scope.get('enabled'): return
     findings = result.get('scope_findings')
     ids = {i['id'] for i in scope['items']}
     if result.get('scope_policy_checked') is not True or not isinstance(findings,list):
-        raise ValueError('独立审查缺少学习要求深度核对，未判为通过')
+        raise ScopeReviewValidationError('独立审查缺少学习要求深度核对，未判为通过')
     seen = set()
     for row in findings:
-        if row.get('objective_id') not in ids or row.get('status') not in {'appropriate','not_in_batch','mastery_missing','familiarity_expanded','unconfirmed'} or not str(row.get('evidence','')).strip():
-            raise ValueError('独立审查的学习要求结论缺少真实ID或证据')
+        if not isinstance(row, dict):
+            raise ScopeReviewValidationError('学习要求审查条目须包含编号、结论和证据')
+        ident = row.get('objective_id')
+        if not isinstance(ident, str) or ident not in ids:
+            raise ScopeReviewValidationError(f'审查引用了本批课件清单以外的学习要求编号 {str(ident)[:100]}')
+        if row.get('status') not in REVIEW_STATUSES:
+            raise ScopeReviewValidationError(f'学习要求 {ident} 的审查结论无效')
+        if not isinstance(row.get('evidence'), str) or not row['evidence'].strip():
+            raise ScopeReviewValidationError(f'学习要求 {ident} 缺少页面证据')
         if row['status']!='not_in_batch' and row.get('page') not in result.get('viewed_pages',[]):
-            raise ValueError('学习要求审查证据没有绑定本批实际页码')
+            raise ScopeReviewValidationError('学习要求审查证据没有绑定本批实际页码')
         seen.add(row['objective_id'])
     if not set(required_ids).issubset(seen):
-        raise ValueError('独立审查遗漏本批相关学习要求')
+        raise ScopeReviewValidationError('独立审查遗漏本批相关学习要求：'+', '.join(sorted(set(required_ids)-seen)))
     for row in findings:
         if row['status'] in {'mastery_missing','familiarity_expanded'} or (row['status']=='unconfirmed' and row['objective_id'] in required_ids):
             result['status'] = 'needs_revision'

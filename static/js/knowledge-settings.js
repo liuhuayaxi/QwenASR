@@ -11,7 +11,13 @@ function input(name,label,value,type='text') {
 }
 export async function openKnowledgeSettings(mode='knowledge') {
   let dialog = document.querySelector('#knowledgeModelDialog');
-  if (!dialog) {dialog=document.createElement('dialog');dialog.id='knowledgeModelDialog';dialog.className='settings-dialog';dialog.style.cssText='max-width:720px;width:calc(100vw - 32px);padding:24px';document.body.append(dialog);}
+  if (!dialog) {
+    dialog = document.createElement('dialog');
+    dialog.id = 'knowledgeModelDialog';
+    dialog.className = 'ui-dialog settings-dialog';
+    dialog.style.cssText = 'max-width:720px;width:calc(100vw - 32px);padding:24px';
+    document.body.append(dialog);
+  }
   dialog.innerHTML='<p role="status">正在读取本机设置…</p>';
   dialog.showModal();
   try {

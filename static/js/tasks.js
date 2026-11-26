@@ -82,6 +82,7 @@ function friendlyError(task) {
   if (!task.error) return '';
   // The server's own countdown text ("网络出口地区被拒，3 分钟后自动重试（第 n 次）").
   if (task.status === 'waiting_retry' && task.error_kind === 'provider_region') return task.error;
+  if (task.error_kind === 'review_needs_revision') return task.error;
   const messages = {
     network_dns: '模型服务域名暂时无法解析，网络恢复后可继续。',
     output_truncated: '模型输出达到长度上限，可继续处理或重试。',
@@ -104,6 +105,18 @@ function friendlyError(task) {
   if (/timeout|timed out|超时/i.test(raw)) return '等待处理结果超时，可继续检查或重试。';
   if (/connection|connect|network|连接|网络/i.test(raw)) return '处理服务暂时无法连接，可在连接恢复后继续。';
   return raw.length <= 180 && !/Traceback|File "|\\Users\\/.test(raw) ? raw : '本步骤尚未完成，请展开处理详情查看原因并继续。';
+}
+function reviewIssueDetails(task) {
+  const issues = Array.isArray(task.review_issues) ? task.review_issues : [];
+  if (!issues.length) return '';
+  const items = issues.map(issue => {
+    const severity = issue.severity === 'blocking' ? '必须修订' : '提示';
+    const evidence = issue.evidence ? `<p>证据：${esc(issue.evidence)}</p>` : '';
+    const suggestion = issue.suggestion ? `<p>建议：${esc(issue.suggestion)}</p>` : '';
+    return `<li><b>第 ${esc(issue.page)} 页 · ${severity}</b><p>${esc(issue.problem || '审查发现问题')}</p>${evidence}${suggestion}</li>`;
+  }).join('');
+  const count = `${task.review_blocking_count || 0} 个必须修订，${task.review_warning_count || 0} 个提示`;
+  return `<details class="task-details review-issues" data-detail-key="review-issues" open><summary>独立审查问题（${count}）</summary><ul>${items}</ul>${task.review_report ? `<p>审查报告：${esc(task.review_report)}</p>` : ''}</details>`;
 }
 function operationLabel(inference = {}, receipt = {}, mode, task) {
   if (task?.type === 'knowledge_index') return task.execution_location === 'local' ? '处理位置：Mac 本机' : '';
@@ -188,6 +201,7 @@ function card(task, historical = false) {
     ${!review && actions.length || task.result_url || task.download_url ? `${task.type === 'course_queue' && actions.length ? '<p class="task-queue-scope">队列操作会影响全部课次。</p>' : ''}<div class="task-actions">${review ? '' : buttons}
     ${task.result_url ? `<a href="${esc(task.result_url)}" class="${resultClass}${review ? ' primary' : ''}">${review ? '查看并核对' : task.type === 'course_queue' ? '打开课程回放' : task.family === 'ai' || task.type === 'upload' ? '查看笔记' : '查看课程文件'}</a>` : ''}${task.download_url ? `<a href="${esc(task.download_url)}" class="${resultClass}" download>下载 AI 友好 PDF</a>` : ''}</div>` : ''}
     ${review && actions.length ? `<details class="task-details task-reprocess" data-detail-key="reprocess"><summary>重新处理选项</summary><p>重新调用 AI 处理这些片段会使用当前已保存的配置，不会标记为已人工核对。</p><label>${select} 选择此步骤参与批量重新处理</label><div class="task-actions">${buttons}</div></details>` : ''}
+    ${reviewIssueDetails(task)}
     ${courseDetails || files || details.length ? `${courseDetails || `<details class="task-details" data-detail-key="technical"><summary>${files ? `文件明细（${task.files.length}）` : '处理详情'}</summary>${details.map(text => `<p>${esc(text)}</p>`).join('')}${files ? `<ul>${files}</ul>` : ''}</details>`}` : ''}
     </div></div></article>`;
 }

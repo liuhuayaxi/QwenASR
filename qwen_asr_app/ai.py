@@ -451,6 +451,33 @@ def provider_for_mode(ai: dict[str, Any], mode: str | bool = "sentence") -> dict
         if not isinstance(provider, dict):
             raise ValueError("课堂问答模型尚未配置")
         return dict(provider)
+    if normalized_mode == "note_review":
+        nested = ai.get("note_review_provider")
+        if not isinstance(nested, dict) or not _provider_has_endpoint(nested):
+            return provider_for_mode(ai, "summary")
+        provider = dict(nested)
+        base_url = (
+            provider.get("base_url")
+            or os.getenv("AI_NOTE_REVIEW_BASE_URL")
+            or os.getenv("AI_SUMMARY_BASE_URL")
+            or ai.get("base_url")
+        )
+        return {
+            **ai,
+            **provider,
+            "base_url": base_url,
+            "api_key": inherited_key(provider, base_url),
+            "model": (
+                provider.get("model")
+                or os.getenv("AI_NOTE_REVIEW_MODEL")
+                or os.getenv("AI_SUMMARY_MODEL")
+                or ai.get("summary_model")
+                or ai.get("model")
+            ),
+            "context_window": provider.get("context_window") or ai.get("context_window"),
+            "api_mode": provider.get("api_mode") or ai.get("api_mode"),
+            "extra_params": provider.get("extra_params") if "extra_params" in provider else ai.get("extra_params"),
+        }
     if normalized_mode in {"global", "correction"}:
         key = f"{normalized_mode}_provider"
         provider = ai.get(key)
@@ -492,10 +519,38 @@ def provider_for_mode(ai: dict[str, Any], mode: str | bool = "sentence") -> dict
     return dict(ai)
 
 
+_PURE_FILLER_RE = re.compile(r"^[啊哎诶嗯呃额呢哦唔唉嘿哈呀啦吧嘛]+$")
+
+
+def _is_pure_filler_segment(text: str) -> bool:
+    stripped = re.sub(r"[\s，。、！？,.!?;；:：…—\-~～'\"“”‘’()（）]+", "", str(text or ""))
+    return not stripped or (len(stripped) <= 8 and bool(_PURE_FILLER_RE.fullmatch(stripped)))
+
+
+def _provider_has_endpoint(provider: Any) -> bool:
+    if not isinstance(provider, dict):
+        return False
+    transport = provider_transport(provider)
+    if transport == "agy_cli":
+        return bool(str(provider.get("cli_model") or provider.get("model") or "").strip())
+    return bool(str(provider.get("base_url") or provider.get("model") or "").strip())
+
+
+def lightweight_mode_for(config: dict[str, Any] | None, fallback: str = "summary") -> str:
+    """Route lightweight verification/title/abstract tasks to the configured
+    correction tier when available, falling back cleanly for minimal configs."""
+    ai = (config or {}).get("ai") if isinstance(config, dict) else {}
+    if isinstance(ai, dict):
+        for candidate in ("correction",):
+            if _provider_has_endpoint(ai.get(f"{candidate}_provider")):
+                return candidate
+    return fallback
+
+
 def select_model(ai: dict[str, Any], mode: str | bool = "sentence") -> str:
     provider = provider_for_mode(ai, mode)
     if provider_transport(provider) == "agy_cli":
-        return str(provider.get("cli_model") or provider.get("model") or "gemini-3.8-flash-medium")
+        return str(provider.get("cli_model") or provider.get("model") or "gemini-4-hydrogen-medium")
     return str(provider.get("model") or os.getenv("AI_MODEL") or "gpt-5-mini")
 
 
@@ -1085,6 +1140,7 @@ async def polish_timestamped_segments(
         f"{provider_prompt}\n{AI_SPEECH_CLEANUP_RULES}\n"
         "输入是按时间顺序排列的课堂转写段落。逐段校正术语、识别错误、标点和断句。"
         "批量请求只共享上下文，结果必须逐段回写：每个 blocks 元素的 segment_ids 只能含一个输入 id。"
+        "每个输入 id 都必须出现在 blocks 中且 corrected 不能为空；若某段仅含“嗯”“啊”“呃”等口头填充词，请保留简短原文或标点占位，禁止整段置空或漏掉该 id。"
         "每个输入 id 必须且只能出现一次，顺序不得改变；即使相邻段属于同一句也不得合并。"
         "不得拆分单个 id、跳过内容、添加来源外信息或自行生成时间戳。"
         "只返回 JSON：{\"blocks\":[{\"segment_ids\":[1],\"corrected\":\"第一段精修文本\"},{\"segment_ids\":[2],\"corrected\":\"第二段精修文本\"}]}。"
@@ -1166,6 +1222,10 @@ async def polish_timestamped_segments(
         translated=str(raw_block.get('translation') or '').strip()
         if translation_target and not translated:
             raise AIRequestError('AI 遗漏了逐段译文，正在拆批重试',kind='invalid_segment_mapping')
+        if not corrected and len(ids) == 1 and ids[0] in positions:
+            raw_source_text = str(source[positions[ids[0]]].get("text") or "").strip()
+            if _is_pure_filler_segment(raw_source_text):
+                corrected = raw_source_text
         if not ids or not corrected or any(value not in positions for value in ids):
             raise AIRequestError("AI 返回了空文本或不存在的段落编号，原文已保留", kind="invalid_segment_mapping")
         if len(ids) != 1:
@@ -1182,6 +1242,29 @@ async def polish_timestamped_segments(
                        **({'correction_provenance':raw_block['correction_provenance']} if raw_block.get('correction_provenance') else {}),
                        **({'correction_review': raw_block['correction_review']} if raw_block.get('correction_review') else {})})
     if flattened != source_ids:
+        returned_set = set(flattened)
+        if (
+            not translation_target
+            and len(flattened) == len(returned_set)
+            and [i for i in source_ids if i in returned_set] == flattened
+        ):
+            missing = [i for i in source_ids if i not in returned_set]
+            if missing and all(_is_pure_filler_segment(str(source[positions[i]].get("text") or "")) for i in missing):
+                merged_result: list[dict[str, Any]] = []
+                idx = 0
+                for block in result:
+                    first_id = block["segment_ids"][0]
+                    while idx < len(source_ids) and source_ids[idx] != first_id:
+                        sid = source_ids[idx]
+                        merged_result.append({"segment_ids": [sid], "corrected": str(source[positions[sid]].get("text") or "").strip()})
+                        idx += 1
+                    merged_result.append(block)
+                    idx += len(block["segment_ids"])
+                while idx < len(source_ids):
+                    sid = source_ids[idx]
+                    merged_result.append({"segment_ids": [sid], "corrected": str(source[positions[sid]].get("text") or "").strip()})
+                    idx += 1
+                return merged_result
         raise AIRequestError("AI 遗漏或重复了来源段落，原文已保留", kind="invalid_segment_mapping")
     return result
 
@@ -1211,13 +1294,20 @@ async def polish_timestamped_segments_resilient(
             raise
         if len(segments) > 1:
             midpoint = len(segments) // 2
-            left = await polish_timestamped_segments_resilient(
-                segments[:midpoint], detected_language, config, mode=mode, on_checkpoint=on_checkpoint
+            left_result, right_result = await asyncio.gather(
+                polish_timestamped_segments_resilient(
+                    segments[:midpoint], detected_language, config, mode=mode, on_checkpoint=on_checkpoint
+                ),
+                polish_timestamped_segments_resilient(
+                    segments[midpoint:], detected_language, config, mode=mode, on_checkpoint=on_checkpoint
+                ),
+                return_exceptions=True,
             )
-            right = await polish_timestamped_segments_resilient(
-                segments[midpoint:], detected_language, config, mode=mode, on_checkpoint=on_checkpoint
-            )
-            return [*left, *right]
+            if isinstance(left_result, BaseException):
+                raise left_result
+            if isinstance(right_result, BaseException):
+                raise right_result
+            return [*left_result, *right_result]
 
         segment = segments[0]
         raw = str(segment.get("corrected") or segment.get("raw") or "").strip()
@@ -1343,6 +1433,9 @@ def summary_instructions(config: dict[str, Any], *, live: bool = False) -> str:
             instructions += prompt_block(config['_yuketang_questions'])
         elif detailed_chunk:
             instructions += "\n雨课堂题目将在最终合并稿中由程序附加；本分块只整理当前课堂内容，不生成题库小节。"
+    if not live:
+        from .note_prompts import EXPLANATORY_PROSE
+        instructions += "\n" + EXPLANATORY_PROSE
     return instructions
 
 
@@ -1423,7 +1516,7 @@ async def summarize_note_abstract(
         instructions=instructions,
         payload={"detailed_review_notes": detailed_markdown[:30_000]},
         config=config,
-        mode="summary",
+        mode=lightweight_mode_for(config, "summary"),
         max_output_tokens=180,
     )
     abstract = re.sub(r"\s+", " ", abstract).strip().strip("\"'“”")
@@ -1435,7 +1528,7 @@ async def summarize_note_abstract(
             ),
             payload={"abstract_to_shorten": abstract},
             config=config,
-            mode="summary",
+            mode=lightweight_mode_for(config, "summary"),
             max_output_tokens=160,
         )
         abstract = re.sub(r"\s+", " ", abstract).strip().strip("\"'“”")
@@ -1475,7 +1568,7 @@ async def generate_recording_title(
             "category": str(category or "")[:80] or None,
         },
         config=config,
-        mode="summary",
+        mode=lightweight_mode_for(config, "summary"),
         max_output_tokens=160,
     )
     title = re.sub(r"[\r\n]+", " ", str(data.get("title") or "")).strip().strip("《》\"'“”")

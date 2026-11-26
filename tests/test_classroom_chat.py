@@ -55,14 +55,14 @@ class ClassroomChatTests(unittest.IsolatedAsyncioTestCase):
                                                        'conversation_id': conversation_id})
 
     async def test_default_full_context_and_fresh_followup_are_saved(self):
-        self.assertEqual((await self.client.get('/api/ai/classroom-chat/settings')).json()['provider']['model'], 'gemini-3.8-flash-high')
+        self.assertEqual((await self.client.get('/api/ai/classroom-chat/settings')).json()['provider']['model'], 'gemini-4-hydrogen-medium')
         call = AsyncMock(return_value=r'先用 **折射定律**，公式为 $n_1\sin\theta_1=n_2\sin\theta_2$。')
         with patch('qwen_asr_app.classroom_chat.request_ai_text', call):
             first = await self.ask()
             self.assertEqual(first.status_code, 200, first.text)
             sent = call.call_args.kwargs
             self.assertEqual(sent['mode'], 'chat')
-            self.assertEqual(sent['config']['ai']['chat_provider']['model'], 'gemini-3.8-flash-high')
+            self.assertEqual(sent['config']['ai']['chat_provider']['model'], 'gemini-4-hydrogen-medium')
             self.assertEqual([b['text'] for b in sent['payload']['transcript']],
                              ['精修：从介质一到介质二，n1 sin θ1 = n2 sin θ2。', '最新内容是临界角'])
             self.assertEqual(len(sent['payload']['live_preview']), 1)

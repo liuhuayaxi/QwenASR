@@ -27,6 +27,32 @@ try {
   assert.equal(pdf.subarray(0, 5).toString(), '%PDF-');
   assert.ok(pdf.length > 1000, 'offline export returned an empty PDF');
   console.log('Offline note export: Markdown, KaTeX and local module imports passed');
+
+  // Exercise the failure path in the normal browser CI job too: a missing
+  // transitive import must name the module instead of waiting for 30 seconds.
+  const incompleteRepo = path.join(temporary, 'incomplete-repo');
+  const scripts = path.join(incompleteRepo, 'static/js');
+  fs.mkdirSync(scripts, {recursive: true});
+  for (const name of ['markdown-reader.js', 'ppt-jump.js']) {
+    fs.copyFileSync(path.join(repo, 'static/js', name), path.join(scripts, name));
+  }
+  fs.symlinkSync(path.join(repo, 'static/vendor'), path.join(incompleteRepo, 'static/vendor'), 'dir');
+  const failedOutput = path.join(temporary, 'missing-dependency.pdf');
+  fs.writeFileSync(request, JSON.stringify({
+    repo_root: incompleteRepo, output: failedOutput,
+    module_roots: [path.join(__dirname, 'node_modules')],
+    markdown: '# Synthetic missing-dependency regression',
+  }));
+  const failed = spawnSync(process.execPath,
+    [path.join(repo, 'scripts/render_review_note.cjs'), request],
+    {encoding: 'utf8', timeout: 15000});
+  assert.ifError(failed.error);
+  assert.notEqual(failed.status, 0);
+  assert.match(failed.stderr, /PDF 渲染器初始化失败/);
+  assert.match(failed.stderr, /\/static\/js\/rendering\.js/);
+  assert.doesNotMatch(failed.stderr, /Timeout 30000ms/);
+  assert.equal(fs.existsSync(failedOutput), false);
+  console.log('Offline note export: missing local module fails immediately with diagnostics');
 } finally {
   fs.rmSync(temporary, {recursive: true, force: true});
 }

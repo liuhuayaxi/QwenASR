@@ -1,4 +1,4 @@
-import { renderMarkdown } from "./markdown-reader.js?v=20261108-ppt-4";
+import { renderMarkdown } from "./markdown-reader.js?v=20261119-paper";
 
 export function createSummaryView({ els, escapeHtml, formatDuration }) {
   const cards = new Map();
@@ -36,7 +36,8 @@ export function createSummaryView({ els, escapeHtml, formatDuration }) {
       ${points.length ? `<ul>${points.map((point) => `<li>${escapeHtml(point)}</li>`).join("")}</ul>` : ""}
       ${item.ai_error ? `<p class="ai-error">课堂实时提纲未完成：${escapeHtml(item.ai_error)}</p>` : ""}`;
     refreshEmpty();
-    card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    const behavior = matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth";
+    card.scrollIntoView({ behavior, block: "nearest" });
   }
 
   function renderSession(session) {

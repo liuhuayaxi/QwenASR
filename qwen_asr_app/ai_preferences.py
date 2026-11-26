@@ -15,7 +15,7 @@ SETTINGS_FIELDS = {'base_url', 'model', 'context_window', 'summary_interval', 's
                    'title_prompt', 'detailed_summary_prompt', 'abstract_prompt',
                    'review_base_url', 'review_model', 'review_api_mode', 'review_context_window',
                    'review_extra_params', 'summary_base_url', 'summary_model', 'summary_api_mode',
-                   'summary_context_window', 'summary_extra_params', 'classroom_chat_context','note_review_enabled','note_ai_latex_enabled'}
+                   'summary_context_window', 'summary_extra_params', 'classroom_chat_context','note_review_enabled','note_ai_latex_enabled','note_strict_scope_enabled'}
 
 
 def _saved_providers(settings):
@@ -66,6 +66,8 @@ class AIPreferences:
             raise ValueError('笔记审核开关必须是布尔值')
         if 'note_ai_latex_enabled' in settings and type(settings['note_ai_latex_enabled']) is not bool:
             raise ValueError('AI LaTeX 排版开关必须是布尔值')
+        if 'note_strict_scope_enabled' in settings and type(settings['note_strict_scope_enabled']) is not bool:
+            raise ValueError('严格学习范围公式限制开关必须是布尔值')
         previous = self.read()
         # A function-specific settings save updates only the submitted modes.
         # DELETE /api/ai/settings remains the explicit way to clear all choices.
@@ -189,6 +191,7 @@ class AIPreferences:
         result['_ai_settings_source'] = 'local_saved'
         result['note_review_enabled'] = saved.get('note_review_enabled') is True
         result['note_ai_latex_enabled'] = saved.get('note_ai_latex_enabled') is True
+        result['note_strict_scope_enabled'] = saved.get('note_strict_scope_enabled') is True
         # These are global settings, not per-request overrides. Only task
         # controls (e.g. "generate a summary now") may enable an operation.
         # Normal browser task actions use the durable global switches. Local
