@@ -792,6 +792,13 @@ async def import_vga(group, complete, category, entry):
         if record is None:
             raise SmartClassError('无法读取课堂转写')
         asset = saved.get('asset_id')
+        if asset and re.fullmatch(r'[a-f0-9]{32}', str(asset)):
+            try:
+                from .course_files import CourseFiles
+                from .storage import app_settings
+                CourseFiles(app_settings).file(category, asset, 'original')
+            except (ValueError, OSError):
+                asset = None
         if not asset:
             update_import_phase(entry, 'vga', 0, '正在读取课堂投屏轨道')
             save_imports()
@@ -942,10 +949,14 @@ async def import_group(group: dict, run_options: dict | None = None):
             entry.update(message="正在生成整堂课笔记")
             save_imports()
             try:
-                response = await local.post(WORKBENCH + f"/api/recordings/{complete['id']}/summary-jobs", json={
-                    "config": config, "summary_system_prompt": options.get("summary_system_prompt", ""),
+                summary_body = {
+                    "config": config,
+                    "summary_system_prompt": options.get("summary_system_prompt", ""),
                     "abstract_system_prompt": options.get("abstract_system_prompt", ""),
-                })
+                }
+                if options.get("vga_extract") and (entry.get("vga") or {}).get("status") == "completed":
+                    summary_body["preserve_review_materials"] = True
+                response = await local.post(WORKBENCH + f"/api/recordings/{complete['id']}/summary-jobs", json=summary_body)
                 response.raise_for_status()
             except httpx.HTTPError:
                 # A failure of this optional task does not undo ASR completion

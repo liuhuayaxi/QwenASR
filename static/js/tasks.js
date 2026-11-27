@@ -208,6 +208,9 @@ function card(task, historical = false) {
 function contextQueueCard(task) {
   return `<article class="task-card task-context-card" data-id="${esc(task.id)}">${task.actions?.length && taskMatchesType(task, $('typeFilter').value) ? `<p class="task-queue-scope">队列操作会影响全部课次。</p><label><input class="task-select" type="checkbox" aria-label="选择整个课程队列" ${state.selected.has(task.id) ? 'checked' : ''} ${state.busy ? 'disabled' : ''}> 选择整个课程队列参与批量处理</label><div class="task-actions">${task.actions.map(action => `<button data-action="${action}" class="ui-button ${action === 'cancel' ? 'danger' : ''}" ${state.busy ? 'disabled' : ''}>${taskActionLabel(task, action)}</button>`).join('')}</div>` : ''}${courseQueueDetails(task)}</article>`;
 }
+function isMaterialDeadlockTask(task) {
+  return task?.type === 'summary' && /补选课件不属于本课程|本节需要教学配图|实际看图后没有合适教学图|课件版本改变|请先通过“补选本节课件”|课件原件已改变|来源版本改变|选中的课件无法打开/.test(String(task.error || ''));
+}
 function groupCard(group) {
 
   const current=group.current_tasks, history=group.history, task=leadingTask(group);
@@ -217,6 +220,8 @@ function groupCard(group) {
   const tone=running?'active':group.errors.length?'attention':review?'review':'quiet';
   const status=running?'处理中':review?'待核对':labels[group.status] || group.status;
   const primary=task.actions?.includes('pause')?'pause':task.actions?.includes('continue')?'continue':task.actions?.includes('retry')?'retry':null;
+  const showRegenerate=Boolean(!running && !review && task.type==='summary' && task.actions?.includes('regenerate'));
+  const regeneratePrimary=Boolean(showRegenerate && isMaterialDeadlockTask(task));
   const elapsed=task.ai_activity?.elapsed_seconds;
   const time=elapsed!=null?`已用时 ${Math.floor(elapsed/60)} 分 ${Math.floor(elapsed%60)} 秒`:'';
   const count=view.count || (view.steps?`步骤 ${view.index+1}/${view.steps.length}`:'');
@@ -230,7 +235,9 @@ function groupCard(group) {
     ${view.detail?`<p class="focus-note">${esc(view.detail)}</p>`:''}
     ${activity?.detail?`<p class="focus-note focus-live-detail" role="status">${esc(activity.detail)}</p>`:''}
     <div class="focus-footer"><p class="focus-activity">${activity?`<i class="live-dot"></i>${esc(activity.label)}`:group.status==='paused'?'进度已保存，可随时继续':group.status==='completed'?'结果已保存':''}${time?`<span>${esc(time)}</span>`:''}</p><div class="focus-actions">
-    ${primary && !review?`<button data-action="${primary}" class="ui-button ${primary==='continue'?'primary':''}" ${state.busy?'disabled':''}>${esc(actionLabels[primary])}</button>`:''}
+    ${regeneratePrimary?`<button data-action="regenerate" class="ui-button primary" ${state.busy?'disabled':''}>重新生成</button>`:''}
+    ${primary && !review?`<button data-action="${primary}" class="ui-button ${primary==='continue' && !regeneratePrimary?'primary':''}" ${state.busy?'disabled':''}>${esc(actionLabels[primary])}</button>`:''}
+    ${showRegenerate && !regeneratePrimary?`<button data-action="regenerate" class="ui-button" ${state.busy?'disabled':''}>重新生成</button>`:''}
     ${group.result_url?`<a class="ui-button ${review?'primary':''}" href="${esc(group.result_url)}">${review?'去核对':group.recording_id?'查看笔记':'查看结果'}</a>`:''}</div></div></div>
     ${error}${running && group.review_count?`<p class="group-secondary">另有 ${group.review_count} 个校对步骤待核对，不影响当前处理</p>`:''}
     <details class="group-details" data-detail-key="steps"><summary>任务详情<span>${current.length} 个当前步骤${history.length?` · ${history.length} 条历史`:''}</span></summary>

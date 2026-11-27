@@ -1272,6 +1272,7 @@ async function generateLibrarySummary(record, card = null, promptOverrides = {})
         custom_prompt: promptOverrides.customPrompt || "",
         material_coverage: promptOverrides.completeMaterials ? 'selected_files' : 'lesson',
         regenerate: Boolean(promptOverrides.regenerate || record.has_ai_summary || record.ai_note_summary?.summary),
+        preserve_pending_materials: Boolean(promptOverrides.preservePendingMaterials),
       }),
     });
     const accepted = await response.json();
@@ -1657,6 +1658,7 @@ $('#chooseReviewMaterials')?.addEventListener('click', async () => {
     const persist = async ids => {
       const response = await fetch(url, {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({material_ids:ids})});
       const result = await response.json(); if (!response.ok) throw new Error(result.detail || '保存失败');
+      if (state.noteSession?.id === session.id) state.noteSession.review_material_ids = ids;
       toast(result.message); dialog.close();
     };
     save.onclick = () => void persist([...dialog.querySelectorAll('input:checked')].map(i => i.value)).catch(error=>toast(error.message));
@@ -2741,7 +2743,7 @@ els.noteDialog.addEventListener("focusout", event => {
   }
 });
 els.generateNoteSummary.addEventListener("click", async () => {
-  if (await saveNoteSummary() && state.noteSession) generateLibrarySummary(state.noteSession);
+  if (await saveNoteSummary() && state.noteSession) generateLibrarySummary(state.noteSession, null, { preservePendingMaterials: true });
 });
 els.regenerateNoteAbstract.addEventListener("click", async () => {
   if (await saveNoteSummary() && state.noteSession) generateLibraryAbstract(state.noteSession);

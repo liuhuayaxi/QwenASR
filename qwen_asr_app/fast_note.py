@@ -23,7 +23,7 @@ import time
 from .ai import request_ai_text, provider_for_mode, lightweight_mode_for, AIRequestError
 from .durable import atomic_bytes, atomic_json
 from .note_content import transcript_blocks, clock
-from .review_materials import collect, extract_image, bind_markdown_images
+from .review_materials import collect, extract_image, bind_markdown_images, resolve_lesson_selection
 from .storage import local_now
 from . import review_scope
 
@@ -61,7 +61,7 @@ def generation_identity(record, blocks, questions, selection, corpus, config):
     from . import note_prompts
     from .material_scope import VERSION as scope_version
     from .yuketang.pdf_layers import VERSION as image_policy
-    materials = sorted([{'id':s['id'],'name':s.get('name'),'sha256':s['sha256'],
+    materials = sorted([{'id':s['id'],'name':s.get('name'),'sha256':s.get('sha256') or s.get('stamp'),
                          'conversion':{k:(s.get('conversion') or {}).get(k) for k in ('status','source_sha256','sha256')}}
                         for s in corpus if s.get('status') not in {'deleted','superseded','excluded'} and not s.get('superseded_by')],
                        key=lambda s:s['id'])
@@ -119,10 +119,10 @@ async def generate_fast(record, config):
         # Without speech there is nothing to rank optional questions against;
         # keep this lesson's own exercises so the note stays on topic.
         questions = [q for q in questions if q.get('必含')]
-    selection = config.get('_review_material_ids', record.metadata.get('review_material_ids'))
     from .course_files import CourseFiles
     from .storage import app_settings
     corpus = await asyncio.to_thread(CourseFiles(app_settings).list, record.metadata.get('category'))
+    selection = resolve_lesson_selection(record, config, corpus)
     identity = generation_identity(record, blocks, questions, selection, corpus, config)
     relative = f'.review-notes/{identity}'
     folder = record.directory / relative

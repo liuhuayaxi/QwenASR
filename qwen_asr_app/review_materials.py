@@ -162,6 +162,47 @@ def _retrieval_by_source(blocks, originals):
     return totals
 
 
+def active_file_ids(items):
+    """Return IDs of active, non-superseded course files."""
+    return {
+        item['id'] for item in items
+        if item.get('id')
+        and item.get('status') not in {'deleted', 'superseded', 'excluded'}
+        and not item.get('superseded_by')
+    }
+
+
+def sanitize_selection(selected, items):
+    """Drop removed/inactive IDs from an old selection; fall back to auto-match when none remain."""
+    if selected is None:
+        return None
+    if not isinstance(selected, list):
+        return None
+    active = active_file_ids(items)
+    remaining = [ident for ident in selected if isinstance(ident, str) and ident in active]
+    if remaining:
+        return remaining
+    return [] if len(selected) == 0 else None
+
+
+def resolve_lesson_selection(record, config, items):
+    """Resolve effective material selection, pruning deleted courseware outside selected_files mode."""
+    if '_review_material_ids' in config:
+        return config['_review_material_ids']
+    raw = record.metadata.get('review_material_ids')
+    if config.get('_note_material_coverage') == 'selected_files':
+        return raw
+    sanitized = sanitize_selection(raw, items)
+    if sanitized != raw:
+        if sanitized is None:
+            record.metadata.pop('review_material_ids', None)
+            record.metadata.pop('review_material_selection', None)
+        else:
+            record.metadata['review_material_ids'] = sanitized
+        record.save_metadata()
+    return sanitized
+
+
 def collect(record, folder, selected=None, settings=None, lesson_title=None):
     settings=settings or app_settings
     folder=Path(folder);folder.mkdir(parents=True,exist_ok=True,mode=0o700)
@@ -186,7 +227,7 @@ def collect(record, folder, selected=None, settings=None, lesson_title=None):
         try:
             _,path=files.file(category,item['id'],'original')
             digest=digest_file(path)
-            if digest!=item['sha256']:raise ValueError('课件原件已改变，请先确认资料版本')
+            if item.get('sha256') and digest!=item['sha256']:raise ValueError('课件原件已改变，请先确认资料版本')
             if digest in seen:
                 excluded.append({'id':item['id'],'reason':'duplicate_content','duplicate_of':next(s['source_id'] for s in originals if s['sha256']==digest)})
                 continue

@@ -17,7 +17,11 @@ from .durable import atomic_bytes, atomic_json
 from .note_content import transcript_blocks, clock
 from .note_pdf import export_pdf, digest
 from .note_prompts import EXPLANATORY_PROSE
-from .review_materials import collect, extract_image, safe_path, tokens, PDF_LOCK, bind_markdown_images, history_signature, history_content_signature
+from .review_materials import (
+    collect, extract_image, safe_path, tokens, PDF_LOCK, bind_markdown_images,
+    history_signature, history_content_signature, active_file_ids,
+    resolve_lesson_selection, digest_file,
+)
 from .storage import local_now
 from .async_tasks import await_owned_task
 from .note_budget import BATCH_POLICY, pack_complete_items, require_budget, request_budget
@@ -961,12 +965,14 @@ async def generate(record, config):
     blocks=transcript_blocks(record)
     if not blocks:raise ValueError('录音还没有可用于生成笔记的转写')
     initial=body_hash(record.metadata.get('ai_note_summary'))
-    selection=config.get('_review_material_ids',record.metadata.get('review_material_ids'))
     from .storage import app_settings
     from .course_files import CourseFiles
     from .classroom_intelligence.integrations import saved_notes_markdown
     from .remote_operations import without_secrets
-    corpus=[(s['id'],s['sha256']) for s in CourseFiles(app_settings).list(record.metadata['category'])]
+    items=CourseFiles(app_settings).list(record.metadata['category'])
+    active=active_file_ids(items)
+    selection=resolve_lesson_selection(record,config,items)
+    corpus=[(s['id'],s.get('sha256') or s.get('stamp')) for s in items if s['id'] in active]
     historical_versions=history_signature(record,app_settings)
     strict_scope=config.get('note_strict_scope_enabled') is True
     pipeline_version=SCOPE_VERSION if (strict_scope and review_scope.enabled_for(record.metadata)) else VERSION
@@ -1074,7 +1080,7 @@ async def generate(record, config):
                 local=payload_for(group)
                 ids={b['source'] for b in group}
                 chosen_history=local['history'];selected_pages=local['pages']
-                cache_key=hashlib.sha256(json.dumps([plan_instructions,local,summary_signature(config)['provider']],sort_keys=True,ensure_ascii=False).encode()).hexdigest()
+                cache_key=hashlib.sha256(json.dumps([plan_instructions,local,summary_signature(config)['provider'],config.get('_note_generation_id') or ''],sort_keys=True,ensure_ascii=False).encode()).hexdigest()
                 stage_cache=record.directory/'.review-notes/.stage-cache'/(cache_key+'.plan.json')
                 if stage_cache.is_file():
                     result=json.loads(stage_cache.read_text());validate_plan(result,ids,package);atomic_json(path,result);return result
@@ -1123,7 +1129,8 @@ async def generate(record, config):
                 image=await owned_thread(extract_image,folder,package,chosen)
                 if scope.get('enabled'):image['objective_ids']=chosen['objective_ids']
                 if image['image_id'] not in {i['image_id'] for i in images}:images.append(image)
-            atomic_json(images_path,images)
+            if not (plan.get('figures_required') and not images):
+                atomic_json(images_path,images)
         if plan.get('figures_required') and not images:raise ValueError('本节需要教学配图，但尚未取得合适原图；成果保留待补选')
         vision_path=folder/'figure-readings.json'
         if vision_path.exists():readings=json.loads(vision_path.read_text())
@@ -1317,8 +1324,17 @@ async def generate(record, config):
         atomic_json(folder/'proposed-note.json',note)
         # Read the on-disk version; a detached in-memory record may be stale.
         current=json.loads(record.meta_path.read_text())
-        current_materials={s['id']:s['sha256'] for s in CourseFiles(app_settings).list(record.metadata['category'])}
-        source_change=('原课件内容' if any(current_materials.get(sid)!=sha for sid,sha in source_versions.items()) else
+        course_files=CourseFiles(app_settings)
+        current_items={s['id']:s for s in course_files.list(record.metadata['category'])}
+        def _current_sha(sid):
+            item=current_items.get(sid)
+            if not item or item.get('status') in {'deleted','superseded','excluded'} or item.get('superseded_by'):return None
+            if item.get('sha256'):return item['sha256']
+            try:
+                _,path=course_files.file(record.metadata['category'],sid,'original')
+                return digest_file(path)
+            except (OSError,ValueError):return None
+        source_change=('原课件内容' if any(_current_sha(sid)!=sha for sid,sha in source_versions.items()) else
             '已接受手记' if saved_notes_markdown(record)!=accepted else
             '此前课次转写或精修内容' if history_content_signature(history_signature(record,app_settings))!=history_content_signature(historical_versions) else '')
         if source_change:

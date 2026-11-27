@@ -668,10 +668,13 @@ async def start_review_pdf(session_id: str):
 @app.get('/api/recordings/{session_id}/review-materials')
 async def review_material_choices(session_id: str):
     from qwen_asr_app.course_files import CourseFiles
+    from qwen_asr_app.review_materials import active_file_ids, sanitize_selection
     record=recording_store.find(session_id)
     if record is None:raise HTTPException(404,'没有找到这次录音')
-    return {'selected':record.metadata.get('review_material_ids'),'materials':[
-        {'id':i['id'],'name':i['name'],'sha256':i['sha256']} for i in CourseFiles(app_settings).list(record.metadata['category'])]}
+    items=CourseFiles(app_settings).list(record.metadata['category'])
+    active=active_file_ids(items)
+    return {'selected':sanitize_selection(record.metadata.get('review_material_ids'),items),'materials':[
+        {'id':i['id'],'name':i['name'],'sha256':i['sha256']} for i in items if i['id'] in active]}
 
 
 @app.get('/api/recordings/{session_id}/note-proposal')
@@ -713,13 +716,19 @@ async def adopt_note_proposal(session_id: str,payload:dict=Body(...)):
 @recording_operation
 async def save_review_material_choices(session_id: str,payload:dict=Body(...)):
     from qwen_asr_app.course_files import CourseFiles
+    from qwen_asr_app.review_materials import active_file_ids
     record=recording_store.find(session_id)
     if record is None:raise HTTPException(404,'没有找到这次录音')
     ids=payload.get('material_ids')
-    valid={i['id'] for i in CourseFiles(app_settings).list(record.metadata['category'])}
+    valid=active_file_ids(CourseFiles(app_settings).list(record.metadata['category']))
     if ids is not None and (not isinstance(ids,list) or any(not isinstance(i,str) or i not in valid for i in ids)):
         raise HTTPException(400,'所选课件不属于本课程或已移除')
-    record.metadata['review_material_ids']=ids
+    if ids is None:
+        record.metadata.pop('review_material_ids',None)
+        record.metadata.pop('review_material_selection',None)
+    else:
+        record.metadata['review_material_ids']=ids
+        record.metadata['review_material_selection']={'source':'manual','pending':True,'updated_at':local_now()}
     record.save_metadata()
     return {'saved':True,'message':'已保存本节课件范围，继续生成时会复用输入不变的阶段'}
 
@@ -1246,7 +1255,7 @@ def _build_compact_ai_tasks(include_history: bool = False) -> list[dict[str, Any
                 "resume_stage": "abstract" if abstract_pending else "",
                 "retry_in_seconds": int(summary.get("retry_in_seconds") or 0),
                 "auto_retry_count": int(summary.get("auto_retry_count") or 0),
-                "actions": (["pause", "cancel"] if status in {"queued", "running", "waiting_retry"} else ["continue", "retry", "cancel"]),
+                "actions": (["pause", "cancel"] if status in {"queued", "running", "waiting_retry"} else ["continue", "retry", "regenerate", "cancel"]),
                 "updated_at": str(summary.get("updated_at") or summary.get("started_at") or ""),
             })
 
@@ -1903,7 +1912,17 @@ async def ai_task_action(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
     config.setdefault("terminology", course.get("terminology") or [])
     if kind == "refinement":
         config["_parallel_refinement"] = True
+    saved_summary = record.metadata.get("summary_job") or {}
     resume_abstract = kind == "summary" and action != "regenerate" and _summary_abstract_pending(record)
+    selection_meta = record.metadata.get("review_material_selection")
+    pending_manual = isinstance(selection_meta, dict) and selection_meta.get("source") == "manual" and selection_meta.get("pending") is True
+    material_recovery = (
+        kind == "summary"
+        and action in {"continue", "retry"}
+        and not resume_abstract
+        and _needs_material_recovery(saved_summary)
+    )
+    effective_regenerate = (action == "regenerate") or material_recovery
     if action == "regenerate" and kind == "summary":
         # Maintenance regeneration deliberately uses bounded detailed chunks;
         # a single very long Gemini response can otherwise hit its output cap
@@ -1918,7 +1937,7 @@ async def ai_task_action(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
             for provider in ai.values():
                 if isinstance(provider, dict) and str(provider.get("transport") or "").lower() == "agy_cli":
                     provider["concurrency"] = max(4, int(provider.get("concurrency") or 0))
-    if action in {"retry", "regenerate"}:
+    if action in {"retry", "regenerate"} or material_recovery:
         if kind == "summary":
             if not resume_abstract:
                 # A human-requested retry grants one new finite validation
@@ -1951,15 +1970,23 @@ async def ai_task_action(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
     if kind == "summary":
         fresh_review = bool(
             action in {"continue", "retry"}
-            and (record.metadata.get("summary_job") or {}).get("resume_stage") == "pdf"
+            and not material_recovery
+            and saved_summary.get("resume_stage") == "pdf"
+        )
+        preserve_pending = bool(material_recovery and pending_manual)
+        coverage = (
+            "lesson"
+            if (action == "regenerate" or (material_recovery and not pending_manual and _has_transcript_text(record)))
+            else saved_summary.get("material_coverage", "lesson")
         )
         summary_payload = {
             "config": config,
-            "regenerate": action == 'regenerate',
-            "custom_prompt": (record.metadata.get('summary_job') or {}).get('custom_prompt', ''),
-            "material_coverage": (record.metadata.get('summary_job') or {}).get('material_coverage', 'lesson'),
+            "regenerate": effective_regenerate,
+            "preserve_pending_materials": preserve_pending,
+            "custom_prompt": saved_summary.get('custom_prompt', ''),
+            "material_coverage": coverage,
             "_resume_abstract": resume_abstract,
-            "_pdf_only": action != 'regenerate' and (record.metadata.get('summary_job') or {}).get('resume_stage') == 'pdf',
+            "_pdf_only": not effective_regenerate and saved_summary.get('resume_stage') == 'pdf',
             "_fresh_review": fresh_review,
             "summary_system_prompt": config.get("_note_summary_system_prompt") or DEFAULT_NOTE_SUMMARY_PROMPT,
             "abstract_system_prompt": config.get("_note_abstract_system_prompt") or DEFAULT_NOTE_ABSTRACT_PROMPT,
@@ -2462,6 +2489,60 @@ async def generate_title(session_id: str, payload: dict[str, Any] = Body(...)) -
         raise HTTPException(status_code=502, detail=f"AI 标题请求失败：{exc}") from exc
 
 
+def _has_transcript_text(record: RecordingRecord) -> bool:
+    return any(
+        str(item.get("corrected") or item.get("raw") or "").strip()
+        for item in record.segments
+    )
+
+
+_MATERIAL_DEADLOCK_MARKERS = (
+    "补选课件不属于本课程",
+    "本节需要教学配图，但尚未取得合适原图",
+    "实际看图后没有合适教学图",
+    "课件版本改变，旧任务已保留",
+    "请先通过“补选本节课件”选择需要完整覆盖的课件",
+    "课件原件已改变，请先确认资料版本",
+    "来源版本改变",
+    "选中的课件无法打开",
+)
+
+
+def _needs_material_recovery(summary_job: Any) -> bool:
+    """Return True when a failed note checkpoint deadlocked on materials or figures before writing a draft."""
+    if not isinstance(summary_job, dict):
+        return False
+    if str(summary_job.get("status") or "") not in {"failed", "interrupted", "paused", "cancelled"}:
+        return False
+    if str(summary_job.get("resume_stage") or "") in {"pdf", "abstract"}:
+        return False
+    phase = str((summary_job.get("checkpoint") or {}).get("phase") or "")
+    if phase and phase not in {"排队中", "匹配课件", "核对学习范围", "识别本节新内容", "准备配图"}:
+        return False
+    err = str(summary_job.get("error") or "")
+    return any(marker in err for marker in _MATERIAL_DEADLOCK_MARKERS)
+
+
+def _prepare_summary_materials(record: RecordingRecord, payload: dict[str, Any]) -> bool:
+    """Clear stale courseware pins when regenerating from material retrieval."""
+    changed = False
+    coverage = payload.get('material_coverage', 'lesson')
+    selection_meta = record.metadata.get('review_material_selection')
+    pending_manual = isinstance(selection_meta, dict) and selection_meta.get('source') == 'manual' and selection_meta.get('pending') is True
+    regenerate = payload.get('regenerate') is True
+    if regenerate and coverage != 'selected_files' and payload.get('_preserve_review_materials') is not True:
+        keep_pending = pending_manual and payload.get('preserve_pending_materials') is True
+        if not keep_pending and _has_transcript_text(record):
+            if record.metadata.pop('review_material_ids', None) is not None:
+                changed = True
+            if record.metadata.pop('review_material_selection', None) is not None:
+                changed = True
+    if isinstance(record.metadata.get('review_material_selection'), dict) and record.metadata['review_material_selection'].get('pending'):
+        record.metadata['review_material_selection'] = {**record.metadata['review_material_selection'], 'pending': False}
+        changed = True
+    return changed
+
+
 @app.post("/api/recordings/{session_id}/generate-summary")
 @recording_operation
 async def generate_library_summary(
@@ -2472,10 +2553,10 @@ async def generate_library_summary(
         raise HTTPException(status_code=404, detail="没有找到这条录音")
     if record.metadata.get("status") != "completed":
         raise HTTPException(status_code=400, detail="请等待录音或转写完整结束后再生成详细 AI 总结")
-    if not any(
-        str(item.get("corrected") or item.get("raw") or "").strip()
-        for item in record.segments
-    ) and not record.metadata.get("review_material_ids"):
+    if not payload.get("_materials_prepared"):
+        if _prepare_summary_materials(record, payload):
+            record.save_metadata()
+    if not _has_transcript_text(record) and not record.metadata.get("review_material_ids"):
         # A lesson with chosen 课件 but no usable speech still gets a
         # material-only note from the fast pipeline.
         raise HTTPException(status_code=400, detail="录音还没有可用于生成详细 AI 总结的转写内容")
@@ -2631,7 +2712,8 @@ def start_summary_job(record: RecordingRecord, payload: dict[str, Any], *, autom
     previous = record.metadata.get("summary_job") or {}
     regenerate = payload.get('regenerate') is True
     generation_id = uuid.uuid4().hex if regenerate else str(previous.get('generation_id') or '')
-    payload = {**payload, '_note_generation_id': generation_id}
+    _prepare_summary_materials(record, payload)
+    payload = {**payload, '_note_generation_id': generation_id, '_materials_prepared': True}
     if regenerate:
         record.metadata.pop('ai_note_summary_draft', None)
     previous_error = previous.get("error") or previous.get("previous_error") or ""
@@ -2798,7 +2880,11 @@ async def create_summary_job(session_id: str, payload: dict[str, Any] = Body(...
     # This endpoint starts a user-requested note. Older clients do not send an
     # explicit flag, so an existing body means a fresh generation. Task-center
     # continue/retry uses start_summary_job directly and keeps its saved round.
-    payload = {**payload, 'regenerate': payload.get('regenerate', bool(_saved_note_summary(record).get('summary')))}
+    payload = {
+        **payload,
+        'regenerate': payload.get('regenerate', bool(_saved_note_summary(record).get('summary'))),
+        '_preserve_review_materials': payload.get('preserve_review_materials') is True,
+    }
     start_summary_job(record, payload)
     return {"accepted": True, "session_id": session_id}
 
